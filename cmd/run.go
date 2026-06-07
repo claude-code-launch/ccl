@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/haiboyuwen/cc/internal/claude"
-	"github.com/haiboyuwen/cc/internal/config"
+	"github.com/haiboyuwen/claude-code-launch/internal/claude"
+	"github.com/haiboyuwen/claude-code-launch/internal/config"
 )
 
 var runCmd = &cobra.Command{

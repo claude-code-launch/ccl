@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/viper"
-	"github.com/haiboyuwen/cc/internal/provider"
+	"github.com/haiboyuwen/claude-code-launch/internal/provider"
 )
 
 func ConfigPath() string {

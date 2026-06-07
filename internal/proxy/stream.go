@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/haiboyuwen/cc/internal/protocol"
+	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
 )
 
 // StreamTransformer coordinates translating a stream of OpenAI chunks into Anthropic SSE chunks.

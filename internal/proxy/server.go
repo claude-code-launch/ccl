@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/haiboyuwen/cc/internal/protocol"
-	"github.com/haiboyuwen/cc/internal/provider"
+	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
+	"github.com/haiboyuwen/claude-code-launch/internal/provider"
 	"go.uber.org/zap"
 )
 

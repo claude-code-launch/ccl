@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/haiboyuwen/cc/internal/protocol"
+	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
 )
 
 func TestConvertRequest(t *testing.T) {

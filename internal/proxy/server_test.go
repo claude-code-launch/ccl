@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/haiboyuwen/cc/internal/protocol"
-	"github.com/haiboyuwen/cc/internal/provider"
-	"github.com/haiboyuwen/cc/internal/proxy"
+	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
+	"github.com/haiboyuwen/claude-code-launch/internal/provider"
+	"github.com/haiboyuwen/claude-code-launch/internal/proxy"
 	"go.uber.org/zap"
 )
 
