@@ -21,7 +21,7 @@ func determineModelTier(model string) string {
 		return "sonnet"
 	}
 	modelLower := strings.ToLower(model)
-	if containsAny(modelLower, "opus", "reasoner", "reasoning", "o1", "o3") {
+	if containsAny(modelLower, "opus", "reasoner", "reasoning", "o1", "o3", "pro") {
 		return "opus"
 	}
 	if containsAny(modelLower, "haiku", "mini", "flash", "lite", "turbo", "fast") {
@@ -86,10 +86,8 @@ func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[
 	}
 
 	if needsProxy {
-		env["ANTHROPIC_AUTH_TOKEN"] = "local-proxy-dummy-key"
 		env["ANTHROPIC_API_KEY"] = "local-proxy-dummy-key"
 	} else if p.APIKey != "" {
-		env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
 		env["ANTHROPIC_API_KEY"] = p.APIKey
 	}
 
@@ -97,6 +95,8 @@ func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[
 		if strings.Contains(p.Model, ",") {
 			models := parseModelPool(p.Model)
 			tierMap := mapPoolToTiers(models)
+
+			env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
 
 			for tier, model := range tierMap {
 				tierUpper := strings.ToUpper(tier)
@@ -122,18 +122,26 @@ func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[
 // matches what would be written to the actual temp file.
 func PreviewSettings(p provider.Provider) string {
 	var baseURL string
+	var srv *proxy.Server
 
-	needsProxy := p.Type == "openai" || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
+	isModelPool := p.Model != "" && strings.Contains(p.Model, ",")
+	needsProxy := p.Type == "openai" || isModelPool || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
 	if needsProxy {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		srv := proxy.NewServer("127.0.0.1:0", p, logger)
+		srv = proxy.NewServer("127.0.0.1:0", p, logger)
 		if err := srv.Start(); err != nil {
 			return fmt.Sprintf("Error: failed to start proxy: %v", err)
 		}
+		defer srv.Stop()
 		baseURL = "http://" + srv.Addr()
-		srv.Stop()
 	} else {
 		baseURL = p.Endpoint
+	}
+
+	if srv != nil && p.Model == "" {
+		if discovered := srv.AvailableModels(); len(discovered) > 0 {
+			p.Model = strings.Join(discovered, ",")
+		}
 	}
 
 	env := buildSettingsEnv(p, baseURL, needsProxy)
@@ -188,7 +196,8 @@ func Run(p provider.Provider, args []string) error {
 	var srv *proxy.Server
 	var baseURL string
 
-	needsProxy := p.Type == "openai" || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
+	isModelPool := p.Model != "" && strings.Contains(p.Model, ",")
+	needsProxy := p.Type == "openai" || isModelPool || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
 	if needsProxy {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		proxyAddr := "127.0.0.1:0"
@@ -206,6 +215,12 @@ func Run(p provider.Provider, args []string) error {
 		time.Sleep(200 * time.Millisecond)
 	} else {
 		baseURL = p.Endpoint
+	}
+
+	if srv != nil && p.Model == "" {
+		if discovered := srv.AvailableModels(); len(discovered) > 0 {
+			p.Model = strings.Join(discovered, ",")
+		}
 	}
 
 	// Build and write per-session settings JSON (like cc_switch)
@@ -235,6 +250,14 @@ func Run(p provider.Provider, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
+
+	// Inject all settings env vars into the process environment as well.
+	// The --settings JSON env section may not reliably propagate all env vars
+	// (especially feature flags like CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY),
+	// so we set them in cmd.Env to guarantee Claude Code sees them.
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 
 	return cmd.Run()
 }

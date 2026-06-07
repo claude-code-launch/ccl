@@ -4,7 +4,7 @@ type Provider struct {
 	Name     string `mapstructure:"name"`
 	Type     string `mapstructure:"type"`
 	Endpoint string `mapstructure:"endpoint"`
-	APIKey   string `mapstructure:"api_key"`
+	APIKey   string `mapstructure:"apikey"`
 	Model    string `mapstructure:"model"`
 }
 

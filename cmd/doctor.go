@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -67,23 +68,22 @@ var doctorCmd = &cobra.Command{
 
 		// 5. Test Endpoint reachability and API Authentication key
 		if p.Endpoint != "" {
-			fmt.Printf("  - Testing reachability and auth key validation...")
+			fmt.Printf("  - Testing reachability and auth key validation...\n")
 			client := http.Client{
 				Timeout: 5 * time.Second,
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			testURL := p.Endpoint
-			if p.Type == "openai" {
-				// We test using OpenAI models endpoint
-				testURL = p.Endpoint + "/models"
-				if !time.Now().IsZero() { // generic path override
-					testURL = stringsReplaceV1(p.Endpoint) + "/models"
-				}
+			// Determine models URL precisely following how internal/proxy/server.go's fetchAvailableModels checks models
+			endpoint := strings.TrimSuffix(p.Endpoint, "/")
+			modelsURL := endpoint + "/models"
+			if !strings.HasSuffix(endpoint, "/v1") {
+				modelsURL = endpoint + "/v1/models"
+				modelsURL = strings.Replace(modelsURL, "/v1/v1", "/v1", 1)
 			}
 
-			req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
+			req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 			if err != nil {
 				fmt.Printf("\n✗ Failed to create validation request: %v\n", err)
 				return nil
@@ -94,6 +94,7 @@ var doctorCmd = &cobra.Command{
 				req.Header.Set("Authorization", "Bearer "+p.APIKey)
 			} else {
 				req.Header.Set("x-api-key", p.APIKey)
+				req.Header.Set("anthropic-version", "2023-06-01")
 			}
 
 			resp, err := client.Do(req)
@@ -103,8 +104,37 @@ var doctorCmd = &cobra.Command{
 				defer resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
 					fmt.Printf(" Success! Connected and verified. (HTTP %d)\n", resp.StatusCode)
-				} else if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				} else if resp.StatusCode == http.StatusUnauthorized {
 					fmt.Printf("\n✗ Authentication failed! (HTTP %d). Please verify your API Key.\n", resp.StatusCode)
+				} else if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+					// Fallback strategy if GET models returns 404 or 403 on third-party proxies
+					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer fallbackCancel()
+
+					fallbackReq, fallbackErr := http.NewRequestWithContext(fallbackCtx, "GET", p.Endpoint, nil)
+					if fallbackErr != nil {
+						fmt.Printf("\n✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
+						return nil
+					}
+
+					if p.Type == "openai" {
+						fallbackReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+					} else {
+						fallbackReq.Header.Set("x-api-key", p.APIKey)
+						fallbackReq.Header.Set("anthropic-version", "2023-06-01")
+					}
+
+					fallbackResp, fallbackErr := client.Do(fallbackReq)
+					if fallbackErr != nil {
+						fmt.Printf("\n✗ Models discovery returned HTTP %d, and base endpoint fallback is unreachable: %v\n", resp.StatusCode, fallbackErr)
+					} else {
+						defer fallbackResp.Body.Close()
+						if fallbackResp.StatusCode == http.StatusUnauthorized || fallbackResp.StatusCode == http.StatusForbidden {
+							fmt.Printf("\n✗ Authentication failed! Base endpoint returned HTTP %d. Please verify your API Key.\n", fallbackResp.StatusCode)
+						} else {
+							fmt.Printf(" Success! Connected and verified. (HTTP %d, models discovery bypassed)\n", resp.StatusCode)
+						}
+					}
 				} else {
 					fmt.Printf(" Connected, but returned unexpected status (HTTP %d)\n", resp.StatusCode)
 				}
@@ -113,26 +143,6 @@ var doctorCmd = &cobra.Command{
 
 		return nil
 	},
-}
-
-// Quick helper to format /v1 path mapping to OpenAI standards.
-func stringsReplaceV1(endpoint string) string {
-	endpoint = pFormat(endpoint)
-	if !pHasSuffix(endpoint, "/v1") && !pHasSuffix(endpoint, "/v1/chat/completions") {
-		return endpoint + "/v1"
-	}
-	return endpoint
-}
-
-func pFormat(s string) string {
-	for len(s) > 0 && s[len(s)-1] == '/' {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-func pHasSuffix(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
 func init() {

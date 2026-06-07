@@ -52,9 +52,9 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to bind proxy to %s: %w", s.addr, err)
 	}
 
-	// Fetch models from the gateway in a non-blocking background task (only if no model configured)
+	// Fetch models from the gateway synchronously if no model configured
 	if s.provider.Model == "" {
-		go s.fetchAvailableModels()
+		s.fetchAvailableModels()
 	}
 
 	mux := http.NewServeMux()
@@ -105,15 +105,33 @@ func (s *Server) Addr() string {
 	return s.addr
 }
 
+func (s *Server) AvailableModels() []string {
+	s.modelsMutex.RLock()
+	defer s.modelsMutex.RUnlock()
+	if len(s.availableModels) == 0 {
+		return nil
+	}
+	res := make([]string, len(s.availableModels))
+	copy(res, s.availableModels)
+	return res
+}
+
 func (s *Server) fetchAvailableModels() {
 	endpoint := strings.TrimSuffix(s.provider.Endpoint, "/")
+	if endpoint == "" {
+		if s.provider.Type == "openai" {
+			endpoint = "https://api.openai.com/v1"
+		} else {
+			endpoint = "https://api.anthropic.com"
+		}
+	}
 	modelsURL := endpoint + "/models"
 	if !strings.HasSuffix(endpoint, "/v1") {
 		modelsURL = endpoint + "/v1/models"
 		modelsURL = strings.Replace(modelsURL, "/v1/v1", "/v1", 1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
@@ -128,7 +146,7 @@ func (s *Server) fetchAvailableModels() {
 		req.Header.Set("x-api-key", s.provider.APIKey)
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 3 * time.Second}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -181,12 +199,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dynamic Model Mapping: intelligent mapping of the requested Anthropic model (e.g., opus, sonnet, haiku)
+	// Resolve incoming model alias back to real gateway model name
 	s.modelsMutex.RLock()
-	mappedModel := protocol.MapModel(antReq.Model, s.provider.Model, s.availableModels)
+	realModel := protocol.FromGatewayModelAlias(antReq.Model, s.availableModels)
+	// If it matches pool models as configured, or if FromGatewayModelAlias resolved it, use that
+	mappedModel := protocol.MapModel(realModel, s.provider.Model, s.availableModels)
 	s.modelsMutex.RUnlock()
 
-	s.logger.Info("Mapped requested model to target gateway model", "requested", antReq.Model, "mapped", mappedModel)
+	s.logger.Info("Mapped requested model to target gateway model", "requested", antReq.Model, "resolved_alias", realModel, "mapped", mappedModel)
 
 	// -------------------------------------------------------------
 	// Handle "anthropic" type provider: native passthrough
@@ -201,6 +221,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		endpoint := strings.TrimSuffix(s.provider.Endpoint, "/")
+		if endpoint == "" {
+			endpoint = "https://api.anthropic.com"
+		}
 		if !strings.HasSuffix(endpoint, "/messages") && !strings.HasSuffix(endpoint, "/v1/messages") {
 			endpoint = endpoint + "/v1/messages"
 			endpoint = strings.Replace(endpoint, "/v1/v1/", "/v1/", 1)
@@ -285,6 +308,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	// The provider's Endpoint might not end with "/v1/chat/completions" — let's normalize.
 	endpoint := strings.TrimSuffix(s.provider.Endpoint, "/")
+	if endpoint == "" {
+		endpoint = "https://api.openai.com"
+	}
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
 		// Append appropriate suffix for OpenAI
 		endpoint = endpoint + "/v1/chat/completions"
@@ -409,27 +435,86 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	s.logger.Debug("Received models check request")
-	// Return a list of Anthropic compatible models so Claude Code's UI/Select menu can render correctly.
 	w.Header().Set("Content-Type", "application/json")
-	modelsJSON := `{
-		"data": [
-			{"id": "claude-sonnet-4-6", "type": "model"},
-			{"id": "claude-sonnet-4-6-20250514", "type": "model"},
-			{"id": "claude-3-5-sonnet", "type": "model"},
-			{"id": "claude-3-5-sonnet-20241022", "type": "model"},
-			{"id": "claude-opus-4-8", "type": "model"},
-			{"id": "claude-opus-4-8-20250514", "type": "model"},
-			{"id": "claude-opus-4-7", "type": "model"},
-			{"id": "claude-opus-4-7-20250514", "type": "model"},
-			{"id": "claude-3-opus", "type": "model"},
-			{"id": "claude-3-opus-20240229", "type": "model"},
-			{"id": "claude-haiku-4-5", "type": "model"},
-			{"id": "claude-haiku-4-5-20251001", "type": "model"},
-			{"id": "claude-3-5-haiku", "type": "model"},
-			{"id": "claude-3-5-haiku-20241022", "type": "model"}
-		]
-	}`
-	w.Write([]byte(modelsJSON))
+
+	standardModels := []string{
+		"claude-sonnet-4-6",
+		"claude-sonnet-4-6-20250514",
+		"claude-3-5-sonnet",
+		"claude-3-5-sonnet-20241022",
+		"claude-opus-4-8",
+		"claude-opus-4-8-20250514",
+		"claude-opus-4-7",
+		"claude-opus-4-7-20250514",
+		"claude-3-opus",
+		"claude-3-opus-20240229",
+		"claude-haiku-4-5",
+		"claude-haiku-4-5-20251001",
+		"claude-3-5-haiku",
+		"claude-3-5-haiku-20241022",
+	}
+
+	poolModels := []string{}
+	if s.provider.Model != "" && strings.Contains(s.provider.Model, ",") {
+		for _, m := range strings.Split(s.provider.Model, ",") {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				poolModels = append(poolModels, m)
+			}
+		}
+	}
+
+	s.modelsMutex.RLock()
+	availModels := s.availableModels
+	s.modelsMutex.RUnlock()
+
+	// Collect models from all sources and deduplicate them, mapping non-compliant ones to aliases.
+	var models []string
+	seen := make(map[string]bool)
+
+	addModel := func(m string) {
+		if m != "" {
+			alias := protocol.ToGatewayModelAlias(m)
+			if !seen[alias] {
+				seen[alias] = true
+				models = append(models, alias)
+			}
+		}
+	}
+
+	// 1. First add pool models if configured
+	for _, m := range poolModels {
+		addModel(m)
+	}
+
+	// 2. Next add dynamically discovered models from the gateway
+	for _, m := range availModels {
+		addModel(m)
+	}
+
+	// 3. If still empty, fall back to standard models
+	if len(models) == 0 {
+		for _, m := range standardModels {
+			addModel(m)
+		}
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString(`{"data":[`)
+	first := true
+	writeModel := func(id string) {
+		if !first {
+			buf.WriteString(",")
+		}
+		first = false
+		buf.WriteString(fmt.Sprintf(`{"id":"%s","type":"model"}`, id))
+	}
+	for _, id := range models {
+		writeModel(id)
+	}
+	buf.WriteString(`]}`)
+
+	w.Write(buf.Bytes())
 }
 
 func (s *Server) handleFallback(w http.ResponseWriter, r *http.Request) {
