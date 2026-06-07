@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,7 +16,6 @@ import (
 	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
 	"github.com/haiboyuwen/claude-code-launch/internal/proxy"
-	"go.uber.org/zap"
 )
 
 func TestProxyServerUnary(t *testing.T) {
@@ -85,7 +85,7 @@ func TestProxyServerUnary(t *testing.T) {
 		Model:    "gpt-4o",
 	}
 
-	logger, _ := zap.NewDevelopment()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxyServer := proxy.NewServer("127.0.0.1:3457", p, logger)
 	if err := proxyServer.Start(); err != nil {
 		t.Fatalf("Failed to start proxy: %v", err)
@@ -185,7 +185,7 @@ func TestProxyServerStreaming(t *testing.T) {
 		Model:    "gpt-4-turbo",
 	}
 
-	logger, _ := zap.NewDevelopment()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxyServer := proxy.NewServer("127.0.0.1:3458", p, logger)
 	if err := proxyServer.Start(); err != nil {
 		t.Fatalf("Failed to start proxy: %v", err)

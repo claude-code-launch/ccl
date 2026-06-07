@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -15,13 +16,12 @@ import (
 
 	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
-	"go.uber.org/zap"
 )
 
 type Server struct {
 	addr            string
 	provider        provider.Provider
-	logger          *zap.Logger
+	logger          *slog.Logger
 	httpServer      *http.Server
 	ln              net.Listener
 	wg              sync.WaitGroup
@@ -35,7 +35,7 @@ type modelsResponse struct {
 	} `json:"data"`
 }
 
-func NewServer(addr string, p provider.Provider, logger *zap.Logger) *Server {
+func NewServer(addr string, p provider.Provider, logger *slog.Logger) *Server {
 	return &Server{
 		addr:     addr,
 		provider: p,
@@ -72,9 +72,9 @@ func (s *Server) Start() error {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.logger.Info("Proxy server listening", zap.String("addr", s.ln.Addr().String()))
+		s.logger.Info("Proxy server listening", "addr", s.ln.Addr().String())
 		if err := s.httpServer.Serve(s.ln); err != nil && err != http.ErrServerClosed {
-			s.logger.Error("HTTP proxy server error", zap.Error(err))
+			s.logger.Error("HTTP proxy server error", "error", err)
 		}
 	}()
 
@@ -91,7 +91,7 @@ func (s *Server) Stop() {
 	defer cancel()
 
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		s.logger.Error("Error during proxy server shutdown", zap.Error(err))
+		s.logger.Error("Error during proxy server shutdown", "error", err)
 	}
 	s.wg.Wait()
 	s.logger.Info("Proxy server stopped")
@@ -118,7 +118,7 @@ func (s *Server) fetchAvailableModels() {
 
 	req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 	if err != nil {
-		s.logger.Warn("Failed to create models discovery request", zap.Error(err))
+		s.logger.Warn("Failed to create models discovery request", "error", err)
 		return
 	}
 
@@ -132,19 +132,19 @@ func (s *Server) fetchAvailableModels() {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		s.logger.Warn("Models discovery request failed", zap.Error(err))
+		s.logger.Warn("Models discovery request failed", "error", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		s.logger.Warn("Models discovery returned non-200 status", zap.Int("status", resp.StatusCode))
+		s.logger.Warn("Models discovery returned non-200 status", "status", resp.StatusCode)
 		return
 	}
 
 	var mResp modelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&mResp); err != nil {
-		s.logger.Warn("Failed to decode models response", zap.Error(err))
+		s.logger.Warn("Failed to decode models response", "error", err)
 		return
 	}
 
@@ -155,7 +155,7 @@ func (s *Server) fetchAvailableModels() {
 	}
 	s.modelsMutex.Unlock()
 
-	s.logger.Info("Dynamically discovered available gateway models", zap.Int("count", len(s.availableModels)), zap.Strings("models", s.availableModels))
+	s.logger.Info("Dynamically discovered available gateway models", "count", len(s.availableModels), "models", s.availableModels)
 }
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -169,14 +169,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Read and decode the incoming Anthropic Request
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.logger.Error("Failed to read request body", zap.Error(err))
+		s.logger.Error("Failed to read request body", "error", err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	var antReq protocol.AnthropicRequest
 	if err := json.Unmarshal(bodyBytes, &antReq); err != nil {
-		s.logger.Error("Failed to parse request body as AnthropicRequest", zap.Error(err))
+		s.logger.Error("Failed to parse request body as AnthropicRequest", "error", err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
@@ -186,7 +186,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	mappedModel := protocol.MapModel(antReq.Model, s.provider.Model, s.availableModels)
 	s.modelsMutex.RUnlock()
 
-	s.logger.Info("Mapped requested model to target gateway model", zap.String("requested", antReq.Model), zap.String("mapped", mappedModel))
+	s.logger.Info("Mapped requested model to target gateway model", "requested", antReq.Model, "mapped", mappedModel)
 
 	// -------------------------------------------------------------
 	// Handle "anthropic" type provider: native passthrough
@@ -195,7 +195,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		antReq.Model = mappedModel
 		antBody, err := json.Marshal(antReq)
 		if err != nil {
-			s.logger.Error("Failed to encode Anthropic request", zap.Error(err))
+			s.logger.Error("Failed to encode Anthropic request", "error", err)
 			http.Error(w, "Internal Encoding Error", http.StatusInternalServerError)
 			return
 		}
@@ -206,12 +206,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			endpoint = strings.Replace(endpoint, "/v1/v1/", "/v1/", 1)
 		}
 
-		s.logger.Debug("Forwarding native Anthropic request", zap.String("url", endpoint))
+		s.logger.Debug("Forwarding native Anthropic request", "url", endpoint)
 
 		reqCtx := r.Context()
 		forwardReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewBuffer(antBody))
 		if err != nil {
-			s.logger.Error("Failed to create outgoing request", zap.Error(err))
+			s.logger.Error("Failed to create outgoing request", "error", err)
 			http.Error(w, "Internal Routing Error", http.StatusInternalServerError)
 			return
 		}
@@ -235,7 +235,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		client := &http.Client{}
 		resp, err := client.Do(forwardReq)
 		if err != nil {
-			s.logger.Error("Outgoing Anthropic request failed", zap.Error(err))
+			s.logger.Error("Outgoing Anthropic request failed", "error", err)
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 			return
 		}
@@ -254,7 +254,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		// Since both endpoints speak the same protocol, io.Copy handles both unary and streaming SSE flawlessly.
 		_, err = io.Copy(w, resp.Body)
 		if err != nil {
-			s.logger.Error("Failed to stream response back to client", zap.Error(err))
+			s.logger.Error("Failed to stream response back to client", "error", err)
 		}
 		return
 	}
@@ -266,19 +266,19 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Transform Anthropic Request into OpenAI Request
 	oaReq, err := protocol.ConvertRequest(&antReq)
 	if err != nil {
-		s.logger.Error("Failed to translate Anthropic request to OpenAI format", zap.Error(err))
+		s.logger.Error("Failed to translate Anthropic request to OpenAI format", "error", err)
 		http.Error(w, "Internal Translation Error", http.StatusInternalServerError)
 		return
 	}
 
 	oaReq.Model = mappedModel
-	s.logger.Info("Mapped requested model to target gateway model", zap.String("requested", antReq.Model), zap.String("mapped", mappedModel))
+	s.logger.Info("Mapped requested model to target gateway model", "requested", antReq.Model, "mapped", mappedModel)
 
 	// Forward Request to Target Endpoint (OpenAI-compatible)
 	client := &http.Client{}
 	oaBody, err := json.Marshal(oaReq)
 	if err != nil {
-		s.logger.Error("Failed to encode OpenAI request", zap.Error(err))
+		s.logger.Error("Failed to encode OpenAI request", "error", err)
 		http.Error(w, "Internal Encoding Error", http.StatusInternalServerError)
 		return
 	}
@@ -292,12 +292,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		endpoint = strings.Replace(endpoint, "/v1/v1/", "/v1/", 1)
 	}
 
-	s.logger.Debug("Forwarding converted request to OpenAI endpoint", zap.String("url", endpoint))
+	s.logger.Debug("Forwarding converted request to OpenAI endpoint", "url", endpoint)
 
 	reqCtx := r.Context()
 	forwardReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewBuffer(oaBody))
 	if err != nil {
-		s.logger.Error("Failed to create outgoing request", zap.Error(err))
+		s.logger.Error("Failed to create outgoing request", "error", err)
 		http.Error(w, "Internal Routing Error", http.StatusInternalServerError)
 		return
 	}
@@ -309,7 +309,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Perform the HTTP Request
 	resp, err := client.Do(forwardReq)
 	if err != nil {
-		s.logger.Error("Outgoing request failed", zap.Error(err))
+		s.logger.Error("Outgoing request failed", "error", err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -317,7 +317,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		s.logger.Error("Upstream returned non-200 status", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
+		s.logger.Error("Upstream returned non-200 status", "status", resp.StatusCode, "body", string(respBody))
 		// Pipe the exact error details back
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
@@ -337,21 +337,21 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnary(w http.ResponseWriter, body io.Reader) {
 	respBytes, err := io.ReadAll(body)
 	if err != nil {
-		s.logger.Error("Failed to read upstream response", zap.Error(err))
+		s.logger.Error("Failed to read upstream response", "error", err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 
 	var oaResp protocol.OpenAIResponse
 	if err := json.Unmarshal(respBytes, &oaResp); err != nil {
-		s.logger.Error("Failed to parse OpenAI response", zap.Error(err))
+		s.logger.Error("Failed to parse OpenAI response", "error", err)
 		http.Error(w, "Internal Mapping Error", http.StatusInternalServerError)
 		return
 	}
 
 	antResp, err := protocol.ConvertResponse(&oaResp)
 	if err != nil {
-		s.logger.Error("Failed to convert OpenAI response to Anthropic style", zap.Error(err))
+		s.logger.Error("Failed to convert OpenAI response to Anthropic style", "error", err)
 		http.Error(w, "Internal Mapping Error", http.StatusInternalServerError)
 		return
 	}
@@ -385,7 +385,7 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 
 		events, err := st.TranslateChunk(line)
 		if err != nil {
-			s.logger.Error("Error parsing stream line", zap.Error(err))
+			s.logger.Error("Error parsing stream line", "error", err)
 			continue
 		}
 
@@ -394,7 +394,7 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 			if formatted != "" {
 				_, err := fmt.Fprint(w, formatted)
 				if err != nil {
-					s.logger.Error("Failed to write SSE event to client", zap.Error(err))
+					s.logger.Error("Failed to write SSE event to client", "error", err)
 					return
 				}
 				flusher.Flush()
@@ -403,7 +403,7 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		s.logger.Error("Error scanning streaming input", zap.Error(err))
+		s.logger.Error("Error scanning streaming input", "error", err)
 	}
 }
 
@@ -423,6 +423,6 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFallback(w http.ResponseWriter, r *http.Request) {
-	s.logger.Warn("Fallback catch-all route triggered", zap.String("path", r.URL.Path), zap.String("method", r.Method))
+	s.logger.Warn("Fallback catch-all route triggered", "path", r.URL.Path, "method", r.Method)
 	http.Error(w, "Endpoint Not Supported by Local Proxy", http.StatusNotFound)
 }

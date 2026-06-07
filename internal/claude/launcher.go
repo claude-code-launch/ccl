@@ -2,6 +2,8 @@ package claude
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
@@ -9,7 +11,6 @@ import (
 
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
 	"github.com/haiboyuwen/claude-code-launch/internal/proxy"
-	"go.uber.org/zap"
 )
 
 func Run(p provider.Provider, args []string) error {
@@ -25,7 +26,7 @@ func Run(p provider.Provider, args []string) error {
 	needsProxy := p.Type == "openai" || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
 	if needsProxy {
 		// Initialize completely silent logger for the background proxy to prevent polluting terminal UI
-		logger := zap.NewNop()
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 		proxyAddr := "127.0.0.1:0"
 		srv = proxy.NewServer(proxyAddr, p, logger)
