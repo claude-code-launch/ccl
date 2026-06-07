@@ -31,7 +31,22 @@
 
 ## 🚀 安装与编译
 
-首先确保你本地已经安装了 Go (推荐 1.22+)。
+### 方法一：直接下载预编译二进制（推荐）
+我们利用 GitHub Actions 实现了完美的 CI/CD 流程，所有发布版本均包含多平台的开箱即用二进制。
+
+请前往 [GitHub Releases](https://github.com/haiboyuwen/cc/releases) 页面，下载适合您平台的压缩包：
+- **Apple macOS**: `cc-darwin-amd64` (Intel) / `cc-darwin-arm64` (Apple Silicon M1/M2/M3)
+- **Linux**: `cc-linux-amd64` / `cc-linux-arm64`
+- **Windows**: `cc-windows-amd64.exe`
+
+下载后将其移动到您的系统 `PATH` 目录（例如 macOS/Linux 下的 `/usr/local/bin`），并赋予执行权限：
+```bash
+chmod +x cc-darwin-arm64
+mv cc-darwin-arm64 /usr/local/bin/cc
+```
+
+### 方法二：本地源码编译
+如果您希望从源码编译，确保您本地已经安装了 Go (推荐 1.22+)。
 
 ```bash
 # 克隆仓库
@@ -42,7 +57,26 @@ cd cc
 go build -o cc main.go
 ```
 
-你可以将编译出来的 `cc` 移动到系统的 `PATH` 目录（例如 `/usr/local/bin` 或 `/usr/bin`）以便在任何项目目录下直接通过 `cc` 快捷启动。
+你可以将编译出来的 `cc` 移动到系统的 `PATH` 目录。
+
+---
+
+## 🛠️ 自动化发布指南 (CI/CD)
+
+项目配置了 GitHub Actions 自动化工作流。当需要发布新版本时，无需手动编译多平台包，只需直接在本地推送标签即可：
+
+```bash
+# 1. 创建符合 v* 规范的版本 tag
+git tag v1.0.1
+
+# 2. 推送到 GitHub
+git push origin v1.0.1
+```
+GitHub Actions 会自动触发并执行以下操作：
+- 拉取代码，配置 Go 1.24 运行环境。
+- 使用 `-ldflags="-s -w"` 深度压缩二进制体积（剔除符号调试表，缩减 35%+）。
+- 跨平台交叉编译 macOS、Linux、Windows 5 大核心架构的目标文件。
+- 自动提取标签之间的 Commit 历史生成发布日志并发布。
 
 ---
 
