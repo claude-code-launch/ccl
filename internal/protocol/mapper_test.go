@@ -189,3 +189,78 @@ func TestConvertToolCall(t *testing.T) {
 		t.Errorf("Schema type mismatch")
 	}
 }
+
+
+func TestReasoningContentMapping(t *testing.T) {
+	// 1. Test request conversion mapping "thinking" -> "reasoning_content"
+	antReq := &protocol.AnthropicRequest{
+		Model: "claude-3-5-sonnet",
+		Messages: []protocol.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{
+						"type": "thinking",
+						"thinking": "Let me think about it.",
+					},
+					map[string]any{
+						"type": "text",
+						"text": "The answer is 42.",
+					},
+				},
+			},
+		},
+	}
+
+	oaReq, err := protocol.ConvertRequest(antReq)
+	if err != nil {
+		t.Fatalf("ConvertRequest failed: %v", err)
+	}
+
+	if len(oaReq.Messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d", len(oaReq.Messages))
+	}
+
+	msg := oaReq.Messages[0]
+	if msg.ReasoningContent != "Let me think about it." {
+		t.Errorf("Expected ReasoningContent 'Let me think about it.', got '%s'", msg.ReasoningContent)
+	}
+
+	if msg.Content != "The answer is 42." {
+		t.Errorf("Expected Content 'The answer is 42.', got '%v'", msg.Content)
+	}
+
+	// 2. Test response conversion mapping "reasoning_content" -> "thinking"
+	oaResp := &protocol.OpenAIResponse{
+		ID:    "chatcmpl-123",
+		Model: "gpt-4o",
+		Choices: []protocol.OpenAIChoice{
+			{
+				Index: 0,
+				Message: protocol.OpenAIMessage{
+					Role:             "assistant",
+					Content:          "The answer is 42.",
+					ReasoningContent: "Thinking process details.",
+				},
+				FinishReason: "stop",
+			},
+		},
+	}
+
+	antResp, err := protocol.ConvertResponse(oaResp)
+	if err != nil {
+		t.Fatalf("ConvertResponse failed: %v", err)
+	}
+
+	if len(antResp.Content) != 2 {
+		t.Fatalf("Expected 2 content blocks, got %d", len(antResp.Content))
+	}
+
+	if antResp.Content[0].Type != "thinking" || antResp.Content[0].Thinking != "Thinking process details." {
+		t.Errorf("Expected first content block to be 'thinking' with 'Thinking process details.', got %+v", antResp.Content[0])
+	}
+
+	if antResp.Content[1].Type != "text" || antResp.Content[1].Text != "The answer is 42." {
+		t.Errorf("Expected second content block to be 'text' with 'The answer is 42.', got %+v", antResp.Content[1])
+	}
+}

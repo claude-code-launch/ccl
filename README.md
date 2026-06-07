@@ -145,6 +145,14 @@ ccl
 # 启动 Claude Code 交互，所有请求均自动经本地 ccl 代理安全转换
 ./ccl
 
+# 支持将后续的所有参数直接透传给 Claude Code：
+./ccl resume
+./ccl --dangerously-skip-permissions
+
+# 也可以显式使用 claude 命令来透传后面的所有参数：
+./ccl claude resume
+./ccl claude --dangerously-skip-permissions
+
 # 你也可以像原来一样跟上其他的子命令或路径：
 ./ccl --help
 ./ccl /compact

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
@@ -9,11 +10,13 @@ import (
 
 // StreamTransformer coordinates translating a stream of OpenAI chunks into Anthropic SSE chunks.
 type StreamTransformer struct {
-	sentMessageStart bool
-	sentBlockStart   bool
-	activeToolID     string
-	activeToolName   string
-	toolArgsBuilder  strings.Builder
+	sentMessageStart  bool
+	sentBlockStart    bool
+	sentThinkingStart bool
+	currentBlockIdx   int
+	activeToolID      string
+	activeToolName    string
+	toolArgsBuilder   strings.Builder
 }
 
 // TranslateChunk transforms a single raw line of "data: {...}" from OpenAI into one or more Anthropic SSE events.
@@ -69,13 +72,47 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 		events = append(events, "event: message_start\ndata: "+string(data))
 	}
 
+	// 1.5 Check for Reasoning Content block delta (Thinking Mode)
+	if delta.ReasoningContent != "" {
+		if !st.sentThinkingStart {
+			st.sentThinkingStart = true
+			blockStart := map[string]any{
+				"type":  "content_block_start",
+				"index": st.currentBlockIdx,
+				"content_block": map[string]any{
+					"type": "thinking",
+				},
+			}
+			data, _ := json.Marshal(blockStart)
+			events = append(events, "event: content_block_start\ndata: "+string(data))
+		}
+
+		blockDelta := map[string]any{
+			"type":  "content_block_delta",
+			"index": st.currentBlockIdx,
+			"delta": map[string]any{
+				"type":     "thinking_delta",
+				"thinking": delta.ReasoningContent,
+			},
+		}
+		data, _ := json.Marshal(blockDelta)
+		events = append(events, "event: content_block_delta\ndata: "+string(data))
+	}
+
 	// 2. Check for Text Content block delta
 	if delta.Content != "" {
+		// If thinking block was open, close it first and increment block index
+		if st.sentThinkingStart {
+			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
+			st.sentThinkingStart = false
+			st.currentBlockIdx++
+		}
+
 		if !st.sentBlockStart {
 			st.sentBlockStart = true
 			blockStart := map[string]any{
 				"type":  "content_block_start",
-				"index": 0,
+				"index": st.currentBlockIdx,
 				"content_block": map[string]any{
 					"type": "text",
 					"text": "",
@@ -87,7 +124,7 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 
 		blockDelta := map[string]any{
 			"type":  "content_block_delta",
-			"index": 0,
+			"index": st.currentBlockIdx,
 			"delta": map[string]any{
 				"type": "text_delta",
 				"text": delta.Content,
@@ -103,13 +140,20 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 
 		// Check if a new tool call block started
 		if tc.ID != "" && tc.ID != st.activeToolID {
+			// If thinking block was open, close it first and increment block index
+			if st.sentThinkingStart {
+				events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
+				st.sentThinkingStart = false
+				st.currentBlockIdx++
+			}
+
 			st.activeToolID = tc.ID
 			st.activeToolName = tc.Function.Name
 			st.toolArgsBuilder.Reset()
 
 			blockStart := map[string]any{
 				"type":  "content_block_start",
-				"index": 0,
+				"index": st.currentBlockIdx,
 				"content_block": map[string]any{
 					"type":  "tool_use",
 					"id":    tc.ID,
@@ -126,7 +170,7 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 
 			blockDelta := map[string]any{
 				"type":  "content_block_delta",
-				"index": 0,
+				"index": st.currentBlockIdx,
 				"delta": map[string]any{
 					"type":        "input_json_delta",
 					"partial_json": tc.Function.Arguments,
@@ -142,14 +186,18 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 		fr := *choice.FinishReason
 
 		// If a content block was open, close it
+		if st.sentThinkingStart {
+			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
+			st.sentThinkingStart = false
+		}
 		if st.sentBlockStart {
-			events = append(events, "event: content_block_stop\ndata: "+`{"type":"content_block_stop","index":0}`)
+			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
 			st.sentBlockStart = false
 		}
 
 		// Handle tool call completion inside stream
 		if st.activeToolID != "" {
-			events = append(events, "event: content_block_stop\ndata: "+`{"type":"content_block_stop","index":0}`)
+			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
 			st.activeToolID = ""
 			st.activeToolName = ""
 			st.toolArgsBuilder.Reset()

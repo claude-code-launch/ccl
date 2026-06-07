@@ -16,6 +16,12 @@ type AnthropicRequest struct {
 	TopP          *float64              `json:"top_p,omitempty"`
 	Tools         []AnthropicTool       `json:"tools,omitempty"`
 	ToolChoice    *AnthropicToolChoice  `json:"tool_choice,omitempty"`
+	Thinking      *AnthropicThinking    `json:"thinking,omitempty"`
+}
+
+type AnthropicThinking struct {
+	Type         string `json:"type"` // e.g. "enabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 type AnthropicMessage struct {
@@ -29,6 +35,9 @@ type ContentBlock struct {
 	ID    string          `json:"id,omitempty"`    // for tool_use
 	Name  string          `json:"name,omitempty"`  // for tool_use
 	Input json.RawMessage `json:"input,omitempty"` // for tool_use, can be arbitrary object
+
+	Thinking  string `json:"thinking,omitempty"`  // for thinking
+	Signature string `json:"signature,omitempty"` // for thinking_delta
 
 	ToolUseID string `json:"tool_use_id,omitempty"` // for tool_result
 	Content   any    `json:"content,omitempty"`     // for tool_result, can be string or []ContentBlock

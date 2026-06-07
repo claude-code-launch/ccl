@@ -15,11 +15,12 @@ type OpenAIRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role       string               `json:"role"`
-	Content    any                  `json:"content,omitempty"` // string or []OpenAIMessagePart
-	Name       string               `json:"name,omitempty"`    // for tool result
-	ToolCallID string               `json:"tool_call_id,omitempty"`
-	ToolCalls  []OpenAIToolCall     `json:"tool_calls,omitempty"`
+	Role             string               `json:"role"`
+	Content          any                  `json:"content,omitempty"` // string or []OpenAIMessagePart
+	Name             string               `json:"name,omitempty"`    // for tool result
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	ToolCalls        []OpenAIToolCall     `json:"tool_calls,omitempty"`
+	ReasoningContent string               `json:"reasoning_content,omitempty"`
 }
 
 type OpenAIMessagePart struct {
@@ -94,7 +95,8 @@ type OpenAIStreamChoice struct {
 }
 
 type OpenAIStreamDelta struct {
-	Role       string           `json:"role,omitempty"`
-	Content    string           `json:"content,omitempty"`
-	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	Role             string           `json:"role,omitempty"`
+	Content          string           `json:"content,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
 }

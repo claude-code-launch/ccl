@@ -75,7 +75,8 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 						Type: "text",
 						Text: block.Text,
 					})
-
+				case "thinking":
+					oaMsg.ReasoningContent = block.Thinking
 				case "image":
 					// Try to handle image mapping if encountered, otherwise skip
 					// OpenAI expects base64 or URL. We leave empty or map to Type/ImageURL
@@ -350,6 +351,12 @@ func ConvertResponse(oaResp *OpenAIResponse) (*AnthropicResponse, error) {
 
 	// Process message content or tool calls
 	msg := choice.Message
+	if msg.ReasoningContent != "" {
+		antResp.Content = append(antResp.Content, ContentBlock{
+			Type:     "thinking",
+			Thinking: msg.ReasoningContent,
+		})
+	}
 	if contentStr, ok := msg.Content.(string); ok && contentStr != "" {
 		antResp.Content = append(antResp.Content, ContentBlock{
 			Type: "text",

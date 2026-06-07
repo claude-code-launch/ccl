@@ -257,3 +257,130 @@ func TestProxyServerStreaming(t *testing.T) {
 		t.Error("Missing message_stop event in translated stream")
 	}
 }
+
+
+func TestProxyServerStreamingReasoning(t *testing.T) {
+	// 1. Create a mock target endpoint server simulating OpenAI Streaming with reasoning_content.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		chunks := []string{
+			`data: {"id":"chatcmpl-stream-reasoning","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-stream-reasoning","choices":[{"index":0,"delta":{"reasoning_content":"Let me "},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-stream-reasoning","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-stream-reasoning","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-stream-reasoning","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk+"\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+
+	mockServer := &http.Server{
+		Addr:    "127.0.0.1:4569",
+		Handler: mux,
+	}
+
+	go func() {
+		_ = mockServer.ListenAndServe()
+	}()
+	defer mockServer.Shutdown(context.Background())
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 2. Initialize and start local CC Proxy Server
+	p := provider.Provider{
+		Name:     "mock-openai-stream-reasoning",
+		Type:     "openai",
+		Endpoint: "http://127.0.0.1:4569/v1",
+		APIKey:   "mock-key",
+		Model:    "deepseek-reasoner",
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxyServer := proxy.NewServer("127.0.0.1:3459", p, logger)
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("Failed to start proxy: %v", err)
+	}
+	defer proxyServer.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 3. Make client request using Anthropic structure with stream: true
+	antReq := protocol.AnthropicRequest{
+		Model: "claude-3-5-sonnet",
+		Messages: []protocol.AnthropicMessage{
+			{
+				Role:    "user",
+				Content: "Hello",
+			},
+		},
+		Stream: true,
+	}
+
+	reqBody, _ := json.Marshal(antReq)
+	req, err := http.NewRequest("POST", "http://127.0.0.1:3459/v1/messages", bytes.NewBuffer(reqBody))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to execute request to proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected OK, got %d", resp.StatusCode)
+	}
+
+	var events []string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		text := scanner.Text()
+		if text != "" {
+			events = append(events, text)
+		}
+	}
+
+	// We expect events to contain message_start, content_block_start (thinking), content_block_delta (thinking_delta) etc.
+	var hasMessageStart, hasThinkingDelta, hasContentDelta, hasMessageStop bool
+	for _, ev := range events {
+		if strings.Contains(ev, `"type":"message_start"`) {
+			hasMessageStart = true
+		}
+		if strings.Contains(ev, `"thinking_delta"`) && (strings.Contains(ev, `"thinking":"Let me "`) || strings.Contains(ev, `"thinking":"think"`)) {
+			hasThinkingDelta = true
+		}
+		if strings.Contains(ev, `"text_delta"`) && strings.Contains(ev, `"text":"Hello!"`) {
+			hasContentDelta = true
+		}
+		if strings.Contains(ev, `"type":"message_stop"`) {
+			hasMessageStop = true
+		}
+	}
+
+	if !hasMessageStart {
+		t.Error("Missing message_start event in translated stream")
+	}
+	if !hasThinkingDelta {
+		t.Error("Missing content_block_delta thinking tokens in translated stream")
+	}
+	if !hasContentDelta {
+		t.Error("Missing content_block_delta text tokens in translated stream")
+	}
+	if !hasMessageStop {
+		t.Error("Missing message_stop event in translated stream")
+	}
+}
