@@ -82,7 +82,25 @@ GitHub Actions 会自动触发并执行以下操作：
 
 ## 🛠️ 快速上手
 
-### 1. 添加你的 AI 接口服务商 (Provider)
+### 极速免配置模式 (推荐 🚀)
+如果你已经在终端的环境变量中配置了 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`，`cc` 将会自动识别并直接以此作为服务源，**完全零配置运行**！
+
+```bash
+# 1. 注入你的环境变量（例如使用 DeepSeek 官方）
+export OPENAI_API_KEY="sk-your-deepseek-api-key"
+export OPENAI_BASE_URL="https://api.deepseek.com" # 选填，默认指向官方 OpenAI
+
+# 2. 直接一行启动
+cc
+```
+> 💡 在此模式下，依旧享受超强的 **「智能模型映射」**：常规对话走 `deepseek-chat`，深度推理全自动路由至 `deepseek-reasoner`！
+
+---
+
+### 交互配置模式
+如果你需要管理多个网关通道，可以使用 `cc` 的配置管理系统：
+
+#### 1. 添加你的 AI 接口服务商 (Provider)
 
 运行 `cc add` 命令，开始添加。如果你使用的是 DeepSeek 官方，可以配置如下：
 
