@@ -176,9 +176,24 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 
 // MapModel intelligently translates the requested Anthropic model name into the best available OpenAI gateway counterpart.
 func MapModel(requestedModel string, configuredModel string, availableModels []string) string {
-	// 1. If the user explicitly configured a model in config.yaml, use it.
-	if configuredModel != "" {
+	// If the user explicitly configured a single model (no commas), use it directly.
+	if configuredModel != "" && !strings.Contains(configuredModel, ",") {
 		return configuredModel
+	}
+
+	// If the user provided a comma-separated list of models in configuration,
+	// we treat it as a constrained pool of available models.
+	var modelPool []string
+	if configuredModel != "" && strings.Contains(configuredModel, ",") {
+		parts := strings.Split(configuredModel, ",")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				modelPool = append(modelPool, part)
+			}
+		}
+	} else {
+		modelPool = availableModels
 	}
 
 	requestedModel = strings.ToLower(requestedModel)
@@ -193,10 +208,10 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 		return false
 	}
 
-	// Find models in availableModels list
+	// Find models in pool
 	findInAvailable := func(candidates ...string) string {
 		for _, cand := range candidates {
-			for _, avail := range availableModels {
+			for _, avail := range modelPool {
 				if strings.EqualFold(avail, cand) || strings.Contains(strings.ToLower(avail), strings.ToLower(cand)) {
 					return avail
 				}
@@ -212,74 +227,83 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 
 	if isOpusTier {
 		// Prefer strongest reasoning / smart models
-		if match := findInAvailable("deepseek-reasoner", "o1", "o3-mini", "gpt-4o", "claude-3-opus"); match != "" {
+		if match := findInAvailable("deepseek-reasoner", "deepseek-v4-pro", "o1", "o3-mini", "gpt-4o", "claude-3-opus"); match != "" {
 			return match
 		}
-		// Run a keyword heuristic if standard candidates are not found in availableModels
-		for _, avail := range availableModels {
+		// Run a keyword heuristic if standard candidates are not found in modelPool
+		for _, avail := range modelPool {
 			availLower := strings.ToLower(avail)
-			if containsAny(availLower, "reasoner", "reasoning", "o1", "o3", "max", "opus") {
+			if containsAny(availLower, "reasoner", "reasoning", "o1", "o3", "max", "opus", "pro") {
 				return avail
 			}
 		}
 		// Second heuristic try: general high performance keyword
-		for _, avail := range availableModels {
+		for _, avail := range modelPool {
 			availLower := strings.ToLower(avail)
-			if containsAny(availLower, "pro", "plus") && !containsAny(availLower, "flash", "mini", "lite") {
+			if containsAny(availLower, "plus") && !containsAny(availLower, "flash", "mini", "lite") {
 				return avail
 			}
 		}
 		// Fallback
+		if len(modelPool) > 0 {
+			return modelPool[0]
+		}
 		return "deepseek-reasoner"
 	}
 
 	if isSonnetTier {
 		// Prefer flagship standard models or good chat models
-		if match := findInAvailable("deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gpt-4"); match != "" {
+		if match := findInAvailable("deepseek-v4-pro", "qwen3.6-plus", "deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gpt-4"); match != "" {
 			return match
 		}
-		// Run a keyword heuristic if standard candidates are not found in availableModels
-		for _, avail := range availableModels {
+		// Run a keyword heuristic if standard candidates are not found in modelPool
+		for _, avail := range modelPool {
 			availLower := strings.ToLower(avail)
 			// Match "pro", "plus", "chat", "standard", "v4", "v3", etc. but exclude low-tier or reasoning variants
-			if containsAny(availLower, "pro", "plus", "chat", "standard", "v4", "v3", "glm-5") && !containsAny(availLower, "flash", "mini", "lite", "reasoner", "reasoning") {
+			if containsAny(availLower, "pro", "plus", "chat", "standard", "v4", "v3", "glm-5", "flash") && !containsAny(availLower, "mini", "lite", "reasoner", "reasoning") {
 				return avail
 			}
 		}
 		// Fallback to first available model that is not low tier if possible
-		for _, avail := range availableModels {
+		for _, avail := range modelPool {
 			availLower := strings.ToLower(avail)
-			if !containsAny(availLower, "flash", "mini", "lite") {
+			if !containsAny(availLower, "mini", "lite") {
 				return avail
 			}
 		}
 		// Fallback
+		if len(modelPool) > 0 {
+			return modelPool[0]
+		}
 		return "deepseek-chat"
 	}
 
 	if isHaikuTier {
 		// Prefer fast, cost-effective models
-		if match := findInAvailable("gpt-4o-mini", "gpt-3.5-turbo", "claude-3-5-haiku"); match != "" {
+		if match := findInAvailable("deepseek-v4-flash", "gpt-4o-mini", "gpt-3.5-turbo", "claude-3-5-haiku"); match != "" {
 			return match
 		}
-		// Run a keyword heuristic if standard candidates are not found in availableModels
-		for _, avail := range availableModels {
+		// Run a keyword heuristic if standard candidates are not found in modelPool
+		for _, avail := range modelPool {
 			availLower := strings.ToLower(avail)
 			if containsAny(availLower, "mini", "flash", "lite", "haiku", "turbo", "fast") {
 				return avail
 			}
 		}
 		// Fallback
+		if len(modelPool) > 0 {
+			return modelPool[len(modelPool)-1] // return last model which is usually smaller
+		}
 		return "gpt-4o-mini"
 	}
 
 	// Global default if no tier could be resolved
-	if len(availableModels) > 0 {
+	if len(modelPool) > 0 {
 		// Just pick deepseek-chat or the first available model
-		if match := findInAvailable("deepseek-chat", "gpt-4o"); match != "" {
+		if match := findInAvailable("deepseek-chat", "gpt-4o", "qwen3.6-plus"); match != "" {
 			return match
 		}
-		return availableModels[0]
+		return modelPool[0]
 	}
 
 	return "deepseek-chat" // Reasonable general fallback

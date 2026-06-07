@@ -48,6 +48,22 @@ func TestMapModel(t *testing.T) {
 		t.Errorf("Expected configuration override 'my-custom-model', got '%s'", m)
 	}
 
+	// Case 1b: Configuration is comma-separated pool, should select deepseek-v4-pro for Sonnet.
+	poolConfig := "bailian-glm-5.1,gemini-3.5-flash,qwen3.6-plus,deepseek-v4-flash,deepseek-v4-pro"
+	if m := protocol.MapModel("claude-3-5-sonnet", poolConfig, nil); m != "deepseek-v4-pro" {
+		t.Errorf("Expected pool selection 'deepseek-v4-pro' for Sonnet, got '%s'", m)
+	}
+
+	// Case 1c: Configuration is comma-separated pool, should select deepseek-v4-pro for Opus.
+	if m := protocol.MapModel("claude-3-opus", poolConfig, nil); m != "deepseek-v4-pro" {
+		t.Errorf("Expected pool selection 'deepseek-v4-pro' for Opus, got '%s'", m)
+	}
+
+	// Case 1d: Configuration is comma-separated pool, should select deepseek-v4-flash for Haiku.
+	if m := protocol.MapModel("claude-3-5-haiku", poolConfig, nil); m != "deepseek-v4-flash" {
+		t.Errorf("Expected pool selection 'deepseek-v4-flash' for Haiku, got '%s'", m)
+	}
+
 	// Case 2: Opus model tier requested, deepseek-reasoner available.
 	modelsList := []string{"gpt-4o-mini", "deepseek-chat", "deepseek-reasoner", "gpt-4o"}
 	if m := protocol.MapModel("claude-3-opus-20240229", "", modelsList); m != "deepseek-reasoner" {
