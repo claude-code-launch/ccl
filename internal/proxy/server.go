@@ -409,12 +409,24 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	s.logger.Debug("Received models check request")
-	// Return a stub Anthropic compatible response for model checks.
+	// Return a list of Anthropic compatible models so Claude Code's UI/Select menu can render correctly.
 	w.Header().Set("Content-Type", "application/json")
 	modelsJSON := `{
 		"data": [
 			{
 				"id": "claude-3-5-sonnet",
+				"type": "model"
+			},
+			{
+				"id": "claude-3-5-sonnet-20241022",
+				"type": "model"
+			},
+			{
+				"id": "claude-3-opus",
+				"type": "model"
+			},
+			{
+				"id": "claude-3-5-haiku",
 				"type": "model"
 			}
 		]

@@ -1,17 +1,183 @@
 package claude
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
 	"github.com/haiboyuwen/claude-code-launch/internal/proxy"
 )
+
+// determineModelTier matches a model name to one of the standard Claude tiers: sonnet, opus, or haiku.
+func determineModelTier(model string) string {
+	if model == "" {
+		return "sonnet"
+	}
+	modelLower := strings.ToLower(model)
+	if containsAny(modelLower, "opus", "reasoner", "reasoning", "o1", "o3") {
+		return "opus"
+	}
+	if containsAny(modelLower, "haiku", "mini", "flash", "lite", "turbo", "fast") {
+		return "haiku"
+	}
+	return "sonnet"
+}
+
+func containsAny(s string, keywords ...string) bool {
+	for _, kw := range keywords {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseModelPool splits a comma-separated model string into individual model names.
+func parseModelPool(modelPool string) []string {
+	parts := strings.Split(modelPool, ",")
+	var models []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			models = append(models, part)
+		}
+	}
+	return models
+}
+
+// mapPoolToTiers assigns each model in a pool to its Claude tier.
+// The first model matching a tier claims it; unclaimed tiers fall back to the first pool model.
+func mapPoolToTiers(models []string) map[string]string {
+	tierMap := make(map[string]string)
+	for _, model := range models {
+		tier := determineModelTier(model)
+		if _, exists := tierMap[tier]; !exists {
+			tierMap[tier] = model
+		}
+	}
+	if len(models) > 0 {
+		for _, tier := range []string{"sonnet", "opus", "haiku"} {
+			if _, exists := tierMap[tier]; !exists {
+				tierMap[tier] = models[0]
+			}
+		}
+	}
+	return tierMap
+}
+
+// settingsJSON represents the per-session settings file passed via --settings.
+type settingsJSON struct {
+	Env map[string]string `json:"env"`
+}
+
+// buildSettingsEnv constructs the environment variable overrides for the per-session settings file.
+func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[string]string {
+	env := make(map[string]string)
+
+	if baseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = baseURL
+	}
+
+	if needsProxy {
+		env["ANTHROPIC_AUTH_TOKEN"] = "local-proxy-dummy-key"
+		env["ANTHROPIC_API_KEY"] = "local-proxy-dummy-key"
+	} else if p.APIKey != "" {
+		env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
+		env["ANTHROPIC_API_KEY"] = p.APIKey
+	}
+
+	if p.Model != "" {
+		if strings.Contains(p.Model, ",") {
+			models := parseModelPool(p.Model)
+			tierMap := mapPoolToTiers(models)
+
+			for tier, model := range tierMap {
+				tierUpper := strings.ToUpper(tier)
+				env["ANTHROPIC_DEFAULT_"+tierUpper+"_MODEL"] = model
+				env["ANTHROPIC_DEFAULT_"+tierUpper+"_MODEL_NAME"] = model
+			}
+
+			if m, ok := tierMap["sonnet"]; ok {
+				env["ANTHROPIC_MODEL"] = m
+			} else if len(models) > 0 {
+				env["ANTHROPIC_MODEL"] = models[0]
+			}
+		} else {
+			env["ANTHROPIC_MODEL"] = p.Model
+		}
+	}
+
+	return env
+}
+
+// PreviewSettings generates a settings file using the exact same pipeline as Run(),
+// including starting the proxy to get the real dynamic URL. This ensures the preview
+// matches what would be written to the actual temp file.
+func PreviewSettings(p provider.Provider) string {
+	var baseURL string
+
+	needsProxy := p.Type == "openai" || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
+	if needsProxy {
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		srv := proxy.NewServer("127.0.0.1:0", p, logger)
+		if err := srv.Start(); err != nil {
+			return fmt.Sprintf("Error: failed to start proxy: %v", err)
+		}
+		baseURL = "http://" + srv.Addr()
+		srv.Stop()
+	} else {
+		baseURL = p.Endpoint
+	}
+
+	env := buildSettingsEnv(p, baseURL, needsProxy)
+	settings := settingsJSON{Env: env}
+
+	path, err := writeSettingsFile(settings)
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+	defer os.Remove(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	return string(data)
+}
+
+func writeSettingsFile(content settingsJSON) (string, error) {
+	data, err := json.MarshalIndent(content, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal settings JSON: %w", err)
+	}
+
+	f, err := os.CreateTemp("", "claude_*_settings.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp settings file: %w", err)
+	}
+	path := f.Name()
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(path)
+		return "", fmt.Errorf("failed to write settings file: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("failed to close settings file: %w", err)
+	}
+
+	return path, nil
+}
 
 func Run(p provider.Provider, args []string) error {
 	claudePath, err := exec.LookPath("claude")
@@ -22,12 +188,9 @@ func Run(p provider.Provider, args []string) error {
 	var srv *proxy.Server
 	var baseURL string
 
-	// If the provider type is "openai", start the local translation proxy
 	needsProxy := p.Type == "openai" || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
 	if needsProxy {
-		// Initialize completely silent logger for the background proxy to prevent polluting terminal UI
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 		proxyAddr := "127.0.0.1:0"
 		srv = proxy.NewServer(proxyAddr, p, logger)
 
@@ -37,51 +200,41 @@ func Run(p provider.Provider, args []string) error {
 		}
 		defer srv.Stop()
 
-		// Retrieve the dynamically allocated address (e.g. 127.0.0.1:52184)
 		allocatedAddr := srv.Addr()
-
-		// Set the base URL to our local proxy instead of the real endpoint
 		baseURL = "http://" + allocatedAddr
 
-		// Give the proxy server a brief moment to bind and start listening
 		time.Sleep(200 * time.Millisecond)
 	} else {
 		baseURL = p.Endpoint
 	}
 
+	// Build and write per-session settings JSON (like cc_switch)
+	env := buildSettingsEnv(p, baseURL, needsProxy)
+	settings := settingsJSON{Env: env}
+	settingsPath, err := writeSettingsFile(settings)
+	if err != nil {
+		return fmt.Errorf("failed to create settings file: %w", err)
+	}
+	defer os.Remove(settingsPath)
+
+	fmt.Println("Using provider-specific claude config:")
+	fmt.Println(settingsPath)
+
+	// Build claude command args: prepend --settings before user args
+	claudeArgs := []string{"--settings", settingsPath}
+	claudeArgs = append(claudeArgs, args...)
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		// On Windows, the globally installed npm binary "claude" is a batch file or ps1 script (claude.cmd / claude.ps1).
-		// We must invoke it through cmd.exe to ensure proper command parsing and shell execution.
-		winArgs := append([]string{"/c", claudePath}, args...)
+		winArgs := append([]string{"/c", claudePath}, claudeArgs...)
 		cmd = exec.Command("cmd", winArgs...)
 	} else {
-		cmd = exec.Command(claudePath, args...)
+		cmd = exec.Command(claudePath, claudeArgs...)
 	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
 	cmd.Env = os.Environ()
-
-	// Inject base URL (either the local proxy or direct anthropic endpoint)
-	if baseURL != "" {
-		cmd.Env = append(cmd.Env, "ANTHROPIC_BASE_URL="+baseURL)
-	}
-
-	// API key can be set directly.
-	// NOTE: For OpenAI providers, Claude Code doesn't need to know the real API key,
-	// because the local proxy intercepts and adds the real Bearer token.
-	// However, we inject a dummy key so Claude Code doesn't complain about missing keys.
-	if needsProxy {
-		cmd.Env = append(cmd.Env, "ANTHROPIC_API_KEY=local-proxy-dummy-key")
-	} else if p.APIKey != "" {
-		cmd.Env = append(cmd.Env, "ANTHROPIC_API_KEY="+p.APIKey)
-	}
-
-	if p.Model != "" {
-		cmd.Env = append(cmd.Env, "ANTHROPIC_MODEL="+p.Model)
-	}
 
 	return cmd.Run()
 }

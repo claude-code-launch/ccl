@@ -196,6 +196,15 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 		modelPool = availableModels
 	}
 
+	// If the requested model is already a pool member, return it directly.
+	// This handles per-tier env vars (ANTHROPIC_DEFAULT_SONNET_MODEL, etc.)
+	// that already map tiers to specific backend models.
+	for _, model := range modelPool {
+		if strings.EqualFold(model, requestedModel) {
+			return model
+		}
+	}
+
 	requestedModel = strings.ToLower(requestedModel)
 
 	// Helper matching function
@@ -223,7 +232,7 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 	// 2. Map based on model tier requested by Claude Code
 	isHaikuTier := containsAny(requestedModel, "haiku")
 	isOpusTier := containsAny(requestedModel, "opus", "4.8", "4.7")
-	isSonnetTier := containsAny(requestedModel, "sonnet", "3-5", "3.5") && !isHaikuTier
+	isSonnetTier := (containsAny(requestedModel, "sonnet", "3-5", "3.5") && !isHaikuTier) || requestedModel == ""
 
 	if isOpusTier {
 		// Prefer strongest reasoning / smart models
