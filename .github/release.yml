@@ -1,5 +1,5 @@
 # GitHub Release Configuration
-# Controls how release notes are automatically generated from commits
+# Controls how release notes are automatically generated from commits and pull requests
 
 changelog:
   exclude:
