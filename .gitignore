@@ -1,0 +1,23 @@
+# Compiled Object files, Signatures, Symlinks, etc.
+bin/
+cc
+cc.exe
+cc.test
+cc.prof
+*.out
+*.exe
+*.test
+*.prof
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
