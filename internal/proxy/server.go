@@ -413,22 +413,20 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	modelsJSON := `{
 		"data": [
-			{
-				"id": "claude-3-5-sonnet",
-				"type": "model"
-			},
-			{
-				"id": "claude-3-5-sonnet-20241022",
-				"type": "model"
-			},
-			{
-				"id": "claude-3-opus",
-				"type": "model"
-			},
-			{
-				"id": "claude-3-5-haiku",
-				"type": "model"
-			}
+			{"id": "claude-sonnet-4-6", "type": "model"},
+			{"id": "claude-sonnet-4-6-20250514", "type": "model"},
+			{"id": "claude-3-5-sonnet", "type": "model"},
+			{"id": "claude-3-5-sonnet-20241022", "type": "model"},
+			{"id": "claude-opus-4-8", "type": "model"},
+			{"id": "claude-opus-4-8-20250514", "type": "model"},
+			{"id": "claude-opus-4-7", "type": "model"},
+			{"id": "claude-opus-4-7-20250514", "type": "model"},
+			{"id": "claude-3-opus", "type": "model"},
+			{"id": "claude-3-opus-20240229", "type": "model"},
+			{"id": "claude-haiku-4-5", "type": "model"},
+			{"id": "claude-haiku-4-5-20251001", "type": "model"},
+			{"id": "claude-3-5-haiku", "type": "model"},
+			{"id": "claude-3-5-haiku-20241022", "type": "model"}
 		]
 	}`
 	w.Write([]byte(modelsJSON))

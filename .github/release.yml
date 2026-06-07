@@ -1,10 +1,5 @@
-# GitHub Release Configuration
-# Controls how release notes are automatically generated from commits and pull requests
-
 changelog:
   exclude:
-    labels:
-      - ignore
     authors:
       - github-actions[bot]
   categories:
@@ -13,14 +8,26 @@ changelog:
         - feature
         - feat
         - enhancement
+      regex:
+        - "^feat"
+        - "^enhancement"
     - title: "🐛 Bug Fixes"
       labels:
         - fix
         - bug
         - hotfix
+      regex:
+        - "^fix"
+        - "^bug"
+        - "^hotfix"
     - title: "🧰 Maintenance & Chore"
       labels:
         - chore
         - docs
         - ci
         - refactor
+      regex:
+        - "^ci"
+        - "^chore"
+        - "^docs"
+        - "^refactor"
