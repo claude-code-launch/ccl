@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/charmbracelet/huh"
 )
@@ -38,7 +39,12 @@ func AutoInstall() error {
 	}
 
 	fmt.Println("Installing Claude Code CLI globally (@anthropic-ai/claude-code)...")
-	cmd := exec.Command(npmPath, "install", "-g", "@anthropic-ai/claude-code")
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/c", npmPath, "install", "-g", "@anthropic-ai/claude-code")
+	} else {
+		cmd = exec.Command(npmPath, "install", "-g", "@anthropic-ai/claude-code")
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

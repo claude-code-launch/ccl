@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/haiboyuwen/cc/internal/provider"
@@ -47,7 +48,15 @@ func Run(p provider.Provider, args []string) error {
 		baseURL = p.Endpoint
 	}
 
-	cmd := exec.Command(claudePath, args...)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// On Windows, the globally installed npm binary "claude" is a batch file or ps1 script (claude.cmd / claude.ps1).
+		// We must invoke it through cmd.exe to ensure proper command parsing and shell execution.
+		winArgs := append([]string{"/c", claudePath}, args...)
+		cmd = exec.Command("cmd", winArgs...)
+	} else {
+		cmd = exec.Command(claudePath, args...)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
