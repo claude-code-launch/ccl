@@ -21,9 +21,9 @@ var doctorCmd = &cobra.Command{
 		// 1. Check Node.js
 		nodePath, err := exec.LookPath("node")
 		if err != nil {
-			fmt.Println("✗ Node.js is not installed or not in PATH")
+			fmt.Println("- Info: Node.js is not installed (no longer required by newer native Claude Code binaries)")
 		} else {
-			fmt.Printf("✓ Node.js installed at: %s\n", nodePath)
+			fmt.Printf("✓ Node.js found at: %s\n", nodePath)
 		}
 
 		// 2. Check Claude CLI
@@ -33,7 +33,7 @@ var doctorCmd = &cobra.Command{
 			// Prompt to install automatically
 			err := claude.AutoInstall()
 			if err != nil {
-				fmt.Printf("✗ Auto-installation failed: %v. Please install manually using: npm install -g @anthropic-ai/claude-code\n", err)
+				fmt.Printf("✗ Auto-installation failed: %v. Please install manually by visiting: https://code.claude.com/\n", err)
 			}
 		} else {
 			claudePath, _ := exec.LookPath("claude")

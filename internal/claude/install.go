@@ -15,18 +15,13 @@ func IsInstalled() bool {
 	return err == nil
 }
 
-// AutoInstall attempts to install Claude CLI globally via npm.
-// It returns an error if npm is missing or the installation command fails.
+// AutoInstall attempts to install Claude CLI globally via official script.
+// It uses curl/bash on macOS/Linux and powershell on Windows.
 func AutoInstall() error {
-	npmPath, err := exec.LookPath("npm")
-	if err != nil {
-		return fmt.Errorf("npm is not installed or not found in system PATH. Please install Node.js/npm first: https://nodejs.org/")
-	}
-
 	var confirm bool
-	err = huh.NewConfirm().
+	err := huh.NewConfirm().
 		Title("Claude Code is not installed").
-		Description("Would you like cc to automatically install it globally via npm?").
+		Description("Would you like cc to automatically install it via the official installer script?").
 		Value(&confirm).
 		Run()
 
@@ -35,21 +30,31 @@ func AutoInstall() error {
 	}
 
 	if !confirm {
-		return fmt.Errorf("installation cancelled. You can install it manually using: npm install -g @anthropic-ai/claude-code")
+		return fmt.Errorf("installation cancelled. You can install it manually by referring to https://code.claude.com/")
 	}
 
-	fmt.Println("Installing Claude Code CLI globally (@anthropic-ai/claude-code)...")
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/c", npmPath, "install", "-g", "@anthropic-ai/claude-code")
+		fmt.Println("Installing Claude Code CLI via official PowerShell installer...")
+		// Official Windows installer command: irm https://claude.ai/install.ps1 | iex
+		cmd = exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://claude.ai/install.ps1 | iex")
 	} else {
-		cmd = exec.Command(npmPath, "install", "-g", "@anthropic-ai/claude-code")
+		// Ensure curl or wget is installed
+		_, curlErr := exec.LookPath("curl")
+		_, wgetErr := exec.LookPath("wget")
+		if curlErr != nil && wgetErr != nil {
+			return fmt.Errorf("either 'curl' or 'wget' is required but neither was found in PATH. Please install one of them first")
+		}
+
+		fmt.Println("Installing Claude Code CLI via official Shell installer (curl -fsSL https://claude.ai/install.sh | bash)...")
+		cmd = exec.Command("bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash")
 	}
+
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("npm installation failed: %w", err)
+		return fmt.Errorf("official installation script failed: %w", err)
 	}
 
 	fmt.Println("✓ Claude Code CLI installed successfully!")
