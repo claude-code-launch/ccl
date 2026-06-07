@@ -18,7 +18,7 @@ var listCmd = &cobra.Command{
 		}
 
 		if len(cfg.Providers) == 0 {
-			fmt.Println("No providers added yet. Use 'cc add' to add one.")
+			fmt.Println("No providers added yet. Use 'ccl add' to add one.")
 			return nil
 		}
 

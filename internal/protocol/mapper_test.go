@@ -70,6 +70,17 @@ func TestMapModel(t *testing.T) {
 	if m := protocol.MapModel("claude-3-5-haiku-20241022", "", modelsListHaiku); m != "gpt-4o-mini" {
 		t.Errorf("Expected Haiku mapping 'gpt-4o-mini', got '%s'", m)
 	}
+
+	// Case 6: Sonnet tier with custom non-standard models (like your gateway).
+	customModels := []string{"deepseek-v4-flash", "deepseek-v4-pro", "qwen3.6-plus", "bailian-glm-5.1", "gemini-3.5-flash"}
+	if m := protocol.MapModel("claude-3-5-sonnet-20241022", "", customModels); m != "deepseek-v4-pro" {
+		t.Errorf("Expected custom Sonnet mapping 'deepseek-v4-pro', got '%s'", m)
+	}
+
+	// Case 7: Haiku tier with custom non-standard models (like your gateway).
+	if m := protocol.MapModel("claude-3-5-haiku-20241022", "", customModels); m != "deepseek-v4-flash" {
+		t.Errorf("Expected custom Haiku mapping 'deepseek-v4-flash', got '%s'", m)
+	}
 }
 
 func TestConvertResponse(t *testing.T) {

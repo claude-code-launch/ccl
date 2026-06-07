@@ -28,25 +28,25 @@ jobs:
           mkdir -p dist
 
           # macOS
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/cc-darwin-amd64 main.go
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/cc-darwin-arm64 main.go
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/ccl-darwin-amd64 main.go
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/ccl-darwin-arm64 main.go
 
           # Linux
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/cc-linux-amd64 main.go
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/cc-linux-arm64 main.go
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/ccl-linux-amd64 main.go
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/ccl-linux-arm64 main.go
 
           # Windows
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/cc-windows-amd64.exe main.go
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/ccl-windows-amd64.exe main.go
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/cc-darwin-amd64
-            dist/cc-darwin-arm64
-            dist/cc-linux-amd64
-            dist/cc-linux-arm64
-            dist/cc-windows-amd64.exe
+            dist/ccl-darwin-amd64
+            dist/ccl-darwin-arm64
+            dist/ccl-linux-amd64
+            dist/ccl-linux-arm64
+            dist/ccl-windows-amd64.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

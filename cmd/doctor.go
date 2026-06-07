@@ -16,7 +16,7 @@ var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check system prerequisites and provider connectivity",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("Diagnosing cc environment:")
+		fmt.Println("Diagnosing ccl environment:")
 
 		// 1. Check Node.js
 		nodePath, err := exec.LookPath("node")
@@ -50,7 +50,7 @@ var doctorCmd = &cobra.Command{
 
 		// 4. Check Active Provider
 		if cfg.ActiveProvider == "" {
-			fmt.Println("✗ Active provider is not selected. Use 'cc add' or 'cc use'")
+			fmt.Println("✗ Active provider is not selected. Use 'ccl add' or 'ccl use'")
 			return nil
 		}
 		fmt.Printf("✓ Active provider: %s\n", cfg.ActiveProvider)

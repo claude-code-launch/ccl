@@ -21,7 +21,7 @@ func AutoInstall() error {
 	var confirm bool
 	err := huh.NewConfirm().
 		Title("Claude Code is not installed").
-		Description("Would you like cc to automatically install it via the official installer script?").
+		Description("Would you like ccl to automatically install it via the official installer script?").
 		Value(&confirm).
 		Run()
 

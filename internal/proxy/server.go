@@ -122,7 +122,12 @@ func (s *Server) fetchAvailableModels() {
 		return
 	}
 
-	req.Header.Set("Authorization", "Bearer "+s.provider.APIKey)
+	if s.provider.Type == "openai" {
+		req.Header.Set("Authorization", "Bearer "+s.provider.APIKey)
+	} else {
+		req.Header.Set("x-api-key", s.provider.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	resp, err := client.Do(req)
@@ -176,6 +181,88 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dynamic Model Mapping: intelligent mapping of the requested Anthropic model (e.g., opus, sonnet, haiku)
+	s.modelsMutex.RLock()
+	mappedModel := protocol.MapModel(antReq.Model, s.provider.Model, s.availableModels)
+	s.modelsMutex.RUnlock()
+
+	s.logger.Info("Mapped requested model to target gateway model", zap.String("requested", antReq.Model), zap.String("mapped", mappedModel))
+
+	// -------------------------------------------------------------
+	// Handle "anthropic" type provider: native passthrough
+	// -------------------------------------------------------------
+	if s.provider.Type == "anthropic" {
+		antReq.Model = mappedModel
+		antBody, err := json.Marshal(antReq)
+		if err != nil {
+			s.logger.Error("Failed to encode Anthropic request", zap.Error(err))
+			http.Error(w, "Internal Encoding Error", http.StatusInternalServerError)
+			return
+		}
+
+		endpoint := strings.TrimSuffix(s.provider.Endpoint, "/")
+		if !strings.HasSuffix(endpoint, "/messages") && !strings.HasSuffix(endpoint, "/v1/messages") {
+			endpoint = endpoint + "/v1/messages"
+			endpoint = strings.Replace(endpoint, "/v1/v1/", "/v1/", 1)
+		}
+
+		s.logger.Debug("Forwarding native Anthropic request", zap.String("url", endpoint))
+
+		reqCtx := r.Context()
+		forwardReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewBuffer(antBody))
+		if err != nil {
+			s.logger.Error("Failed to create outgoing request", zap.Error(err))
+			http.Error(w, "Internal Routing Error", http.StatusInternalServerError)
+			return
+		}
+
+		// Copy or set Anthropic specific headers
+		forwardReq.Header.Set("Content-Type", "application/json")
+		forwardReq.Header.Set("x-api-key", s.provider.APIKey)
+
+		// Propagate Anthropic Version
+		antVersion := r.Header.Get("anthropic-version")
+		if antVersion == "" {
+			antVersion = "2023-06-01"
+		}
+		forwardReq.Header.Set("anthropic-version", antVersion)
+
+		// Propagate any client IP headers or other metadata if present
+		if clientIP := r.Header.Get("x-forwarded-for"); clientIP != "" {
+			forwardReq.Header.Set("x-forwarded-for", clientIP)
+		}
+
+		client := &http.Client{}
+		resp, err := client.Do(forwardReq)
+		if err != nil {
+			s.logger.Error("Outgoing Anthropic request failed", zap.Error(err))
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Propagate upstream response headers back to client
+		for k, v := range resp.Header {
+			for _, val := range v {
+				w.Header().Add(k, val)
+			}
+		}
+
+		w.WriteHeader(resp.StatusCode)
+
+		// Stream or write the native Anthropic response directly back
+		// Since both endpoints speak the same protocol, io.Copy handles both unary and streaming SSE flawlessly.
+		_, err = io.Copy(w, resp.Body)
+		if err != nil {
+			s.logger.Error("Failed to stream response back to client", zap.Error(err))
+		}
+		return
+	}
+
+	// -------------------------------------------------------------
+	// Handle "openai" type provider: translation proxy
+	// -------------------------------------------------------------
+
 	// Transform Anthropic Request into OpenAI Request
 	oaReq, err := protocol.ConvertRequest(&antReq)
 	if err != nil {
@@ -183,11 +270,6 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal Translation Error", http.StatusInternalServerError)
 		return
 	}
-
-	// Dynamic Model Mapping: intelligent mapping of the requested Anthropic model (e.g., opus, sonnet, haiku)
-	s.modelsMutex.RLock()
-	mappedModel := protocol.MapModel(antReq.Model, s.provider.Model, s.availableModels)
-	s.modelsMutex.RUnlock()
 
 	oaReq.Model = mappedModel
 	s.logger.Info("Mapped requested model to target gateway model", zap.String("requested", antReq.Model), zap.String("mapped", mappedModel))

@@ -1,4 +1,4 @@
-module github.com/haiboyuwen/cc
+module github.com/haiboyuwen/claude-code-launch
 
 go 1.24.5
 

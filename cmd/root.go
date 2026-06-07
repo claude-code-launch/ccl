@@ -11,9 +11,9 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "cc",
-	Short: "cc is a multi-provider launcher for Claude Code",
-	Long:  `cc manages different LLM providers for Claude Code and runs Claude Code with injected configurations.`,
+	Use:   "ccl",
+	Short: "ccl is a multi-provider launcher for Claude Code",
+	Long:  `ccl manages different LLM providers for Claude Code and runs Claude Code with injected configurations.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Check if Claude Code is installed first
 		if !claude.IsInstalled() {
@@ -26,9 +26,24 @@ var rootCmd = &cobra.Command{
 		// 1. Prioritize environment variables for implicit setup
 		envAPIKey := os.Getenv("OPENAI_API_KEY")
 		envBaseURL := os.Getenv("OPENAI_BASE_URL")
+		envAnthropicKey := os.Getenv("ANTHROPIC_API_KEY")
+		envAnthropicBase := os.Getenv("ANTHROPIC_BASE_URL")
 
 		var p provider.Provider
-		if envAPIKey != "" {
+		if envAnthropicKey != "" {
+			// We got implicit configuration from Anthropic environment variables!
+			p = provider.Provider{
+				Name:     "environment-anthropic",
+				Type:     "anthropic",
+				Endpoint: envAnthropicBase,
+				APIKey:   envAnthropicKey,
+				Model:    os.Getenv("ANTHROPIC_MODEL"),
+			}
+			// If no endpoint is provided from env, default to standard Anthropic
+			if p.Endpoint == "" {
+				p.Endpoint = "https://api.anthropic.com"
+			}
+		} else if envAPIKey != "" {
 			// We got implicit configuration from environment variables!
 			p = provider.Provider{
 				Name:     "environment",
@@ -49,7 +64,7 @@ var rootCmd = &cobra.Command{
 			}
 
 			if cfg.ActiveProvider == "" {
-				return fmt.Errorf("no active provider selected. Please set OPENAI_API_KEY (and optionally OPENAI_BASE_URL) in environment, or use 'cc add' or 'cc use [provider]'")
+				return fmt.Errorf("no active provider selected. Please set OPENAI_API_KEY (and optionally OPENAI_BASE_URL) in environment, or use 'ccl add' or 'ccl use [provider]'")
 			}
 
 			var ok bool

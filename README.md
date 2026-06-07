@@ -1,13 +1,13 @@
-# cc: Claude Code 多网关智能代理启动器 (Multi-Provider Launcher)
+# ccl: Claude Code 多网关智能代理启动器 (Multi-Provider Launcher)
 
-`cc` 是一个专门为 Anthropic 官方 CLI 工具 **Claude Code** 开发的多模型网关代理与极速启动器。
+`ccl` 是一个专门为 Anthropic 官方 CLI 工具 **Claude Code** 开发的多模型网关代理与极速启动器。
 
 它可以帮助你在运行 Claude Code 时，无缝对接 OpenAI 兼容格式的网关（如官方 DeepSeek、SiliconFlow、OpenRouter、OneAPI 等），实现超低成本运行。
 
 ## ✨ 核心亮点
 
 1. **智能多档模型映射 (无需复杂配置)**
-   - 当 `config.yaml` 里的 `model` 字段留空时，`cc` 将进入 **「智能协议代理映射模式」**。
+   - 当 `config.yaml` 里的 `model` 字段留空时，`ccl` 将进入 **「智能协议代理映射模式」**。
    - 自动在启动时拉取接口提供商的可用模型库。
    - 动态分析 Claude Code 的模型档位（Opus / Sonnet / Haiku），匹配最佳替代：
      - 💎 **Opus 强推理档** (Claude Opus, Claude 4.8 / 4.7 等) $\Rightarrow$ 优先匹配 `deepseek-reasoner` (R1) 或 `o1`、`o3-mini`、`gpt-4o`。
@@ -18,9 +18,9 @@
    - 采用本地轻量级的高性能并发 socket 服务（TCP），自动拦截并完美将 Anthropic 专有的 `Messages` 协议以及 `Streaming (SSE)` 转换为标准的 `OpenAI / Chat Completions` 协议。
    - 完美适配 Claude Code CLI 所有的 Tools（工具调用）和 System Prompt，使用体验 100% 丝滑。
 
-3. **智能环境探针与诊断 (`cc doctor`)**
+3. **智能环境探针与诊断 (`ccl doctor`)**
    - 自动检查本地环境依赖（Node.js, Claude CLI）。
-   - 如果系统未安装 Claude CLI，`cc` 将触发**全自动静默安装**，无需你手动运行 `npm install -g`。
+   - 如果系统未安装 Claude CLI，`ccl` 将触发**全自动静默安装**，无需你手动运行 `npm install -g`。
    - 提供连接探针，对各 Provider 的 Endpoint 连通性、API 鉴权密钥进行安全测试。
 
 4. **多通道配置与灵活切换**
@@ -34,15 +34,15 @@
 ### 方法一：直接下载预编译二进制（推荐）
 我们利用 GitHub Actions 实现了完美的 CI/CD 流程，所有发布版本均包含多平台的开箱即用二进制。
 
-请前往 [GitHub Releases](https://github.com/haiboyuwen/cc/releases) 页面，下载适合您平台的压缩包：
-- **Apple macOS**: `cc-darwin-amd64` (Intel) / `cc-darwin-arm64` (Apple Silicon M1/M2/M3)
-- **Linux**: `cc-linux-amd64` / `cc-linux-arm64`
-- **Windows**: `cc-windows-amd64.exe`
+请前往 [GitHub Releases](https://github.com/haiboyuwen/claude-code-launch/releases) 页面，下载适合您平台的压缩包：
+- **Apple macOS**: `ccl-darwin-amd64` (Intel) / `ccl-darwin-arm64` (Apple Silicon M1/M2/M3)
+- **Linux**: `ccl-linux-amd64` / `ccl-linux-arm64`
+- **Windows**: `ccl-windows-amd64.exe`
 
 下载后将其移动到您的系统 `PATH` 目录（例如 macOS/Linux 下的 `/usr/local/bin`），并赋予执行权限：
 ```bash
-chmod +x cc-darwin-arm64
-mv cc-darwin-arm64 /usr/local/bin/cc
+chmod +x ccl-darwin-arm64
+mv ccl-darwin-arm64 /usr/local/bin/ccl
 ```
 
 ### 方法二：本地源码编译
@@ -50,14 +50,14 @@ mv cc-darwin-arm64 /usr/local/bin/cc
 
 ```bash
 # 克隆仓库
-git clone <your-repository-url>
-cd cc
+git clone https://github.com/haiboyuwen/claude-code-launch.git
+cd claude-code-launch
 
-# 编译生成 cc 执行文件
-go build -o cc main.go
+# 编译生成 ccl 执行文件
+go build -o ccl main.go
 ```
 
-你可以将编译出来的 `cc` 移动到系统的 `PATH` 目录。
+你可以将编译出来的 `ccl` 移动到系统的 `PATH` 目录。
 
 ---
 
@@ -83,7 +83,7 @@ GitHub Actions 会自动触发并执行以下操作：
 ## 🛠️ 快速上手
 
 ### 极速免配置模式 (推荐 🚀)
-如果你已经在终端的环境变量中配置了 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`，`cc` 将会自动识别并直接以此作为服务源，**完全零配置运行**！
+如果你已经在终端的环境变量中配置了 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`，`ccl` 将会自动识别并直接以此作为服务源，**完全零配置运行**！
 
 ```bash
 # 1. 注入你的环境变量（例如使用 DeepSeek 官方）
@@ -91,21 +91,21 @@ export OPENAI_API_KEY="sk-your-deepseek-api-key"
 export OPENAI_BASE_URL="https://api.deepseek.com" # 选填，默认指向官方 OpenAI
 
 # 2. 直接一行启动
-cc
+ccl
 ```
 > 💡 在此模式下，依旧享受超强的 **「智能模型映射」**：常规对话走 `deepseek-chat`，深度推理全自动路由至 `deepseek-reasoner`！
 
 ---
 
 ### 交互配置模式
-如果你需要管理多个网关通道，可以使用 `cc` 的配置管理系统：
+如果你需要管理多个网关通道，可以使用 `ccl` 的配置管理系统：
 
 #### 1. 添加你的 AI 接口服务商 (Provider)
 
-运行 `cc add` 命令，开始添加。如果你使用的是 DeepSeek 官方，可以配置如下：
+运行 `ccl add` 命令，开始添加。如果你使用的是 DeepSeek 官方，可以配置如下：
 
 ```bash
-./cc add
+./ccl add
 ```
 
 交互引导中填入信息：
@@ -121,10 +121,10 @@ cc
 
 ```bash
 # 查看所有已添加的服务商 (带有 * 的为当前激活)
-./cc list
+./ccl list
 
 # 切换到指定的 provider
-./cc use deepseek
+./ccl use deepseek
 ```
 
 ### 3. 环境诊断
@@ -132,22 +132,22 @@ cc
 在正式跑 Claude 之前，可以测试网关的健康度和密钥是否有效：
 
 ```bash
-./cc doctor
+./ccl doctor
 ```
 
 如果检测到本地没有全局安装 `@anthropic-ai/claude-code`，它会提示并尝试为你一键静默安装。
 
 ### 4. 开启 Claude Code 奇妙旅程
 
-直接输入 `cc`，即可丝滑进入 Claude Code CLI 原生界面：
+直接输入 `ccl`，即可丝滑进入 Claude Code CLI 原生界面：
 
 ```bash
-# 启动 Claude Code 交互，所有请求均自动经本地 cc 代理安全转换
-./cc
+# 启动 Claude Code 交互，所有请求均自动经本地 ccl 代理安全转换
+./ccl
 
 # 你也可以像原来一样跟上其他的子命令或路径：
-./cc --help
-./cc /compact
+./ccl --help
+./ccl /compact
 ```
 
 ---
@@ -160,7 +160,7 @@ cc
 │   ├── delete.go       # 删除提供商
 │   ├── doctor.go       # 环境及密钥连通性自检
 │   ├── list.go         # 列表展示提供商
-│   ├── root.go         # cc 主入口及 Claude 进程拉起
+│   ├── root.go         # ccl 主入口及 Claude 进程拉起
 │   └── use.go          # 快速切换激活提供商
 ├── internal/
 │   ├── claude/         # Claude Code CLI 自动安装、进程拉起及端口注入逻辑

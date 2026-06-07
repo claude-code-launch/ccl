@@ -1,9 +1,9 @@
 # Compiled Object files, Signatures, Symlinks, etc.
 bin/
-cc
-cc.exe
-cc.test
-cc.prof
+ccl
+ccl.exe
+ccl.test
+ccl.prof
 *.out
 *.exe
 *.test

@@ -10,7 +10,20 @@ import (
 
 func ConfigPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cc", "config.yaml")
+	newPath := filepath.Join(home, ".ccl", "config.yaml")
+
+	// Automatic Migration logic:
+	// If the new config directory ~/.ccl does not exist, but old ~/.cc/config.yaml exists,
+	// automatically migrate/move it to the new path.
+	oldPath := filepath.Join(home, ".cc", "config.yaml")
+	if _, err := os.Stat(newPath); os.IsNotExist(err) {
+		if _, errOld := os.Stat(oldPath); errOld == nil {
+			_ = os.MkdirAll(filepath.Dir(newPath), 0755)
+			_ = os.Rename(oldPath, newPath)
+		}
+	}
+
+	return newPath
 }
 
 func Load() (*provider.Config, error) {

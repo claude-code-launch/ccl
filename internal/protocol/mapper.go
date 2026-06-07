@@ -206,14 +206,28 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 	}
 
 	// 2. Map based on model tier requested by Claude Code
-	isOpusTier := containsAny(requestedModel, "opus", "4.8", "4.7")
-	isSonnetTier := containsAny(requestedModel, "sonnet", "3-5", "3.5")
 	isHaikuTier := containsAny(requestedModel, "haiku")
+	isOpusTier := containsAny(requestedModel, "opus", "4.8", "4.7")
+	isSonnetTier := containsAny(requestedModel, "sonnet", "3-5", "3.5") && !isHaikuTier
 
 	if isOpusTier {
 		// Prefer strongest reasoning / smart models
 		if match := findInAvailable("deepseek-reasoner", "o1", "o3-mini", "gpt-4o", "claude-3-opus"); match != "" {
 			return match
+		}
+		// Run a keyword heuristic if standard candidates are not found in availableModels
+		for _, avail := range availableModels {
+			availLower := strings.ToLower(avail)
+			if containsAny(availLower, "reasoner", "reasoning", "o1", "o3", "max", "opus") {
+				return avail
+			}
+		}
+		// Second heuristic try: general high performance keyword
+		for _, avail := range availableModels {
+			availLower := strings.ToLower(avail)
+			if containsAny(availLower, "pro", "plus") && !containsAny(availLower, "flash", "mini", "lite") {
+				return avail
+			}
 		}
 		// Fallback
 		return "deepseek-reasoner"
@@ -224,6 +238,21 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 		if match := findInAvailable("deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gpt-4"); match != "" {
 			return match
 		}
+		// Run a keyword heuristic if standard candidates are not found in availableModels
+		for _, avail := range availableModels {
+			availLower := strings.ToLower(avail)
+			// Match "pro", "plus", "chat", "standard", "v4", "v3", etc. but exclude low-tier or reasoning variants
+			if containsAny(availLower, "pro", "plus", "chat", "standard", "v4", "v3", "glm-5") && !containsAny(availLower, "flash", "mini", "lite", "reasoner", "reasoning") {
+				return avail
+			}
+		}
+		// Fallback to first available model that is not low tier if possible
+		for _, avail := range availableModels {
+			availLower := strings.ToLower(avail)
+			if !containsAny(availLower, "flash", "mini", "lite") {
+				return avail
+			}
+		}
 		// Fallback
 		return "deepseek-chat"
 	}
@@ -232,6 +261,13 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 		// Prefer fast, cost-effective models
 		if match := findInAvailable("gpt-4o-mini", "gpt-3.5-turbo", "claude-3-5-haiku"); match != "" {
 			return match
+		}
+		// Run a keyword heuristic if standard candidates are not found in availableModels
+		for _, avail := range availableModels {
+			availLower := strings.ToLower(avail)
+			if containsAny(availLower, "mini", "flash", "lite", "haiku", "turbo", "fast") {
+				return avail
+			}
 		}
 		// Fallback
 		return "gpt-4o-mini"

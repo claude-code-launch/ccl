@@ -19,7 +19,7 @@ var useCmd = &cobra.Command{
 
 		target := args[0]
 		if _, exists := cfg.Providers[target]; !exists {
-			return fmt.Errorf("provider %q not found in configuration. Add it first using 'cc add' or check spelling with 'cc list'", target)
+			return fmt.Errorf("provider %q not found in configuration. Add it first using 'ccl add' or check spelling with 'ccl list'", target)
 		}
 
 		cfg.ActiveProvider = target
