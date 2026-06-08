@@ -1,15 +1,15 @@
 package provider
 
 type Provider struct {
-	Name     string            `mapstructure:"name"`
-	Type     string            `mapstructure:"type"`
-	Endpoint string            `mapstructure:"endpoint"`
-	APIKey   string            `mapstructure:"apikey"`
-	Model    string            `mapstructure:"model"`
-	Env      map[string]string `mapstructure:"env,omitempty"`
+	Name     string            `yaml:"name" mapstructure:"name"`
+	Type     string            `yaml:"type" mapstructure:"type"`
+	Endpoint string            `yaml:"endpoint" mapstructure:"endpoint"`
+	APIKey   string            `yaml:"apikey" mapstructure:"apikey"`
+	Model    string            `yaml:"model" mapstructure:"model"`
+	Env      map[string]string `yaml:"env,omitempty" mapstructure:"env,omitempty"`
 }
 
 type Config struct {
-	ActiveProvider string              `mapstructure:"active_provider"`
-	Providers      map[string]Provider `mapstructure:"providers"`
+	ActiveProvider string              `yaml:"active_provider" mapstructure:"active_provider"`
+	Providers      map[string]Provider `yaml:"providers" mapstructure:"providers"`
 }

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 func ConfigPath() string {
@@ -31,10 +31,9 @@ func Load() (*provider.Config, error) {
 		Providers: make(map[string]provider.Provider),
 	}
 
-	v := viper.New()
-	v.SetConfigFile(ConfigPath())
-
-	if err := v.ReadInConfig(); err != nil {
+	path := ConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
 		// If the config file does not exist, return an empty initialized config
 		if os.IsNotExist(err) {
 			return cfg, nil
@@ -42,7 +41,7 @@ func Load() (*provider.Config, error) {
 		return cfg, err
 	}
 
-	err := v.Unmarshal(cfg)
+	err = yaml.Unmarshal(data, cfg)
 	if err != nil {
 		return cfg, err
 	}
@@ -62,10 +61,10 @@ func Save(cfg *provider.Config) error {
 		return err
 	}
 
-	v := viper.New()
-	v.SetConfigFile(path)
-	v.Set("active_provider", cfg.ActiveProvider)
-	v.Set("providers", cfg.Providers)
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
 
-	return v.WriteConfigAs(path)
+	return os.WriteFile(path, data, 0644)
 }
