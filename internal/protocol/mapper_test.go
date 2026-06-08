@@ -9,7 +9,7 @@ import (
 
 func TestConvertRequest(t *testing.T) {
 	antReq := &protocol.AnthropicRequest{
-		Model: "claude-3-5-sonnet",
+		Model:  "claude-3-5-sonnet",
 		System: "You are a helpful assistant.",
 		Messages: []protocol.AnthropicMessage{
 			{
@@ -190,7 +190,6 @@ func TestConvertToolCall(t *testing.T) {
 	}
 }
 
-
 func TestReasoningContentMapping(t *testing.T) {
 	// 1. Test request conversion mapping "thinking" -> "reasoning_content"
 	antReq := &protocol.AnthropicRequest{
@@ -200,7 +199,7 @@ func TestReasoningContentMapping(t *testing.T) {
 				Role: "assistant",
 				Content: []any{
 					map[string]any{
-						"type": "thinking",
+						"type":     "thinking",
 						"thinking": "Let me think about it.",
 					},
 					map[string]any{

@@ -114,6 +114,10 @@ func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[
 		}
 	}
 
+	for k, v := range p.Env {
+		env[k] = v
+	}
+
 	return env
 }
 

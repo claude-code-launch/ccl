@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/spf13/cobra"
 	"github.com/haiboyuwen/claude-code-launch/internal/config"
+	"github.com/spf13/cobra"
 )
 
 var listCmd = &cobra.Command{

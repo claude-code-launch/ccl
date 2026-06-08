@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
 	"github.com/haiboyuwen/claude-code-launch/internal/config"
+	"github.com/spf13/cobra"
 )
 
 var useCmd = &cobra.Command{

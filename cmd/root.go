@@ -5,8 +5,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/spf13/cobra"
 	"github.com/haiboyuwen/claude-code-launch/internal/claude"
+	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{

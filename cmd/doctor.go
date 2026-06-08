@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/haiboyuwen/claude-code-launch/internal/claude"
 	"github.com/haiboyuwen/claude-code-launch/internal/config"
+	"github.com/spf13/cobra"
 )
 
 var doctorCmd = &cobra.Command{

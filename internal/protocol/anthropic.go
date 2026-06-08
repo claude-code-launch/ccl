@@ -4,19 +4,19 @@ import "encoding/json"
 
 // AnthropicRequest matches the structure sent by Claude Code to /v1/messages.
 type AnthropicRequest struct {
-	Model         string                `json:"model"`
-	Messages      []AnthropicMessage    `json:"messages"`
-	System        any                   `json:"system,omitempty"` // Can be string or []ContentBlock
-	MaxTokens     int                   `json:"max_tokens,omitempty"`
-	Metadata      map[string]any        `json:"metadata,omitempty"`
-	StopSequences []string              `json:"stop_sequences,omitempty"`
-	Stream        bool                  `json:"stream,omitempty"`
-	Temperature   *float64              `json:"temperature,omitempty"`
-	TopK          *int                  `json:"top_k,omitempty"`
-	TopP          *float64              `json:"top_p,omitempty"`
-	Tools         []AnthropicTool       `json:"tools,omitempty"`
-	ToolChoice    *AnthropicToolChoice  `json:"tool_choice,omitempty"`
-	Thinking      *AnthropicThinking    `json:"thinking,omitempty"`
+	Model         string               `json:"model"`
+	Messages      []AnthropicMessage   `json:"messages"`
+	System        any                  `json:"system,omitempty"` // Can be string or []ContentBlock
+	MaxTokens     int                  `json:"max_tokens,omitempty"`
+	Metadata      map[string]any       `json:"metadata,omitempty"`
+	StopSequences []string             `json:"stop_sequences,omitempty"`
+	Stream        bool                 `json:"stream,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	TopK          *int                 `json:"top_k,omitempty"`
+	TopP          *float64             `json:"top_p,omitempty"`
+	Tools         []AnthropicTool      `json:"tools,omitempty"`
+	ToolChoice    *AnthropicToolChoice `json:"tool_choice,omitempty"`
+	Thinking      *AnthropicThinking   `json:"thinking,omitempty"`
 }
 
 type AnthropicThinking struct {
@@ -57,14 +57,14 @@ type AnthropicToolChoice struct {
 
 // AnthropicResponse matches the structure expected by Claude Code.
 type AnthropicResponse struct {
-	ID           string             `json:"id"`
-	Type         string             `json:"type"`
-	Role         string             `json:"role"`
-	Content      []ContentBlock     `json:"content"`
-	Model        string             `json:"model"`
-	StopReason   string             `json:"stop_reason,omitempty"`
-	StopSequence string             `json:"stop_sequence,omitempty"`
-	Usage        AnthropicUsage     `json:"usage"`
+	ID           string         `json:"id"`
+	Type         string         `json:"type"`
+	Role         string         `json:"role"`
+	Content      []ContentBlock `json:"content"`
+	Model        string         `json:"model"`
+	StopReason   string         `json:"stop_reason,omitempty"`
+	StopSequence string         `json:"stop_sequence,omitempty"`
+	Usage        AnthropicUsage `json:"usage"`
 }
 
 type AnthropicUsage struct {

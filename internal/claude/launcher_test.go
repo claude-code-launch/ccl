@@ -73,3 +73,37 @@ func TestLauncherDynamicDiscovery(t *testing.T) {
 		t.Errorf("Expected default haiku model to be 'deepseek-v4-flash', got: %q", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 	}
 }
+
+func TestLauncherCustomEnv(t *testing.T) {
+	p := provider.Provider{
+		Name:     "custom-env-test",
+		Type:     "anthropic",
+		Endpoint: "https://api.anthropic.com",
+		APIKey:   "mock-key",
+		Model:    "claude-3-5-sonnet",
+		Env: map[string]string{
+			"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
+			"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
+		},
+	}
+
+	settingsJSONStr := claude.PreviewSettings(p)
+
+	var settings map[string]map[string]string
+	if err := json.Unmarshal([]byte(settingsJSONStr), &settings); err != nil {
+		t.Fatalf("Failed to parse settings JSON: %v. JSON: %s", err, settingsJSONStr)
+	}
+
+	env := settings["env"]
+	if env == nil {
+		t.Fatalf("No env block found in settings: %s", settingsJSONStr)
+	}
+
+	if env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] != "50" {
+		t.Errorf("Expected CLAUDE_AUTOCOMPACT_PCT_OVERRIDE to be 50, got: %q", env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
+	}
+
+	if env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] != "1" {
+		t.Errorf("Expected CLAUDE_CODE_DISABLE_1M_CONTEXT to be 1, got: %q", env["CLAUDE_CODE_DISABLE_1M_CONTEXT"])
+	}
+}

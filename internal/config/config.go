@@ -4,8 +4,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/viper"
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
+	"github.com/spf13/viper"
 )
 
 func ConfigPath() string {

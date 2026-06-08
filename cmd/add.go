@@ -1,17 +1,14 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/huh"
-	"github.com/spf13/cobra"
 	"github.com/haiboyuwen/claude-code-launch/internal/config"
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
+	"github.com/spf13/cobra"
 )
 
 var addCmd = &cobra.Command{
@@ -19,7 +16,7 @@ var addCmd = &cobra.Command{
 	Short: "Add a new LLM provider config",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var p provider.Provider
-
+		var envRaw string
 		// Step 1: Gather general metadata
 		err := huh.NewForm(
 			huh.NewGroup(
@@ -55,27 +52,35 @@ var addCmd = &cobra.Command{
 						}
 						return nil
 					}),
-
-				huh.NewInput().
-					Title("Model").
-					Description("The model identifier (e.g., deepseek-chat, gpt-4o, claude-3-5-sonnet)").
-					Value(&p.Model).
-					Validate(func(str string) error {
-						if str == "" {
-							return errors.New("model name cannot be empty")
-						}
-						return nil
-					}),
+				huh.NewText().
+					Title("Environment Variables (optional)").
+					Description("One KEY=VALUE per line, leave empty to skip").
+					Value(&envRaw),
 			),
 		).Run()
 
 		if err != nil {
 			return err
 		}
+		// 可选，有内容才解析
+		for _, line := range strings.Split(envRaw, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			k, v, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			if p.Env == nil {
+				p.Env = make(map[string]string)
+			}
+			p.Env[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
 
 		// Step 2: Auto-detect Protocol Type
 		fmt.Println("\nAuto-detecting provider protocol type...")
-		p.Type = detectProtocol(p.Endpoint, p.APIKey)
+		p.Type, p.Model = detectProtocolAndModels(p.Endpoint, p.APIKey)
 		fmt.Printf("✓ Detected Protocol Type: %s\n\n", p.Type)
 
 		// Confirm or let user overwrite
@@ -137,43 +142,6 @@ var addCmd = &cobra.Command{
 		}
 		return nil
 	},
-}
-
-// detectProtocol probes the endpoint to figure out if it is an openai or anthropic endpoint.
-func detectProtocol(endpoint, apiKey string) string {
-	endpoint = strings.TrimSuffix(endpoint, "/")
-
-	// We'll run a quick models probe first which is standard for OpenAI
-	modelsURL := endpoint + "/models"
-	if !strings.HasSuffix(endpoint, "/v1") && !strings.HasSuffix(endpoint, "/v1/chat/completions") {
-		// Try fallback models endpoint format
-		modelsURL = endpoint + "/v1/models"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
-	if err == nil {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		client := &http.Client{Timeout: 4 * time.Second}
-		resp, err := client.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				// If /models returns OK (usually OpenAI lists models here), it is OpenAI
-				return "openai"
-			}
-		}
-	}
-
-	// Default heuristical probe based on URL patterns
-	if strings.Contains(endpoint, "anthropic.com") {
-		return "anthropic"
-	}
-
-	// Default fallback to openai compatible
-	return "openai"
 }
 
 func init() {

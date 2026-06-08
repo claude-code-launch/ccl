@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"github.com/spf13/cobra"
 	"github.com/haiboyuwen/claude-code-launch/internal/claude"
+	"github.com/spf13/cobra"
 )
 
 var updateCmd = &cobra.Command{

@@ -55,12 +55,12 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 		msgStart := map[string]any{
 			"type": "message_start",
 			"message": map[string]any{
-				"id":           chunk.ID,
-				"type":         "message",
-				"role":         "assistant",
-				"content":      []any{},
-				"model":        chunk.Model,
-				"stop_reason":  nil,
+				"id":            chunk.ID,
+				"type":          "message",
+				"role":          "assistant",
+				"content":       []any{},
+				"model":         chunk.Model,
+				"stop_reason":   nil,
 				"stop_sequence": nil,
 				"usage": map[string]any{
 					"input_tokens":  0,
@@ -172,7 +172,7 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 				"type":  "content_block_delta",
 				"index": st.currentBlockIdx,
 				"delta": map[string]any{
-					"type":        "input_json_delta",
+					"type":         "input_json_delta",
 					"partial_json": tc.Function.Arguments,
 				},
 			}
@@ -218,7 +218,7 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 		msgDelta := map[string]any{
 			"type": "message_delta",
 			"delta": map[string]any{
-				"stop_reason":  stopReason,
+				"stop_reason":   stopReason,
 				"stop_sequence": nil,
 			},
 			"usage": map[string]any{

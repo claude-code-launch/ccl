@@ -15,17 +15,17 @@ type OpenAIRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role             string               `json:"role"`
-	Content          any                  `json:"content,omitempty"` // string or []OpenAIMessagePart
-	Name             string               `json:"name,omitempty"`    // for tool result
-	ToolCallID       string               `json:"tool_call_id,omitempty"`
-	ToolCalls        []OpenAIToolCall     `json:"tool_calls,omitempty"`
-	ReasoningContent string               `json:"reasoning_content,omitempty"`
+	Role             string           `json:"role"`
+	Content          any              `json:"content,omitempty"` // string or []OpenAIMessagePart
+	Name             string           `json:"name,omitempty"`    // for tool result
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
 }
 
 type OpenAIMessagePart struct {
-	Type     string         `json:"type"`
-	Text     string         `json:"text,omitempty"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
 	ImageURL *OpenAIImageURL `json:"image_url,omitempty"`
 }
 

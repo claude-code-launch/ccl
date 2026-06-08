@@ -258,7 +258,6 @@ func TestProxyServerStreaming(t *testing.T) {
 	}
 }
 
-
 func TestProxyServerStreamingReasoning(t *testing.T) {
 	// 1. Create a mock target endpoint server simulating OpenAI Streaming with reasoning_content.
 	mux := http.NewServeMux()
