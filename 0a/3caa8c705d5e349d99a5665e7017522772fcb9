@@ -1,0 +1,16 @@
+cmd/detect.go
+  h_1d8661cb669d01 1-162
+cmd/add.go
+  h_1d8661cb669d01 58,68-79,83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "0a3caa8c705d5e349d99a5665e7017522772fcb9",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
