@@ -1,6 +1,13 @@
 package protocol
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
 
 // AnthropicRequest matches the structure sent by Claude Code to /v1/messages.
 type AnthropicRequest struct {
@@ -70,4 +77,61 @@ type AnthropicResponse struct {
 type AnthropicUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+}
+type AnthropicModelResponse struct {
+	Data []struct {
+		CreatedAt   time.Time `json:"created_at"`
+		DisplayName string    `json:"display_name"`
+		Id          string    `json:"id"`
+		Type        string    `json:"type"`
+	} `json:"data"`
+	FirstId string `json:"firstId"`
+	HasMore bool   `json:"hasMore"`
+	LastId  string `json:"lastId"`
+}
+
+// GetAnthropicModels 通过 API Key 和 BaseURL 获取 Anthropic 模型列表
+func GetAnthropicModels(baseURL, key string) (string, error) {
+	if key == "" {
+		return "", fmt.Errorf("api key 不能为空")
+	}
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		baseURL+"/v1/models",
+		nil,
+	)
+	if err != nil {
+		return "", fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result AnthropicModelResponse
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return "", fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	models := make([]string, 0, len(result.Data))
+	for _, m := range result.Data {
+		if m.Id != "" {
+			models = append(models, m.Id)
+		}
+	}
+
+	return strings.Join(models, ","), nil
 }

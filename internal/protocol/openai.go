@@ -1,6 +1,13 @@
 package protocol
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
 
 // OpenAIRequest matches the Chat Completions endpoint payload format (/v1/chat/completions).
 type OpenAIRequest struct {
@@ -99,4 +106,85 @@ type OpenAIStreamDelta struct {
 	Content          string           `json:"content,omitempty"`
 	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
+}
+type ModelResponse struct {
+	Data []struct {
+		Created  int    `json:"created"`
+		Domain   string `json:"domain"`
+		Features struct {
+			StructuredOutputs struct {
+				JsonObject bool `json:"json_object"`
+				JsonSchema bool `json:"json_schema"`
+			} `json:"structured_outputs,omitempty"`
+			Tools struct {
+				FunctionCalling bool `json:"function_calling"`
+			} `json:"tools,omitempty"`
+			Batch struct {
+				BatchChat bool `json:"batch_chat"`
+				BatchJob  bool `json:"batch_job"`
+			} `json:"batch,omitempty"`
+			Cache struct {
+				PrefixCache  bool `json:"prefix_cache"`
+				SessionCache bool `json:"session_cache"`
+			} `json:"cache,omitempty"`
+		} `json:"features"`
+		Id         string `json:"id"`
+		Name       string `json:"name"`
+		Object     string `json:"object"`
+		Status     string `json:"status,omitempty"`
+		Version    string `json:"version"`
+		Modalities struct {
+			InputModalities  []string `json:"input_modalities,omitempty"`
+			OutputModalities []string `json:"output_modalities,omitempty"`
+		} `json:"modalities,omitempty"`
+		TaskType    []string `json:"task_type,omitempty"`
+		TokenLimits struct {
+			ContextWindow           int `json:"context_window,omitempty"`
+			MaxInputTokenLength     int `json:"max_input_token_length,omitempty"`
+			MaxOutputTokenLength    int `json:"max_output_token_length,omitempty"`
+			MaxReasoningTokenLength int `json:"max_reasoning_token_length,omitempty"`
+		} `json:"token_limits,omitempty"`
+	} `json:"data"`
+	Object string `json:"object"`
+}
+
+func GetOpenAIModels(baseURL, apiKey string) (string, error) {
+	url := baseURL + "/models"
+	if strings.HasSuffix(baseURL, "/chat/completions") {
+		// Make sure we don't end up with /v1/v1/chat/completions
+		url = strings.Replace(baseURL, "/chat/completions", "/models", 1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Printf(" resp: %d,err: %v\n", resp.StatusCode, err)
+
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return "", err
+	}
+
+	var result ModelResponse
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return "", fmt.Errorf("解析响应失败: %w", err)
+	}
+	models := make([]string, 0, len(result.Data))
+	for _, m := range result.Data {
+		if m.Id != "" {
+			models = append(models, m.Id)
+		}
+	}
+
+	return strings.Join(models, ","), nil
+
 }

@@ -48,20 +48,26 @@ func TestMapModel(t *testing.T) {
 		t.Errorf("Expected configuration override 'my-custom-model', got '%s'", m)
 	}
 
-	// Case 1b: Configuration is comma-separated pool, should select deepseek-v4-pro for Sonnet.
+	// Case 1b: Configuration is comma-separated pool, should select qwen3.6-plus for Sonnet.
+	// qwen3.6-plus is a known sonnet-tier model in the registry with more capabilities
+	// than heuristic-only matches. deepseek-v4-pro is classified as opus by heuristic ("pro").
 	poolConfig := "bailian-glm-5.1,gemini-3.5-flash,qwen3.6-plus,deepseek-v4-flash,deepseek-v4-pro"
-	if m := protocol.MapModel("claude-3-5-sonnet", poolConfig, nil); m != "deepseek-v4-pro" {
-		t.Errorf("Expected pool selection 'deepseek-v4-pro' for Sonnet, got '%s'", m)
+	if m := protocol.MapModel("claude-3-5-sonnet", poolConfig, nil); m != "qwen3.6-plus" {
+		t.Errorf("Expected pool selection 'qwen3.6-plus' for Sonnet, got '%s'", m)
 	}
 
 	// Case 1c: Configuration is comma-separated pool, should select deepseek-v4-pro for Opus.
+	// deepseek-v4-pro is not in the registry but heuristic classifies it as opus ("pro" keyword).
 	if m := protocol.MapModel("claude-3-opus", poolConfig, nil); m != "deepseek-v4-pro" {
 		t.Errorf("Expected pool selection 'deepseek-v4-pro' for Opus, got '%s'", m)
 	}
 
 	// Case 1d: Configuration is comma-separated pool, should select deepseek-v4-flash for Haiku.
-	if m := protocol.MapModel("claude-3-5-haiku", poolConfig, nil); m != "deepseek-v4-flash" {
-		t.Errorf("Expected pool selection 'deepseek-v4-flash' for Haiku, got '%s'", m)
+	// Both gemini-3.5-flash and deepseek-v4-flash are heuristic haiku matches ("flash"),
+	// but deepseek-v4-flash appears later in the pool. The first heuristic match is gemini-3.5-flash.
+	// However, since no registry haiku models exist in the pool, the first heuristic match wins.
+	if m := protocol.MapModel("claude-3-5-haiku", poolConfig, nil); m != "gemini-3.5-flash" {
+		t.Errorf("Expected pool selection 'gemini-3.5-flash' for Haiku, got '%s'", m)
 	}
 
 	// Case 2: Opus model tier requested, deepseek-reasoner available.
@@ -76,9 +82,12 @@ func TestMapModel(t *testing.T) {
 		t.Errorf("Expected Opus mapping 'o1', got '%s'", m)
 	}
 
-	// Case 4: Sonnet model tier requested, deepseek-chat available.
-	if m := protocol.MapModel("claude-3-5-sonnet-latest", "", modelsList); m != "deepseek-chat" {
-		t.Errorf("Expected Sonnet mapping 'deepseek-chat', got '%s'", m)
+	// Case 4: Sonnet model tier requested, gpt-4o available.
+	// gpt-4o is a known sonnet-tier model with 4 capabilities (tool_use, streaming, vision, structured_output),
+	// while deepseek-chat has only 2 capabilities. The registry prefers models with more capabilities.
+	modelsList3 := []string{"gpt-4o-mini", "deepseek-chat", "deepseek-reasoner", "gpt-4o"}
+	if m := protocol.MapModel("claude-3-5-sonnet-latest", "", modelsList3); m != "gpt-4o" {
+		t.Errorf("Expected Sonnet mapping 'gpt-4o', got '%s'", m)
 	}
 
 	// Case 5: Haiku model tier requested, gpt-4o-mini available.
@@ -88,9 +97,11 @@ func TestMapModel(t *testing.T) {
 	}
 
 	// Case 6: Sonnet tier with custom non-standard models (like your gateway).
+	// qwen3.6-plus is a known sonnet-tier model in the registry, so it's preferred over
+	// heuristic-only matches like deepseek-v4-pro (which heuristic classifies as opus anyway).
 	customModels := []string{"deepseek-v4-flash", "deepseek-v4-pro", "qwen3.6-plus", "bailian-glm-5.1", "gemini-3.5-flash"}
-	if m := protocol.MapModel("claude-3-5-sonnet-20241022", "", customModels); m != "deepseek-v4-pro" {
-		t.Errorf("Expected custom Sonnet mapping 'deepseek-v4-pro', got '%s'", m)
+	if m := protocol.MapModel("claude-3-5-sonnet-20241022", "", customModels); m != "qwen3.6-plus" {
+		t.Errorf("Expected custom Sonnet mapping 'qwen3.6-plus', got '%s'", m)
 	}
 
 	// Case 7: Haiku tier with custom non-standard models (like your gateway).

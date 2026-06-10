@@ -37,7 +37,7 @@ func resolveProvider() (provider.Provider, error) {
 			Type:     "anthropic",
 			Endpoint: envAnthropicBase,
 			APIKey:   envAnthropicKey,
-			Model:    os.Getenv("ANTHROPIC_MODEL"),
+			// Model:    os.Getenv("ANTHROx[PIC_MODEL"),
 		}
 		if p.Endpoint == "" {
 			p.Endpoint = "https://api.anthropic.com"

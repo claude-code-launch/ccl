@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,8 +26,7 @@ type Server struct {
 	httpServer      *http.Server
 	ln              net.Listener
 	wg              sync.WaitGroup
-	availableModels []string
-	modelsMutex     sync.RWMutex
+	availableModels string
 }
 
 type modelsResponse struct {
@@ -56,7 +56,6 @@ func (s *Server) Start() error {
 	if s.provider.Model == "" {
 		s.fetchAvailableModels()
 	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", s.handleMessages)
 	mux.HandleFunc("/v1/models", s.handleModels)
@@ -105,73 +104,17 @@ func (s *Server) Addr() string {
 	return s.addr
 }
 
-func (s *Server) AvailableModels() []string {
-	s.modelsMutex.RLock()
-	defer s.modelsMutex.RUnlock()
-	if len(s.availableModels) == 0 {
-		return nil
-	}
-	res := make([]string, len(s.availableModels))
-	copy(res, s.availableModels)
-	return res
+func (s *Server) AvailableModels() string {
+	return s.availableModels
 }
 
 func (s *Server) fetchAvailableModels() {
-	endpoint := strings.TrimSuffix(s.provider.Endpoint, "/")
-	if endpoint == "" {
-		if s.provider.Type == "openai" {
-			endpoint = "https://api.openai.com/v1"
-		} else {
-			endpoint = "https://api.anthropic.com"
-		}
-	}
-	modelsURL := endpoint + "/models"
-	if !strings.HasSuffix(endpoint, "/v1") {
-		modelsURL = endpoint + "/v1/models"
-		modelsURL = strings.Replace(modelsURL, "/v1/v1", "/v1", 1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
+	availModels, err := protocol.GetOpenAIModels(s.provider.Endpoint, s.provider.APIKey)
 	if err != nil {
-		s.logger.Warn("Failed to create models discovery request", "error", err)
+		s.logger.Error("Dynamically discovered available gateway models err", err)
 		return
 	}
-
-	if s.provider.Type == "openai" {
-		req.Header.Set("Authorization", "Bearer "+s.provider.APIKey)
-	} else {
-		req.Header.Set("x-api-key", s.provider.APIKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-	}
-	client := &http.Client{Timeout: 3 * time.Second}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		s.logger.Warn("Models discovery request failed", "error", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		s.logger.Warn("Models discovery returned non-200 status", "status", resp.StatusCode)
-		return
-	}
-
-	var mResp modelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&mResp); err != nil {
-		s.logger.Warn("Failed to decode models response", "error", err)
-		return
-	}
-
-	s.modelsMutex.Lock()
-	s.availableModels = make([]string, 0, len(mResp.Data))
-	for _, m := range mResp.Data {
-		s.availableModels = append(s.availableModels, m.ID)
-	}
-	s.modelsMutex.Unlock()
+	s.availableModels = availModels
 
 	s.logger.Info("Dynamically discovered available gateway models", "count", len(s.availableModels), "models", s.availableModels)
 }
@@ -184,103 +127,20 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Debug("Received Anthropic Messages request")
 
-	// Read and decode the incoming Anthropic Request
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.logger.Error("Failed to read request body", "error", err)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
-		return
-	}
-
 	var antReq protocol.AnthropicRequest
-	if err := json.Unmarshal(bodyBytes, &antReq); err != nil {
+
+	if err := json.NewDecoder(r.Body).Decode(&antReq); err != nil {
 		s.logger.Error("Failed to parse request body as AnthropicRequest", "error", err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	// Resolve incoming model alias back to real gateway model name
-	s.modelsMutex.RLock()
-	realModel := protocol.FromGatewayModelAlias(antReq.Model, s.availableModels)
+	realModel := protocol.FromGatewayModelAlias(antReq.Model, strings.Split(s.availableModels, ","))
 	// If it matches pool models as configured, or if FromGatewayModelAlias resolved it, use that
-	mappedModel := protocol.MapModel(realModel, s.provider.Model, s.availableModels)
-	s.modelsMutex.RUnlock()
+	mappedModel := protocol.MapModel(realModel, s.provider.Model, strings.Split(s.availableModels, ","))
 
 	s.logger.Info("Mapped requested model to target gateway model", "requested", antReq.Model, "resolved_alias", realModel, "mapped", mappedModel)
-
-	// -------------------------------------------------------------
-	// Handle "anthropic" type provider: native passthrough
-	// -------------------------------------------------------------
-	if s.provider.Type == "anthropic" {
-		antReq.Model = mappedModel
-		antBody, err := json.Marshal(antReq)
-		if err != nil {
-			s.logger.Error("Failed to encode Anthropic request", "error", err)
-			http.Error(w, "Internal Encoding Error", http.StatusInternalServerError)
-			return
-		}
-
-		endpoint := strings.TrimSuffix(s.provider.Endpoint, "/")
-		if endpoint == "" {
-			endpoint = "https://api.anthropic.com"
-		}
-		if !strings.HasSuffix(endpoint, "/messages") && !strings.HasSuffix(endpoint, "/v1/messages") {
-			endpoint = endpoint + "/v1/messages"
-			endpoint = strings.Replace(endpoint, "/v1/v1/", "/v1/", 1)
-		}
-
-		s.logger.Debug("Forwarding native Anthropic request", "url", endpoint)
-
-		reqCtx := r.Context()
-		forwardReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewBuffer(antBody))
-		if err != nil {
-			s.logger.Error("Failed to create outgoing request", "error", err)
-			http.Error(w, "Internal Routing Error", http.StatusInternalServerError)
-			return
-		}
-
-		// Copy or set Anthropic specific headers
-		forwardReq.Header.Set("Content-Type", "application/json")
-		forwardReq.Header.Set("x-api-key", s.provider.APIKey)
-
-		// Propagate Anthropic Version
-		antVersion := r.Header.Get("anthropic-version")
-		if antVersion == "" {
-			antVersion = "2023-06-01"
-		}
-		forwardReq.Header.Set("anthropic-version", antVersion)
-
-		// Propagate any client IP headers or other metadata if present
-		if clientIP := r.Header.Get("x-forwarded-for"); clientIP != "" {
-			forwardReq.Header.Set("x-forwarded-for", clientIP)
-		}
-
-		client := &http.Client{}
-		resp, err := client.Do(forwardReq)
-		if err != nil {
-			s.logger.Error("Outgoing Anthropic request failed", "error", err)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		// Propagate upstream response headers back to client
-		for k, v := range resp.Header {
-			for _, val := range v {
-				w.Header().Add(k, val)
-			}
-		}
-
-		w.WriteHeader(resp.StatusCode)
-
-		// Stream or write the native Anthropic response directly back
-		// Since both endpoints speak the same protocol, io.Copy handles both unary and streaming SSE flawlessly.
-		_, err = io.Copy(w, resp.Body)
-		if err != nil {
-			s.logger.Error("Failed to stream response back to client", "error", err)
-		}
-		return
-	}
 
 	// -------------------------------------------------------------
 	// Handle "openai" type provider: translation proxy
@@ -434,25 +294,9 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+
 	s.logger.Debug("Received models check request")
 	w.Header().Set("Content-Type", "application/json")
-
-	standardModels := []string{
-		"claude-sonnet-4-6",
-		"claude-sonnet-4-6-20250514",
-		"claude-3-5-sonnet",
-		"claude-3-5-sonnet-20241022",
-		"claude-opus-4-8",
-		"claude-opus-4-8-20250514",
-		"claude-opus-4-7",
-		"claude-opus-4-7-20250514",
-		"claude-3-opus",
-		"claude-3-opus-20240229",
-		"claude-haiku-4-5",
-		"claude-haiku-4-5-20251001",
-		"claude-3-5-haiku",
-		"claude-3-5-haiku-20241022",
-	}
 
 	poolModels := []string{}
 	if s.provider.Model != "" && strings.Contains(s.provider.Model, ",") {
@@ -464,40 +308,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.modelsMutex.RLock()
-	availModels := s.availableModels
-	s.modelsMutex.RUnlock()
-
-	// Collect models from all sources and deduplicate them, mapping non-compliant ones to aliases.
-	var models []string
-	seen := make(map[string]bool)
-
-	addModel := func(m string) {
-		if m != "" {
-			alias := protocol.ToGatewayModelAlias(m)
-			if !seen[alias] {
-				seen[alias] = true
-				models = append(models, alias)
-			}
-		}
-	}
-
-	// 1. First add pool models if configured
-	for _, m := range poolModels {
-		addModel(m)
-	}
-
-	// 2. Next add dynamically discovered models from the gateway
-	for _, m := range availModels {
-		addModel(m)
-	}
-
-	// 3. If still empty, fall back to standard models
-	if len(models) == 0 {
-		for _, m := range standardModels {
-			addModel(m)
-		}
-	}
+	availModels := strings.Split(s.provider.Model, ",")
+	models := protocol.BatchToGatewayModelAlias(slices.Concat(poolModels, availModels))
 
 	var buf bytes.Buffer
 	buf.WriteString(`{"data":[`)

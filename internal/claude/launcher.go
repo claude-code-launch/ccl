@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
 	"github.com/haiboyuwen/claude-code-launch/internal/proxy"
 )
@@ -42,14 +43,14 @@ func containsAny(s string, keywords ...string) bool {
 // parseModelPool splits a comma-separated model string into individual model names.
 func parseModelPool(modelPool string) []string {
 	parts := strings.Split(modelPool, ",")
-	var models []string
+	var result []string
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part != "" {
-			models = append(models, part)
+			result = append(result, part)
 		}
 	}
-	return models
+	return result
 }
 
 // mapPoolToTiers assigns each model in a pool to its Claude tier.
@@ -74,7 +75,8 @@ func mapPoolToTiers(models []string) map[string]string {
 
 // settingsJSON represents the per-session settings file passed via --settings.
 type settingsJSON struct {
-	Env map[string]string `json:"env"`
+	Env                    map[string]string `json:"env"`
+	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 }
 
 // buildSettingsEnv constructs the environment variable overrides for the per-session settings file.
@@ -93,11 +95,11 @@ func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[
 
 	if p.Model != "" {
 		if strings.Contains(p.Model, ",") {
-			models := parseModelPool(p.Model)
-			tierMap := mapPoolToTiers(models)
+			modelList := parseModelPool(p.Model)
+			tierMap := mapPoolToTiers(modelList)
 
 			env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-
+			env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 			for tier, model := range tierMap {
 				tierUpper := strings.ToUpper(tier)
 				env["ANTHROPIC_DEFAULT_"+tierUpper+"_MODEL"] = model
@@ -106,8 +108,8 @@ func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[
 
 			if m, ok := tierMap["sonnet"]; ok {
 				env["ANTHROPIC_MODEL"] = m
-			} else if len(models) > 0 {
-				env["ANTHROPIC_MODEL"] = models[0]
+			} else if len(modelList) > 0 {
+				env["ANTHROPIC_MODEL"] = modelList[0]
 			}
 		} else {
 			env["ANTHROPIC_MODEL"] = p.Model
@@ -128,8 +130,7 @@ func PreviewSettings(p provider.Provider) string {
 	var baseURL string
 	var srv *proxy.Server
 
-	isModelPool := p.Model != "" && strings.Contains(p.Model, ",")
-	needsProxy := p.Type == "openai" || isModelPool || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
+	needsProxy := p.Type == "openai"
 	if needsProxy {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		srv = proxy.NewServer("127.0.0.1:0", p, logger)
@@ -144,12 +145,12 @@ func PreviewSettings(p provider.Provider) string {
 
 	if srv != nil && p.Model == "" {
 		if discovered := srv.AvailableModels(); len(discovered) > 0 {
-			p.Model = strings.Join(discovered, ",")
+			p.Model = discovered
 		}
 	}
 
 	env := buildSettingsEnv(p, baseURL, needsProxy)
-	settings := settingsJSON{Env: env}
+	settings := settingsJSON{Env: env, HasCompletedOnboarding: true}
 
 	path, err := writeSettingsFile(settings)
 	if err != nil {
@@ -200,53 +201,75 @@ func Run(p provider.Provider, args []string) error {
 	var srv *proxy.Server
 	var baseURL string
 
-	isModelPool := p.Model != "" && strings.Contains(p.Model, ",")
-	needsProxy := p.Type == "openai" || isModelPool || (p.Type == "anthropic" && p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com")
+	needsProxy := p.Type == "openai"
 	if needsProxy {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		proxyAddr := "127.0.0.1:0"
-		srv = proxy.NewServer(proxyAddr, p, logger)
-
-		err := srv.Start()
-		if err != nil {
+		srv = proxy.NewServer("127.0.0.1:0", p, logger)
+		if err := srv.Start(); err != nil {
 			return fmt.Errorf("failed to start local proxy: %w", err)
 		}
 		defer srv.Stop()
-
-		allocatedAddr := srv.Addr()
-		baseURL = "http://" + allocatedAddr
-
+		baseURL = "http://" + srv.Addr()
 		time.Sleep(200 * time.Millisecond)
 	} else {
 		baseURL = p.Endpoint
 	}
 
-	if srv != nil && p.Model == "" {
-		if discovered := srv.AvailableModels(); len(discovered) > 0 {
-			p.Model = strings.Join(discovered, ",")
+	if p.Model == "" {
+		if srv != nil {
+			if discovered := srv.AvailableModels(); len(discovered) > 0 {
+				p.Model = discovered
+			}
+		} else {
+			m, err := protocol.GetAnthropicModels(p.Endpoint, p.APIKey)
+			if err != nil {
+				return err
+			}
+			tmp := protocol.BatchToGatewayModelAlias(strings.Split(m, ","))
+			p.Model = strings.Join(tmp, ",")
 		}
+
 	}
 
-	// Build and write per-session settings JSON (like cc_switch)
-	env := buildSettingsEnv(p, baseURL, needsProxy)
-	settings := settingsJSON{Env: env}
+	// Anthropic 直连只注入 base url 和 api key，其余走 buildSettingsEnv
+	// var envOverrides map[string]string
+	// if p.Type != "openai" {
+	// 	envOverrides = make(map[string]string)
+	// 	if p.APIKey != "" {
+	// 		envOverrides["ANTHROPIC_API_KEY"] = p.APIKey
+	// 	}
+	// 	if p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com" {
+	// 		envOverrides["ANTHROPIC_BASE_URL"] = p.Endpoint
+	// 	}
+	// }
+
+	claudeArgs := make([]string, 0, len(args)+2)
+	// if p.Type == "openai" {
+	// 	settings := settingsJSON{Env: buildSettingsEnv(p, baseURL, needsProxy)}
+	// 	settingsPath, err := writeSettingsFile(settings)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to create settings file: %w", err)
+	// 	}
+	// 	defer os.Remove(settingsPath)
+	// 	fmt.Println("Using provider-specific claude config:", settingsPath)
+	// 	claudeArgs = append(claudeArgs, "--settings", settingsPath)
+	// }
+
+	settings := settingsJSON{Env: buildSettingsEnv(p, baseURL, needsProxy)}
 	settingsPath, err := writeSettingsFile(settings)
 	if err != nil {
 		return fmt.Errorf("failed to create settings file: %w", err)
 	}
 	defer os.Remove(settingsPath)
 
-	fmt.Println("Using provider-specific claude config:")
-	fmt.Println(settingsPath)
+	fmt.Println("Using provider-specific claude config:", settingsPath)
 
-	// Build claude command args: prepend --settings before user args
-	claudeArgs := []string{"--settings", settingsPath}
+	claudeArgs = append(claudeArgs, "--settings", settingsPath)
 	claudeArgs = append(claudeArgs, args...)
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		winArgs := append([]string{"/c", claudePath}, claudeArgs...)
-		cmd = exec.Command("cmd", winArgs...)
+		cmd = exec.Command("cmd", append([]string{"/c", claudePath}, claudeArgs...)...)
 	} else {
 		cmd = exec.Command(claudePath, claudeArgs...)
 	}
@@ -254,14 +277,21 @@ func Run(p provider.Provider, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-
-	// Inject all settings env vars into the process environment as well.
-	// The --settings JSON env section may not reliably propagate all env vars
-	// (especially feature flags like CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY),
-	// so we set them in cmd.Env to guarantee Claude Code sees them.
-	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	// if p.Type == "openai" {
+	// 	cmd.Env = os.Environ()
+	// } else {
+	// 	filteredEnv := make([]string, 0, len(os.Environ())+len(envOverrides))
+	// 	for _, e := range os.Environ() {
+	// 		key := strings.SplitN(e, "=", 2)[0]
+	// 		if _, overridden := envOverrides[key]; !overridden {
+	// 			filteredEnv = append(filteredEnv, e)
+	// 		}
+	// 	}
+	// 	for k, v := range envOverrides {
+	// 		filteredEnv = append(filteredEnv, k+"="+v)
+	// 	}
+	// 	cmd.Env = filteredEnv
+	// }
 
 	return cmd.Run()
 }

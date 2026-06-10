@@ -69,7 +69,7 @@ func normalizeBase(endpoint string) string {
 // probeAnthropicProtocol 向 /v1/messages POST 空 body，
 // 通过响应 JSON 顶层 "type" 字段识别 Anthropic 协议。
 func probeAnthropicProtocol(endpoint, apiKey string) bool {
-	url := normalizeBase(endpoint) + "/v1/messages"
+	url := normalizeBase(endpoint) + "/messages"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
@@ -137,7 +137,7 @@ func fetchAnthropicModels(endpoint, apiKey string) []string {
 // 同时解析模型列表，协议检测与取模型合并为一次请求。
 // 响应结构：{"object": "list", "data": [{"id": "gpt-4", ...}, ...]}
 func probeOpenAIModels(endpoint, apiKey string) ([]string, bool) {
-	url := normalizeBase(endpoint) + "/v1/models"
+	url := normalizeBase(endpoint) + "/models"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()

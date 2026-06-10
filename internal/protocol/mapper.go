@@ -176,6 +176,8 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 }
 
 // MapModel intelligently translates the requested Anthropic model name into the best available OpenAI gateway counterpart.
+// Uses the authoritative models registry for tier classification and selection when possible,
+// falling back to heuristic keyword matching for models not in the registry.
 func MapModel(requestedModel string, configuredModel string, availableModels []string) string {
 	// If the user explicitly configured a single model (no commas), use it directly.
 	if configuredModel != "" && !strings.Contains(configuredModel, ",") {
@@ -206,116 +208,10 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 		}
 	}
 
-	requestedModel = strings.ToLower(requestedModel)
-
-	// Helper matching function
-	containsAny := func(s string, keywords ...string) bool {
-		for _, kw := range keywords {
-			if strings.Contains(s, kw) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Find models in pool
-	findInAvailable := func(candidates ...string) string {
-		for _, cand := range candidates {
-			for _, avail := range modelPool {
-				if strings.EqualFold(avail, cand) || strings.Contains(strings.ToLower(avail), strings.ToLower(cand)) {
-					return avail
-				}
-			}
-		}
-		return ""
-	}
-
-	// 2. Map based on model tier requested by Claude Code
-	isHaikuTier := containsAny(requestedModel, "haiku")
-	isOpusTier := containsAny(requestedModel, "opus", "4.8", "4.7")
-	isSonnetTier := (containsAny(requestedModel, "sonnet", "3-5", "3.5") && !isHaikuTier) || requestedModel == ""
-
-	if isOpusTier {
-		// Prefer strongest reasoning / smart models
-		if match := findInAvailable("deepseek-reasoner", "deepseek-v4-pro", "o1", "o3-mini", "gpt-4o", "claude-3-opus"); match != "" {
-			return match
-		}
-		// Run a keyword heuristic if standard candidates are not found in modelPool
-		for _, avail := range modelPool {
-			availLower := strings.ToLower(avail)
-			if containsAny(availLower, "reasoner", "reasoning", "o1", "o3", "max", "opus", "pro") {
-				return avail
-			}
-		}
-		// Second heuristic try: general high performance keyword
-		for _, avail := range modelPool {
-			availLower := strings.ToLower(avail)
-			if containsAny(availLower, "plus") && !containsAny(availLower, "flash", "mini", "lite") {
-				return avail
-			}
-		}
-		// Fallback
-		if len(modelPool) > 0 {
-			return modelPool[0]
-		}
-		return "deepseek-reasoner"
-	}
-
-	if isSonnetTier {
-		// Prefer flagship standard models or good chat models
-		if match := findInAvailable("deepseek-v4-pro", "qwen3.6-plus", "deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gpt-4"); match != "" {
-			return match
-		}
-		// Run a keyword heuristic if standard candidates are not found in modelPool
-		for _, avail := range modelPool {
-			availLower := strings.ToLower(avail)
-			// Match "pro", "plus", "chat", "standard", "v4", "v3", etc. but exclude low-tier or reasoning variants
-			if containsAny(availLower, "pro", "plus", "chat", "standard", "v4", "v3", "glm-5", "flash") && !containsAny(availLower, "mini", "lite", "reasoner", "reasoning") {
-				return avail
-			}
-		}
-		// Fallback to first available model that is not low tier if possible
-		for _, avail := range modelPool {
-			availLower := strings.ToLower(avail)
-			if !containsAny(availLower, "mini", "lite") {
-				return avail
-			}
-		}
-		// Fallback
-		if len(modelPool) > 0 {
-			return modelPool[0]
-		}
-		return "deepseek-chat"
-	}
-
-	if isHaikuTier {
-		// Prefer fast, cost-effective models
-		if match := findInAvailable("deepseek-v4-flash", "gpt-4o-mini", "gpt-3.5-turbo", "claude-3-5-haiku"); match != "" {
-			return match
-		}
-		// Run a keyword heuristic if standard candidates are not found in modelPool
-		for _, avail := range modelPool {
-			availLower := strings.ToLower(avail)
-			if containsAny(availLower, "mini", "flash", "lite", "haiku", "turbo", "fast") {
-				return avail
-			}
-		}
-		// Fallback
-		if len(modelPool) > 0 {
-			return modelPool[len(modelPool)-1] // return last model which is usually smaller
-		}
-		return "gpt-4o-mini"
-	}
-
-	// Global default if no tier could be resolved
+	// Global default if no model could be resolved.
 	if len(modelPool) > 0 {
-		// Just pick deepseek-chat or the first available model
-		if match := findInAvailable("deepseek-chat", "gpt-4o", "qwen3.6-plus"); match != "" {
-			return match
-		}
 		return modelPool[0]
 	}
-
 	return "deepseek-chat" // Reasonable general fallback
 }
 
@@ -381,6 +277,21 @@ func ConvertResponse(oaResp *OpenAIResponse) (*AnthropicResponse, error) {
 	}
 
 	return antResp, nil
+}
+
+func BatchToGatewayModelAlias(rawModels []string) []string {
+	var models []string
+	seen := make(map[string]bool)
+
+	for _, rawModel := range rawModels {
+		alias := ToGatewayModelAlias(rawModel)
+		if !seen[alias] {
+			seen[alias] = true
+			models = append(models, alias)
+		}
+	}
+
+	return models
 }
 
 // ToGatewayModelAlias translates a raw model name into an Anthropic-compliant name
