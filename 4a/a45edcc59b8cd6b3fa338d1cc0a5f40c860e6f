@@ -1,0 +1,94 @@
+internal/protocol/mapper.go
+  s_b61c0c8c020b78::t_390237f2f51488 179-180,211
+  s_ed629ad2112219::t_c5659d500a460a 287
+  s_ed629ad2112219::t_7355cf2a0feb2d 283-284
+  s_ed629ad2112219::t_7bb1ddcad03cdb 288-291
+  h_1d8661cb669d01 285,293-295
+internal/protocol/anthropic.go
+  s_ed629ad2112219::t_7b7e10d84f7302 94
+  s_ed629ad2112219::t_a5f9c280482ec2 96
+  s_ed629ad2112219::t_654336d42569a6 93,95,97-108,110-118,120-121,125,137
+  s_ed629ad2112219::t_dbf06321d2d963 122
+  s_ed629ad2112219::t_ad9eb66ed89c91 81
+  s_ed629ad2112219::t_70efb840e052a9 119
+  h_1d8661cb669d01 3-4,6-7,9-10,92,124,127,131-132,135
+  s_ed629ad2112219::t_2926e94675d754 128-130,133-134
+  s_ed629ad2112219::t_927d93e6e6f929 136
+  s_ed629ad2112219::t_1d1f7db5bc6547 123
+  s_ed629ad2112219::t_079f56f42de602 91
+  s_ed629ad2112219::t_02aeef4ce703ac 109
+cmd/root.go
+  s_b61c0c8c020b78::t_e1b76ea71fda4e 38
+internal/proxy/server.go
+  s_ed629ad2112219::t_0a1b589b826d3d 297
+  s_ed629ad2112219::t_461d476937fb7f 312
+  h_1d8661cb669d01 112,114,117,131,139
+  s_ed629ad2112219::t_32e17c25e4a6d6 132
+  s_ed629ad2112219::t_dbedd01e3265b3 141
+internal/protocol/mapper_test.go
+  s_b61c0c8c020b78::t_c370d3b5cc22ab 88-89
+  s_b61c0c8c020b78::t_b4877eddeac116 100-101,103-104
+  s_b61c0c8c020b78::t_7a1ac1a7e601bd 85-87,90
+  s_b61c0c8c020b78::t_ee74d43b920573 51-53,55-56,60,66-70
+cmd/detect.go
+  h_1d8661cb669d01 72,140
+internal/protocol/openai.go
+  s_ed629ad2112219::t_3da3d19b266550 153
+  s_ed629ad2112219::t_4fd13cad35de3f 155
+  s_ed629ad2112219::t_259d8d374ab8d6 110
+  s_ed629ad2112219::t_f49cc882c61b5a 158-161,163-167,170-172
+  s_ed629ad2112219::t_390b4ed1a41ff9 149
+  s_ed629ad2112219::t_1b2568d704ee3b 151
+  s_ed629ad2112219::t_93377956074dce 176
+  s_ed629ad2112219::t_6bf0473bd78f6d 178-179,181-182,185-188
+  s_ed629ad2112219::t_bfeaa9bd1c4a6a 152
+  s_ed629ad2112219::t_d7b376b465a51b 154
+  h_1d8661cb669d01 6,8,150,157,173-175,177,180,183-184,189-190
+  s_ed629ad2112219::t_91500454a45b12 162
+  s_ed629ad2112219::t_bed57677763370 168-169
+internal/claude/launcher.go
+  s_b61c0c8c020b78::t_25dd7f0744ea91 46,50,53
+  s_ed629ad2112219::t_1d7319d2867ebe 148
+  h_1d8661cb669d01 14,79,102,153,223-229,231,245,247-256,280-294
+  s_b61c0c8c020b78::t_ff460b205f82d0 98-99,111-112
+  s_ed629ad2112219::t_1356e632be846b 219
+  s_ed629ad2112219::t_17c9957b00097b 220-222
+  s_ed629ad2112219::t_e7735810ad2dcc 204,207-208,212,218,234,246,272
+  s_ed629ad2112219::t_4a47b000083408 257-258,265,267
+cmd/resolve.go
+  h_1d8661cb669d01 40
+cmd/models.go
+  s_ed629ad2112219::t_21b93ed80be31d 36
+  h_1d8661cb669d01 6,35,38
+  s_ed629ad2112219::t_e149b6a52eea51 21-33
+  s_b61c0c8c020b78::t_bf27fc53d9e8e0 1-5,7-19,34,37,39-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "4aa45edcc59b8cd6b3fa338d1cc0a5f40c860e6f",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b61c0c8c020b78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6f7a8fef-005d-45db-908d-6197c3b6fd1d",
+        "model": "qwen3.6-plus"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_ed629ad2112219": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781057376560",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
