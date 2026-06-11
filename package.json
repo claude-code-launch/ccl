@@ -9,10 +9,25 @@
   "bin": {
     "ccl": "./bin/ccl"
   },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "postinstall": "node ./scripts/install.js"
+    "test": "echo \"No tests specified\" && exit 0"
   },
-  "keywords": ["claude", "claude-code", "anthropic", "proxy"],
-  "author": "Your Name",
-  "license": "MIT"
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "proxy",
+    "launcher",
+    "cli"
+  ],
+  "author": "claudecodelaunch",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
