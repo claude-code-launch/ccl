@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/claude"
-	"github.com/haiboyuwen/claude-code-launch/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
 type settingsJSON struct {

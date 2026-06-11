@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
-	"github.com/haiboyuwen/claude-code-launch/internal/provider"
-	"github.com/haiboyuwen/claude-code-launch/internal/proxy"
+	"github.com/claude-code-launch/ccl/internal/protocol"
+	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/proxy"
 )
 
 func TestProxyServerUnary(t *testing.T) {

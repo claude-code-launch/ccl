@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/config"
+	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/spf13/cobra"
 )
 

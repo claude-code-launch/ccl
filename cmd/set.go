@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
-	"github.com/haiboyuwen/claude-code-launch/internal/config"
-	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
-	"github.com/haiboyuwen/claude-code-launch/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/protocol"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 

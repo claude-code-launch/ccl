@@ -3,7 +3,7 @@ package protocol_test
 import (
 	"testing"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 func TestModelAliases(t *testing.T) {

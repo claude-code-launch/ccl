@@ -4,7 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"gopkg.in/yaml.v3"
 )
 

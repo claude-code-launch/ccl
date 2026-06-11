@@ -5,9 +5,9 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/claude"
-	"github.com/haiboyuwen/claude-code-launch/internal/config"
-	"github.com/haiboyuwen/claude-code-launch/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 

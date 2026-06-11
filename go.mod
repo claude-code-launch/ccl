@@ -1,4 +1,4 @@
-module github.com/haiboyuwen/claude-code-launch
+module github.com/claude-code-launch/ccl
 
 go 1.26
 

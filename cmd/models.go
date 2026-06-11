@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/spf13/cobra"
 )
 

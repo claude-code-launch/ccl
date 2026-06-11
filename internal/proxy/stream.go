@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 // StreamTransformer coordinates translating a stream of OpenAI chunks into Anthropic SSE chunks.

@@ -1,6 +1,6 @@
 package main
 
-import "github.com/haiboyuwen/claude-code-launch/cmd"
+import "github.com/claude-code-launch/ccl/cmd"
 
 func main() {
 	cmd.Execute()

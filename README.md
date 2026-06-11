@@ -34,7 +34,7 @@
 ### 方法一：直接下载预编译二进制（推荐）
 我们利用 GitHub Actions 实现了完美的 CI/CD 流程，所有发布版本均包含多平台的开箱即用二进制。
 
-请前往 [GitHub Releases](https://github.com/haiboyuwen/claude-code-launch/releases) 页面，下载适合您平台的压缩包：
+请前往 [GitHub Releases](https://github.com/claude-code-launch/ccl/releases) 页面，下载适合您平台的压缩包：
 - **Apple macOS**: `ccl-darwin-amd64` (Intel) / `ccl-darwin-arm64` (Apple Silicon M1/M2/M3)
 - **Linux**: `ccl-linux-amd64` / `ccl-linux-arm64`
 - **Windows**: `ccl-windows-amd64.exe`
@@ -50,7 +50,7 @@ mv ccl-darwin-arm64 /usr/local/bin/ccl
 
 ```bash
 # 克隆仓库
-git clone https://github.com/haiboyuwen/claude-code-launch.git
+git clone https://github.com/claude-code-launch/ccl.git
 cd claude-code-launch
 
 # 编译生成 ccl 执行文件
