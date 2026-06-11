@@ -1,0 +1,27 @@
+package.json
+  s_87a074f2661e70::t_e0abc3e63c33db 1,4-15,17-18
+  s_87a074f2661e70::t_6e940c0d51660f 2-3,16
+.github/workflows/npm-publish.yml
+  s_87a074f2661e70::t_ef9a5f9a01c4f3 6,14,41,49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "c3d19e53906a02906465d8f15cd6778372257e58",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_87a074f2661e70": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781171779723",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
