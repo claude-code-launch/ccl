@@ -1,0 +1,36 @@
+cmd/install.go
+  h_1d8661cb669d01 4-5,9,11-12,23-46,48-51,54-85,87-89,91,93-104,107-111,113-116,119-120
+.github/workflows/release.yml
+  s_b550a07ba23eff::t_3525377bdef473 7-12
+cmd/set.go
+  s_0bced0fa0a8ba8::t_b0562899564f5b 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "ec85e2af1c998e9f7d24dd29787001dfb2ea020b",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_0bced0fa0a8ba8": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781142824257",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_b550a07ba23eff": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781156726197",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
