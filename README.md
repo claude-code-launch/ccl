@@ -56,10 +56,33 @@ cd claude-code-launch
 # 编译生成 ccl 执行文件
 go build -o ccl main.go
 ```
+方法三：Go 安装
+确保您本地已经安装了 Go（推荐 1.22+）。
 
-你可以将编译出来的 `ccl` 移动到系统的 `PATH` 目录。
+```
+go install github.com/claude-code-launch/ccl@latest
+```
+⚠️ 注意：安装完成后，您需要将 GOBIN 目录添加到系统的 PATH 环境变量中，否则可能无法在终端直接运行 ccl 命令。
 
----
+如何配置 PATH 环境变量？
+根据您的操作系统，选择对应的配置方式：
+
+macOS / Linux (Bash/Zsh)
+打开终端并运行以下命令（根据你使用的 shell，修改 ~/.zshrc 或 ~/.bashrc）：
+
+```
+export GOPATH=$(go env GOPATH)
+export PATH=$PATH:$GOPATH/bin
+source ~/.zshrc # 如果使用的是 bash，请改为 source ~/.bashrc
+```
+
+Windows (PowerShell)
+在 PowerShell 中运行以下命令（仅对当前用户永久生效）：
+
+```PowerShell
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$(go env GOPATH)\bin", "User")
+```
+注：重启终端后生效。
 
 ## 🛠️ 自动化发布指南 (CI/CD)
 
