@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -170,7 +171,7 @@ func GetOpenAIModels(baseURL, apiKey string) (string, error) {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		return "", err
+		return "", errors.New(resp.Status)
 	}
 
 	var result ModelResponse

@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -115,9 +116,15 @@ func GetAnthropicModels(baseURL, key string) (string, error) {
 
 	httpClient := &http.Client{Timeout: 15 * time.Second}
 	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("请求失败: %w", err)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Printf(" resp: %d,err: %v\n", resp.StatusCode, err)
+
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return "", errors.New(resp.Status)
 	}
+
 	defer resp.Body.Close()
 
 	var result AnthropicModelResponse

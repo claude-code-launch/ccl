@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/haiboyuwen/claude-code-launch/internal/claude"
 	"github.com/haiboyuwen/claude-code-launch/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -28,11 +27,11 @@ var doctorCmd = &cobra.Command{
 		}
 
 		// 2. Check Claude CLI
-		claudeInstalled := claude.IsInstalled()
+		claudeInstalled := IsInstalled()
 		if !claudeInstalled {
 			fmt.Println("✗ Claude Code CLI is not installed or not in PATH.")
 			// Prompt to install automatically
-			err := claude.AutoInstall()
+			err := AutoInstall()
 			if err != nil {
 				fmt.Printf("✗ Auto-installation failed: %v. Please install manually by visiting: https://code.claude.com/\n", err)
 			}

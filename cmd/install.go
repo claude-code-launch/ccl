@@ -1,4 +1,4 @@
-package claude
+package cmd
 
 import (
 	"context"
@@ -144,39 +144,5 @@ func AutoInstall() error {
 	}
 
 	fmt.Println("✓ Claude Code CLI installed successfully!")
-	return nil
-}
-
-// Upgrade runs the upgrade procedure.
-func Upgrade() error {
-	if !IsInstalled() {
-		var confirm bool
-		err := huh.NewConfirm().
-			Title("Claude Code is not installed").
-			Description("Would you like to install it now?").
-			Value(&confirm).
-			Run()
-
-		if err != nil {
-			return err
-		}
-
-		if !confirm {
-			return fmt.Errorf("installation cancelled")
-		}
-
-		if err := RunInstallerScript(); err != nil {
-			return err
-		}
-		fmt.Println("✓ Claude Code CLI installed successfully!")
-		return nil
-	}
-
-	fmt.Println("Updating Claude Code CLI to the latest version...")
-	if err := RunInstallerScript(); err != nil {
-		return err
-	}
-
-	fmt.Println("✓ Claude Code CLI updated successfully!")
 	return nil
 }

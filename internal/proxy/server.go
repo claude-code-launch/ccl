@@ -111,7 +111,7 @@ func (s *Server) AvailableModels() string {
 func (s *Server) fetchAvailableModels() {
 	availModels, err := protocol.GetOpenAIModels(s.provider.Endpoint, s.provider.APIKey)
 	if err != nil {
-		s.logger.Error("Dynamically discovered available gateway models err", err)
+		s.logger.Error("Dynamically discovered available gateway models err", "error", err)
 		return
 	}
 	s.availableModels = availModels

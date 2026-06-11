@@ -132,6 +132,8 @@ func (r *ModelRouter) Select(tier string, fallbackTiers ...string) string {
 type settingsJSON struct {
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
+	Model                  string            `json:"model,omitempty"`          // Lock to single model
+	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
 }
 
 // buildEnv constructs the env-var overrides for a settings file.
@@ -149,8 +151,40 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 		env["ANTHROPIC_API_KEY"] = p.APIKey
 	}
 
-	if p.Model != "" {
+	// 1. Custom model ID — bypasses ALL tier logic (Bedrock ARN, custom fine-tune, etc.)
+	if p.CustomModelID != "" {
+		env["CLAUDE_CODE_MODEL_ID"] = p.CustomModelID
+	}
+
+	// 2. Explicit tier model overrides (user-specified)
+	if p.OpusModel != "" {
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = p.OpusModel
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] = p.OpusModel
+	}
+	if p.SonnetModel != "" {
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = p.SonnetModel
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"] = p.SonnetModel
+	}
+	if p.HaikuModel != "" {
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = p.HaikuModel
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = p.HaikuModel
+	}
+
+	// 3. Effort level (low/medium/high)
+	if p.EffortLevel != "" {
+		env["CLAUDE_CODE_EFFORT_LEVEL"] = p.EffortLevel
+	}
+
+	// 4. Model pool routing (auto-assign tiers from comma-separated list)
+	// Only used as fallback when explicit tier models aren't set
+	if p.Model != "" && (p.OpusModel == "" || p.SonnetModel == "" || p.HaikuModel == "") {
 		applyModelEnv(env, p.Model)
+	}
+
+	// Gateway discovery & traffic reduction (always enabled for multi-model setups)
+	if p.Model != "" || p.CustomModelID != "" {
+		env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+		env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	}
 
 	// Provider-level overrides take final precedence.
@@ -224,7 +258,7 @@ func writeSettingsFile(content settingsJSON) (string, error) {
 
 // providerContext holds resolved state needed to build a settings file.
 type providerContext struct {
-	provider provider.Provider
+	provider provider.Provider // copy, not reference — safe to mutate
 	baseURL  string
 	useProxy bool
 	srv      *proxy.Server // non-nil only when a local proxy was started
@@ -233,18 +267,20 @@ type providerContext struct {
 // setupProvider starts a proxy if needed and resolves the final model list.
 // The caller must call cleanup() to release any proxy resources.
 func setupProvider(p provider.Provider) (*providerContext, error) {
-	ctx := &providerContext{provider: p, useProxy: p.Type == "openai"}
+	// Make a COPY to avoid mutating the original provider (fixes mutation bug)
+	providerCopy := p
+	ctx := &providerContext{provider: providerCopy, useProxy: p.Type == "openai"}
 
 	if ctx.useProxy {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		srv := proxy.NewServer("127.0.0.1:0", p, logger)
+		srv := proxy.NewServer("127.0.0.1:0", providerCopy, logger)
 		if err := srv.Start(); err != nil {
 			return nil, fmt.Errorf("start proxy: %w", err)
 		}
 		ctx.srv = srv
 		ctx.baseURL = "http://" + srv.Addr()
 	} else {
-		ctx.baseURL = p.Endpoint
+		ctx.baseURL = providerCopy.Endpoint
 	}
 
 	if err := ctx.resolveModel(); err != nil {
@@ -255,6 +291,7 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 }
 
 // resolveModel auto-discovers the model list when none is configured.
+// Mutates the local copy only.
 func (c *providerContext) resolveModel() error {
 	if c.provider.Model != "" {
 		return nil
@@ -282,6 +319,8 @@ func (c *providerContext) settings() settingsJSON {
 	return settingsJSON{
 		Env:                    buildEnv(c.provider, c.baseURL, c.useProxy),
 		HasCompletedOnboarding: true,
+		Model:                  c.provider.LockModel,
+		ModelOverrides:         c.provider.ModelOverrides,
 	}
 }
 
