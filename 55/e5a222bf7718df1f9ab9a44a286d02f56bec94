@@ -1,0 +1,30 @@
+internal/claude/launcher.go
+  s_0bced0fa0a8ba8::t_24d7dc8f29a742 115,118-119
+  s_0bced0fa0a8ba8::t_c247798fff1aca 20-39,42,46,49-53,56-64,69-70,73,80-89,92,95,100,102-105,107-109,111,114,116-117,120-121,127-131,137-138,145-146,148,153,156,163-169,172-190,195-196,200,205,212,216,221-231,233-236,238,240,242,244-245,247,250-255,257-316,318,320,322,328
+  s_0bced0fa0a8ba8::t_0b9cb9eadd1ee9 101,110,112
+  s_0bced0fa0a8ba8::t_35fd0fc7894392 96-98
+  s_0bced0fa0a8ba8::t_74e04d4887da55 124
+  s_0bced0fa0a8ba8::t_577bbaf5d8326b 40-41,44,48,54,68,71,74-77
+  h_1d8661cb669d01 10,12,99,113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "55e5a222bf7718df1f9ab9a44a286d02f56bec94",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_0bced0fa0a8ba8": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781142824257",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
