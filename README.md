@@ -56,7 +56,12 @@ cd claude-code-launch
 # 编译生成 ccl 执行文件
 go build -o ccl main.go
 ```
+### 方法三：go 安装
+如果您希望从源码编译，确保您本地已经安装了 Go (推荐 1.22+)。
 
+```bash
+go install github.com/claude-code-launch/ccl@latest
+```
 你可以将编译出来的 `ccl` 移动到系统的 `PATH` 目录。
 
 ---
