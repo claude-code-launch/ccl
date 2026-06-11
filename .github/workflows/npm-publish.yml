@@ -1,0 +1,66 @@
+name: CI/CD Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'   # 推送形如 v1.0.0 的 Git Tag 时触发
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18, 20]   # 多 Node 版本测试
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. 设置 Node.js 环境
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          registry-url: 'https://registry.npmjs.org'
+
+      # 3. 缓存依赖
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ matrix.node-version }}-
+
+      # 4. 安装依赖
+      - name: Install dependencies
+        run: npm ci
+
+      # 5. 跑测试
+      - name: Run tests
+        run: npm test
+
+      # 6. 自动递增版本号并生成 tag
+      - name: Bump version and push tag
+        if: matrix.node-version == '20'   # 只在一个 Node 版本下执行
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version patch -m "chore: bump version to %s"
+          git push origin HEAD:main --follow-tags
+
+      # 7. 发布到 npm（Scoped Package 公共发布）
+      - name: Publish to npm
+        if: matrix.node-version == '20'   # 避免多版本重复发布
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # 8. 自动生成 Release Notes
+      - name: Create GitHub Release
+        if: matrix.node-version == '20'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
