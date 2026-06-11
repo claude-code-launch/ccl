@@ -1,0 +1,14 @@
+.github/workflows/release.yml
+  h_1d8661cb669d01 23,36,50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "6fe9b770d3b4ded01534b712867e85ff27ba6546",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
