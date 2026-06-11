@@ -1,0 +1,62 @@
+internal/provider/provider.go
+  s_0bced0fa0a8ba8::t_4f71ae60272936 10-18
+internal/claude/launcher.go
+  s_0bced0fa0a8ba8::t_9a4ea2bb49f2b2 135-136,154-180,184-189,261,270-272,276,283,294,322-323
+internal/claude/launcher_test.go
+  s_0bced0fa0a8ba8::t_8be15ae564768b 6,15-195,233,238,268,274,279
+internal/protocol/anthropic.go
+  h_1d8661cb669d01 6,127
+  s_0bced0fa0a8ba8::t_b851d203c610c5 119-125
+cmd/set.go
+  s_0bced0fa0a8ba8::t_3e141e50fcf489 43,67,200-203,206-209,236,390-391
+  s_0bced0fa0a8ba8::t_0da84fc7543d7f 181,185,210-212,214-215,250,259,300,349-350,355-358,363,427-428
+  s_0bced0fa0a8ba8::t_c7a7e15b12e5d3 241,248,251-258,261-267,279-281,283,289-299,302-304,306-311,313-323,325,327-341,343-348,351-354,360-362,364-366
+  s_0bced0fa0a8ba8::t_b064589bd11656 16,18-19,21,30,55,61,64,68,70,72,74,77,81-82,93,95,120-121,125-127,129-134,137-147,149-150,154,170-178,184,186-188,205,220-221,226-227,232-235,392-404,414,416
+  s_0bced0fa0a8ba8::t_07f6e0322ee684 243-247,260,301,312,326,342,359
+  s_0bced0fa0a8ba8::t_c09ce3d84f1c1d 418-426,429
+  s_eb4da2911daab1::t_3822f144ff0ecf 441-459
+  s_0bced0fa0a8ba8::t_1094e0d7c695c3 105,166,179,194,386-388
+  h_1d8661cb669d01 222-225,228-229,231,237-240,249,430-439
+  s_0bced0fa0a8ba8::t_4a55c93ec38cc0 230,242,268-278,282,284-286
+  s_0bced0fa0a8ba8::t_3d82de7537df62 367-385,389
+  s_0bced0fa0a8ba8::t_8ec08041a5471c 167-169,180,182-183,189-193,195-199,204,213,217-219,287-288,324
+  s_0bced0fa0a8ba8::t_b0562899564f5b 2-15,17,20,22-29,31-42,44-54,56-60,62-63,65-66,69,71,73,75-76,78-80,83-92,94,96-104,106-119,122-124,128,135-136,148,151-153,155-165,216,305,405-413,415,417
+cmd/root.go
+  h_1d8661cb669d01 9-10,40
+  s_eb4da2911daab1::t_a822fba696a6ea 84-140
+cmd/install.go
+  h_1d8661cb669d01 1
+internal/proxy/server.go
+  s_0bced0fa0a8ba8::t_795c705f3e8019 114
+internal/protocol/openai.go
+  h_1d8661cb669d01 6,174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "98e30de4b58e875484e6a673d809fc701472b3af",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_0bced0fa0a8ba8": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781142824257",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_eb4da2911daab1": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781155303511",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
