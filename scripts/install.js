@@ -48,17 +48,22 @@ function getLatestReleaseTag(callback) {
 }
 
 getLatestReleaseTag((VERSION) => {
-    const ext = os === 'windows' ? '.exe' : '';
-    const filename = `${BINARY_NAME}_${os}_${arch}${os === 'windows' ? '.zip' : '.tar.gz'}`;
-    const url = `https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${filename}`;
+    // 根据不同平台选择文件扩展名
+    let filename;
+    if (os === 'windows') {
+        filename = `${BINARY_NAME}_${os}_${arch}.exe`;
+    } else {
+        filename = `${BINARY_NAME}_${os}_${arch}`;
+    }
 
+    const url = `https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${filename}`;
     const binDir = path.join(__dirname, '../bin');
     if (!fs.existsSync(binDir)) fs.mkdirSync(binDir);
-    const tarPath = path.join(binDir, filename);
+    const filePath = path.join(binDir, filename);
 
     console.log(`📥 Downloading native binary from ${url}...`);
 
-    const file = fs.createWriteStream(tarPath);
+    const file = fs.createWriteStream(filePath);
     https.get(url, (response) => {
         const stream = (response.statusCode === 302 || response.statusCode === 301)
             ? https.get(response.headers.location, (redirectResp) => redirectResp.pipe(file))
@@ -68,18 +73,31 @@ getLatestReleaseTag((VERSION) => {
             file.close();
             console.log('📦 Extracting binary...');
 
-            if (os === 'windows') {
-                execSync(`tar -xf "${tarPath}" -C "${binDir}"`);
-            } else {
-                execSync(`tar -xzf "${tarPath}" -C "${binDir}"`);
-                fs.chmodSync(path.join(binDir, BINARY_NAME), '755');
-            }
+            try {
+                if (filename.endsWith('.tar.gz')) {
+                    execSync(`tar -xzf "${filePath}" -C "${binDir}"`);
+                } else if (filename.endsWith('.zip')) {
+                    execSync(`unzip -o "${filePath}" -d "${binDir}"`);
+                } else {
+                    // 如果是裸二进制，直接重命名
+                    fs.renameSync(filePath, path.join(binDir, BINARY_NAME + (os === 'windows' ? '.exe' : '')));
+                }
 
-            fs.unlinkSync(tarPath);
-            console.log('🎉 Installation complete!');
+                if (os !== 'windows') {
+                    fs.chmodSync(path.join(binDir, BINARY_NAME), '755');
+                }
+
+                // 清理压缩包
+                if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
+                console.log('🎉 Installation complete!');
+            } catch (err) {
+                console.error(`❌ Extraction failed: ${err.message}`);
+                process.exit(1);
+            }
         });
     }).on('error', (err) => {
-        fs.unlinkSync(tarPath);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         console.error(`❌ Download failed: ${err.message}`);
         process.exit(1);
     });

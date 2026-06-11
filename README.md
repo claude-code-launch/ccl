@@ -31,7 +31,12 @@
 
 ## 🚀 安装与编译
 
-### 方法一：直接下载预编译二进制（推荐）
+### 快速安装
+```
+    npm install -g @claudecodelaunch/ccl
+```
+
+### 方法一：直接下载预编译二进制
 我们利用 GitHub Actions 实现了完美的 CI/CD 流程，所有发布版本均包含多平台的开箱即用二进制。
 
 请前往 [GitHub Releases](https://github.com/claude-code-launch/ccl/releases) 页面，下载适合您平台的压缩包：
@@ -56,7 +61,7 @@ cd claude-code-launch
 # 编译生成 ccl 执行文件
 go build -o ccl main.go
 ```
-方法三：Go 安装
+### 方法三：Go 安装
 确保您本地已经安装了 Go（推荐 1.22+）。
 
 ```
