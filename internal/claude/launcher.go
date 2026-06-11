@@ -7,265 +7,325 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/haiboyuwen/claude-code-launch/internal/protocol"
 	"github.com/haiboyuwen/claude-code-launch/internal/provider"
 	"github.com/haiboyuwen/claude-code-launch/internal/proxy"
 )
 
-// determineModelTier matches a model name to one of the standard Claude tiers: sonnet, opus, or haiku.
+// ─────────────────────────────────────────────────────────────────────────────
+// Model tier classification
+// ─────────────────────────────────────────────────────────────────────────────
+
+const (
+	tierOpus   = "opus"
+	tierSonnet = "sonnet"
+	tierHaiku  = "haiku"
+)
+
+// tierKeywords maps each tier to its identifying keywords, checked in priority order.
+var tierKeywords = [3]struct {
+	tier     string
+	keywords []string
+}{
+	{tierOpus, []string{"opus", "reasoning", "reasoner", "thinking", "pro", "max", "ultra"}},
+	{tierHaiku, []string{"haiku", "mini", "nano", "air", "lite", "flash"}},
+	{tierSonnet, []string{"sonnet", "turbo", "fast"}},
+}
+
+var versionRegex = regexp.MustCompile(`\d+(\.\d+)?`)
+
+// determineModelTier classifies a model name into haiku / sonnet / opus.
 func determineModelTier(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
-		return "sonnet"
+		return tierSonnet
 	}
-	modelLower := strings.ToLower(model)
-	if containsAny(modelLower, "opus", "reasoner", "reasoning", "o1", "o3", "pro") {
-		return "opus"
-	}
-	if containsAny(modelLower, "haiku", "mini", "flash", "lite", "turbo", "fast") {
-		return "haiku"
-	}
-	return "sonnet"
-}
 
-func containsAny(s string, keywords ...string) bool {
-	for _, kw := range keywords {
-		if strings.Contains(s, kw) {
-			return true
-		}
-	}
-	return false
-}
-
-// parseModelPool splits a comma-separated model string into individual model names.
-func parseModelPool(modelPool string) []string {
-	parts := strings.Split(modelPool, ",")
-	var result []string
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
-}
-
-// mapPoolToTiers assigns each model in a pool to its Claude tier.
-// The first model matching a tier claims it; unclaimed tiers fall back to the first pool model.
-func mapPoolToTiers(models []string) map[string]string {
-	tierMap := make(map[string]string)
-	for _, model := range models {
-		tier := determineModelTier(model)
-		if _, exists := tierMap[tier]; !exists {
-			tierMap[tier] = model
-		}
-	}
-	if len(models) > 0 {
-		for _, tier := range []string{"sonnet", "opus", "haiku"} {
-			if _, exists := tierMap[tier]; !exists {
-				tierMap[tier] = models[0]
+	for _, entry := range tierKeywords {
+		for _, kw := range entry.keywords {
+			if strings.Contains(model, kw) {
+				return entry.tier
 			}
 		}
 	}
-	return tierMap
+
+	// Fall back to embedded version number.
+	switch v := extractVersion(model); {
+	case v >= 5.0:
+		return tierOpus
+	case v >= 3.0:
+		return tierSonnet
+	default:
+		return tierHaiku
+	}
 }
 
-// settingsJSON represents the per-session settings file passed via --settings.
+func extractVersion(model string) float64 {
+	m := versionRegex.FindString(model)
+	if m == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(m, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model pool & routing
+// ─────────────────────────────────────────────────────────────────────────────
+
+// parseModelPool splits a comma-separated model string into trimmed, non-empty names.
+func parseModelPool(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ModelRouter routes model requests to the first available model in a tier.
+type ModelRouter struct {
+	pools map[string][]string
+}
+
+// NewModelRouter groups a flat list of model names into per-tier pools.
+func NewModelRouter(models []string) *ModelRouter {
+	pools := map[string][]string{
+		tierHaiku:  nil,
+		tierSonnet: nil,
+		tierOpus:   nil,
+	}
+	for _, m := range models {
+		t := determineModelTier(m)
+		pools[t] = append(pools[t], m)
+	}
+	return &ModelRouter{pools: pools}
+}
+
+// Select returns the first available model for tier, then tries each fallback in order.
+func (r *ModelRouter) Select(tier string, fallbackTiers ...string) string {
+	if models := r.pools[tier]; len(models) > 0 {
+		return models[0]
+	}
+	for _, t := range fallbackTiers {
+		if models := r.pools[t]; len(models) > 0 {
+			return models[0]
+		}
+	}
+	return ""
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings file
+// ─────────────────────────────────────────────────────────────────────────────
+
+// settingsJSON is the per-session settings file consumed by the Claude CLI (--settings).
 type settingsJSON struct {
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 }
 
-// buildSettingsEnv constructs the environment variable overrides for the per-session settings file.
-func buildSettingsEnv(p provider.Provider, baseURL string, needsProxy bool) map[string]string {
+// buildEnv constructs the env-var overrides for a settings file.
+func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]string {
 	env := make(map[string]string)
 
 	if baseURL != "" {
 		env["ANTHROPIC_BASE_URL"] = baseURL
 	}
 
-	if needsProxy {
+	switch {
+	case useProxy:
 		env["ANTHROPIC_API_KEY"] = "local-proxy-dummy-key"
-	} else if p.APIKey != "" {
+	case p.APIKey != "":
 		env["ANTHROPIC_API_KEY"] = p.APIKey
 	}
 
 	if p.Model != "" {
-		if strings.Contains(p.Model, ",") {
-			modelList := parseModelPool(p.Model)
-			tierMap := mapPoolToTiers(modelList)
-
-			env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-			env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-			for tier, model := range tierMap {
-				tierUpper := strings.ToUpper(tier)
-				env["ANTHROPIC_DEFAULT_"+tierUpper+"_MODEL"] = model
-				env["ANTHROPIC_DEFAULT_"+tierUpper+"_MODEL_NAME"] = model
-			}
-
-			if m, ok := tierMap["sonnet"]; ok {
-				env["ANTHROPIC_MODEL"] = m
-			} else if len(modelList) > 0 {
-				env["ANTHROPIC_MODEL"] = modelList[0]
-			}
-		} else {
-			env["ANTHROPIC_MODEL"] = p.Model
-		}
+		applyModelEnv(env, p.Model)
 	}
 
+	// Provider-level overrides take final precedence.
 	for k, v := range p.Env {
 		env[k] = v
 	}
-
 	return env
 }
 
-// PreviewSettings generates a settings file using the exact same pipeline as Run(),
-// including starting the proxy to get the real dynamic URL. This ensures the preview
-// matches what would be written to the actual temp file.
-func PreviewSettings(p provider.Provider) string {
-	var baseURL string
-	var srv *proxy.Server
+// applyModelEnv writes model-related env vars into env.
+// A comma-separated model spec enables per-tier gateway routing;
+// a single name sets ANTHROPIC_MODEL directly.
+func applyModelEnv(env map[string]string, modelSpec string) {
+	if !strings.Contains(modelSpec, ",") {
+		env["ANTHROPIC_MODEL"] = modelSpec
+		return
+	}
 
-	needsProxy := p.Type == "openai"
-	if needsProxy {
-		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		srv = proxy.NewServer("127.0.0.1:0", p, logger)
-		if err := srv.Start(); err != nil {
-			return fmt.Sprintf("Error: failed to start proxy: %v", err)
+	router := NewModelRouter(parseModelPool(modelSpec))
+	opus := router.Select(tierOpus, tierSonnet, tierHaiku)
+	sonnet := router.Select(tierSonnet, tierOpus, tierHaiku)
+	haiku := router.Select(tierHaiku, tierSonnet)
+
+	env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+	env["ANTHROPIC_MODEL"] = sonnet
+
+	for _, kv := range []struct{ k, v string }{
+		{"ANTHROPIC_DEFAULT_OPUS_MODEL", opus},
+		{"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", opus},
+		{"ANTHROPIC_DEFAULT_SONNET_MODEL", sonnet},
+		{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", sonnet},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", haiku},
+	} {
+		if kv.v != "" {
+			env[kv.k] = kv.v
 		}
-		defer srv.Stop()
-		baseURL = "http://" + srv.Addr()
-	} else {
-		baseURL = p.Endpoint
 	}
-
-	if srv != nil && p.Model == "" {
-		if discovered := srv.AvailableModels(); len(discovered) > 0 {
-			p.Model = discovered
-		}
-	}
-
-	env := buildSettingsEnv(p, baseURL, needsProxy)
-	settings := settingsJSON{Env: env, HasCompletedOnboarding: true}
-
-	path, err := writeSettingsFile(settings)
-	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
-	}
-	defer os.Remove(path)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
-	}
-
-	return string(data)
 }
 
+// writeSettingsFile serialises content to a temp JSON file and returns its path.
+// The caller is responsible for removing the file when done.
 func writeSettingsFile(content settingsJSON) (string, error) {
 	data, err := json.MarshalIndent(content, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal settings JSON: %w", err)
+		return "", fmt.Errorf("marshal settings: %w", err)
 	}
 
 	f, err := os.CreateTemp("", "claude_*_settings.json")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp settings file: %w", err)
+		return "", fmt.Errorf("create temp settings file: %w", err)
 	}
 	path := f.Name()
 
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		os.Remove(path)
-		return "", fmt.Errorf("failed to write settings file: %w", err)
+		return "", fmt.Errorf("write settings file: %w", err)
 	}
-
 	if err := f.Close(); err != nil {
 		os.Remove(path)
-		return "", fmt.Errorf("failed to close settings file: %w", err)
+		return "", fmt.Errorf("close settings file: %w", err)
 	}
-
 	return path, nil
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider context — shared setup for PreviewSettings and Run
+// ─────────────────────────────────────────────────────────────────────────────
+
+// providerContext holds resolved state needed to build a settings file.
+type providerContext struct {
+	provider provider.Provider
+	baseURL  string
+	useProxy bool
+	srv      *proxy.Server // non-nil only when a local proxy was started
+}
+
+// setupProvider starts a proxy if needed and resolves the final model list.
+// The caller must call cleanup() to release any proxy resources.
+func setupProvider(p provider.Provider) (*providerContext, error) {
+	ctx := &providerContext{provider: p, useProxy: p.Type == "openai"}
+
+	if ctx.useProxy {
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		srv := proxy.NewServer("127.0.0.1:0", p, logger)
+		if err := srv.Start(); err != nil {
+			return nil, fmt.Errorf("start proxy: %w", err)
+		}
+		ctx.srv = srv
+		ctx.baseURL = "http://" + srv.Addr()
+	} else {
+		ctx.baseURL = p.Endpoint
+	}
+
+	if err := ctx.resolveModel(); err != nil {
+		ctx.cleanup()
+		return nil, err
+	}
+	return ctx, nil
+}
+
+// resolveModel auto-discovers the model list when none is configured.
+func (c *providerContext) resolveModel() error {
+	if c.provider.Model != "" {
+		return nil
+	}
+	if c.srv != nil {
+		c.provider.Model = c.srv.AvailableModels()
+		return nil
+	}
+	models, err := protocol.GetAnthropicModels(c.provider.Endpoint, c.provider.APIKey)
+	if err != nil {
+		return err
+	}
+	aliases := protocol.BatchToGatewayModelAlias(strings.Split(models, ","))
+	c.provider.Model = strings.Join(aliases, ",")
+	return nil
+}
+
+func (c *providerContext) cleanup() {
+	if c.srv != nil {
+		c.srv.Stop()
+	}
+}
+
+func (c *providerContext) settings() settingsJSON {
+	return settingsJSON{
+		Env:                    buildEnv(c.provider, c.baseURL, c.useProxy),
+		HasCompletedOnboarding: true,
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PreviewSettings returns the JSON that would be written to the settings temp file.
+func PreviewSettings(p provider.Provider) string {
+	ctx, err := setupProvider(p)
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+	defer ctx.cleanup()
+
+	data, err := json.MarshalIndent(ctx.settings(), "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Error: marshal settings: %v", err)
+	}
+	return string(data)
+}
+
+// Run launches the Claude CLI with settings derived from p, forwarding extra args.
 func Run(p provider.Provider, args []string) error {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
-		return fmt.Errorf("claude CLI is not installed or not in PATH. Install with: npm install -g @anthropic-ai/claude-code. Error: %w", err)
+		return fmt.Errorf("claude CLI not found in PATH (install with: npm install -g @anthropic-ai/claude-code): %w", err)
 	}
 
-	var srv *proxy.Server
-	var baseURL string
-
-	needsProxy := p.Type == "openai"
-	if needsProxy {
-		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		srv = proxy.NewServer("127.0.0.1:0", p, logger)
-		if err := srv.Start(); err != nil {
-			return fmt.Errorf("failed to start local proxy: %w", err)
-		}
-		defer srv.Stop()
-		baseURL = "http://" + srv.Addr()
-		time.Sleep(200 * time.Millisecond)
-	} else {
-		baseURL = p.Endpoint
-	}
-
-	if p.Model == "" {
-		if srv != nil {
-			if discovered := srv.AvailableModels(); len(discovered) > 0 {
-				p.Model = discovered
-			}
-		} else {
-			m, err := protocol.GetAnthropicModels(p.Endpoint, p.APIKey)
-			if err != nil {
-				return err
-			}
-			tmp := protocol.BatchToGatewayModelAlias(strings.Split(m, ","))
-			p.Model = strings.Join(tmp, ",")
-		}
-
-	}
-
-	// Anthropic 直连只注入 base url 和 api key，其余走 buildSettingsEnv
-	// var envOverrides map[string]string
-	// if p.Type != "openai" {
-	// 	envOverrides = make(map[string]string)
-	// 	if p.APIKey != "" {
-	// 		envOverrides["ANTHROPIC_API_KEY"] = p.APIKey
-	// 	}
-	// 	if p.Endpoint != "" && p.Endpoint != "https://api.anthropic.com" {
-	// 		envOverrides["ANTHROPIC_BASE_URL"] = p.Endpoint
-	// 	}
-	// }
-
-	claudeArgs := make([]string, 0, len(args)+2)
-	// if p.Type == "openai" {
-	// 	settings := settingsJSON{Env: buildSettingsEnv(p, baseURL, needsProxy)}
-	// 	settingsPath, err := writeSettingsFile(settings)
-	// 	if err != nil {
-	// 		return fmt.Errorf("failed to create settings file: %w", err)
-	// 	}
-	// 	defer os.Remove(settingsPath)
-	// 	fmt.Println("Using provider-specific claude config:", settingsPath)
-	// 	claudeArgs = append(claudeArgs, "--settings", settingsPath)
-	// }
-
-	settings := settingsJSON{Env: buildSettingsEnv(p, baseURL, needsProxy)}
-	settingsPath, err := writeSettingsFile(settings)
+	ctx, err := setupProvider(p)
 	if err != nil {
-		return fmt.Errorf("failed to create settings file: %w", err)
+		return err
+	}
+	defer ctx.cleanup()
+
+	settingsPath, err := writeSettingsFile(ctx.settings())
+	if err != nil {
+		return fmt.Errorf("create settings file: %w", err)
 	}
 	defer os.Remove(settingsPath)
 
 	fmt.Println("Using provider-specific claude config:", settingsPath)
 
-	claudeArgs = append(claudeArgs, "--settings", settingsPath)
-	claudeArgs = append(claudeArgs, args...)
+	claudeArgs := append([]string{"--settings", settingsPath}, args...)
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -277,21 +337,6 @@ func Run(p provider.Provider, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	// if p.Type == "openai" {
-	// 	cmd.Env = os.Environ()
-	// } else {
-	// 	filteredEnv := make([]string, 0, len(os.Environ())+len(envOverrides))
-	// 	for _, e := range os.Environ() {
-	// 		key := strings.SplitN(e, "=", 2)[0]
-	// 		if _, overridden := envOverrides[key]; !overridden {
-	// 			filteredEnv = append(filteredEnv, e)
-	// 		}
-	// 	}
-	// 	for k, v := range envOverrides {
-	// 		filteredEnv = append(filteredEnv, k+"="+v)
-	// 	}
-	// 	cmd.Env = filteredEnv
-	// }
 
 	return cmd.Run()
 }
