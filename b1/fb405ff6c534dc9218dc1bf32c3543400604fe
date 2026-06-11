@@ -1,0 +1,39 @@
+internal/protocol/anthropic.go
+  h_1d8661cb669d01 8,121,132
+  s_b550a07ba23eff::t_77edca2db78ec8 129
+  s_b550a07ba23eff::t_604c6341f622ab 120,122-125,127-128,130
+cmd/set.go
+  h_1d8661cb669d01 431-434
+cmd/doctor.go
+  h_1d8661cb669d01 147-150
+internal/protocol/openai.go
+  h_1d8661cb669d01 8,169-173,176-179,181
+cmd/cmd_test.go
+  s_b550a07ba23eff::t_c57cb7111267d6 9-20,29-35
+  s_b550a07ba23eff::t_1095f1f76ced84 21-24
+  h_1d8661cb669d01 1-8,26-27,36
+  s_b550a07ba23eff::t_037cdcc557163e 28
+  s_b550a07ba23eff::t_50efce19023327 37,39-45
+  s_b550a07ba23eff::t_e718863f15081e 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "b1fb405ff6c534dc9218dc1bf32c3543400604fe",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b550a07ba23eff": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781156726197",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
