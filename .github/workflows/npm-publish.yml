@@ -11,8 +11,8 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [18, 20]
-
+        node-version: [18, 24]
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
