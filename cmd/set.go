@@ -428,6 +428,10 @@ func init() {
 	rootCmd.AddCommand(setCmd)
 }
 
+func SetCMD() *cobra.Command {
+	return setCmd
+}
+
 // 辅助：字符串是否在切片中
 func stringInSlice(s string, slice []string) bool {
 	for _, v := range slice {

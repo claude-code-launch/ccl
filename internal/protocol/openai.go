@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -165,12 +166,19 @@ func GetOpenAIModels(baseURL, apiKey string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		fmt.Printf(" resp: %d,err: %v\n", resp.StatusCode, err)
+	if err != nil {
+		fmt.Printf("Failed to get OpenAI models: %s\n", err.Error())
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
 
-		if resp != nil {
-			resp.Body.Close()
+		errmsg, err := io.ReadAll(resp.Body)
+		if err != nil {
+			fmt.Printf("Failed to get OpenAI models: %s\n", err.Error())
+			return "", err
 		}
+		fmt.Printf("[OpenAi config error] url:%s,key:%s, status:%d, msg:%s \n", url, apiKey, resp.StatusCode, string(errmsg))
 		return "", errors.New(resp.Status)
 	}
 

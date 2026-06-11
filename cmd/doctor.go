@@ -144,6 +144,10 @@ var doctorCmd = &cobra.Command{
 	},
 }
 
+func RootCmd() *cobra.Command {
+	return rootCmd
+}
+
 func init() {
 	rootCmd.AddCommand(doctorCmd)
 }
