@@ -1,0 +1,50 @@
+internal/protocol/mapper_test.go
+  h_1d8661cb669d01 7
+internal/claude/launcher_test.go
+  h_1d8661cb669d01 11-12
+cmd/root.go
+  h_1d8661cb669d01 8-10
+internal/proxy/server_test.go
+  h_1d8661cb669d01 16-18
+internal/protocol/alias_test.go
+  h_1d8661cb669d01 6
+cmd/models.go
+  h_1d8661cb669d01 6
+cmd/use.go
+  h_1d8661cb669d01 6
+internal/config/config.go
+  h_1d8661cb669d01 7
+main.go
+  h_1d8661cb669d01 3
+cmd/list.go
+  h_1d8661cb669d01 7
+cmd/doctor.go
+  h_1d8661cb669d01 11
+go.mod
+  h_1d8661cb669d01 1
+README.md
+  h_1d8661cb669d01 37,53
+internal/claude/launcher.go
+  h_1d8661cb669d01 15-17
+cmd/settings.go
+  h_1d8661cb669d01 6
+cmd/set.go
+  h_1d8661cb669d01 9-11
+internal/proxy/server.go
+  h_1d8661cb669d01 18-19
+cmd/run.go
+  h_1d8661cb669d01 6-7
+internal/proxy/stream.go
+  h_1d8661cb669d01 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "0fe065de086f8f3b5aa0c402763bf56d5026d33d",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
