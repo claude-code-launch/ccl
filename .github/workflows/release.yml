@@ -78,29 +78,30 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      # 💡 修改点 1：把二进制文件先下载到一个临时的 tmp 目录，不要直接盖掉 bin/
       - name: Download Go Binaries
         uses: actions/download-artifact@v4
         with:
           name: go-binaries
           path: tmp-bin/
 
-      # 💡 修改点 2：把临时目录里的二进制移入真实的 bin/ 目录，这样本地推上去的 wrapper.js 就会安全无恙
       - name: Prepare npm Assets
         run: |
-          # 确保 bin 目录存在（checkout 出来的项目应该自带）
           mkdir -p bin
-
-          # 把编译好的 ccl-* 移动进 bin 文件夹
           mv tmp-bin/* bin/
           rm -rf tmp-bin
-
-          # 赋予执行权限
           chmod +x bin/ccl-*
           chmod +x bin/wrapper.js
 
-          echo "=== Verification of files inside bin/ ==="
-          ls -lh bin/
+      # 💡 核心注入：从 Git Tag 中提取版本号（去掉开头的 v），并直接动态写入 package.json
+      - name: Sync Version from Git Tag
+        run: |
+          # ${GITHUB_REF_NAME} 在 tag 触发时就是 "v1.0.1"
+          # sed 's/^v//' 会把开头的 "v" 剥离掉，变成 "1.0.1"
+          CLEAN_VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          echo "Syncing package.json version to: $CLEAN_VERSION"
+
+          # 使用 npm 官方自带命令动态修改 package.json 的版本号，且不触发任何 git commit
+          npm version $CLEAN_VERSION --no-git-tag-version
 
       - name: Publish to npm with Trusted Publishing
         run: npm publish --provenance --access public
