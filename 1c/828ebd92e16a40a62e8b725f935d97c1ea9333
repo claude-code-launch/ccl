@@ -1,0 +1,31 @@
+.github/workflows/release.yml
+  s_87a074f2661e70::t_2f216b8dfdff93 10-11,17-19,35,40-41,54-55,60-66,81-94,96-98
+LICENSE
+  s_87a074f2661e70::t_ef372fbf2c298c 1-2,4-21
+  h_1d8661cb669d01 3
+package.json
+  h_1d8661cb669d01 2
+  s_87a074f2661e70::t_d9996cc34c645c 3,7,10
+  s_87a074f2661e70::t_6dacb1df19c8df 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "1c828ebd92e16a40a62e8b725f935d97c1ea9333",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_87a074f2661e70": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781171779723",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
