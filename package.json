@@ -1,32 +1,19 @@
 {
-  "name": "claudecodelaunch",
-  "version": "0.0.0",
+  "name": "@claudecodelaunch/ccl",
+  "version": "1.0.0",
   "description": "Launcher and proxy wrapper for Claude Code CLI",
   "repository": {
     "type": "git",
-    "url": "https://github.com/claude-code-launch/ccl.git"
+    "url": "git+https://github.com/claude-code-launch/ccl.git"
   },
   "bin": {
-    "ccl": "./bin/ccl"
+    "ccl": "./bin/wrapper.js"
   },
   "files": [
     "bin/",
     "README.md",
     "LICENSE"
   ],
-  "scripts": {
-    "test": "echo \"No tests specified\" && exit 0"
-  },
-  "keywords": [
-    "claude",
-    "claude-code",
-    "anthropic",
-    "proxy",
-    "launcher",
-    "cli"
-  ],
-  "author": "claudecodelaunch",
-  "license": "MIT",
   "publishConfig": {
     "access": "public"
   }

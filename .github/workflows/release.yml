@@ -7,12 +7,16 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write  # 允许创建 GitHub Release 和上传 Assets
+  id-token: write  # 💡 核心修改：允许通过 OIDC 向 npm 进行可信发布认证
 
 jobs:
   release:
     name: Build and Release
     runs-on: ubuntu-latest
+    # 💡 我们把编译出来的文件作为 Artifacts 暂存，方便下一个 job (publish) 直接复用
+    outputs:
+      version: ${{ steps.get_version.outputs.VERSION }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,12 +32,13 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
+          # 💡 注意：为了对齐 Node.js 的 process.platform，Windows 这里统一命名为 win32
           GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/ccl-darwin-amd64 main.go
           GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/ccl-darwin-arm64 main.go
           GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/ccl-linux-amd64 main.go
           GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/ccl-linux-arm64 main.go
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/ccl-windows-amd64.exe main.go
-          GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/ccl-windows-arm64.exe main.go
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/ccl-win32-x64.exe main.go
+          GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/ccl-win32-arm64.exe main.go
 
       - name: List dist files
         run: ls -lh dist
@@ -46,11 +51,18 @@ jobs:
             dist/ccl-darwin-arm64
             dist/ccl-linux-amd64
             dist/ccl-linux-arm64
-            dist/ccl-windows-amd64.exe
-            dist/ccl-windows-arm64.exe
+            dist/ccl-win32-x64.exe
+            dist/ccl-win32-arm64.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 把编译好的包临时存起来给下一个 Job 用
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-binaries
+          path: dist/
 
   publish:
     name: Publish to npm
@@ -66,10 +78,21 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
-        run: npm install
+      # 💡 下载前面编译好的原生二进制文件
+      - name: Download Go Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: go-binaries
+          path: bin/
 
-      - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # 💡 把编译出来的二进制和你的 wrapper.js 放在一起，并赋予执行权限
+      - name: Prepare npm Assets
+        run: |
+          chmod +x bin/ccl-*
+          chmod +x bin/wrapper.js
+          echo "=== Verification of files inside bin/ ==="
+          ls -lh bin/
+
+      # 💡 核心修改：利用 `--provenance` 开启可信发布，彻底告别 NPM_TOKEN 密钥
+      - name: Publish to npm with Trusted Publishing
+        run: npm publish --provenance --access public
