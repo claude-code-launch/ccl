@@ -64,43 +64,43 @@ jobs:
           name: go-binaries
           path: dist/
 
-    publish:
-      name: Publish to npm
-      runs-on: ubuntu-latest
-      needs: release
-      steps:
-        - name: Checkout repository
-          uses: actions/checkout@v4
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-        - name: Setup Node.js
-          uses: actions/setup-node@v4
-          with:
-            node-version: '24'
-            registry-url: 'https://registry.npmjs.org'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
 
-        # 💡 修改点 1：把二进制文件先下载到一个临时的 tmp 目录，不要直接盖掉 bin/
-        - name: Download Go Binaries
-          uses: actions/download-artifact@v4
-          with:
-            name: go-binaries
-            path: tmp-bin/
+      # 💡 修改点 1：把二进制文件先下载到一个临时的 tmp 目录，不要直接盖掉 bin/
+      - name: Download Go Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: go-binaries
+          path: tmp-bin/
 
-        # 💡 修改点 2：把临时目录里的二进制移入真实的 bin/ 目录，这样本地推上去的 wrapper.js 就会安全无恙
-        - name: Prepare npm Assets
-          run: |
-            # 确保 bin 目录存在（checkout 出来的项目应该自带）
-            mkdir -p bin
+      # 💡 修改点 2：把临时目录里的二进制移入真实的 bin/ 目录，这样本地推上去的 wrapper.js 就会安全无恙
+      - name: Prepare npm Assets
+        run: |
+          # 确保 bin 目录存在（checkout 出来的项目应该自带）
+          mkdir -p bin
 
-            # 把编译好的 ccl-* 移动进 bin 文件夹
-            mv tmp-bin/* bin/
-            rm -rf tmp-bin
+          # 把编译好的 ccl-* 移动进 bin 文件夹
+          mv tmp-bin/* bin/
+          rm -rf tmp-bin
 
-            # 赋予执行权限
-            chmod +x bin/ccl-*
-            chmod +x bin/wrapper.js
+          # 赋予执行权限
+          chmod +x bin/ccl-*
+          chmod +x bin/wrapper.js
 
-            echo "=== Verification of files inside bin/ ==="
-            ls -lh bin/
+          echo "=== Verification of files inside bin/ ==="
+          ls -lh bin/
 
-        - name: Publish to npm with Trusted Publishing
-          run: npm publish --provenance --access public
+      - name: Publish to npm with Trusted Publishing
+        run: npm publish --provenance --access public
