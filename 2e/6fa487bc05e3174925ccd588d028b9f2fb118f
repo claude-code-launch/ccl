@@ -1,0 +1,24 @@
+bin/wrapper.js
+  s_87a074f2661e70::t_f27f7a6b08191e 1-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "2e6fa487bc05e3174925ccd588d028b9f2fb118f",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_87a074f2661e70": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781171779723",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
