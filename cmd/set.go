@@ -343,10 +343,11 @@ You can automatically discover models from the API endpoint, or enter them manua
 				// 记录当前槽位的 1M 状态，model 更换后保留
 				wasEnabled1M := stringInSlice(pick, current1M)
 
-				// 内层：单列选模型（不含 1M，由外层管理）
-				modelOpts := append([]huh.Option[string]{}, poolOptions...)
-				modelOpts = append(modelOpts, huh.NewOption(manualToken, manualToken))
+				// 构造选项（pool + manual）
+				opts = append([]huh.Option[string]{}, poolOptions...)
+				opts = append(opts, huh.NewOption(manualToken, manualToken))
 
+				// 预选逻辑：如果已有值且在 pool 中则默认选中该值，否则默认选 manualToken
 				defaultChoice := ""
 				if fieldPtr != nil && *fieldPtr != "" {
 					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
@@ -357,13 +358,15 @@ You can automatically discover models from the API endpoint, or enter them manua
 					}
 				}
 
-				chosen := defaultChoice
+				var chosen string
+				chosen = defaultChoice
+
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
 							Title(fmt.Sprintf("Set model for %s", pick)).
 							Description("Choose from model pool or select manual entry to type a model ID").
-							Options(modelOpts...).
+							Options(opts...).
 							Value(&chosen),
 					),
 				).Run()
@@ -373,8 +376,10 @@ You can automatically discover models from the API endpoint, or enter them manua
 
 				if chosen == manualToken || chosen == "" {
 					var manual string
-					if fieldPtr != nil && *fieldPtr != "" && !stringInSlice(strings.TrimSuffix(*fieldPtr, "[1m]"), selectedModels) {
-						manual = strings.TrimSuffix(*fieldPtr, "[1m]")
+					// 如果已有值且不是 pool 中的值，预填到 manual 里，方便用户确认或修改
+					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
+					if fieldPtr != nil && baseVal != "" && !stringInSlice(baseVal, selectedModels) {
+						manual = baseVal
 					}
 					err = huh.NewForm(
 						huh.NewGroup(
