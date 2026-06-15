@@ -238,15 +238,20 @@ You can automatically discover models from the API endpoint, or enter them manua
 			}
 			manualToken := "(Enter custom model ID)"
 
-			// helper: format display label with current value
+			// helper: format display label with current value and 1M status
 			formatLabel := func(base string) string {
 				if base == "Done" {
 					return base
 				}
 				if ptr, ok := slotMap[base]; ok && ptr != nil && *ptr != "" {
-					return fmt.Sprintf("%s — current: %s", base, *ptr)
+					model := strings.TrimSuffix(*ptr, "[1m]")
+					checkbox := "☐"
+					if strings.HasSuffix(*ptr, "[1m]") {
+						checkbox = "☑"
+					}
+					return fmt.Sprintf("%s — current: %s  %s 1M", base, model, checkbox)
 				}
-				return fmt.Sprintf("%s — current: (not set)", base)
+				return fmt.Sprintf("%s — current: (not set)  ☐ 1M", base)
 			}
 
 			for {
@@ -317,7 +322,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 					var manual string
 					// 如果已有值且不是 pool 中的值，预填到 manual 里，方便用户确认或修改
 					if fieldPtr != nil && *fieldPtr != "" && !stringInSlice(*fieldPtr, selectedModels) {
-						manual = *fieldPtr
+						manual = strings.TrimSuffix(*fieldPtr, "[1m]")
 					}
 					err = huh.NewForm(
 						huh.NewGroup(
@@ -332,7 +337,39 @@ You can automatically discover models from the API endpoint, or enter them manua
 					}
 					*fieldPtr = strings.TrimSpace(manual)
 				} else {
-					*fieldPtr = chosen
+					*fieldPtr = strings.TrimSuffix(chosen, "[1m]")
+				}
+
+				// 1M context prompt (checkbox style)
+				if *fieldPtr != "" {
+					baseModel := strings.TrimSuffix(*fieldPtr, "[1m]")
+					var contextOpts []string
+					if strings.HasSuffix(*fieldPtr, "[1m]") {
+						contextOpts = []string{"1m"}
+					}
+					err = huh.NewForm(
+						huh.NewGroup(
+							huh.NewMultiSelect[string]().
+								Title("Context Window Options").
+								Description("Space to toggle, Enter to confirm").
+								Options(
+									huh.NewOption("Enable 1M context window (appends [1m], sets CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000)", "1m"),
+								).
+								Value(&contextOpts),
+						),
+					).Run()
+					if err != nil {
+						return err
+					}
+					if stringInSlice("1m", contextOpts) {
+						*fieldPtr = baseModel + "[1m]"
+						if p.Env == nil {
+							p.Env = make(map[string]string)
+						}
+						p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+					} else {
+						*fieldPtr = baseModel
+					}
 				}
 
 				fmt.Printf("✅ %s set to %q\n\n", pick, *fieldPtr)
@@ -352,7 +389,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 							huh.NewOption("high", "high"),
 							huh.NewOption("xhigh", "xhigh"),
 							huh.NewOption("max", "max"),
-							huh.NewOption("ultracode)", "ultracode"),
+							huh.NewOption("ultracode", "ultracode"),
 						).
 						Value(&p.EffortLevel),
 				),
