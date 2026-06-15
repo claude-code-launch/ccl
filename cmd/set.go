@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -212,27 +213,143 @@ You can automatically discover models from the API endpoint, or enter them manua
 		if configAdvanced {
 			fmt.Println("\n--- Claude Code Advanced Model Configuration ---")
 
+			baseSlotNames := []string{
+				"Default (general)",
+				"Opus",
+				"Sonnet",
+				"Haiku",
+				"Custom (user-defined slot)",
+			}
+
+			slotMap := map[string]*string{
+				"Default (general)":          &p.CustomModelID,
+				"Opus":                       &p.OpusModel,
+				"Sonnet":                     &p.SonnetModel,
+				"Haiku":                      &p.HaikuModel,
+				"Custom (user-defined slot)": &p.LockModel,
+			}
+
 			sortedModels := make([]string, len(selectedModels))
 			copy(sortedModels, selectedModels)
 			sort.Strings(sortedModels)
 
-			slots := []slotEntry{
-				{name: "Default (general)", model: &p.CustomModelID},
-				{name: "Opus", model: &p.OpusModel},
-				{name: "Sonnet", model: &p.SonnetModel},
-				{name: "Haiku", model: &p.HaikuModel},
-				{name: "Custom (user-defined slot)", model: &p.LockModel},
-			}
+			red := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+			dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
-			setEnv := func(key, val string) {
-				if p.Env == nil {
-					p.Env = make(map[string]string)
+			buildOpts := func() []huh.Option[string] {
+				var opts []huh.Option[string]
+				for _, name := range baseSlotNames {
+					slotLabel := fmt.Sprintf("%s — current: (not set)", name)
+					if ptr, ok := slotMap[name]; ok && ptr != nil && *ptr != "" {
+						slotLabel = fmt.Sprintf("%s — current: %s", name, strings.TrimSuffix(*ptr, "[1m]"))
+					}
+					opts = append(opts, huh.NewOption(slotLabel, "slot:"+name))
+
+					ptr := slotMap[name]
+					if ptr != nil && strings.HasSuffix(*ptr, "[1m]") {
+						opts = append(opts, huh.NewOption("  "+red.Render("[x] 1m"), "toggle:"+name))
+					} else {
+						opts = append(opts, huh.NewOption("  "+dim.Render("[ ] 1m"), "toggle:"+name))
+					}
 				}
-				p.Env[key] = val
+				opts = append(opts, huh.NewOption("Done", "done"))
+				return opts
 			}
 
-			if err = RunSlotListTUI(slots, sortedModels, setEnv); err != nil {
-				return err
+			pick := "slot:Default (general)"
+			for {
+				err = huh.NewForm(
+					huh.NewGroup(
+						huh.NewSelect[string]().
+							Title("Claude Slot Mapping").
+							Description("Select a slot to configure its model, or select [ ] 1m to toggle.").
+							Options(buildOpts()...).
+							Value(&pick),
+					),
+				).Run()
+				if err != nil {
+					return err
+				}
+
+				if pick == "done" || pick == "" {
+					break
+				}
+
+				if strings.HasPrefix(pick, "toggle:") {
+					slotName := strings.TrimPrefix(pick, "toggle:")
+					fieldPtr, ok := slotMap[slotName]
+					if ok && fieldPtr != nil {
+						base := strings.TrimSuffix(*fieldPtr, "[1m]")
+						if strings.HasSuffix(*fieldPtr, "[1m]") {
+							*fieldPtr = base
+						} else if base != "" {
+							*fieldPtr = base + "[1m]"
+							if p.Env == nil {
+								p.Env = make(map[string]string)
+							}
+							p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+						}
+					}
+					continue
+				}
+
+				// pick is "slot:Name" → launch dual-panel TUI for model + 1M config
+				slotName := strings.TrimPrefix(pick, "slot:")
+				fieldPtr, ok := slotMap[slotName]
+				if !ok {
+					fmt.Printf("⚠️  No mapping for slot %q, skipping.\n", slotName)
+					continue
+				}
+
+				currentModel := strings.TrimSuffix(*fieldPtr, "[1m]")
+				wasEnabled1M := strings.HasSuffix(*fieldPtr, "[1m]")
+
+				res, err := RunSlotConfigTUI(slotName, sortedModels, currentModel, wasEnabled1M)
+				if err != nil {
+					return err
+				}
+				if res.cancelled {
+					pick = "slot:" + slotName
+					continue
+				}
+
+				if res.manual {
+					var manual string
+					if currentModel != "" && !stringInSlice(currentModel, sortedModels) {
+						manual = currentModel
+					}
+					err = huh.NewForm(
+						huh.NewGroup(
+							huh.NewInput().
+								Title(fmt.Sprintf("%s - Manual Entry", slotName)).
+								Description("Enter model ID for this slot").
+								Value(&manual),
+						),
+					).Run()
+					if err != nil {
+						return err
+					}
+					*fieldPtr = strings.TrimSpace(manual)
+				} else {
+					*fieldPtr = res.model
+				}
+
+				// Apply 1M suffix
+				if *fieldPtr != "" {
+					base := strings.TrimSuffix(*fieldPtr, "[1m]")
+					if res.enable1M {
+						*fieldPtr = base + "[1m]"
+						if p.Env == nil {
+							p.Env = make(map[string]string)
+						}
+						p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+					} else {
+						*fieldPtr = base
+					}
+				}
+
+				fmt.Printf("✅ %s set to %q\n\n", slotName, *fieldPtr)
+				pick = "slot:" + slotName
 			}
 
 			// Effort Level
