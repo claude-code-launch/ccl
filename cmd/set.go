@@ -197,7 +197,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 		// ------------------------------------------------------------
 		// 直接显示 Claude Code 高级配置确认（不再单独做“选择模型”步骤）
 		// ------------------------------------------------------------
-		var configAdvanced bool
+		var configAdvanced = true
 		err = huh.NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
