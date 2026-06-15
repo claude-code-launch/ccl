@@ -1,0 +1,19 @@
+cmd/set.go
+  s_0460707b20c048::t_578b19e6a3ff94 215,237-256,259-260,269-270,278,282-285,287,289-292,294,300-307,326,347,370
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "463abe4580ccfa7b4ddb6034a3294134e53c5a7a",
+  "prompts": {},
+  "sessions": {
+    "s_0460707b20c048": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "1beba82a-9732-47cf-9fa7-767f60a345a8",
+        "model": "gemini-3.5-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
