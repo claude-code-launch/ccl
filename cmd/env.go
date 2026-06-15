@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/spf13/cobra"
 )

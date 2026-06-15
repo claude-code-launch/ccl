@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 )
 
 // IsInstalled returns true if the 'claude' CLI executable is found in system PATH.
