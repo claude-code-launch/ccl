@@ -1,0 +1,22 @@
+cmd/slot_config_tui.go
+  s_0460707b20c048::t_7776b117acb91a 27-39
+  s_0460707b20c048::t_18cc7008543593 106,113-115,117-120,124-131,135-142,151
+  s_0460707b20c048::t_44d6fae838726c 210,225-226,228,230-241,243
+  s_0460707b20c048::t_60b1cfa2adf278 308,310
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "54fc46d29bc50f2687589515f3afb32d59c7b8af",
+  "prompts": {},
+  "sessions": {
+    "s_0460707b20c048": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "1beba82a-9732-47cf-9fa7-767f60a345a8",
+        "model": "gemini-3.5-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
