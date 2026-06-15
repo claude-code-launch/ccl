@@ -101,12 +101,8 @@ func (m *slotConfigTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focusRight = !m.focusRight
 
 		case tea.KeyEnter:
-			if m.focusRight {
-				m.commitResult()
-				m.done = true
-				return m, tea.Quit
-			}
-			if len(m.filtered) > 0 {
+			// Enter always confirms regardless of panel
+			if m.focusRight && len(m.filtered) > 0 {
 				m.selected = m.filtered[m.cursor]
 			}
 			m.commitResult()
@@ -114,27 +110,30 @@ func (m *slotConfigTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case tea.KeySpace:
-			if m.focusRight {
+			// Space toggles 1M when options panel (LEFT, !focusRight) is focused
+			if !m.focusRight {
 				m.enable1M = !m.enable1M
 			}
 
 		case tea.KeyUp:
-			if !m.focusRight && m.cursor > 0 {
+			// Arrow keys navigate model list (RIGHT, focusRight)
+			if m.focusRight && m.cursor > 0 {
 				m.cursor--
 			}
 
 		case tea.KeyDown:
-			if !m.focusRight && m.cursor < len(m.filtered)-1 {
+			if m.focusRight && m.cursor < len(m.filtered)-1 {
 				m.cursor++
 			}
 
 		case tea.KeyBackspace:
-			if !m.focusRight && len(m.filter) > 0 {
+			if m.focusRight && len(m.filter) > 0 {
 				m.applyFilter(m.filter[:len(m.filter)-1])
 			}
 
 		default:
-			if !m.focusRight && msg.Text != "" {
+			// Typing filters the model list (RIGHT panel)
+			if m.focusRight && msg.Text != "" {
 				m.applyFilter(m.filter + msg.Text)
 			}
 		}
@@ -192,16 +191,52 @@ func (m *slotConfigTUI) View() tea.View {
 	red := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	green := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 
-	// ── Left panel: model list ──
-	var leftLines []string
+	// ── Left panel: options (1M toggle) — focused by default ──
+	checkbox := "[ ]"
+	checkLabel := "Enable 1M Context"
+	if m.enable1M {
+		checkbox = red.Render("[x]")
+		checkLabel = green.Render("Enable 1M Context")
+	}
 
-	// Filter indicator
-	if m.filter != "" {
-		leftLines = append(leftLines, dimStyle.Render("/ "+m.filter+"▌"))
-	} else if !m.focusRight {
-		leftLines = append(leftLines, dimStyle.Render("/ type to filter..."))
+	curModel := "(not set)"
+	if m.selected != "" && m.selected != manualEntry {
+		curModel = m.selected
+	} else if len(m.filtered) > 0 && m.cursor < len(m.filtered) && m.filtered[m.cursor] != manualEntry {
+		curModel = m.filtered[m.cursor]
+	}
+
+	optionsLines := []string{
+		dimStyle.Render("Slot: ") + m.slotName,
+		dimStyle.Render("Model: ") + curModel,
+		"",
+		fmt.Sprintf("%s %s", checkbox, checkLabel),
+		"",
+		dimStyle.Render("Space to toggle"),
+		"",
+		dimStyle.Render("Tab → select model"),
+	}
+	if !m.focusRight {
+		optionsLines[3] = lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%s %s", checkbox, checkLabel))
+	}
+
+	optionsContent := strings.Join(optionsLines, "\n")
+	var optionsPanel string
+	if !m.focusRight {
+		optionsPanel = borderActive.Render(optionsContent)
 	} else {
-		leftLines = append(leftLines, "")
+		optionsPanel = borderInactive.Render(optionsContent)
+	}
+
+	// ── Right panel: model list ──
+	var modelLines []string
+
+	if m.filter != "" {
+		modelLines = append(modelLines, dimStyle.Render("/ "+m.filter+"▌"))
+	} else if m.focusRight {
+		modelLines = append(modelLines, dimStyle.Render("/ type to filter..."))
+	} else {
+		modelLines = append(modelLines, dimStyle.Render("Tab to select model"))
 	}
 
 	visibleStart := 0
@@ -217,72 +252,34 @@ func (m *slotConfigTUI) View() tea.View {
 	for i := visibleStart; i < visibleEnd; i++ {
 		label := m.filtered[i]
 		prefix := "  "
-		if i == m.cursor && !m.focusRight {
+		if i == m.cursor && m.focusRight {
 			prefix = cursorStyle.Render("> ")
-		} else {
-			prefix = "  "
 		}
 		line := label
 		if label == m.selected && label != manualEntry {
 			line = selectedStyle.Render("✓ " + label)
-			if i == m.cursor && !m.focusRight {
+			if i == m.cursor && m.focusRight {
 				line = cursorStyle.Render("> ") + selectedStyle.Render("✓ "+label)
 				prefix = ""
 			}
 		}
-		leftLines = append(leftLines, prefix+line)
+		modelLines = append(modelLines, prefix+line)
 	}
 
-	// Scroll indicator
 	if len(m.filtered) > maxRows {
-		leftLines = append(leftLines, dimStyle.Render(fmt.Sprintf("  … %d/%d", m.cursor+1, len(m.filtered))))
+		modelLines = append(modelLines, dimStyle.Render(fmt.Sprintf("  … %d/%d", m.cursor+1, len(m.filtered))))
 	}
 
-	leftContent := strings.Join(leftLines, "\n")
-	var leftPanel string
-	if !m.focusRight {
-		leftPanel = borderActive.Render(leftContent)
-	} else {
-		leftPanel = borderInactive.Render(leftContent)
-	}
-
-	// ── Right panel: options ──
-	checkbox := "[ ]"
-	checkLabel := "Enable 1M Context"
-	if m.enable1M {
-		checkbox = red.Render("[x]")
-		checkLabel = green.Render("Enable 1M Context")
-	}
-
-	curModel := "(not set)"
-	if m.selected != "" && m.selected != manualEntry {
-		curModel = m.selected
-	} else if len(m.filtered) > 0 && m.cursor < len(m.filtered) && m.filtered[m.cursor] != manualEntry {
-		curModel = m.filtered[m.cursor]
-	}
-
-	rightLines := []string{
-		dimStyle.Render("Slot: ") + m.slotName,
-		dimStyle.Render("Model: ") + curModel,
-		"",
-		fmt.Sprintf("%s %s", checkbox, checkLabel),
-		"",
-		dimStyle.Render("Space to toggle"),
-	}
+	modelContent := strings.Join(modelLines, "\n")
+	var modelPanel string
 	if m.focusRight {
-		// highlight the checkbox line when focused
-		rightLines[3] = lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%s %s", checkbox, checkLabel))
-	}
-
-	rightContent := strings.Join(rightLines, "\n")
-	var rightPanel string
-	if m.focusRight {
-		rightPanel = borderActive.Render(rightContent)
+		modelPanel = borderActive.Render(modelContent)
 	} else {
-		rightPanel = borderInactive.Render(rightContent)
+		modelPanel = borderInactive.Render(modelContent)
 	}
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel)
+	// Options LEFT, model list RIGHT
+	body := lipgloss.JoinHorizontal(lipgloss.Top, optionsPanel, " ", modelPanel)
 
 	footer := dimStyle.Render("↑↓ Navigate  Enter Confirm  Tab Switch panel  Esc Cancel")
 
