@@ -24,18 +24,19 @@ type slotConfigResult struct {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type slotConfigTUI struct {
-	slotName   string
-	models     []string // full sorted pool
-	cursor     int      // cursor in filtered list
-	selected   string   // currently highlighted model (value, not display)
-	enable1M   bool
-	filter     string
-	filtered   []string // filtered subset
-	focusRight bool     // false = left list, true = right options
-	result     slotConfigResult
-	done       bool
-	width      int
-	height     int
+	slotName    string
+	models      []string // full sorted pool
+	cursor      int      // cursor in filtered model list (right panel)
+	leftCursor  int      // cursor in left panel: 0=1M, 1=Done
+	selected    string   // currently selected model
+	enable1M    bool
+	filter      string
+	filtered    []string // filtered subset
+	focusRight  bool     // false = left panel, true = right model list
+	result      slotConfigResult
+	done        bool
+	width       int
+	height      int
 }
 
 const manualEntry = "(Enter custom model ID)"
@@ -102,33 +103,43 @@ func (m *slotConfigTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyEnter:
 			if m.focusRight {
-				// Select model → update left panel, return focus to left
+				// Right panel: select model → return to left panel
 				if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 					m.selected = m.filtered[m.cursor]
 				}
 				m.focusRight = false
 				return m, nil
 			}
-			// Enter on left panel (options) → confirm and exit
-			m.commitResult()
-			m.done = true
-			return m, tea.Quit
-
-		case tea.KeySpace:
-			// Space toggles 1M when options panel (LEFT, !focusRight) is focused
-			if !m.focusRight {
+			// Left panel: act on leftCursor
+			switch m.leftCursor {
+			case 0: // 1M toggle
 				m.enable1M = !m.enable1M
+			case 1: // Done
+				m.commitResult()
+				m.done = true
+				return m, tea.Quit
 			}
 
 		case tea.KeyUp:
-			// Arrow keys navigate model list (RIGHT, focusRight)
-			if m.focusRight && m.cursor > 0 {
-				m.cursor--
+			if m.focusRight {
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			} else {
+				if m.leftCursor > 0 {
+					m.leftCursor--
+				}
 			}
 
 		case tea.KeyDown:
-			if m.focusRight && m.cursor < len(m.filtered)-1 {
-				m.cursor++
+			if m.focusRight {
+				if m.cursor < len(m.filtered)-1 {
+					m.cursor++
+				}
+			} else {
+				if m.leftCursor < 1 { // 0=1M, 1=Done
+					m.leftCursor++
+				}
 			}
 
 		case tea.KeyBackspace:
@@ -137,7 +148,7 @@ func (m *slotConfigTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		default:
-			// Typing filters the model list (RIGHT panel)
+			// Typing filters the model list (RIGHT panel only)
 			if m.focusRight && msg.Text != "" {
 				m.applyFilter(m.filter + msg.Text)
 			}
@@ -196,7 +207,7 @@ func (m *slotConfigTUI) View() tea.View {
 	red := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	green := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 
-	// ── Left panel: options (1M toggle) — focused by default ──
+	// ── Left panel: options (1M toggle + Done) — focused by default ──
 	checkbox := "[ ]"
 	checkLabel := "Enable 1M Context"
 	if m.enable1M {
@@ -211,19 +222,25 @@ func (m *slotConfigTUI) View() tea.View {
 		curModel = m.filtered[m.cursor]
 	}
 
-	optionsLines := []string{
-		dimStyle.Render("Slot: ") + m.slotName,
-		dimStyle.Render("Model: ") + curModel,
-		"",
+	// Left panel items: 0=1M, 1=Done
+	leftItems := []string{
 		fmt.Sprintf("%s %s", checkbox, checkLabel),
-		"",
-		dimStyle.Render("Space to toggle"),
-		"",
-		dimStyle.Render("Tab → select model"),
+		"Done",
 	}
-	if !m.focusRight {
-		optionsLines[3] = lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%s %s", checkbox, checkLabel))
+	var optionsLines []string
+	optionsLines = append(optionsLines,
+		dimStyle.Render("Slot: ")+m.slotName,
+		dimStyle.Render("Model: ")+curModel,
+		"",
+	)
+	for i, item := range leftItems {
+		prefix := "  "
+		if !m.focusRight && i == m.leftCursor {
+			prefix = cursorStyle.Render("> ")
+		}
+		optionsLines = append(optionsLines, prefix+item)
 	}
+	optionsLines = append(optionsLines, "", dimStyle.Render("Tab → select model"))
 
 	optionsContent := strings.Join(optionsLines, "\n")
 	var optionsPanel string
@@ -288,9 +305,9 @@ func (m *slotConfigTUI) View() tea.View {
 
 	var footer string
 	if m.focusRight {
-		footer = dimStyle.Render("↑↓ Navigate  Enter Select model (returns to left)  Esc Cancel")
+		footer = dimStyle.Render("↑↓ Navigate  Enter Select (returns to left)  Esc Cancel")
 	} else {
-		footer = dimStyle.Render("Space Toggle 1M  Tab → model list  Enter Confirm  Esc Cancel")
+		footer = dimStyle.Render("↑↓ Navigate  Enter Select  Tab → model list  Esc Cancel")
 	}
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99")).
