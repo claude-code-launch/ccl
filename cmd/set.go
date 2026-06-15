@@ -211,7 +211,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 		if configAdvanced {
 			fmt.Println("\n--- Claude Code Advanced Model Configuration ---")
 
-			// 列表式槽位配置：用户从列表中选择一个槽位进行配置，配置完成后返回列表，直到选择 Done
+			// 列表式槽位配置
 			baseSlotLabels := []string{
 				"Default (general)",
 				"Opus",
@@ -221,14 +221,21 @@ You can automatically discover models from the API endpoint, or enter them manua
 				"Done",
 			}
 
-			// map label -> pointer to provider field
-			// 注意：根据你的 provider.Provider 结构，你可以调整 Default 映射到合适字段
 			slotMap := map[string]*string{
-				"Default (general)":          &p.CustomModelID, // 将 default 映射到 CustomModelID（如需改动请调整）
+				"Default (general)":          &p.CustomModelID,
 				"Opus":                       &p.OpusModel,
 				"Sonnet":                     &p.SonnetModel,
 				"Haiku":                      &p.HaikuModel,
-				"Custom (user-defined slot)": &p.LockModel, // 复用 LockModel 字段作为自定义槽位存储
+				"Custom (user-defined slot)": &p.LockModel,
+			}
+
+			// Ordered slot names (no "Done") for 1M MultiSelect
+			slotNames := []string{
+				"Default (general)",
+				"Opus",
+				"Sonnet",
+				"Haiku",
+				"Custom (user-defined slot)",
 			}
 
 			// poolOptions（从 selectedModels）
@@ -238,44 +245,90 @@ You can automatically discover models from the API endpoint, or enter them manua
 			}
 			manualToken := "(Enter custom model ID)"
 
-			// helper: format display label with current value and 1M status
+			// formatLabel shows slot name with current model (no 1M indicator — managed by right column)
 			formatLabel := func(base string) string {
 				if base == "Done" {
 					return base
 				}
 				if ptr, ok := slotMap[base]; ok && ptr != nil && *ptr != "" {
-					model := strings.TrimSuffix(*ptr, "[1m]")
-					checkbox := "☐"
-					if strings.HasSuffix(*ptr, "[1m]") {
-						checkbox = "☑"
-					}
-					return fmt.Sprintf("%s — current: %s  %s 1M", base, model, checkbox)
+					return fmt.Sprintf("%s — current: %s", base, strings.TrimSuffix(*ptr, "[1m]"))
 				}
-				return fmt.Sprintf("%s — current: (not set)  ☐ 1M", base)
+				return fmt.Sprintf("%s — current: (not set)", base)
+			}
+
+			// get1MSlots returns slot names that currently have [1m] suffix
+			get1MSlots := func() []string {
+				var active []string
+				for _, name := range slotNames {
+					if ptr, ok := slotMap[name]; ok && ptr != nil && strings.HasSuffix(*ptr, "[1m]") {
+						active = append(active, name)
+					}
+				}
+				return active
+			}
+
+			// apply1MSlots applies 1M MultiSelect state to all configured slots
+			apply1MSlots := func(selected []string) {
+				hasAny := false
+				for _, name := range slotNames {
+					ptr, ok := slotMap[name]
+					if !ok || ptr == nil || *ptr == "" {
+						continue
+					}
+					base := strings.TrimSuffix(*ptr, "[1m]")
+					if stringInSlice(name, selected) {
+						*ptr = base + "[1m]"
+						hasAny = true
+					} else {
+						*ptr = base
+					}
+				}
+				if hasAny {
+					if p.Env == nil {
+						p.Env = make(map[string]string)
+					}
+					p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+				}
+			}
+
+			// Build 1M options (all slots)
+			var oneMOpts []huh.Option[string]
+			for _, name := range slotNames {
+				oneMOpts = append(oneMOpts, huh.NewOption(name, name))
 			}
 
 			for {
-				// 显示槽位列表（单选），用户选择要配置的槽位或 Done 退出
-				var pick string
-				// 构造 options：label 显示带当前值，value 使用 base label 以便后续映射
+				// 构造槽位选项
 				var opts []huh.Option[string]
 				for _, base := range baseSlotLabels {
-					display := formatLabel(base)
-					opts = append(opts, huh.NewOption(display, base))
+					opts = append(opts, huh.NewOption(formatLabel(base), base))
 				}
 
+				var pick string
+				current1M := get1MSlots()
+
+				// 外层：左列=槽位选择，右列=1M MultiSelect
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
 							Title("Claude Slot Mapping").
-							Description("Select a slot to configure. After configuring, you'll return to this list. Choose Done to finish.").
+							Description("Select a slot to configure. Choose Done to finish.").
 							Options(opts...).
 							Value(&pick),
 					),
-				).Run()
+					huh.NewGroup(
+						huh.NewMultiSelect[string]().
+							Title("1M context").
+							Options(oneMOpts...).
+							Value(&current1M),
+					),
+				).WithLayout(huh.LayoutColumns(2)).Run()
 				if err != nil {
 					return err
 				}
+
+				// Apply 1M changes from right column
+				apply1MSlots(current1M)
 
 				if pick == "Done" || pick == "" {
 					break
@@ -283,16 +336,17 @@ You can automatically discover models from the API endpoint, or enter them manua
 
 				fieldPtr, ok := slotMap[pick]
 				if !ok {
-					// 如果没有映射，跳过（安全兜底）
 					fmt.Printf("⚠️  No mapping for slot %q, skipping.\n", pick)
 					continue
 				}
 
-				// 构造选项（pool + manual）
-				opts = append([]huh.Option[string]{}, poolOptions...)
-				opts = append(opts, huh.NewOption(manualToken, manualToken))
+				// 记录当前槽位的 1M 状态，model 更换后保留
+				wasEnabled1M := stringInSlice(pick, current1M)
 
-				// 预选逻辑：如果已有值且在 pool 中则默认选中该值，否则默认选 manualToken
+				// 内层：单列选模型（不含 1M，由外层管理）
+				modelOpts := append([]huh.Option[string]{}, poolOptions...)
+				modelOpts = append(modelOpts, huh.NewOption(manualToken, manualToken))
+
 				defaultChoice := ""
 				if fieldPtr != nil && *fieldPtr != "" {
 					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
@@ -303,35 +357,22 @@ You can automatically discover models from the API endpoint, or enter them manua
 					}
 				}
 
-				var chosen string
-				chosen = defaultChoice
-
-				// Pre-fill 1M based on current value
-				enable1M := fieldPtr != nil && strings.HasSuffix(*fieldPtr, "[1m]")
-
+				chosen := defaultChoice
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
 							Title(fmt.Sprintf("Set model for %s", pick)).
 							Description("Choose from model pool or select manual entry to type a model ID").
-							Options(opts...).
+							Options(modelOpts...).
 							Value(&chosen),
 					),
-					huh.NewGroup(
-						huh.NewConfirm().
-							Title("1M context").
-							Affirmative("✓ enabled").
-							Negative("✗ disabled").
-							Value(&enable1M),
-					),
-				).WithLayout(huh.LayoutColumns(2)).Run()
+				).Run()
 				if err != nil {
 					return err
 				}
 
 				if chosen == manualToken || chosen == "" {
 					var manual string
-					// 如果已有值且不是 pool 中的值，预填到 manual 里，方便用户确认或修改
 					if fieldPtr != nil && *fieldPtr != "" && !stringInSlice(strings.TrimSuffix(*fieldPtr, "[1m]"), selectedModels) {
 						manual = strings.TrimSuffix(*fieldPtr, "[1m]")
 					}
@@ -351,22 +392,18 @@ You can automatically discover models from the API endpoint, or enter them manua
 					*fieldPtr = chosen
 				}
 
-				// Apply 1M suffix
+				// Re-apply 1M suffix for this slot (preserve state after model change)
 				if *fieldPtr != "" {
-					baseModel := strings.TrimSuffix(*fieldPtr, "[1m]")
-					if enable1M {
-						*fieldPtr = baseModel + "[1m]"
-						if p.Env == nil {
-							p.Env = make(map[string]string)
-						}
-						p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+					base := strings.TrimSuffix(*fieldPtr, "[1m]")
+					if wasEnabled1M {
+						*fieldPtr = base + "[1m]"
 					} else {
-						*fieldPtr = baseModel
+						*fieldPtr = base
 					}
 				}
 
 				fmt.Printf("✅ %s set to %q\n\n", pick, *fieldPtr)
-				// 配置完成后循环回到槽位列表，用户可以继续配置其他槽位或选择 Done
+				// 配置完成后循环回到槽位列表
 			}
 
 			// Effort Level
