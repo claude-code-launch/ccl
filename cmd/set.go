@@ -350,9 +350,8 @@ You can automatically discover models from the API endpoint, or enter them manua
 					err = huh.NewForm(
 						huh.NewGroup(
 							huh.NewMultiSelect[string]().
-								Title("Context Window Options").
 								Options(
-									huh.NewOption("Enable 1M context window (appends [1m], sets CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000)", "1m"),
+									huh.NewOption("Enable 1M context window", "1m"),
 								).
 								Value(&contextOpts),
 						),
