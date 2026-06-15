@@ -307,10 +307,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 				chosen = defaultChoice
 
 				// Pre-fill 1M based on current value
-				var contextOpts []string
-				if fieldPtr != nil && strings.HasSuffix(*fieldPtr, "[1m]") {
-					contextOpts = []string{"1m"}
-				}
+				enable1M := fieldPtr != nil && strings.HasSuffix(*fieldPtr, "[1m]")
 
 				err = huh.NewForm(
 					huh.NewGroup(
@@ -321,12 +318,11 @@ You can automatically discover models from the API endpoint, or enter them manua
 							Value(&chosen),
 					),
 					huh.NewGroup(
-						huh.NewMultiSelect[string]().
-							Title("Options").
-							Options(
-								huh.NewOption("1M context", "1m"),
-							).
-							Value(&contextOpts),
+						huh.NewConfirm().
+							Title("1M context").
+							Affirmative("✓ enabled").
+							Negative("✗ disabled").
+							Value(&enable1M),
 					),
 				).WithLayout(huh.LayoutColumns(2)).Run()
 				if err != nil {
@@ -358,7 +354,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 				// Apply 1M suffix
 				if *fieldPtr != "" {
 					baseModel := strings.TrimSuffix(*fieldPtr, "[1m]")
-					if stringInSlice("1m", contextOpts) {
+					if enable1M {
 						*fieldPtr = baseModel + "[1m]"
 						if p.Env == nil {
 							p.Env = make(map[string]string)
