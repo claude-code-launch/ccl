@@ -351,7 +351,6 @@ You can automatically discover models from the API endpoint, or enter them manua
 						huh.NewGroup(
 							huh.NewMultiSelect[string]().
 								Title("Context Window Options").
-								Description("Space to toggle, Enter to confirm").
 								Options(
 									huh.NewOption("Enable 1M context window (appends [1m], sets CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000)", "1m"),
 								).
