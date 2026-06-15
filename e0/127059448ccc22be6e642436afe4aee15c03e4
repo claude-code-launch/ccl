@@ -1,0 +1,45 @@
+cmd/del.go
+  s_35322523de4de9::t_70b4381a76bfb8 1-117
+cmd/env.go
+  s_35322523de4de9::t_677e4644263805 1-318
+.github/workflows/release.yml
+  s_87a074f2661e70::t_73367a46133d61 108
+  s_87a074f2661e70::t_43494cadaf49b7 102-106
+  s_87a074f2661e70::t_0f4d053a701833 107
+  s_87a074f2661e70::t_51342a6d3eb264 100-101
+cmd/root.go
+  s_35322523de4de9::t_9c95fa32a88b79 40
+cmd/set.go
+  s_35322523de4de9::t_612a6d51147e90 347,350,353-354
+cmd/version.go
+  s_35322523de4de9::t_c0d12d3f52df29 1-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "e0127059448ccc22be6e642436afe4aee15c03e4",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_35322523de4de9": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "12aea579-2ee8-4bb9-a3ab-e82d536c1af1",
+        "model": "gemini-3.5-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_87a074f2661e70": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781171779723",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
