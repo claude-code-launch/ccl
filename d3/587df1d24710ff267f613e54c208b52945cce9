@@ -1,0 +1,14 @@
+cmd/set.go
+  h_1d8661cb669d01 392
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "d3587df1d24710ff267f613e54c208b52945cce9",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
