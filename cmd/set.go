@@ -229,14 +229,9 @@ You can automatically discover models from the API endpoint, or enter them manua
 				"Custom (user-defined slot)": &p.LockModel,
 			}
 
-			var poolOptions []huh.Option[string]
 			sortedModels := make([]string, len(selectedModels))
 			copy(sortedModels, selectedModels)
 			sort.Strings(sortedModels)
-			for _, m := range sortedModels {
-				poolOptions = append(poolOptions, huh.NewOption(m, m))
-			}
-			manualToken := "(Enter custom model ID)"
 
 			red := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 			dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -302,7 +297,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 					continue
 				}
 
-				// pick is "slot:Name"
+				// pick is "slot:Name" → launch dual-panel TUI for model + 1M config
 				slotName := strings.TrimPrefix(pick, "slot:")
 				fieldPtr, ok := slotMap[slotName]
 				if !ok {
@@ -310,42 +305,22 @@ You can automatically discover models from the API endpoint, or enter them manua
 					continue
 				}
 
-				var chosenOpts []huh.Option[string]
-				chosenOpts = append(chosenOpts, poolOptions...)
-				chosenOpts = append(chosenOpts, huh.NewOption(manualToken, manualToken))
+				currentModel := strings.TrimSuffix(*fieldPtr, "[1m]")
+				wasEnabled1M := strings.HasSuffix(*fieldPtr, "[1m]")
 
-				defaultChoice := ""
-				if fieldPtr != nil && *fieldPtr != "" {
-					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
-					if stringInSlice(baseVal, sortedModels) {
-						defaultChoice = baseVal
-					} else {
-						defaultChoice = manualToken
-					}
-				}
-
-				chosen := defaultChoice
-				err = huh.NewForm(
-					huh.NewGroup(
-						huh.NewSelect[string]().
-							Title(fmt.Sprintf("Set model for %s", slotName)).
-							Description("Type to filter. Choose from model pool or select manual entry.").
-							Options(chosenOpts...).
-							Filtering(true).
-							Value(&chosen),
-					),
-				).Run()
+				res, err := RunSlotConfigTUI(slotName, sortedModels, currentModel, wasEnabled1M)
 				if err != nil {
 					return err
 				}
+				if res.cancelled {
+					pick = "slot:" + slotName
+					continue
+				}
 
-				wasEnabled1M := fieldPtr != nil && strings.HasSuffix(*fieldPtr, "[1m]")
-
-				if chosen == manualToken || chosen == "" {
+				if res.manual {
 					var manual string
-					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
-					if fieldPtr != nil && baseVal != "" && !stringInSlice(baseVal, sortedModels) {
-						manual = baseVal
+					if currentModel != "" && !stringInSlice(currentModel, sortedModels) {
+						manual = currentModel
 					}
 					err = huh.NewForm(
 						huh.NewGroup(
@@ -360,24 +335,26 @@ You can automatically discover models from the API endpoint, or enter them manua
 					}
 					*fieldPtr = strings.TrimSpace(manual)
 				} else {
-					*fieldPtr = chosen
+					*fieldPtr = res.model
 				}
 
-				// Restore 1M suffix after model change
+				// Apply 1M suffix
 				if *fieldPtr != "" {
 					base := strings.TrimSuffix(*fieldPtr, "[1m]")
-					if wasEnabled1M {
+					if res.enable1M {
 						*fieldPtr = base + "[1m]"
+						if p.Env == nil {
+							p.Env = make(map[string]string)
+						}
+						p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
 					} else {
 						*fieldPtr = base
 					}
 				}
 
 				fmt.Printf("✅ %s set to %q\n\n", slotName, *fieldPtr)
-				// Return cursor to the slot row after model config
 				pick = "slot:" + slotName
 			}
-
 			// Effort Level
 			err = huh.NewForm(
 				huh.NewGroup(
