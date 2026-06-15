@@ -101,10 +101,15 @@ func (m *slotConfigTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focusRight = !m.focusRight
 
 		case tea.KeyEnter:
-			// Enter always confirms regardless of panel
-			if m.focusRight && len(m.filtered) > 0 {
-				m.selected = m.filtered[m.cursor]
+			if m.focusRight {
+				// Select model → update left panel, return focus to left
+				if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+					m.selected = m.filtered[m.cursor]
+				}
+				m.focusRight = false
+				return m, nil
 			}
+			// Enter on left panel (options) → confirm and exit
 			m.commitResult()
 			m.done = true
 			return m, tea.Quit
@@ -281,7 +286,12 @@ func (m *slotConfigTUI) View() tea.View {
 	// Options LEFT, model list RIGHT
 	body := lipgloss.JoinHorizontal(lipgloss.Top, optionsPanel, " ", modelPanel)
 
-	footer := dimStyle.Render("↑↓ Navigate  Enter Confirm  Tab Switch panel  Esc Cancel")
+	var footer string
+	if m.focusRight {
+		footer = dimStyle.Render("↑↓ Navigate  Enter Select model (returns to left)  Esc Cancel")
+	} else {
+		footer = dimStyle.Render("Space Toggle 1M  Tab → model list  Enter Confirm  Esc Cancel")
+	}
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99")).
 		Render("Configure: " + m.slotName)
