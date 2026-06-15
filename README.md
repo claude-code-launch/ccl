@@ -7,12 +7,14 @@
 ## ✨ 核心亮点
 
 1. **智能多档模型映射 (无需复杂配置)**
-   - 当 `config.yaml` 里的 `model` 字段留空时，`ccl` 将进入 **「智能协议代理映射模式」**。
-   - 自动在启动时拉取接口提供商的可用模型库。
-   - 动态分析 Claude Code 的模型档位（Opus / Sonnet / Haiku），匹配最佳替代：
+   - 当槽位未手动配置时，`ccl` 自动进入 **「智能协议代理映射模式」**。
+   - 自动在启动时拉取接口提供商的可用模型库，按关键词动态分析并分配到各档位：
      - 💎 **Opus 强推理档** → 优先匹配 `deepseek-reasoner` (R1) 或 `o1`、`o3-mini`、`gpt-4o`
      - 🚀 **Sonnet 黄金档** → 优先匹配 `deepseek-chat` (V3)、`gpt-4o`、`claude-3-5-sonnet`
      - ⚡ **Haiku 极速档** → 优先匹配 `gpt-4o-mini`、`gpt-3.5-turbo`
+   - 若通过 `ccl set` 手动为某个档位指定了模型，则该档位的自动映射被覆盖，其余未配置的档位仍走自动映射。
+
+   > **两种模式的关系**：自动映射是兜底策略，手动槽位配置优先级更高。你可以只配置 Opus 档（指向推理模型），让 Sonnet / Haiku 继续走自动映射——完全按需混用。
 
 2. **零感协议翻译与流式代理**
    - 采用本地轻量级的高性能并发 socket 服务（TCP），自动拦截并完美将 Anthropic 专有的 `Messages` 协议以及 `Streaming (SSE)` 转换为标准的 `OpenAI / Chat Completions` 协议。
