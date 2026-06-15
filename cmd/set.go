@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -229,7 +230,10 @@ You can automatically discover models from the API endpoint, or enter them manua
 			}
 
 			var poolOptions []huh.Option[string]
-			for _, m := range selectedModels {
+			sortedModels := make([]string, len(selectedModels))
+			copy(sortedModels, selectedModels)
+			sort.Strings(sortedModels)
+			for _, m := range sortedModels {
 				poolOptions = append(poolOptions, huh.NewOption(m, m))
 			}
 			manualToken := "(Enter custom model ID)"
@@ -260,8 +264,8 @@ You can automatically discover models from the API endpoint, or enter them manua
 				return opts
 			}
 
+			pick := "slot:Default (general)" // default cursor position
 			for {
-				var pick string
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
@@ -294,6 +298,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 							p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
 						}
 					}
+					// Stay on the toggle row to show updated state
 					continue
 				}
 
@@ -312,7 +317,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 				defaultChoice := ""
 				if fieldPtr != nil && *fieldPtr != "" {
 					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
-					if stringInSlice(baseVal, selectedModels) {
+					if stringInSlice(baseVal, sortedModels) {
 						defaultChoice = baseVal
 					} else {
 						defaultChoice = manualToken
@@ -324,8 +329,9 @@ You can automatically discover models from the API endpoint, or enter them manua
 					huh.NewGroup(
 						huh.NewSelect[string]().
 							Title(fmt.Sprintf("Set model for %s", slotName)).
-							Description("Choose from model pool or select manual entry to type a model ID").
+							Description("Type to filter. Choose from model pool or select manual entry.").
 							Options(chosenOpts...).
+							Filtering(true).
 							Value(&chosen),
 					),
 				).Run()
@@ -338,7 +344,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 				if chosen == manualToken || chosen == "" {
 					var manual string
 					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
-					if fieldPtr != nil && baseVal != "" && !stringInSlice(baseVal, selectedModels) {
+					if fieldPtr != nil && baseVal != "" && !stringInSlice(baseVal, sortedModels) {
 						manual = baseVal
 					}
 					err = huh.NewForm(
@@ -368,6 +374,8 @@ You can automatically discover models from the API endpoint, or enter them manua
 				}
 
 				fmt.Printf("✅ %s set to %q\n\n", slotName, *fieldPtr)
+				// Return cursor to the slot row after model config
+				pick = "slot:" + slotName
 			}
 
 			// Effort Level
