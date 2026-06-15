@@ -234,23 +234,21 @@ You can automatically discover models from the API endpoint, or enter them manua
 			sort.Strings(sortedModels)
 
 			red := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-			dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 			buildOpts := func() []huh.Option[string] {
 				var opts []huh.Option[string]
 				for _, name := range baseSlotNames {
-					slotLabel := fmt.Sprintf("%s — current: (not set)", name)
-					if ptr, ok := slotMap[name]; ok && ptr != nil && *ptr != "" {
-						slotLabel = fmt.Sprintf("%s — current: %s", name, strings.TrimSuffix(*ptr, "[1m]"))
+					ptr := slotMap[name]
+					var indicator string
+					if ptr != nil && strings.HasSuffix(*ptr, "[1m]") {
+						indicator = "  " + red.Render("⚡1M")
+					}
+
+					slotLabel := fmt.Sprintf("%s — current: (not set)%s", name, indicator)
+					if ptr != nil && *ptr != "" {
+						slotLabel = fmt.Sprintf("%s — current: %s%s", name, strings.TrimSuffix(*ptr, "[1m]"), indicator)
 					}
 					opts = append(opts, huh.NewOption(slotLabel, "slot:"+name))
-
-					ptr := slotMap[name]
-					if ptr != nil && strings.HasSuffix(*ptr, "[1m]") {
-						opts = append(opts, huh.NewOption("  "+red.Render("[x] 1m"), "toggle:"+name))
-					} else {
-						opts = append(opts, huh.NewOption("  "+dim.Render("[ ] 1m"), "toggle:"+name))
-					}
 				}
 				opts = append(opts, huh.NewOption("Done", "done"))
 				return opts
@@ -272,29 +270,11 @@ You can automatically discover models from the API endpoint, or enter them manua
 				}
 
 				if pick == "done" || pick == "" {
-					break
-				}
-
-				if strings.HasPrefix(pick, "toggle:") {
-					slotName := strings.TrimPrefix(pick, "toggle:")
-					fieldPtr, ok := slotMap[slotName]
-					if ok && fieldPtr != nil {
-						base := strings.TrimSuffix(*fieldPtr, "[1m]")
-						if strings.HasSuffix(*fieldPtr, "[1m]") {
-							*fieldPtr = base
-						} else if base != "" {
-							*fieldPtr = base + "[1m]"
-							if p.Env == nil {
-								p.Env = make(map[string]string)
-							}
-							p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
-						}
+						break
 					}
-					continue
-				}
 
-				// pick is "slot:Name" → launch dual-panel TUI for model + 1M config
-				slotName := strings.TrimPrefix(pick, "slot:")
+					// pick is "slot:Name" → launch dual-panel TUI for model + 1M config
+					slotName := strings.TrimPrefix(pick, "slot:")
 				fieldPtr, ok := slotMap[slotName]
 				if !ok {
 					fmt.Printf("⚠️  No mapping for slot %q, skipping.\n", slotName)
