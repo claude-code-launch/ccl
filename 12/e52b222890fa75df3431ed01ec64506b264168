@@ -1,0 +1,26 @@
+cmd/install.go
+  s_edf712a8e9f099::t_daaef46eadbe17 14
+cmd/set.go
+  s_edf712a8e9f099::t_b132eb05da1389 8
+go.mod
+  s_edf712a8e9f099::t_d3463ec5b1fa64 6
+  s_edf712a8e9f099::t_b7fd6d20787422 12-14,17-20,22-26,30-31,37-38
+cmd/env.go
+  s_edf712a8e9f099::t_5bde7ecf46112a 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "12e52b222890fa75df3431ed01ec64506b264168",
+  "prompts": {},
+  "sessions": {
+    "s_edf712a8e9f099": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "0d2e2099-f1b5-4c2d-9ff6-b11a194caa52",
+        "model": "gemini-3.5-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
