@@ -212,13 +212,12 @@ You can automatically discover models from the API endpoint, or enter them manua
 		if configAdvanced {
 			fmt.Println("\n--- Claude Code Advanced Model Configuration ---")
 
-			baseSlotLabels := []string{
+			baseSlotNames := []string{
 				"Default (general)",
 				"Opus",
 				"Sonnet",
 				"Haiku",
 				"Custom (user-defined slot)",
-				"Done",
 			}
 
 			slotMap := map[string]*string{
@@ -235,34 +234,40 @@ You can automatically discover models from the API endpoint, or enter them manua
 			}
 			manualToken := "(Enter custom model ID)"
 
-			tag1M := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("[x] 1m")
-			formatLabel := func(base string) string {
-				if base == "Done" {
-					return base
-				}
-				if ptr, ok := slotMap[base]; ok && ptr != nil && *ptr != "" {
-					model := strings.TrimSuffix(*ptr, "[1m]")
-					if strings.HasSuffix(*ptr, "[1m]") {
-						return fmt.Sprintf("%s — current: %s  %s", base, model, tag1M)
+			red := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+			dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+			// buildOpts builds the flat list: slot row + 1M toggle row per slot, then Done
+			buildOpts := func() []huh.Option[string] {
+				var opts []huh.Option[string]
+				for _, name := range baseSlotNames {
+					// Slot row
+					slotLabel := fmt.Sprintf("%s — current: (not set)", name)
+					if ptr, ok := slotMap[name]; ok && ptr != nil && *ptr != "" {
+						slotLabel = fmt.Sprintf("%s — current: %s", name, strings.TrimSuffix(*ptr, "[1m]"))
 					}
-					return fmt.Sprintf("%s — current: %s", base, model)
+					opts = append(opts, huh.NewOption(slotLabel, "slot:"+name))
+
+					// 1M toggle row
+					ptr := slotMap[name]
+					if ptr != nil && strings.HasSuffix(*ptr, "[1m]") {
+						opts = append(opts, huh.NewOption("  "+red.Render("[x] 1m"), "toggle:"+name))
+					} else {
+						opts = append(opts, huh.NewOption("  "+dim.Render("[ ] 1m"), "toggle:"+name))
+					}
 				}
-				return fmt.Sprintf("%s — current: (not set)", base)
+				opts = append(opts, huh.NewOption("Done", "done"))
+				return opts
 			}
 
 			for {
-				var opts []huh.Option[string]
-				for _, base := range baseSlotLabels {
-					opts = append(opts, huh.NewOption(formatLabel(base), base))
-				}
-
 				var pick string
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
 							Title("Claude Slot Mapping").
-							Description("Select a slot to configure. Choose Done to finish.").
-							Options(opts...).
+							Description("Select a slot to configure its model, or select [ ] 1m to toggle.").
+							Options(buildOpts()...).
 							Value(&pick),
 					),
 				).Run()
@@ -270,58 +275,36 @@ You can automatically discover models from the API endpoint, or enter them manua
 					return err
 				}
 
-				if pick == "Done" || pick == "" {
+				if pick == "done" || pick == "" {
 					break
 				}
 
-				fieldPtr, ok := slotMap[pick]
-				if !ok {
-					fmt.Printf("⚠️  No mapping for slot %q, skipping.\n", pick)
-					continue
-				}
-
-				// Sub-action: Set model or Toggle 1M
-				is1M := fieldPtr != nil && strings.HasSuffix(*fieldPtr, "[1m]")
-				toggleLabel := "Enable 1M context"
-				if is1M {
-					toggleLabel = "Disable 1M context"
-				}
-
-				var action string
-				err = huh.NewForm(
-					huh.NewGroup(
-						huh.NewSelect[string]().
-							Title(pick).
-							Options(
-								huh.NewOption("Set model", "model"),
-								huh.NewOption(toggleLabel, "toggle1m"),
-							).
-							Value(&action),
-					),
-				).Run()
-				if err != nil {
-					return err
-				}
-
-				if action == "toggle1m" {
-					if fieldPtr != nil {
+				if strings.HasPrefix(pick, "toggle:") {
+					slotName := strings.TrimPrefix(pick, "toggle:")
+					fieldPtr, ok := slotMap[slotName]
+					if ok && fieldPtr != nil {
 						base := strings.TrimSuffix(*fieldPtr, "[1m]")
-						if is1M {
+						if strings.HasSuffix(*fieldPtr, "[1m]") {
 							*fieldPtr = base
-						} else {
-							if base != "" {
-								*fieldPtr = base + "[1m]"
-								if p.Env == nil {
-									p.Env = make(map[string]string)
-								}
-								p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+						} else if base != "" {
+							*fieldPtr = base + "[1m]"
+							if p.Env == nil {
+								p.Env = make(map[string]string)
 							}
+							p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
 						}
 					}
 					continue
 				}
 
-				// action == "model"
+				// pick is "slot:Name"
+				slotName := strings.TrimPrefix(pick, "slot:")
+				fieldPtr, ok := slotMap[slotName]
+				if !ok {
+					fmt.Printf("⚠️  No mapping for slot %q, skipping.\n", slotName)
+					continue
+				}
+
 				var chosenOpts []huh.Option[string]
 				chosenOpts = append(chosenOpts, poolOptions...)
 				chosenOpts = append(chosenOpts, huh.NewOption(manualToken, manualToken))
@@ -340,7 +323,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
-							Title(fmt.Sprintf("Set model for %s", pick)).
+							Title(fmt.Sprintf("Set model for %s", slotName)).
 							Description("Choose from model pool or select manual entry to type a model ID").
 							Options(chosenOpts...).
 							Value(&chosen),
@@ -350,7 +333,6 @@ You can automatically discover models from the API endpoint, or enter them manua
 					return err
 				}
 
-				// Re-read 1M state after any prior toggle
 				wasEnabled1M := fieldPtr != nil && strings.HasSuffix(*fieldPtr, "[1m]")
 
 				if chosen == manualToken || chosen == "" {
@@ -362,7 +344,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 					err = huh.NewForm(
 						huh.NewGroup(
 							huh.NewInput().
-								Title(fmt.Sprintf("%s - Manual Entry", pick)).
+								Title(fmt.Sprintf("%s - Manual Entry", slotName)).
 								Description("Enter model ID for this slot").
 								Value(&manual),
 						),
@@ -385,7 +367,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 					}
 				}
 
-				fmt.Printf("✅ %s set to %q\n\n", pick, *fieldPtr)
+				fmt.Printf("✅ %s set to %q\n\n", slotName, *fieldPtr)
 			}
 
 			// Effort Level
