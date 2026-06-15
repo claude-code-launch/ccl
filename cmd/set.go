@@ -351,7 +351,8 @@ You can automatically discover models from the API endpoint, or enter them manua
 							huh.NewOption("medium", "medium"),
 							huh.NewOption("high", "high"),
 							huh.NewOption("xhigh", "xhigh"),
-							huh.NewOption("max (May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.)", "max"),
+							huh.NewOption("max", "max"),
+							huh.NewOption("ultracode)", "ultracode"),
 						).
 						Value(&p.EffortLevel),
 				),
