@@ -319,13 +319,16 @@ You can automatically discover models from the API endpoint, or enter them manua
 							Description("Choose from model pool or select manual entry to type a model ID").
 							Options(opts...).
 							Value(&chosen),
+					),
+					huh.NewGroup(
 						huh.NewMultiSelect[string]().
+							Title("Options").
 							Options(
 								huh.NewOption("1M context", "1m"),
 							).
 							Value(&contextOpts),
 					),
-				).Run()
+				).WithLayout(huh.LayoutColumns(2)).Run()
 				if err != nil {
 					return err
 				}
