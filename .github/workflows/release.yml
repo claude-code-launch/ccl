@@ -97,8 +97,15 @@ jobs:
         run: |
           # ${GITHUB_REF_NAME} 在 tag 触发时就是 "v1.0.1"
           # sed 's/^v//' 会把开头的 "v" 剥离掉，变成 "1.0.1"
-          CLEAN_VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
-          echo "Syncing package.json version to: $CLEAN_VERSION"
+          # 提取纯数字版本号
+          RAW_VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          if [[ "$RAW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              CLEAN_VERSION=$(echo "$RAW_VERSION" | sed -E 's/\.([0-9]+)$/-\1/')
+          else
+              CLEAN_VERSION="$RAW_VERSION"
+          fi
+          echo "Original Tag: ${{ github.ref_name }}"
+          echo "Sanitized npm version: $CLEAN_VERSION"
 
           # 使用 npm 官方自带命令动态修改 package.json 的版本号，且不触发任何 git commit
           npm version $CLEAN_VERSION --no-git-tag-version

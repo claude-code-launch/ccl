@@ -64,16 +64,6 @@ You can automatically discover models from the API endpoint, or enter them manua
 			fmt.Printf("✨ Creating new provider %q...\n\n", targetName)
 		}
 
-		// 环境变量回显
-		var envStr string
-		if p.Env != nil {
-			var sb strings.Builder
-			for k, v := range p.Env {
-				sb.WriteString(fmt.Sprintf("%s=%s\n", k, v))
-			}
-			envStr = sb.String()
-		}
-
 		// Step 1: 基础凭据
 		err = huh.NewForm(
 			huh.NewGroup(
@@ -99,27 +89,10 @@ You can automatically discover models from the API endpoint, or enter them manua
 						}
 						return nil
 					}),
-
-				huh.NewText().
-					Title("Environment Variables (optional)").
-					Description("One KEY=VALUE per line").
-					Value(&envStr),
 			),
 		).Run()
 		if err != nil {
 			return err
-		}
-
-		p.Env = make(map[string]string)
-		for _, line := range strings.Split(envStr, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			k, v, ok := strings.Cut(line, "=")
-			if ok {
-				p.Env[strings.TrimSpace(k)] = strings.TrimSpace(v)
-			}
 		}
 
 		// Step 2: 自动探测协议与模型
@@ -371,12 +344,14 @@ You can automatically discover models from the API endpoint, or enter them manua
 				huh.NewGroup(
 					huh.NewSelect[string]().
 						Title("Effort Level").
-						Description("CLAUDE_CODE_EFFORT_LEVEL – low / medium / high").
+						Description("CLAUDE_CODE_EFFORT_LEVEL").
 						Options(
 							huh.NewOption("(unset)", ""),
-							huh.NewOption("low", "low"),
+							huh.NewOption("Low", "low"),
 							huh.NewOption("medium", "medium"),
 							huh.NewOption("high", "high"),
+							huh.NewOption("xhigh", "xhigh"),
+							huh.NewOption("max (May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.)", "max"),
 						).
 						Value(&p.EffortLevel),
 				),
