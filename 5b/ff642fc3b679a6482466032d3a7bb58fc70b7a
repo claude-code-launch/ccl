@@ -1,0 +1,25 @@
+cmd/set.go
+  h_1d8661cb669d01 354
+  s_cd4eea51a2cc10::t_bc35e1b00f4882 355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "5bff642fc3b679a6482466032d3a7bb58fc70b7a",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_cd4eea51a2cc10": {
+      "agent_id": {
+        "tool": "github-copilot-jetbrains",
+        "id": "1781505769414",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
