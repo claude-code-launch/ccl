@@ -295,8 +295,9 @@ You can automatically discover models from the API endpoint, or enter them manua
 				// 预选逻辑：如果已有值且在 pool 中则默认选中该值，否则默认选 manualToken
 				defaultChoice := ""
 				if fieldPtr != nil && *fieldPtr != "" {
-					if stringInSlice(*fieldPtr, selectedModels) {
-						defaultChoice = *fieldPtr
+					baseVal := strings.TrimSuffix(*fieldPtr, "[1m]")
+					if stringInSlice(baseVal, selectedModels) {
+						defaultChoice = baseVal
 					} else {
 						defaultChoice = manualToken
 					}
@@ -305,6 +306,12 @@ You can automatically discover models from the API endpoint, or enter them manua
 				var chosen string
 				chosen = defaultChoice
 
+				// Pre-fill 1M based on current value
+				var contextOpts []string
+				if fieldPtr != nil && strings.HasSuffix(*fieldPtr, "[1m]") {
+					contextOpts = []string{"1m"}
+				}
+
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
@@ -312,6 +319,11 @@ You can automatically discover models from the API endpoint, or enter them manua
 							Description("Choose from model pool or select manual entry to type a model ID").
 							Options(opts...).
 							Value(&chosen),
+						huh.NewMultiSelect[string]().
+							Options(
+								huh.NewOption("1M context", "1m"),
+							).
+							Value(&contextOpts),
 					),
 				).Run()
 				if err != nil {
@@ -321,7 +333,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 				if chosen == manualToken || chosen == "" {
 					var manual string
 					// 如果已有值且不是 pool 中的值，预填到 manual 里，方便用户确认或修改
-					if fieldPtr != nil && *fieldPtr != "" && !stringInSlice(*fieldPtr, selectedModels) {
+					if fieldPtr != nil && *fieldPtr != "" && !stringInSlice(strings.TrimSuffix(*fieldPtr, "[1m]"), selectedModels) {
 						manual = strings.TrimSuffix(*fieldPtr, "[1m]")
 					}
 					err = huh.NewForm(
@@ -337,28 +349,12 @@ You can automatically discover models from the API endpoint, or enter them manua
 					}
 					*fieldPtr = strings.TrimSpace(manual)
 				} else {
-					*fieldPtr = strings.TrimSuffix(chosen, "[1m]")
+					*fieldPtr = chosen
 				}
 
-				// 1M context prompt (checkbox style)
+				// Apply 1M suffix
 				if *fieldPtr != "" {
 					baseModel := strings.TrimSuffix(*fieldPtr, "[1m]")
-					var contextOpts []string
-					if strings.HasSuffix(*fieldPtr, "[1m]") {
-						contextOpts = []string{"1m"}
-					}
-					err = huh.NewForm(
-						huh.NewGroup(
-							huh.NewMultiSelect[string]().
-								Options(
-									huh.NewOption("Enable 1M context window", "1m"),
-								).
-								Value(&contextOpts),
-						),
-					).Run()
-					if err != nil {
-						return err
-					}
 					if stringInSlice("1m", contextOpts) {
 						*fieldPtr = baseModel + "[1m]"
 						if p.Env == nil {
