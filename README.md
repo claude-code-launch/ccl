@@ -186,6 +186,18 @@ ccl
 ./ccl /compact
 ```
 
+### 5. 一键自我升级
+
+`ccl` 提供了非常便捷的在线检测及升级命令：
+
+```bash
+ccl update
+```
+
+运行后，`ccl` 会：
+- 自动查询 npm 镜像源上的最新版本。
+- 比对当前版本，若有新版本，将提示您选择升级方式（支持通过 `npm` 或 `go install` 一键自动下载并完成覆盖更新）。
+
 ---
 
 ## 📁 目录结构
@@ -197,6 +209,7 @@ ccl
 │   ├── doctor.go       # 环境及密钥连通性自检
 │   ├── list.go         # 列表展示提供商
 │   ├── root.go         # ccl 主入口及 Claude 进程拉起
+│   ├── update.go       # 自动检查并更新 ccl 版本
 │   └── use.go          # 快速切换激活提供商
 ├── internal/
 │   ├── claude/         # Claude Code CLI 自动安装、进程拉起及端口注入逻辑
