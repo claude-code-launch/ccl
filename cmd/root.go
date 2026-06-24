@@ -37,7 +37,7 @@ func Execute() {
 		firstArg := os.Args[1]
 		isCclCmd := false
 		switch firstArg {
-		case "use", "set", "list", "doctor", "settings", "models", "run", "help", "completion", "-h", "--help", "version", "del", "env", "update":
+		case "use", "set", "list", "doctor", "settings", "models", "run", "help", "completion", "-h", "--help", "version", "env", "update", "conf":
 			isCclCmd = true
 		}
 

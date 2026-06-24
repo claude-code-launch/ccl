@@ -36,7 +36,7 @@ var listCmd = &cobra.Command{
 				mark = "*"
 			}
 			p := cfg.Providers[name]
-			fmt.Printf("%s %s (%s, model: %s)\n", mark, name, p.Type, p.Model)
+				fmt.Printf("%s %s (%s, model: %s)\n", mark, name, p.Type, formatModelList(p.Model, true))
 		}
 
 		return nil

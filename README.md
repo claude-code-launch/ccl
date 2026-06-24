@@ -20,8 +20,8 @@
    - 采用本地轻量级的高性能并发 socket 服务（TCP），自动拦截并完美将 Anthropic 专有的 `Messages` 协议以及 `Streaming (SSE)` 转换为标准的 `OpenAI / Chat Completions` 协议。
    - 完美适配 Claude Code CLI 所有的 Tools（工具调用）和 System Prompt，使用体验 100% 丝滑。
 
-3. **精细模型槽位配置 (`ccl set` 高级模式)**
-   - 支持对 Claude Code 的每个模型档位（Default / Opus / Sonnet / Haiku / Custom）独立指定模型。
+3. **精细模型槽位配置 (`ccl set` / `ccl conf set` 高级模式)**
+   - 支持对 Claude Code 的每个模型档位（Opus / Sonnet / Haiku / Custom）独立指定模型。
    - 全新的 **双栏 TUI 交互界面**：左侧选项（1M 开关 + Done），右侧模型列表（支持实时输入过滤）。
    - **一键启用 1M 上下文**：为指定槽位开启 `[x] 1M` 后，自动在模型名添加 `[1m]` 后缀，并注入 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000` 环境变量。
    - 外层槽位列表实时显示已启用 1M 的槽位红色 `⚡1M` 标识。
@@ -32,7 +32,7 @@
    - 提供连接探针，对各 Provider 的 Endpoint 连通性、API 鉴权密钥进行安全测试。
 
 5. **多通道配置与灵活切换**
-   - 支持添加、切换、列出、删除以及管理多个独立网关。
+   - 支持添加、切换、列出、复制、删除以及管理多个独立网关。
    - 极简 CLI 交互界面，支持漂亮的终端可视化菜单。
 
 ---
@@ -64,7 +64,7 @@ mv ccl-darwin-arm64 /usr/local/bin/ccl
 ```bash
 git clone https://github.com/claude-code-launch/ccl.git
 cd ccl
-go build -o ccl main.go
+go build -o ccl .
 ```
 
 ### 方法三：Go 安装
@@ -99,6 +99,8 @@ ccl
 
 ```bash
 ccl set
+# 或
+ccl conf set
 # 或直接指定名称
 ccl set deepseek
 ```
@@ -107,6 +109,7 @@ ccl set deepseek
 
 | 步骤 | 说明 |
 |------|------|
+| Language | 选择交互语言（中文 / English） |
 | Provider Name | 唯一标识符，如 `deepseek`、`openrouter` |
 | Endpoint URL | API 地址，如 `https://api.deepseek.com` |
 | API Key | 密钥，本地存储 |
@@ -117,18 +120,17 @@ ccl set deepseek
 
 #### 高级槽位配置（双栏 TUI）
 
-进入高级配置后，外层以列表形式展示五个槽位：
+进入高级配置后，外层以列表形式展示四个槽位：
 
 ```
-Claude Slot Mapping
+Claude Slot 映射
 Select a slot to configure its model, or select [ ] 1m to toggle.
 
-> Default (general) — current: devstral-2512  ⚡1M
-  Opus — current: mistral-medium-2505
-  Sonnet — current: (not set)
+> Opus — current: devstral-2512  ⚡1M
+  Sonnet — current: mistral-medium-2505
   Haiku — current: (not set)
   Custom (user-defined slot) — current: (not set)
-  Done
+  完成
 ```
 
 选中某个槽位后，进入**双栏 TUI**：
@@ -161,17 +163,44 @@ Configure: Opus
 
 > 启用 1M 后，该槽位模型名自动追加 `[1m]` 后缀（如 `glm-5.2[1m]`），并在 provider 环境变量中注入 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`。
 
-#### 2. 查看与切换 Provider
+#### 2. Provider 管理
 
 ```bash
 # 查看所有已添加的服务商（* 为当前激活）
-ccl list
+ccl conf ls
+# 或显示全部模型
+ccl conf ls -a
+
+# 复制一个 Provider 配置
+ccl conf cp source target
+
+# 重命名一个 Provider
+ccl conf mv old-name new-name
+
+# 删除一个 Provider
+ccl conf rm name
 
 # 切换到指定 provider
-ccl use deepseek
+ccl use name
 ```
 
-#### 3. 环境诊断
+#### 3. 环境变量管理
+
+```bash
+# 查看当前 provider 的环境变量
+ccl env ls
+
+# 设置/修改环境变量
+ccl env KEY VALUE
+
+# 重命名环境变量
+ccl env mv OLD_KEY NEW_KEY
+
+# 删除环境变量
+ccl env rm KEY
+```
+
+#### 4. 环境诊断
 
 ```bash
 ccl doctor
@@ -179,7 +208,7 @@ ccl doctor
 
 如果检测到本地没有全局安装 `@anthropic-ai/claude-code`，会提示并尝试一键静默安装。
 
-#### 4. 启动 Claude Code
+#### 5. 启动 Claude Code
 
 ```bash
 # 直接启动
@@ -191,7 +220,7 @@ ccl --dangerously-skip-permissions
 ccl claude --dangerously-skip-permissions
 ```
 
-#### 5. 一键升级
+#### 6. 一键升级
 
 ```bash
 ccl update
@@ -216,24 +245,25 @@ git push origin v1.1.0
 
 ```text
 ├── cmd/
-│   ├── set.go              # 添加/更新提供商（交互式向导 + 高级槽位配置）
-│   ├── slot_config_tui.go  # 双栏 TUI：模型选择 + 1M 上下文开关
-│   ├── del.go              # 删除提供商
-│   ├── doctor.go           # 环境及密钥连通性自检
-│   ├── list.go             # 列表展示提供商
-│   ├── root.go             # ccl 主入口及 Claude 进程拉起
-│   ├── update.go           # 自动检查并更新 ccl 版本
-│   └── use.go              # 快速切换激活提供商
+│   ├── conf.go              # Provider 配置管理（cp/ls/mv/rm/set）
+│   ├── env.go               # 环境变量管理（ls/rm/mv）
+│   ├── set.go               # 添加/更新提供商（交互式向导 + 高级槽位配置）
+│   ├── slot_config_tui.go   # 双栏 TUI：模型选择 + 1M 上下文开关
+│   ├── doctor.go            # 环境及密钥连通性自检
+│   ├── list.go              # 列表展示提供商
+│   ├── root.go              # ccl 主入口及 Claude 进程拉起
+│   ├── translate.go         # 多语言支持（中文 / English）
+│   ├── update.go            # 自动检查并更新 ccl 版本
+│   └── use.go               # 快速切换激活提供商
 ├── internal/
-│   ├── claude/             # Claude Code CLI 自动安装、进程拉起及端口注入
-│   ├── config/             # yaml 配置文件读写
-│   ├── protocol/           # Anthropic ↔ OpenAI 协议转换 & Stream 事件转换
-│   ├── provider/           # 提供商实体定义（含槽位模型字段）
-│   └── proxy/              # 本地并发 TCP 代理服务、模型自动感知与映射
+│   ├── claude/              # Claude Code CLI 自动安装、进程拉起及端口注入
+│   ├── config/              # yaml 配置文件读写
+│   ├── protocol/            # Anthropic ↔ OpenAI 协议转换 & Stream 事件转换
+│   ├── provider/            # 提供商实体定义（含槽位模型字段）
+│   └── proxy/               # 本地并发 TCP 代理服务、模型自动感知与映射
 └── main.go
 ```
 
 ## 📄 开源许可
 
 本项目采用 MIT 协议开源。
-

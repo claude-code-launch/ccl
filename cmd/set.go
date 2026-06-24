@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/huh/v2"
+	"charm.land/bubbles/v2/key"
 	"charm.land/lipgloss/v2"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -14,12 +15,36 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// lang is the language setting for interactive prompts, set at the start of RunConfSet.
+var lang = Lang{code: "en"}
+
 var setCmd = &cobra.Command{
 	Use:   "set [name]",
 	Short: "Add or update an LLM provider configuration",
 	Long: `Add a new provider or update an existing one.
 You can automatically discover models from the API endpoint, or enter them manually.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		return RunConfSet(args)
+	},
+}
+
+
+	// RunConfSet is the shared logic for "ccl set" / "ccl conf set" / "ccl conf".
+	func RunConfSet(args []string) error {
+		// Language selection
+		_ = huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Language / 语言").
+					Description("Choose your preferred language for prompts").
+					Options(
+						huh.NewOption("English", "en"),
+						huh.NewOption("中文", "cn"),
+					).
+					Value(&lang.code),
+			),
+		).Run()
+
 		// 1. 加载配置
 		cfg, err := config.Load()
 		if err != nil {
@@ -38,12 +63,12 @@ You can automatically discover models from the API endpoint, or enter them manua
 			err = huh.NewForm(
 				huh.NewGroup(
 					huh.NewInput().
-						Title("Provider Name").
-						Description("A unique identifier (e.g., openrouter, deepseek, my-company)").
+						Title(lang.T("Provider Name", "Provider Name")).
+						Description(lang.T("例如：openrouter、deepseek、my-company", "A unique identifier (e.g., openrouter, deepseek, my-company)")).
 						Value(&targetName).
 						Validate(func(str string) error {
 							if strings.TrimSpace(str) == "" {
-								return errors.New("provider name cannot be empty")
+								return errors.New(lang.T("provider name 不能为空", "provider name cannot be empty"))
 							}
 							return nil
 						}),
@@ -60,52 +85,59 @@ You can automatically discover models from the API endpoint, or enter them manua
 		if existing, exists := cfg.Providers[targetName]; exists {
 			p = existing
 			isUpdate = true
-			fmt.Printf("🔄 Updating existing provider %q...\n\n", targetName)
+			fmt.Printf("🔄 %s %q...\n\n", lang.T("正在更新", "Updating existing provider"), targetName)
 		} else {
 			p.Name = targetName
-			fmt.Printf("✨ Creating new provider %q...\n\n", targetName)
+			fmt.Printf("✨ %s %q...\n\n", lang.T("正在创建", "Creating new provider"), targetName)
 		}
 
-		// Step 1: 基础凭据
+		// Step 1: 基础凭据（URL 和 Key 拆为两个 Group，PageUp 可回退）
+		// 创建自定义 KeyMap，添加 PageUp 支持回退到上一个 Group
+		customKeyMap := huh.NewDefaultKeyMap()
+		customKeyMap.Input.Prev = key.NewBinding(key.WithKeys("shift+tab", "pgup"), key.WithHelp("shift+tab/pgup", "back"))
+		customKeyMap.Input.Next = key.NewBinding(key.WithKeys("enter", "tab"), key.WithHelp("enter", "next"))
+		customKeyMap.Input.Submit = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit"))
+
 		err = huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
-					Title("Endpoint URL").
-					Description("Base API endpoint, e.g. https://api.openai.com/v1").
+					Title(lang.T("Endpoint URL", "Endpoint URL")).
+					Description(lang.T("API 端点地址，例如：https://api.openai.com/v1", "Base API endpoint, e.g. https://api.openai.com/v1")).
 					Value(&p.Endpoint).
 					Validate(func(str string) error {
 						if strings.TrimSpace(str) == "" {
-							return errors.New("endpoint cannot be empty")
-						}
-						return nil
-					}),
-
-				huh.NewInput().
-					Title("API Key").
-					Description("Your API key, stored locally only").
-					Value(&p.APIKey).
-					EchoMode(huh.EchoModePassword).
-					Validate(func(str string) error {
-						if strings.TrimSpace(str) == "" {
-							return errors.New("API Key cannot be empty")
+							return errors.New(lang.T("endpoint 不能为空", "endpoint cannot be empty"))
 						}
 						return nil
 					}),
 			),
-		).Run()
+			huh.NewGroup(
+				huh.NewInput().
+					Title(lang.T("API Key", "API Key")).
+					Description(lang.T("你的 API Key，仅存储在本地 · 按 PageUp 返回修改 URL", "Your API key, stored locally only · Press PageUp to go back to URL")).
+					Value(&p.APIKey).
+					EchoMode(huh.EchoModePassword).
+					Validate(func(str string) error {
+						if strings.TrimSpace(str) == "" {
+							return errors.New(lang.T("API Key 不能为空", "API Key cannot be empty"))
+						}
+						return nil
+					}),
+			),
+		).WithKeyMap(customKeyMap).Run()
 		if err != nil {
 			return err
 		}
 
 		// Step 2: 自动探测协议与模型
-		fmt.Println("\n🔍 Connecting to endpoint to detect protocol and models...")
+		fmt.Println(lang.T("\n🔍 正在连接端点，探测协议和模型...", "\n🔍 Connecting to endpoint to detect protocol and models..."))
 		detectedType, discoveredModelsRaw := detectProtocolAndModels(p.Endpoint, p.APIKey)
 		p.Type = detectedType
 
 		if detectedType != "" {
-			fmt.Printf("✅ Detected Protocol: %s\n", strings.ToUpper(p.Type))
+			fmt.Printf("✅ %s: %s\n", lang.T("检测到协议", "Detected Protocol"), strings.ToUpper(p.Type))
 		} else {
-			fmt.Println("⚠️  Could not detect protocol automatically")
+			fmt.Println(lang.T("⚠️  无法自动检测协议", "⚠️  Could not detect protocol automatically"))
 		}
 
 		var confirmType = true
@@ -113,7 +145,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 			err = huh.NewForm(
 				huh.NewGroup(
 					huh.NewConfirm().
-						Title(fmt.Sprintf("Use %s protocol?", strings.ToUpper(p.Type))).
+						Title(lang.Tf("使用 %s 协议？", "Use %s protocol?", strings.ToUpper(p.Type))).
 						Value(&confirmType),
 				),
 			).Run()
@@ -126,7 +158,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 			err = huh.NewForm(
 				huh.NewGroup(
 					huh.NewSelect[string]().
-						Title("Select Provider Type").
+						Title(lang.T("选择 Provider 类型", "Select Provider Type")).
 						Options(
 							huh.NewOption("OpenAI Compatible", "openai"),
 							huh.NewOption("Anthropic Native", "anthropic"),
@@ -171,12 +203,12 @@ You can automatically discover models from the API endpoint, or enter them manua
 
 		// 如果没有任何模型（既没探测到也没旧配置），提示用户输入模型池（逗号分隔）
 		if len(selectedModels) == 0 {
-			fmt.Println("⚠️  No models discovered and no existing model list found.")
+			fmt.Println(lang.T("⚠️  未探测到模型，也没有已有的模型列表。", "⚠️  No models discovered and no existing model list found."))
 			err = huh.NewForm(
 				huh.NewGroup(
 					huh.NewInput().
-						Title("Model List").
-						Description("Comma separated list of model IDs to populate the model pool").
+						Title(lang.T("模型列表", "Model List")).
+						Description(lang.T("逗号分隔的模型 ID 列表，用于填充模型池", "Comma separated list of model IDs to populate the model pool")).
 						Value(&p.Model),
 				),
 			).Run()
@@ -201,8 +233,8 @@ You can automatically discover models from the API endpoint, or enter them manua
 		err = huh.NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
-					Title("Configure Claude Code advanced model options?").
-					Description("Includes per-slot mapping (default/opus/sonnet/haiku/custom), effort level, and model lock.").
+					Title(lang.T("配置 Claude Code 高级模型选项？", "Configure Claude Code advanced model options?")).
+					Description(lang.T("包含每个 slot 的映射（opus/sonnet/haiku/custom）、effort level 和 model lock。", "Includes per-slot mapping (opus/sonnet/haiku/custom), effort level, and model lock.")).
 					Value(&configAdvanced),
 			),
 		).Run()
@@ -211,10 +243,10 @@ You can automatically discover models from the API endpoint, or enter them manua
 		}
 
 		if configAdvanced {
-			fmt.Println("\n--- Claude Code Advanced Model Configuration ---")
+			fmt.Println(lang.T("\n--- Claude Code 高级模型配置 ---", "\n--- Claude Code Advanced Model Configuration ---"))
 
 			baseSlotNames := []string{
-				"Default (general)",
+				"Opus",
 				"Opus",
 				"Sonnet",
 				"Haiku",
@@ -222,7 +254,6 @@ You can automatically discover models from the API endpoint, or enter them manua
 			}
 
 			slotMap := map[string]*string{
-				"Default (general)":          &p.CustomModelID,
 				"Opus":                       &p.OpusModel,
 				"Sonnet":                     &p.SonnetModel,
 				"Haiku":                      &p.HaikuModel,
@@ -244,23 +275,23 @@ You can automatically discover models from the API endpoint, or enter them manua
 						indicator = "  " + red.Render("⚡1M")
 					}
 
-					slotLabel := fmt.Sprintf("%s — current: (not set)%s", name, indicator)
+					slotLabel := fmt.Sprintf("%s — %s%s", name, lang.T("当前: (未设置)", "current: (not set)"), indicator)
 					if ptr != nil && *ptr != "" {
-						slotLabel = fmt.Sprintf("%s — current: %s%s", name, strings.TrimSuffix(*ptr, "[1m]"), indicator)
+						slotLabel = fmt.Sprintf("%s — %s%s%s", name, lang.T("当前: ", "current: "), strings.TrimSuffix(*ptr, "[1m]"), indicator)
 					}
 					opts = append(opts, huh.NewOption(slotLabel, "slot:"+name))
 				}
-				opts = append(opts, huh.NewOption("Done", "done"))
+				opts = append(opts, huh.NewOption(lang.T("完成", "Done"), "done"))
 				return opts
 			}
 
-			pick := "slot:Default (general)"
+			pick := "slot:Opus"
 			for {
 				err = huh.NewForm(
 					huh.NewGroup(
 						huh.NewSelect[string]().
-							Title("Claude Slot Mapping").
-							Description("Select a slot to configure its model, or select [ ] 1m to toggle.").
+							Title(lang.T("Claude Slot 映射", "Claude Slot Mapping")).
+							Description(lang.T("选择一个 slot 配置模型，或选择 [ ] 1m 切换大上下文模式。", "Select a slot to configure its model, or select [ ] 1m to toggle.")).
 							Options(buildOpts()...).
 							Value(&pick),
 					),
@@ -277,7 +308,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 					slotName := strings.TrimPrefix(pick, "slot:")
 				fieldPtr, ok := slotMap[slotName]
 				if !ok {
-					fmt.Printf("⚠️  No mapping for slot %q, skipping.\n", slotName)
+					fmt.Printf("⚠️  %s %q，跳过。\n", lang.T("未找到 slot 映射", "No mapping for slot"), slotName)
 					continue
 				}
 
@@ -301,8 +332,8 @@ You can automatically discover models from the API endpoint, or enter them manua
 					err = huh.NewForm(
 						huh.NewGroup(
 							huh.NewInput().
-								Title(fmt.Sprintf("%s - Manual Entry", slotName)).
-								Description("Enter model ID for this slot").
+								Title(lang.Tf("%s - 手动输入", "%s - Manual Entry", slotName)).
+								Description(lang.T("输入该 slot 的模型 ID", "Enter model ID for this slot")).
 								Value(&manual),
 						),
 					).Run()
@@ -328,7 +359,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 					}
 				}
 
-				fmt.Printf("✅ %s set to %q\n\n", slotName, *fieldPtr)
+				fmt.Printf("✅ %s %s：%q\n\n", slotName, lang.T("设置为", "set to"), *fieldPtr)
 				pick = "slot:" + slotName
 			}
 
@@ -336,7 +367,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 			err = huh.NewForm(
 				huh.NewGroup(
 					huh.NewSelect[string]().
-						Title("Effort Level").
+						Title(lang.T("Effort Level（思考力度）", "Effort Level")).
 						Description("CLAUDE_CODE_EFFORT_LEVEL").
 						Options(
 							huh.NewOption("(unset)", ""),
@@ -363,7 +394,7 @@ You can automatically discover models from the API endpoint, or enter them manua
 			_ = huh.NewForm(
 				huh.NewGroup(
 					huh.NewConfirm().
-						Title("Set this as your active provider now?").
+						Title(lang.T("立即设为当前使用的 Provider？", "Set this as your active provider now?")).
 						Value(&activateNow),
 				),
 			).Run()
@@ -382,16 +413,15 @@ You can automatically discover models from the API endpoint, or enter them manua
 
 		fmt.Println("")
 		if isUpdate {
-			fmt.Printf("✅ Successfully updated provider %q\n", p.Name)
+			fmt.Printf("✅ %s %q\n", lang.T("已更新 Provider", "Successfully updated provider"), p.Name)
 		} else {
-			fmt.Printf("✅ Successfully added provider %q\n", p.Name)
+			fmt.Printf("✅ %s %q\n", lang.T("已添加 Provider", "Successfully added provider"), p.Name)
 		}
 		if cfg.ActiveProvider == p.Name {
-			fmt.Println("🔥 This provider is now active")
+			fmt.Println(lang.T("🔥 此 Provider 现在是当前使用的", "🔥 This provider is now active"))
 		}
 		return nil
-	},
-}
+	}
 
 func init() {
 	rootCmd.AddCommand(setCmd)
