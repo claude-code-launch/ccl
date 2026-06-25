@@ -20,5 +20,6 @@ type Provider struct {
 
 type Config struct {
 	ActiveProvider string              `yaml:"active_provider" mapstructure:"active_provider"`
+	Lang           string              `yaml:"lang,omitempty" mapstructure:"lang,omitempty"`
 	Providers      map[string]Provider `yaml:"providers" mapstructure:"providers"`
 }

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/huh/v2"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/spf13/cobra"
 )
 
@@ -39,31 +39,27 @@ var updateCmd = &cobra.Command{
 
 		// Prompt user for update method
 		var method string
-		var options []huh.Option[string]
+		fmt.Println(locale.T("选择更新方式:", "Choose update method:"))
+		fmt.Println("1. Update via npm (Global install)")
+		fmt.Println("2. Update via Go (go install)")
+		fmt.Println("3. View installation instructions")
+		fmt.Println("4. Cancel")
+		fmt.Print("Choose [1-4]: ")
+		var choiceStr string
+		fmt.Scanln(&choiceStr)
+		choiceStr = strings.ToLower(strings.TrimSpace(choiceStr))
 
-		// Check if npm is available
-		if _, err := exec.LookPath("npm"); err == nil {
-			options = append(options, huh.NewOption("Update via npm (Global install)", "npm"))
-		}
-
-		// Check if go is available
-		if _, err := exec.LookPath("go"); err == nil {
-			options = append(options, huh.NewOption("Update via Go (go install)", "go"))
-		}
-
-		options = append(options, huh.NewOption("View installation instructions", "manual"))
-		options = append(options, huh.NewOption("Cancel", "cancel"))
-
-		err = huh.NewForm(
-			huh.NewGroup(
-				huh.NewSelect[string]().
-					Title("Choose Update Method").
-					Options(options...).
-					Value(&method),
-			),
-		).Run()
-		if err != nil {
-			return err
+		switch choiceStr {
+		case "1", "npm":
+			method = "npm"
+		case "2", "go":
+			method = "go"
+		case "3", "manual":
+			method = "manual"
+		case "4", "cancel", "":
+			method = "cancel"
+		default:
+			method = "cancel"
 		}
 
 		switch method {

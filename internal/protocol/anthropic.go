@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -124,12 +123,12 @@ func GetAnthropicModels(baseURL, key string) (string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 
-		errmsg, err := io.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Printf("Failed to get Anthropic models: %s\n", err.Error())
-			return "", err
-		}
-		fmt.Printf("[Anthropic config error] url:%s,key:%s, status:%d, msg:%s \n", baseURL, key, resp.StatusCode, string(errmsg))
+		// errmsg, err := io.ReadAll(resp.Body)
+		// if err != nil {
+		// 	fmt.Printf("Failed to get Anthropic models: %s\n", err.Error())
+		// 	return "", err
+		// }
+		// fmt.Printf("[Anthropic config error] url:%s,key:%s, status:%d, msg:%s \n", baseURL, key, resp.StatusCode, string(errmsg))
 		return "", errors.New(resp.Status)
 	}
 

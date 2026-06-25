@@ -5,13 +5,12 @@ import (
 	"sort"
 	"strings"
 
-	"charm.land/huh/v2"
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/spf13/cobra"
 )
 
 // envCmd manages environment variables for the active provider.
-// Without a subcommand it expects "KEY VALUE" args to set/modify a variable.
 var envCmd = &cobra.Command{
 	Use:   "env [KEY VALUE | ls | rm KEY | mv OLD NEW]",
 	Short: "Manage environment variables",
@@ -30,7 +29,6 @@ Rename a variable:
   ccl env mv OLD_KEY NEW_KEY
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// "ccl env KEY VALUE" — set/modify
 		if len(args) != 2 {
 			return fmt.Errorf("expected KEY and VALUE arguments, or a subcommand (ls, rm, mv). See ccl env --help")
 		}
@@ -66,7 +64,7 @@ Rename a variable:
 	},
 }
 
-// envLsCmd lists all environment variables for the active provider.
+// envLsCmd lists environment variables.
 var envLsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List all environment variables",
@@ -132,19 +130,12 @@ var envRmCmd = &cobra.Command{
 			return fmt.Errorf("key %q not found in %q", key, cfg.ActiveProvider)
 		}
 
-		var confirm bool
-		err = huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Delete %s from %q?", key, cfg.ActiveProvider)).
-					Value(&confirm),
-			),
-		).Run()
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			fmt.Println("Cancelled.")
+		fmt.Printf(locale.T("确定要删除 %s 吗？(y/N): ", "Delete %s? (y/N): "), key)
+		var confirmStr string
+		fmt.Scanln(&confirmStr)
+		confirmStr = strings.ToLower(strings.TrimSpace(confirmStr))
+		if confirmStr != "y" && confirmStr != "yes" {
+			fmt.Println(locale.T("已取消。", "Cancelled."))
 			return nil
 		}
 
@@ -194,19 +185,12 @@ var envMvCmd = &cobra.Command{
 		}
 
 		if _, exists := p.Env[newKey]; exists {
-			var overwrite bool
-			err = huh.NewForm(
-				huh.NewGroup(
-					huh.NewConfirm().
-						Title(fmt.Sprintf("Key %q already exists. Overwrite with value from %q?", newKey, oldKey)).
-						Value(&overwrite),
-				),
-			).Run()
-			if err != nil {
-				return err
-			}
-			if !overwrite {
-				fmt.Println("Cancelled.")
+			fmt.Printf(locale.T("键 %s 已存在，是否覆盖？(y/N): ", "Key %s already exists. Overwrite? (y/N): "), newKey)
+			var confirmStr string
+			fmt.Scanln(&confirmStr)
+			confirmStr = strings.ToLower(strings.TrimSpace(confirmStr))
+			if confirmStr != "y" && confirmStr != "yes" {
+				fmt.Println(locale.T("已取消。", "Cancelled."))
 				return nil
 			}
 		}

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/huh/v2"
+	"github.com/claude-code-launch/ccl/internal/locale"
 )
 
 // IsInstalled returns true if the 'claude' CLI executable is found in system PATH.
@@ -124,18 +124,12 @@ func RunInstallerScript() error {
 // AutoInstall attempts to install Claude CLI globally via official script.
 // It uses curl/bash on macOS/Linux and powershell on Windows.
 func AutoInstall() error {
-	var confirm bool
-	err := huh.NewConfirm().
-		Title("Claude Code is not installed").
-		Description("Would you like ccl to automatically install it via the official installer script?").
-		Value(&confirm).
-		Run()
-
-	if err != nil {
-		return err
-	}
-
-	if !confirm {
+	fmt.Println("Claude Code is not installed.")
+	fmt.Print(locale.T("是否自动安装？(Y/n): ", "Automatically install? (Y/n): "))
+	var confirmStr string
+	fmt.Scanln(&confirmStr)
+	confirmStr = strings.ToLower(strings.TrimSpace(confirmStr))
+	if confirmStr == "n" || confirmStr == "no" {
 		return fmt.Errorf("installation cancelled. You can install it manually by referring to https://code.claude.com/")
 	}
 
