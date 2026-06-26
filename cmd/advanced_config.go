@@ -28,7 +28,7 @@ var (
 	grayText        = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	selectedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	lightning       = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render("⚡1M")
-	filterStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	filterStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	langTipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("239")).Padding(0, 1).MarginTop(1)
 )
@@ -73,7 +73,7 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	ki.SetValue(p.APIKey)
 
 	fi := textinput.New()
-		fi.Placeholder = ""
+	fi.Placeholder = ""
 
 	m := &AdvancedConfigModel{
 		p:              p,
@@ -284,6 +284,13 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			}
 
+		// case "space":
+		// 	// 空格键：Page 2 切换槽位的 1M 上下文开关
+		// 	if m.page == 2 && m.cursor < 4 {
+		// 		slot := []string{"opus", "sonnet", "haiku", "custom"}[m.cursor]
+		// 		m.oneMSlots[slot] = !m.oneMSlots[slot]
+		// 	}
+
 		case "shift+tab":
 			// Shift+Tab → 上一项（同 ↑）
 			m.cursor--
@@ -299,10 +306,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.page == 4 {
 					m.cursor = 2
 				}
-			}
-			if m.page == 2 && m.cursor < 4 {
-				slot := []string{"opus", "sonnet", "haiku", "custom"}[m.cursor]
-				m.oneMSlots[slot] = !m.oneMSlots[slot]
 			}
 
 		case "enter":
@@ -383,7 +386,13 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.filterInput.Blur()
 				}
 			case 2:
-				if m.cursor == 4 {
+				if m.cursor < 4 {
+					// 当光标在槽位上时，按 enter 切换 1M 状态
+					slot := []string{"opus", "sonnet", "haiku", "custom"}[m.cursor]
+					m.oneMSlots[slot] = !m.oneMSlots[slot]
+					m.cursor++
+				} else if m.cursor == 4 {
+					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
 					m.page = 3
 					m.cursor = 0
 				}
@@ -459,7 +468,183 @@ func renderBottomButtons(page int, currentCursor int, nextIdx, backIdx int) stri
 	return fmt.Sprintf("\n%s    %s\n\n", nextStr, backStr)
 }
 
-func (m *AdvancedConfigModel) View() tea.View {
+//	func (m *AdvancedConfigModel) View() tea.View {
+//		var body strings.Builder
+//		protoLabel := protoBadgeStyle.Render("Protocol: " + m.getProtocol())
+//
+//		switch m.page {
+//		case 0:
+//			// ==================== PAGE 0: 凭据配置 ====================
+//			body.WriteString(titleStyle.Render(locale.T("基础凭据配置", "Base Credentials")) + badgeStyle.Render("Credentials") + protoLabel + "\n\n")
+//			prefURL := "  "
+//			if m.cursor == 0 {
+//				prefURL = selectedStyle.Render("> ")
+//			}
+//			body.WriteString(fmt.Sprintf("%s%-14s: %s\n", prefURL, purpleText.Render("Endpoint URL"), m.urlInput.View()))
+//
+//			prefKey := "  "
+//			if m.cursor == 1 {
+//				prefKey = selectedStyle.Render("> ")
+//			}
+//			body.WriteString(fmt.Sprintf("%s%-14s: %s\n", prefKey, purpleText.Render("API Key"), m.keyInput.View()))
+//
+//			body.WriteString(renderBottomButtons(m.page, m.cursor, 2, 3))
+//			body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
+//
+//		case 1:
+//			// ==================== PAGE 1: 槽位映射配置 ====================
+//			if !m.filterInput.Focused() {
+//				body.WriteString(titleStyle.Render(locale.T("Claude Slot 映射配置", "Claude Slot Mapping")) + badgeStyle.Render("Slot List") + protoLabel + "\n\n")
+//				renderRow := func(idx int, label, val string) {
+//					prefix := "  "
+//					labelStr := purpleText.Render(label)
+//					if m.cursor == idx {
+//						prefix = selectedStyle.Render("> ")
+//						labelStr = selectedStyle.Render(label) + grayText.Render(" ("+locale.T("enter 筛选", "enter to list")+")")
+//					}
+//					modelStr := cyanText.Render(val)
+//					if val == "" {
+//						modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
+//					}
+//					body.WriteString(fmt.Sprintf("%s%-6s – %s\n", prefix, labelStr, modelStr))
+//				}
+//				renderRow(0, "Opus", m.p.OpusModel)
+//				renderRow(1, "Sonnet", m.p.SonnetModel)
+//				renderRow(2, "Haiku", m.p.HaikuModel)
+//				renderRow(3, "Custom", m.p.LockModel)
+//
+//				body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
+//				body.WriteString(grayText.Render(locale.T("↑↓ 移动光标 · ←→ 切换按钮 · enter 选择编辑/跳转", "↑↓ Move · ←→ Toggle Buttons · enter select")))
+//			} else {
+//				slotName := []string{"Opus", "Sonnet", "Haiku", "Custom"}[m.activeSlot]
+//				body.WriteString(titleStyle.Render(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName)))
+//				body.WriteString("\n" + filterStyle.Render(locale.T("🔍 过滤模型: ", "🔍 Filter model: ")) + m.filterInput.View() + "\n")
+//				for i, mod := range m.filteredPool {
+//					prefix := "   "
+//					line := grayText.Render(mod)
+//					if i == m.slotListCursor {
+//						prefix = selectedStyle.Render(" > ")
+//						line = selectedStyle.Render(mod)
+//					}
+//					body.WriteString(prefix + line + "\n")
+//				}
+//				body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("键盘输入任意字符快速过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Type to filter · ↑↓ Scroll · enter lock · esc cancel")) + "\n")
+//			}
+//
+//		case 2:
+//			// ==================== PAGE 2: 1M 上下文配置页 (精简) ====================
+//			body.WriteString(titleStyle.Render(locale.T("1M 上下文配置", "1M Context")) + badgeStyle.Render("MultiSelect") + protoLabel + "\n")
+//			body.WriteString(grayText.Render(locale.T("enter 切换开关状态", "enter Toggle Slot Status")) + "\n\n")
+//			renderMultiRow := func(idx int, label, modelVal string) {
+//				box := "[ ]"
+//				slotKey := []string{"opus", "sonnet", "haiku", "custom"}[idx]
+//				if m.oneMSlots[slotKey] {
+//					box = "[x]"
+//				}
+//
+//				// ✅ 核心修复：将游标和方括号合并渲染，避免 \x1b[0m[ 贴在一起导致终端解析错误
+//				var indicator string
+//				if m.cursor == idx {
+//					indicator = selectedStyle.Render("> " + box)
+//				} else {
+//					indicator = "  " + box
+//				}
+//
+//				itemText := grayText.Render(label)
+//				if m.cursor == idx {
+//					itemText = titleStyle.Render(label)
+//				}
+//
+//				modelStr := cyanText.Render(modelVal)
+//				if modelVal == "" {
+//					modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
+//				}
+//
+//				suffix := ""
+//				if m.oneMSlots[slotKey] {
+//					suffix = " " + lightning
+//				}
+//
+//				// 这里改用组合好的 indicator 替换原先的 %s%s
+//				body.WriteString(fmt.Sprintf("%s  %-14s – %s%s\n", indicator, itemText, modelStr, suffix))
+//			}
+//
+//			renderMultiRow(0, "Opus Config", m.p.OpusModel)
+//			renderMultiRow(1, "Sonnet Config", m.p.SonnetModel)
+//			renderMultiRow(2, "Haiku Config", m.p.HaikuModel)
+//			renderMultiRow(3, "Custom Config", m.p.LockModel)
+//
+//			body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
+//			body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))
+//		case 3:
+//			// ==================== PAGE 3: Reasoning Effort 思考流配置 ====================
+//			body.WriteString(titleStyle.Render(locale.T("Reasoning Effort 思考流配置", "Reasoning Effort")) + badgeStyle.Render("Effort") + protoLabel + "\n\n")
+//			for i, level := range m.effortLevels {
+//				prefix := "  "
+//				if m.cursor == i {
+//					prefix = selectedStyle.Render("> ")
+//				}
+//				radio := "( )"
+//				if m.effortCursor == i {
+//					radio = purpleText.Render("(●)")
+//				}
+//				itemText := grayText.Render(level)
+//				if m.cursor == i {
+//					itemText = titleStyle.Render(level)
+//				}
+//				body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radio, itemText))
+//			}
+//
+//			body.WriteString(renderBottomButtons(m.page, m.cursor, 6, 7))
+//			body.WriteString(grayText.Render(locale.T("↑↓ 移动选择级别 · ←→ 切换按钮 · enter 前进/后退", "↑↓ Move · ←→ Toggle Buttons · enter next/back")))
+//
+//		case 4:
+//			// ==================== PAGE 4: 核对并应用此配置 ====================
+//			body.WriteString(titleStyle.Render(locale.T("核对并应用此 Provider 配置", "Review & Apply")) + badgeStyle.Render("Confirm") + "\n\n")
+//			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Endpoint", cyanText.Render(m.p.Endpoint)))
+//			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Protocol", purpleText.Render(m.getProtocol())))
+//			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Effort Level", purpleText.Render(m.effortLevels[m.effortCursor])))
+//
+//			body.WriteString("\n  " + locale.T("是否将该 Provider 设为当前激活配置？", "Set as active provider right now?") + "\n\n")
+//
+//			yesStr, noStr := " "+locale.T("是", "Yes")+" ", " "+locale.T("否", "No")+" "
+//			if m.IsActiveChosen {
+//				yesStr = selectedStyle.Render(" > " + locale.T("是", "Yes") + " <")
+//				noStr = grayText.Render("  " + locale.T("否", "No") + " ")
+//			} else {
+//				yesStr = grayText.Render("  " + locale.T("是", "Yes") + " ")
+//				noStr = selectedStyle.Render(" > " + locale.T("否", "No") + " <")
+//			}
+//			if m.cursor == 0 || m.cursor == 1 {
+//				body.WriteString("  " + yesStr + "  " + noStr + "\n")
+//			} else {
+//				body.WriteString("    " + strings.TrimSpace(yesStr) + "    " + strings.TrimSpace(noStr) + "\n")
+//			}
+//
+//			saveStr := "  " + locale.T("完成并保存", "Save & Finish")
+//			if m.cursor == 2 {
+//				saveStr = selectedStyle.Render("> " + locale.T("完成并保存", "Save & Finish"))
+//			}
+//			body.WriteString("\n" + saveStr + "\n\n")
+//			body.WriteString(grayText.Render(locale.T("←→ 切换激活选项 · ↑↓ 移动 · enter 保存", "←→ Toggle · ↑↓ Move · enter save")))
+//		}
+//
+//		// 指示器
+//		dots := []string{grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫")}
+//		activeColors := []string{"🔵", "🟣", "🟢", "🟡", "🔴"}
+//		dots[m.page] = activeColors[m.page]
+//		pager := fmt.Sprintf("\n\n%s", lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(strings.Join(dots, "   ")))
+//
+//		langTipMsg := locale.T(
+//			"💡 提示: 想要更改终端显示语言？使用 `ccl lang` 即可轻松修改",
+//			"💡 Tip: Want to change TUI display language? Use `ccl lang` to modify it",
+//		)
+//		langTipBanner := "\n" + lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(langTipStyle.Render(langTipMsg))
+//
+//		finalStr := windowStyle.Render(body.String()) + pager + langTipBanner
+//		return tea.NewView(finalStr)
+//	}
+func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 	var body strings.Builder
 	protoLabel := protoBadgeStyle.Render("Protocol: " + m.getProtocol())
 
@@ -471,13 +656,17 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.cursor == 0 {
 			prefURL = selectedStyle.Render("> ")
 		}
-		body.WriteString(fmt.Sprintf("%s%-14s: %s\n", prefURL, purpleText.Render("Endpoint URL"), m.urlInput.View()))
+		// ✅ 修复：先对纯文本 "Endpoint URL" 填充至 14 宽，再加颜色
+		paddedURLText := purpleText.Render(fmt.Sprintf("%-14s", "Endpoint URL"))
+		body.WriteString(fmt.Sprintf("%s%s: %s\n", prefURL, paddedURLText, m.urlInput.View()))
 
 		prefKey := "  "
 		if m.cursor == 1 {
 			prefKey = selectedStyle.Render("> ")
 		}
-		body.WriteString(fmt.Sprintf("%s%-14s: %s\n", prefKey, purpleText.Render("API Key"), m.keyInput.View()))
+		// ✅ 修复：先对纯文本 "API Key" 填充至 14 宽，再加颜色
+		paddedKeyText := purpleText.Render(fmt.Sprintf("%-14s", "API Key"))
+		body.WriteString(fmt.Sprintf("%s%s: %s\n", prefKey, paddedKeyText, m.keyInput.View()))
 
 		body.WriteString(renderBottomButtons(m.page, m.cursor, 2, 3))
 		body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
@@ -488,16 +677,19 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(titleStyle.Render(locale.T("Claude Slot 映射配置", "Claude Slot Mapping")) + badgeStyle.Render("Slot List") + protoLabel + "\n\n")
 			renderRow := func(idx int, label, val string) {
 				prefix := "  "
-				labelStr := purpleText.Render(label)
+				var labelStr string
 				if m.cursor == idx {
 					prefix = selectedStyle.Render("> ")
 					labelStr = selectedStyle.Render(label) + grayText.Render(" ("+locale.T("enter 筛选", "enter to list")+")")
+				} else {
+					// ✅ 修复：先对纯文本 label 填充至 6 宽，再加颜色
+					labelStr = purpleText.Render(fmt.Sprintf("%-6s", label))
 				}
 				modelStr := cyanText.Render(val)
 				if val == "" {
 					modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
 				}
-				body.WriteString(fmt.Sprintf("%s%-6s – %s\n", prefix, labelStr, modelStr))
+				body.WriteString(fmt.Sprintf("%s%s – %s\n", prefix, labelStr, modelStr))
 			}
 			renderRow(0, "Opus", m.p.OpusModel)
 			renderRow(1, "Sonnet", m.p.SonnetModel)
@@ -523,24 +715,30 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 
 	case 2:
-		// ==================== PAGE 2: 1M 上下文配置页 (精简) ====================
+		// ==================== PAGE 2: 1M 上下文配置页 ====================
 		body.WriteString(titleStyle.Render(locale.T("1M 上下文配置", "1M Context")) + badgeStyle.Render("MultiSelect") + protoLabel + "\n")
-		body.WriteString(grayText.Render(locale.T("space 切换开关状态", "space Toggle Slot Status")) + "\n\n")
+		body.WriteString(grayText.Render(locale.T("enter 切换开关状态", "enter Toggle Slot Status")) + "\n\n")
 
 		renderMultiRow := func(idx int, label, modelVal string) {
-			prefix := "  "
-			if m.cursor == idx {
-				prefix = selectedStyle.Render("> ")
-			}
 			box := "[ ]"
 			slotKey := []string{"opus", "sonnet", "haiku", "custom"}[idx]
 			if m.oneMSlots[slotKey] {
 				box = "[x]"
 			}
 
-			itemText := grayText.Render(label)
+			// ✅ 修复：统一包装前缀，确保选中与未选中时完美对齐
+			var indicator string
 			if m.cursor == idx {
-				itemText = titleStyle.Render(label)
+				indicator = selectedStyle.Render("> " + box)
+			} else {
+				indicator = "  " + box
+			}
+
+			// ✅ 核心修复：先对纯文本进行 14 位填充对齐，然后再渲染样式！
+			paddedLabel := fmt.Sprintf("%-14s", label)
+			itemText := grayText.Render(paddedLabel)
+			if m.cursor == idx {
+				itemText = titleStyle.Render(paddedLabel)
 			}
 
 			modelStr := cyanText.Render(modelVal)
@@ -553,7 +751,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 				suffix = " " + lightning
 			}
 
-			body.WriteString(fmt.Sprintf("%s%s  %-14s – %s%s\n", prefix, box, itemText, modelStr, suffix))
+			// ✅ 修复：这里直接拼接 %s，不再使用破绽百出的 %-14s
+			body.WriteString(fmt.Sprintf("%s  %s – %s%s\n", indicator, itemText, modelStr, suffix))
 		}
 
 		renderMultiRow(0, "Opus Config", m.p.OpusModel)
@@ -562,7 +761,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 		renderMultiRow(3, "Custom Config", m.p.LockModel)
 
 		body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
-		body.WriteString(grayText.Render(locale.T("space 切换 · ↑↓ 移动 · ←→ 切换按钮 · enter 下一步", "space Toggle · ↑↓ Move · ←→ Toggle Buttons · enter next")))
+		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))
 
 	case 3:
 		// ==================== PAGE 3: Reasoning Effort 思考流配置 ====================
@@ -597,11 +796,11 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 		yesStr, noStr := " "+locale.T("是", "Yes")+" ", " "+locale.T("否", "No")+" "
 		if m.IsActiveChosen {
-			yesStr = selectedStyle.Render(" > "+locale.T("是", "Yes")+" <")
-			noStr = grayText.Render("  "+locale.T("否", "No")+" ")
+			yesStr = selectedStyle.Render(" > " + locale.T("是", "Yes") + " <")
+			noStr = grayText.Render("  " + locale.T("否", "No") + " ")
 		} else {
-			yesStr = grayText.Render("  "+locale.T("是", "Yes")+" ")
-			noStr = selectedStyle.Render(" > "+locale.T("否", "No")+" <")
+			yesStr = grayText.Render("  " + locale.T("是", "Yes") + " ")
+			noStr = selectedStyle.Render(" > " + locale.T("否", "No") + " <")
 		}
 		if m.cursor == 0 || m.cursor == 1 {
 			body.WriteString("  " + yesStr + "  " + noStr + "\n")
@@ -630,5 +829,5 @@ func (m *AdvancedConfigModel) View() tea.View {
 	langTipBanner := "\n" + lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(langTipStyle.Render(langTipMsg))
 
 	finalStr := windowStyle.Render(body.String()) + pager + langTipBanner
-	return tea.NewView(finalStr)
+	return tea.NewView(finalStr) // ✅ 修复：直接返回渲染后的字符串
 }
