@@ -1,0 +1,24 @@
+.github/workflows/release.yml
+  s_36e0babe273baf::t_91eda9468e329f 22,25,48,63,74,77,83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "c91bbc13583e22bb4034b674cae8b13f4ea5e315",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_36e0babe273baf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cd09f4bc-a722-4270-bd5c-620800380389",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
