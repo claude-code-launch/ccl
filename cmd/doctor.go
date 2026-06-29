@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/config"
@@ -67,6 +69,7 @@ var doctorCmd = &cobra.Command{
 
 		// 5. Test Endpoint reachability and API Authentication key
 		if p.Endpoint != "" {
+			endpointReachable := false
 			fmt.Printf("  - Testing reachability and auth key validation...\n")
 			client := http.Client{
 				Timeout: 5 * time.Second,
@@ -85,63 +88,257 @@ var doctorCmd = &cobra.Command{
 			req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 			if err != nil {
 				fmt.Printf("\n✗ Failed to create validation request: %v\n", err)
-				return nil
-			}
-
-			// Add API Key headers
-			if p.Type == "openai" {
-				req.Header.Set("Authorization", "Bearer "+p.APIKey)
 			} else {
-				req.Header.Set("x-api-key", p.APIKey)
-				req.Header.Set("anthropic-version", "2023-06-01")
-			}
+				// Add API Key headers
+				if p.Type == "openai" {
+					req.Header.Set("Authorization", "Bearer "+p.APIKey)
+				} else {
+					req.Header.Set("x-api-key", p.APIKey)
+					req.Header.Set("anthropic-version", "2023-06-01")
+				}
 
-			resp, err := client.Do(req)
-			if err != nil {
-				fmt.Printf("\n✗ Endpoint is unreachable: %v\n", err)
-			} else {
-				defer resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					fmt.Printf(" Success! Connected and verified. (HTTP %d)\n", resp.StatusCode)
-				} else if resp.StatusCode == http.StatusUnauthorized {
-					fmt.Printf("\n✗ Authentication failed! (HTTP %d). Please verify your API Key.\n", resp.StatusCode)
-				} else if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-					// Fallback strategy if GET models returns 404 or 403 on third-party proxies
-					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer fallbackCancel()
+				resp, err := client.Do(req)
+				if err != nil {
+					fmt.Printf("\n✗ Endpoint is unreachable: %v\n", err)
+				} else {
+					defer resp.Body.Close()
+					if resp.StatusCode == http.StatusOK {
+						fmt.Printf(" Success! Connected and verified. (HTTP %d)\n", resp.StatusCode)
+						endpointReachable = true
+					} else if resp.StatusCode == http.StatusUnauthorized {
+						fmt.Printf("\n✗ Authentication failed! (HTTP %d). Please verify your API Key.\n", resp.StatusCode)
+					} else if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+						// Fallback strategy if GET models returns 404 or 403 on third-party proxies
+						fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer fallbackCancel()
 
-					fallbackReq, fallbackErr := http.NewRequestWithContext(fallbackCtx, "GET", p.Endpoint, nil)
-					if fallbackErr != nil {
-						fmt.Printf("\n✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
-						return nil
-					}
-
-					if p.Type == "openai" {
-						fallbackReq.Header.Set("Authorization", "Bearer "+p.APIKey)
-					} else {
-						fallbackReq.Header.Set("x-api-key", p.APIKey)
-						fallbackReq.Header.Set("anthropic-version", "2023-06-01")
-					}
-
-					fallbackResp, fallbackErr := client.Do(fallbackReq)
-					if fallbackErr != nil {
-						fmt.Printf("\n✗ Models discovery returned HTTP %d, and base endpoint fallback is unreachable: %v\n", resp.StatusCode, fallbackErr)
-					} else {
-						defer fallbackResp.Body.Close()
-						if fallbackResp.StatusCode == http.StatusUnauthorized || fallbackResp.StatusCode == http.StatusForbidden {
-							fmt.Printf("\n✗ Authentication failed! Base endpoint returned HTTP %d. Please verify your API Key.\n", fallbackResp.StatusCode)
+						fallbackReq, fallbackErr := http.NewRequestWithContext(fallbackCtx, "GET", p.Endpoint, nil)
+						if fallbackErr != nil {
+							fmt.Printf("\n✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
 						} else {
-							fmt.Printf(" Success! Connected and verified. (HTTP %d, models discovery bypassed)\n", resp.StatusCode)
+							if p.Type == "openai" {
+								fallbackReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+							} else {
+								fallbackReq.Header.Set("x-api-key", p.APIKey)
+								fallbackReq.Header.Set("anthropic-version", "2023-06-01")
+							}
+
+							fallbackResp, fallbackErr := client.Do(fallbackReq)
+							if fallbackErr != nil {
+								fmt.Printf("\n✗ Models discovery returned HTTP %d, and base endpoint fallback is unreachable: %v\n", resp.StatusCode, fallbackErr)
+							} else {
+								defer fallbackResp.Body.Close()
+								if fallbackResp.StatusCode == http.StatusUnauthorized || fallbackResp.StatusCode == http.StatusForbidden {
+									fmt.Printf("\n✗ Authentication failed! Base endpoint returned HTTP %d. Please verify your API Key.\n", fallbackResp.StatusCode)
+								} else {
+									fmt.Printf(" Success! Connected and verified. (HTTP %d, models discovery bypassed)\n", resp.StatusCode)
+									endpointReachable = true
+								}
+							}
+						}
+					} else {
+						fmt.Printf(" Connected, but returned unexpected status (HTTP %d)\n", resp.StatusCode)
+					}
+				}
+			}
+
+			// 6. Validate configured models with concurrent API calls and reorder (available first)
+			if endpointReachable && p.Model != "" {
+				configuredModels := parseModelList(p.Model)
+				if len(configuredModels) > 0 {
+					fmt.Printf("\n  - Validating %d configured model(s) with concurrent tests...\n", len(configuredModels))
+					availableSet := testModelsConcurrently(configuredModels, p.Endpoint, p.APIKey)
+					available, unavailable := classifyModels(configuredModels, availableSet)
+					printModelReport(available, unavailable)
+
+					// Reorder and save: available first, unavailable last
+					reordered := append(available, unavailable...)
+					newModel := strings.Join(reordered, ",")
+					if newModel != p.Model {
+						p.Model = newModel
+						cfg.Providers[cfg.ActiveProvider] = p
+						if err := config.Save(cfg); err != nil {
+							fmt.Printf("  ✗ Failed to save reordered models: %v\n", err)
+						} else {
+							fmt.Printf("  ✓ Config updated: available models prioritized.\n")
 						}
 					}
-				} else {
-					fmt.Printf(" Connected, but returned unexpected status (HTTP %d)\n", resp.StatusCode)
 				}
 			}
 		}
 
 		return nil
 	},
+}
+
+// parseModelList splits a comma-separated model string into a slice,
+// trimming whitespace and filtering empty entries.
+func parseModelList(modelStr string) []string {
+	parts := strings.Split(modelStr, ",")
+	var result []string
+	for _, m := range parts {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
+// testModelsConcurrently tests multiple models in batches of 50 concurrent workers.
+// Each worker sends a lightweight chat completions POST to verify the model works.
+// Returns a set of model IDs that passed the test.
+func testModelsConcurrently(models []string, endpoint, apiKey string) map[string]bool {
+	const batchSize = 50
+	const requestTimeout = 10 * time.Second
+
+	available := make(map[string]bool)
+	var mu sync.Mutex
+	var completed, okCount, failCount int64
+	total := int64(len(models))
+
+	// Build chat completions URL from endpoint
+	chatURL := buildChatURL(endpoint)
+
+	// Progress bar ticker
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				c := atomic.LoadInt64(&completed)
+				o := atomic.LoadInt64(&okCount)
+				f := atomic.LoadInt64(&failCount)
+				pct := int(float64(c) / float64(total) * 100)
+				bar := buildProgressBar(30, pct)
+				fmt.Printf("\r  %s %d/%d ✓%d ✗%d", bar, c, total, o, f)
+			}
+		}
+	}()
+	defer func() {
+		close(done)
+		// Print final 100%% bar
+		c := atomic.LoadInt64(&completed)
+		o := atomic.LoadInt64(&okCount)
+		f := atomic.LoadInt64(&failCount)
+		bar := buildProgressBar(30, 100)
+		fmt.Printf("\r  %s %d/%d ✓%d ✗%d\n", bar, c, total, o, f)
+	}()
+
+	for start := 0; start < len(models); start += batchSize {
+		end := start + batchSize
+		if end > len(models) {
+			end = len(models)
+		}
+		batch := models[start:end]
+
+		var wg sync.WaitGroup
+		for _, model := range batch {
+			wg.Add(1)
+			go func(m string) {
+				defer wg.Done()
+				ok := testSingleModel(m, chatURL, apiKey, requestTimeout)
+				if ok {
+					mu.Lock()
+					available[m] = true
+					mu.Unlock()
+					atomic.AddInt64(&okCount, 1)
+				} else {
+					atomic.AddInt64(&failCount, 1)
+				}
+				atomic.AddInt64(&completed, 1)
+			}(model)
+		}
+		wg.Wait()
+	}
+	return available
+}
+
+// buildProgressBar returns a visual progress bar string.
+func buildProgressBar(width int, pct int) string {
+	filled := pct * width / 100
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := 0; i < width; i++ {
+		if i < filled {
+			sb.WriteString("█")
+		} else {
+			sb.WriteString("░")
+		}
+	}
+	sb.WriteByte(']')
+	return sb.String()
+}
+func testSingleModel(model, chatURL, apiKey string, timeout time.Duration) bool {
+	body := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`, model)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", chatURL, strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// buildChatURL constructs a chat completions endpoint URL from a provider endpoint.
+func buildChatURL(endpoint string) string {
+	url := strings.TrimSuffix(endpoint, "/")
+	if !strings.Contains(url, "/chat/completions") {
+		if strings.HasSuffix(url, "/v1") {
+			url += "/chat/completions"
+		} else {
+			url += "/v1/chat/completions"
+			url = strings.Replace(url, "/v1/v1/", "/v1/", 1)
+		}
+	}
+	return url
+}
+
+// classifyModels splits configured models into available and unavailable slices,
+// preserving original relative order within each group.
+func classifyModels(configured []string, availableSet map[string]bool) (available, unavailable []string) {
+	if len(availableSet) == 0 {
+		unavailable = configured
+		return
+	}
+	for _, m := range configured {
+		if availableSet[m] {
+			available = append(available, m)
+		} else {
+			unavailable = append(unavailable, m)
+		}
+	}
+	return
+}
+
+// printModelReport displays which models are available and which are not.
+func printModelReport(available, unavailable []string) {
+	for _, m := range available {
+		fmt.Printf("    ✓ %s\n", m)
+	}
+	for _, m := range unavailable {
+		fmt.Printf("    ✗ %s (unavailable)\n", m)
+	}
+	if len(available) > 0 && len(unavailable) > 0 {
+		fmt.Printf("  %d available, %d unavailable\n", len(available), len(unavailable))
+	} else if len(available) > 0 {
+		fmt.Printf("  All %d model(s) available.\n", len(available))
+	} else if len(unavailable) > 0 {
+		fmt.Printf("  All %d model(s) unavailable - check endpoint and API key.\n", len(unavailable))
+	}
 }
 
 func RootCmd() *cobra.Command {

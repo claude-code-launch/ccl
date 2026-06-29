@@ -33,6 +33,8 @@ var (
 	langTipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("239")).Padding(0, 1).MarginTop(1)
 )
 
+const filterViewHeight = 15 // max visible items in filter list
+
 type AdvancedConfigModel struct {
 	p         *provider.Provider
 	modelPool []string
@@ -49,10 +51,11 @@ type AdvancedConfigModel struct {
 	keyInput textinput.Model
 
 	// Page 1
-	activeSlot     int
-	filterInput    textinput.Model
-	filteredPool   []string
-	slotListCursor int
+	activeSlot        int
+	filterInput       textinput.Model
+	filteredPool      []string
+	slotListCursor    int
+	filterWindowStart int // first visible index in filter list
 
 	// Page 3
 	effortLevels []string
@@ -112,22 +115,62 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	return m
 }
 
+// NewAdvancedConfigModelAtPage1 creates a model starting at page 1 (slot mapping)
+// with a pre-populated model pool, skipping the credential page.
+func NewAdvancedConfigModelAtPage1(p *provider.Provider, modelPool []string) *AdvancedConfigModel {
+	m := NewAdvancedConfigModel(p)
+	m.page = 1
+	m.cursor = 4 // start at Opus slot
+	m.modelPool = modelPool
+	m.urlInput.Blur()
+	m.keyInput.Blur()
+	return m
+}
+
 func (m *AdvancedConfigModel) Init() tea.Cmd { return textinput.Blink }
 
 func (m *AdvancedConfigModel) updateFilteredPool() {
 	q := strings.ToLower(m.filterInput.Value())
 	if q == "" {
 		m.filteredPool = append([]string{locale.T("(设置为未设置/清空)", "(clear/unset)")}, m.modelPool...)
-		return
-	}
-	m.filteredPool = []string{}
-	for _, mod := range m.modelPool {
-		if strings.Contains(strings.ToLower(mod), q) {
-			m.filteredPool = append(m.filteredPool, mod)
+	} else {
+		m.filteredPool = []string{}
+		for _, mod := range m.modelPool {
+			if strings.Contains(strings.ToLower(mod), q) {
+				m.filteredPool = append(m.filteredPool, mod)
+			}
+		}
+		if len(m.filteredPool) == 0 {
+			m.filteredPool = []string{locale.T("(无匹配模型)", "(no match)")}
 		}
 	}
-	if len(m.filteredPool) == 0 {
-		m.filteredPool = []string{locale.T("(无匹配模型)", "(no match)")}
+	// Clamp cursor to new filtered pool bounds and reset scroll window
+	m.filterWindowStart = 0
+	if len(m.filteredPool) > 0 && m.slotListCursor >= len(m.filteredPool) {
+		m.slotListCursor = len(m.filteredPool) - 1
+	}
+}
+
+// doAutoConfig auto-fills slot models with the first 4 available from modelPool,
+// sets default effort=max, and clears 1M slots.
+func (m *AdvancedConfigModel) doAutoConfig() {
+	slots := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.LockModel}
+	for i, ptr := range slots {
+		if i < len(m.modelPool) {
+			*ptr = m.modelPool[i]
+		} else {
+			*ptr = ""
+		}
+	}
+	// Default: no 1M context
+	m.oneMSlots = make(map[string]bool)
+	// Default: effort = max
+	m.p.EffortLevel = "max"
+	for i, level := range m.effortLevels {
+		if level == "max" {
+			m.effortCursor = i
+			break
+		}
 	}
 }
 
@@ -143,7 +186,15 @@ func (m *AdvancedConfigModel) getProtocol() string {
 }
 
 func (m *AdvancedConfigModel) goBack() {
-	if m.page > 0 {
+	if m.page == 1 {
+		// Go back from slot mapping to config mode choice
+		m.page = 5
+		m.cursor = 1 // pre-select Manual Config (since user was in manual mode)
+	} else if m.page == 5 {
+		// Go back from choice to credentials
+		m.page = 0
+		m.cursor = 2
+	} else if m.page > 0 {
 		m.page--
 		if m.page == 0 {
 			m.cursor = 2
@@ -184,7 +235,12 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 1 && m.filterInput.Focused() {
 				if m.slotListCursor > 0 {
 					m.slotListCursor--
+					// Scroll window up if cursor goes above visible area
+					if m.slotListCursor < m.filterWindowStart {
+						m.filterWindowStart = m.slotListCursor
+					}
 				}
+				return m, nil
 			} else {
 				if m.page == 0 && (m.cursor == 2 || m.cursor == 3) {
 					m.cursor = 1
@@ -194,6 +250,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = 3
 				} else if m.page == 3 && (m.cursor == 6 || m.cursor == 7) {
 					m.cursor = 5
+				} else if m.page == 5 && m.cursor > 0 {
+					m.cursor--
 				} else if m.cursor > 0 {
 					m.cursor--
 				}
@@ -203,6 +261,10 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 1 && m.filterInput.Focused() {
 				if m.slotListCursor < len(m.filteredPool)-1 {
 					m.slotListCursor++
+					// Scroll window down if cursor goes below visible area
+					if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
+						m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
+					}
 				}
 				return m, nil
 			}
@@ -225,6 +287,10 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.page == 4 {
 				if m.cursor < 2 {
+					m.cursor++
+				}
+			} else if m.page == 5 {
+				if m.cursor < 1 {
 					m.cursor++
 				}
 			}
@@ -268,6 +334,10 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 1 && m.filterInput.Focused() {
 				if m.slotListCursor < len(m.filteredPool)-1 {
 					m.slotListCursor++
+					// Scroll window down if cursor goes below visible area
+					if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
+						m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
+					}
 				}
 				return m, nil
 			}
@@ -305,6 +375,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = 7
 				} else if m.page == 4 {
 					m.cursor = 2
+				} else if m.page == 5 {
+					m.cursor = 1
 				}
 			}
 
@@ -361,14 +433,14 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					m.p.Model = strings.Join(m.modelPool, ",")
 					sort.Strings(m.modelPool)
-					m.page = 1
+					m.page = 5
 					m.cursor = 0
 				}
 			case 1:
 				if !m.filterInput.Focused() {
 					if m.cursor == 4 {
 						m.page = 2
-						m.cursor = 0
+						m.cursor = 4 // default to Next button
 					} else {
 						m.activeSlot = m.cursor
 						m.filterInput.Focus()
@@ -377,6 +449,13 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.updateFilteredPool()
 					}
 				} else {
+					// Safety: clamp cursor to valid range before accessing filteredPool
+					if len(m.filteredPool) == 0 {
+						return m, nil
+					}
+					if m.slotListCursor < 0 || m.slotListCursor >= len(m.filteredPool) {
+						m.slotListCursor = 0
+					}
 					selectedModel := m.filteredPool[m.slotListCursor]
 					if selectedModel == locale.T("(设置为未设置/清空)", "(clear/unset)") || selectedModel == locale.T("(无匹配模型)", "(no match)") {
 						selectedModel = ""
@@ -394,7 +473,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.cursor == 4 {
 					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
 					m.page = 3
-					m.cursor = 0
+					m.cursor = 6 // default to Next button
 				}
 			case 3:
 				if m.cursor < 6 {
@@ -402,13 +481,25 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.p.EffortLevel = m.effortLevels[m.effortCursor]
 					m.page = 4
-					m.cursor = 0
+					m.cursor = 2 // default to Save & Finish
 				}
 			case 4:
 				if m.cursor < 2 {
 					m.cursor = 2
 				} else {
 					return m, tea.Quit
+				}
+			case 5:
+				// Page 5: Auto / Manual config choice
+				if m.cursor == 0 {
+					// Auto Config: auto-fill slots, set effort=max, skip 1M, go to save
+					m.doAutoConfig()
+					m.page = 4
+					m.cursor = 2 // focus on save button
+				} else {
+					// Manual Config: go to slot mapping (old page 1)
+					m.page = 1
+					m.cursor = 4
 				}
 			}
 		}
@@ -702,7 +793,17 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 			slotName := []string{"Opus", "Sonnet", "Haiku", "Custom"}[m.activeSlot]
 			body.WriteString(titleStyle.Render(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName)))
 			body.WriteString("\n" + filterStyle.Render(locale.T("🔍 过滤模型: ", "🔍 Filter model: ")) + m.filterInput.View() + "\n")
-			for i, mod := range m.filteredPool {
+			// Virtual scrolling: only render visible window of filteredPool
+			start := m.filterWindowStart
+			end := start + filterViewHeight
+			if end > len(m.filteredPool) {
+				end = len(m.filteredPool)
+			}
+			if start > 0 {
+				body.WriteString(grayText.Render(fmt.Sprintf("   ↑ ... %d more above ...", start)) + "\n")
+			}
+			for i := start; i < end; i++ {
+				mod := m.filteredPool[i]
 				prefix := "   "
 				line := grayText.Render(mod)
 				if i == m.slotListCursor {
@@ -710,6 +811,9 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 					line = selectedStyle.Render(mod)
 				}
 				body.WriteString(prefix + line + "\n")
+			}
+			if end < len(m.filteredPool) {
+				body.WriteString(grayText.Render(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filteredPool)-end)) + "\n")
 			}
 			body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("键盘输入任意字符快速过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Type to filter · ↑↓ Scroll · enter lock · esc cancel")) + "\n")
 		}
@@ -814,11 +918,38 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 		}
 		body.WriteString("\n" + saveStr + "\n\n")
 		body.WriteString(grayText.Render(locale.T("←→ 切换激活选项 · ↑↓ 移动 · enter 保存", "←→ Toggle · ↑↓ Move · enter save")))
+
+	case 5:
+		// ==================== PAGE 5: 配置模式选择 ====================
+		body.WriteString(titleStyle.Render(locale.T("配置模式选择", "Config Mode")) + badgeStyle.Render("Choice") + protoLabel + "\n\n")
+		body.WriteString(grayText.Render(locale.T("模型已获取，请选择配置方式：", "Models fetched. Choose config mode:")) + "\n\n")
+
+		autoPrefix := "  "
+		autoLabel := grayText.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
+		autoDesc := grayText.Render("    " + locale.T("自动填入前 4 个可用模型，Effort = max，跳过 1M 配置", "Auto-fill first 4 models, Effort=max, skip 1M"))
+		if m.cursor == 0 {
+			autoPrefix = selectedStyle.Render("> ")
+			autoLabel = selectedStyle.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
+		}
+		body.WriteString(autoPrefix + autoLabel + "\n")
+		body.WriteString(autoDesc + "\n\n")
+
+		manualPrefix := "  "
+		manualLabel := grayText.Render(locale.T("🛠 手动配置", "🛠 Manual Config"))
+		manualDesc := grayText.Render("    " + locale.T("手动选择每个槽位的模型、1M 上下文开关、推理力度", "Manually set slot models, 1M context, effort level"))
+		if m.cursor == 1 {
+			manualPrefix = selectedStyle.Render("> ")
+			manualLabel = selectedStyle.Render(locale.T("🛠 手动配置", "🛠 Manual Config"))
+		}
+		body.WriteString(manualPrefix + manualLabel + "\n")
+		body.WriteString(manualDesc + "\n\n")
+
+		body.WriteString(grayText.Render(locale.T("↑↓ 选择 · enter 确认 · esc 返回", "↑↓ Select · enter confirm · esc back")))
 	}
 
 	// 指示器
-	dots := []string{grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫")}
-	activeColors := []string{"🔵", "🟣", "🟢", "🟡", "🔴"}
+	dots := []string{grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫")}
+	activeColors := []string{"🔵", "🟣", "🟢", "🟡", "🔴", "🟠"}
 	dots[m.page] = activeColors[m.page]
 	pager := fmt.Sprintf("\n\n%s", lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(strings.Join(dots, "   ")))
 
@@ -829,5 +960,7 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 	langTipBanner := "\n" + lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(langTipStyle.Render(langTipMsg))
 
 	finalStr := windowStyle.Render(body.String()) + pager + langTipBanner
-	return tea.NewView(finalStr) // ✅ 修复：直接返回渲染后的字符串
+	v := tea.NewView(finalStr)
+	v.AltScreen = true
+	return v
 }

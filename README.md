@@ -26,6 +26,8 @@
    - 自动检查本地环境依赖（Node.js, Claude CLI）。
    - 如果系统未安装 Claude CLI，`ccl` 将触发**全自动静默安装**。
    - 提供连接探针，对各 Provider 的 Endpoint 连通性、API 鉴权密钥进行安全测试。
+   - **模型可用性检测**：并发批量测试所有配置的模型（50 并发 / 10s 超时），自动将可用模型排在配置文件前列。
+   - **实时进度条**：模型测试时显示 `[████████░░░░░░] 45/100 ✓38 ✗7` 进度条。
 
 5. **多通道配置与灵活切换**
    - 支持添加、切换、列出、复制、重命名、删除以及管理多个独立网关。
@@ -168,9 +170,37 @@ ccl lang en       # English
 ccl doctor
 ```
 
-检查本地依赖、Endpoint 连通性、API 鉴权。如果 Claude CLI 未安装，自动触发一键安装。
+检查本地依赖、Endpoint 连通性、API 鉴权。**并发测试所有配置模型**，自动将可用模型排在配置前列，显示实时进度条。如果 Claude CLI 未安装，自动触发一键安装。
 
-### `ccl list` — 查看所有 Provider
+### `ccl models` — 查看可用模型
+
+```bash
+# 查看已配置模型的可用性
+ccl models
+
+# 查看 Provider 全部模型
+ccl models --all
+```
+
+并发测试每个模型，显示 `✓`（可用）或 `✗ (unavailable)`（不可用），带实时进度条。
+
+### `ccl map` — 快速设置 Slot 模型映射
+
+```bash
+# 交互式 TUI — 直接进入 Slot 映射页面
+ccl map
+
+# 自动填充 — 自动检测可用模型并填入前 4 个槽位
+ccl map auto
+ccl map auto my-provider
+
+# 直接指定 — 通过 CLI 参数快速映射
+ccl map --opus gpt-5.1 --sonnet gpt-5.1-codex-max
+ccl map --opus gpt-5.1 --sonnet gpt-5.1-mini --haiku gpt-4o-mini
+ccl map --custom gpt-5.1 my-provider
+```
+
+三种模式：交互式 TUI（直接跳转到 Slot 映射页面）、自动检测填充、CLI 参数直接映射。
 
 ```bash
 ccl list
@@ -247,7 +277,8 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 │   ├── install.go             # Claude CLI 自动安装
 │   ├── lang_cmd.go            # ccl lang 命令
 │   ├── list.go                # list 命令
-│   ├── models.go              # 模型列表展示
+│   ├── map.go                 # ccl map 命令（交互式/自动/CLI 三种映射模式）
+│   ├── models.go              # 模型列表展示 + 可用性检测
 │   ├── root.go                # ccl 主入口 + passthrough 模式
 │   ├── settings.go            # 预览 settings.json
 │   ├── update.go              # 自动升级
