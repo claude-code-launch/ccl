@@ -42,6 +42,30 @@ func TestConvertRequest(t *testing.T) {
 	}
 }
 
+func TestConvertRequestStripsLeadingBillingHeaderAndIncludesStreamUsage(t *testing.T) {
+	antReq := &protocol.AnthropicRequest{
+		Model:     "claude-3-5-sonnet",
+		System:    "x-anthropic-billing-header: cch=abc;\n\nYou are useful.",
+		Stream:    true,
+		MaxTokens: 10,
+		Messages: []protocol.AnthropicMessage{{
+			Role:    "user",
+			Content: "Hello",
+		}},
+	}
+
+	oaReq, err := protocol.ConvertRequest(antReq)
+	if err != nil {
+		t.Fatalf("ConvertRequest failed: %v", err)
+	}
+	if oaReq.Messages[0].Content != "You are useful." {
+		t.Fatalf("billing header was not stripped: %+v", oaReq.Messages[0].Content)
+	}
+	if oaReq.StreamOptions == nil || !oaReq.StreamOptions.IncludeUsage {
+		t.Fatalf("stream_options.include_usage not injected: %+v", oaReq.StreamOptions)
+	}
+}
+
 func TestMapModel(t *testing.T) {
 	// Case 1: Configuration is explicit, so bypass mapping entirely.
 	if m := protocol.MapModel("claude-3-5-sonnet", "my-custom-model", nil); m != "my-custom-model" {
@@ -198,6 +222,280 @@ func TestConvertToolCall(t *testing.T) {
 
 	if schema["type"] != "object" {
 		t.Errorf("Schema type mismatch")
+	}
+}
+
+func TestConvertRequestStopToolChoiceAndMixedToolUse(t *testing.T) {
+	antReq := &protocol.AnthropicRequest{
+		Model:         "claude-3-5-sonnet",
+		StopSequences: []string{"END"},
+		ToolChoice:    &protocol.AnthropicToolChoice{Type: "none"},
+		Messages: []protocol.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{
+						"type": "text",
+						"text": "I will call a tool.",
+					},
+					map[string]any{
+						"type":  "tool_use",
+						"id":    "toolu_1",
+						"name":  "get_weather",
+						"input": map[string]any{"location": "Tokyo"},
+					},
+				},
+			},
+		},
+	}
+
+	oaReq, err := protocol.ConvertRequest(antReq)
+	if err != nil {
+		t.Fatalf("ConvertRequest failed: %v", err)
+	}
+
+	if len(oaReq.Stop) != 1 || oaReq.Stop[0] != "END" {
+		t.Fatalf("stop sequences not mapped: %+v", oaReq.Stop)
+	}
+	if oaReq.ToolChoice != "none" {
+		t.Fatalf("tool_choice none not mapped: %+v", oaReq.ToolChoice)
+	}
+	if len(oaReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(oaReq.Messages))
+	}
+	msg := oaReq.Messages[0]
+	if msg.Content != "I will call a tool." {
+		t.Fatalf("assistant text content was not preserved: %+v", msg.Content)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("tool_use not mapped: %+v", msg.ToolCalls)
+	}
+}
+
+func TestConvertRequestImageBlock(t *testing.T) {
+	antReq := &protocol.AnthropicRequest{
+		Model: "claude-3-5-sonnet",
+		Messages: []protocol.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{
+						"type": "image",
+						"source": map[string]any{
+							"type":       "base64",
+							"media_type": "image/png",
+							"data":       "abc123",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	oaReq, err := protocol.ConvertRequest(antReq)
+	if err != nil {
+		t.Fatalf("ConvertRequest failed: %v", err)
+	}
+	if len(oaReq.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(oaReq.Messages))
+	}
+	parts, ok := oaReq.Messages[0].Content.([]protocol.OpenAIMessagePart)
+	if !ok {
+		t.Fatalf("expected OpenAI content parts, got %T", oaReq.Messages[0].Content)
+	}
+	if len(parts) != 1 || parts[0].Type != "image_url" || parts[0].ImageURL == nil ||
+		parts[0].ImageURL.URL != "data:image/png;base64,abc123" {
+		t.Fatalf("image block not mapped correctly: %+v", parts)
+	}
+}
+
+func TestConvertResponseInvalidToolArguments(t *testing.T) {
+	oaResp := &protocol.OpenAIResponse{
+		ID:    "chatcmpl-tool",
+		Model: "gpt-4o",
+		Choices: []protocol.OpenAIChoice{
+			{
+				Message: protocol.OpenAIMessage{
+					ToolCalls: []protocol.OpenAIToolCall{
+						{
+							ID:   "call_1",
+							Type: "function",
+							Function: protocol.OpenAIFunctionCall{
+								Name:      "bad_args",
+								Arguments: "{not-json",
+							},
+						},
+					},
+				},
+				FinishReason: "tool_calls",
+			},
+		},
+	}
+
+	antResp, err := protocol.ConvertResponse(oaResp)
+	if err != nil {
+		t.Fatalf("ConvertResponse failed: %v", err)
+	}
+	if len(antResp.Content) != 1 || string(antResp.Content[0].Input) != "{}" {
+		t.Fatalf("invalid tool arguments should map to empty object: %+v", antResp.Content)
+	}
+}
+
+func TestConvertResponseContentArrayRefusalAndFunctionCall(t *testing.T) {
+	oaResp := &protocol.OpenAIResponse{
+		ID:    "chatcmpl-mixed",
+		Model: "gpt-4o",
+		Choices: []protocol.OpenAIChoice{{
+			Message: protocol.OpenAIMessage{
+				Content: []any{
+					map[string]any{"type": "output_text", "text": "Hello"},
+					map[string]any{"type": "refusal", "refusal": "No"},
+				},
+				Refusal: "Top-level refusal",
+				FunctionCall: &protocol.OpenAIFunctionCall{
+					Name:      "legacy_tool",
+					Arguments: `{"ok":true}`,
+				},
+			},
+			FinishReason: "function_call",
+		}},
+	}
+
+	antResp, err := protocol.ConvertResponse(oaResp)
+	if err != nil {
+		t.Fatalf("ConvertResponse failed: %v", err)
+	}
+	if antResp.StopReason != "tool_use" {
+		t.Fatalf("expected tool_use stop reason, got %q", antResp.StopReason)
+	}
+	if len(antResp.Content) != 4 {
+		t.Fatalf("expected 4 content blocks, got %+v", antResp.Content)
+	}
+	if antResp.Content[0].Text != "Hello" || antResp.Content[1].Text != "No" || antResp.Content[2].Text != "Top-level refusal" {
+		t.Fatalf("text/refusal blocks not mapped: %+v", antResp.Content)
+	}
+	if antResp.Content[3].Type != "tool_use" || antResp.Content[3].Name != "legacy_tool" || string(antResp.Content[3].Input) != `{"ok":true}` {
+		t.Fatalf("legacy function_call not mapped: %+v", antResp.Content[3])
+	}
+}
+
+func TestConvertRequestToResponses(t *testing.T) {
+	antReq := &protocol.AnthropicRequest{
+		Model:     "claude-3-5-sonnet",
+		System:    "You are useful.",
+		MaxTokens: 128,
+		Stream:    true,
+		Messages: []protocol.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Look"},
+					map[string]any{
+						"type": "image",
+						"source": map[string]any{
+							"type":       "base64",
+							"media_type": "image/png",
+							"data":       "abc",
+						},
+					},
+				},
+			},
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Calling tool"},
+					map[string]any{
+						"type":  "tool_use",
+						"id":    "call_1",
+						"name":  "read_file",
+						"input": map[string]any{"path": "README.md"},
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{
+						"type":        "tool_result",
+						"tool_use_id": "call_1",
+						"content":     "ok",
+					},
+				},
+			},
+		},
+		Tools: []protocol.AnthropicTool{{
+			Name:        "read_file",
+			Description: "Read a file",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+		ToolChoice: &protocol.AnthropicToolChoice{Type: "tool", Name: "read_file"},
+	}
+
+	respReq, err := protocol.ConvertRequestToResponses(antReq)
+	if err != nil {
+		t.Fatalf("ConvertRequestToResponses failed: %v", err)
+	}
+	if respReq.Instructions != "You are useful." || respReq.MaxOutputTokens != 128 || !respReq.Stream {
+		t.Fatalf("basic fields not mapped: %+v", respReq)
+	}
+	if respReq.Store == nil || *respReq.Store {
+		t.Fatalf("Responses proxy should default store=false: %+v", respReq.Store)
+	}
+	if len(respReq.Input) != 4 {
+		t.Fatalf("expected 4 input items, got %+v", respReq.Input)
+	}
+	if respReq.Input[1].Type != "message" || respReq.Input[1].Role != "assistant" {
+		t.Fatalf("assistant text should remain a message before function call: %+v", respReq.Input[1])
+	}
+	if respReq.Input[2].Type != "function_call" || respReq.Input[2].CallID != "call_1" || respReq.Input[2].Name != "read_file" {
+		t.Fatalf("tool_use not mapped to function_call: %+v", respReq.Input[2])
+	}
+	if respReq.Input[3].Type != "function_call_output" || respReq.Input[3].Output != "ok" {
+		t.Fatalf("tool_result not mapped to function_call_output: %+v", respReq.Input[3])
+	}
+	if len(respReq.Tools) != 1 || respReq.Tools[0].Type != "function" || respReq.Tools[0].Name != "read_file" {
+		t.Fatalf("tools not mapped: %+v", respReq.Tools)
+	}
+	choice, ok := respReq.ToolChoice.(map[string]string)
+	if !ok || choice["type"] != "function" || choice["name"] != "read_file" {
+		t.Fatalf("tool_choice not mapped: %+v", respReq.ToolChoice)
+	}
+}
+
+func TestConvertResponsesResponse(t *testing.T) {
+	resp := &protocol.OpenAIResponsesResponse{
+		ID:     "resp_123",
+		Model:  "gpt-5",
+		Status: "completed",
+		Output: []protocol.ResponsesOutputItem{
+			{
+				Type: "message",
+				Content: []protocol.ResponsesOutputPart{
+					{Type: "output_text", Text: "Hello"},
+				},
+			},
+			{
+				Type:      "function_call",
+				CallID:    "call_1",
+				Name:      "read_file",
+				Arguments: `{"path":"README.md"}`,
+			},
+		},
+		Usage: protocol.OpenAIResponsesUsage{InputTokens: 3, OutputTokens: 4},
+	}
+
+	antResp, err := protocol.ConvertResponsesResponse(resp)
+	if err != nil {
+		t.Fatalf("ConvertResponsesResponse failed: %v", err)
+	}
+	if antResp.StopReason != "tool_use" {
+		t.Fatalf("expected tool_use stop reason, got %q", antResp.StopReason)
+	}
+	if len(antResp.Content) != 2 || antResp.Content[0].Text != "Hello" || antResp.Content[1].Name != "read_file" {
+		t.Fatalf("content not mapped: %+v", antResp.Content)
+	}
+	if antResp.Usage.InputTokens != 3 || antResp.Usage.OutputTokens != 4 {
+		t.Fatalf("usage not mapped: %+v", antResp.Usage)
 	}
 }
 

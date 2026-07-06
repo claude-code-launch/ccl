@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -11,6 +13,8 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/protocol"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -52,7 +56,7 @@ var doctorCmd = &cobra.Command{
 
 		// 4. Check Active Provider
 		if cfg.ActiveProvider == "" {
-			fmt.Println("✗ Active provider is not selected. Use 'ccl add' or 'ccl use'")
+			fmt.Println("✗ Active provider is not selected. Use 'ccl set' or 'ccl use'")
 			return nil
 		}
 		fmt.Printf("✓ Active provider: %s\n", cfg.ActiveProvider)
@@ -63,7 +67,7 @@ var doctorCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("  - Type: %s\n", p.Type)
+		fmt.Printf("  - Type: %s\n", provider.ProtocolLabel(p.Type))
 		fmt.Printf("  - Endpoint: %s\n", p.Endpoint)
 		fmt.Printf("  - Model: %s\n", p.Model)
 
@@ -77,12 +81,9 @@ var doctorCmd = &cobra.Command{
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			// Determine models URL precisely following how internal/proxy/server.go's fetchAvailableModels checks models
-			endpoint := strings.TrimSuffix(p.Endpoint, "/")
-			modelsURL := endpoint + "/models"
-			if !strings.HasSuffix(endpoint, "/v1") {
-				modelsURL = endpoint + "/v1/models"
-				modelsURL = strings.Replace(modelsURL, "/v1/v1", "/v1", 1)
+			modelsURL := protocol.NormalizeOpenAIModelsURL(p.Endpoint)
+			if p.Type == "anthropic" {
+				modelsURL = protocol.NormalizeAnthropicModelsURL(p.Endpoint)
 			}
 
 			req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
@@ -90,7 +91,7 @@ var doctorCmd = &cobra.Command{
 				fmt.Printf("\n✗ Failed to create validation request: %v\n", err)
 			} else {
 				// Add API Key headers
-				if p.Type == "openai" {
+				if provider.IsOpenAICompatibleType(p.Type) {
 					req.Header.Set("Authorization", "Bearer "+p.APIKey)
 				} else {
 					req.Header.Set("x-api-key", p.APIKey)
@@ -116,7 +117,7 @@ var doctorCmd = &cobra.Command{
 						if fallbackErr != nil {
 							fmt.Printf("\n✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
 						} else {
-							if p.Type == "openai" {
+							if provider.IsOpenAICompatibleType(p.Type) {
 								fallbackReq.Header.Set("Authorization", "Bearer "+p.APIKey)
 							} else {
 								fallbackReq.Header.Set("x-api-key", p.APIKey)
@@ -147,7 +148,7 @@ var doctorCmd = &cobra.Command{
 				configuredModels := parseModelList(p.Model)
 				if len(configuredModels) > 0 {
 					fmt.Printf("\n  - Validating %d configured model(s) with concurrent tests...\n", len(configuredModels))
-					availableSet := testModelsConcurrently(configuredModels, p.Endpoint, p.APIKey)
+					availableSet := testModelsConcurrently(configuredModels, p.Endpoint, p.APIKey, p.Type)
 					available, unavailable := classifyModels(configuredModels, availableSet)
 					printModelReport(available, unavailable)
 
@@ -171,24 +172,10 @@ var doctorCmd = &cobra.Command{
 	},
 }
 
-// parseModelList splits a comma-separated model string into a slice,
-// trimming whitespace and filtering empty entries.
-func parseModelList(modelStr string) []string {
-	parts := strings.Split(modelStr, ",")
-	var result []string
-	for _, m := range parts {
-		m = strings.TrimSpace(m)
-		if m != "" {
-			result = append(result, m)
-		}
-	}
-	return result
-}
-
 // testModelsConcurrently tests multiple models in batches of 50 concurrent workers.
-// Each worker sends a lightweight chat completions POST to verify the model works.
+// Each worker sends a lightweight provider-specific POST to verify the model works.
 // Returns a set of model IDs that passed the test.
-func testModelsConcurrently(models []string, endpoint, apiKey string) map[string]bool {
+func testModelsConcurrently(models []string, endpoint, apiKey, providerType string) map[string]bool {
 	const batchSize = 50
 	const requestTimeout = 10 * time.Second
 
@@ -196,9 +183,6 @@ func testModelsConcurrently(models []string, endpoint, apiKey string) map[string
 	var mu sync.Mutex
 	var completed, okCount, failCount int64
 	total := int64(len(models))
-
-	// Build chat completions URL from endpoint
-	chatURL := buildChatURL(endpoint)
 
 	// Progress bar ticker
 	done := make(chan struct{})
@@ -241,7 +225,7 @@ func testModelsConcurrently(models []string, endpoint, apiKey string) map[string
 			wg.Add(1)
 			go func(m string) {
 				defer wg.Done()
-				ok := testSingleModel(m, chatURL, apiKey, requestTimeout)
+				ok := testSingleModel(m, endpoint, apiKey, providerType, requestTimeout)
 				if ok {
 					mu.Lock()
 					available[m] = true
@@ -273,12 +257,31 @@ func buildProgressBar(width int, pct int) string {
 	sb.WriteByte(']')
 	return sb.String()
 }
-func testSingleModel(model, chatURL, apiKey string, timeout time.Duration) bool {
-	body := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`, model)
+func testSingleModel(model, endpoint, apiKey, providerType string, timeout time.Duration) bool {
+	providerType = strings.ToLower(strings.TrimSpace(providerType))
+	if providerType == "anthropic" {
+		return testSingleAnthropicModel(model, endpoint, apiKey, timeout)
+	}
+	if provider.IsOpenAIResponsesType(providerType) {
+		return testSingleOpenAIResponsesModel(model, endpoint, apiKey, timeout)
+	}
+	return testSingleOpenAIModel(model, endpoint, apiKey, timeout)
+}
+
+func testSingleOpenAIModel(model, endpoint, apiKey string, timeout time.Duration) bool {
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+		"max_tokens": 1,
+	})
+	if err != nil {
+		return false
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", chatURL, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", buildChatURL(endpoint), bytes.NewReader(body))
 	if err != nil {
 		return false
 	}
@@ -293,18 +296,46 @@ func testSingleModel(model, chatURL, apiKey string, timeout time.Duration) bool 
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
+func testSingleAnthropicModel(model, endpoint, apiKey string, timeout time.Duration) bool {
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if err != nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", buildAnthropicMessagesURL(endpoint), bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func testSingleOpenAIResponsesModel(model, endpoint, apiKey string, timeout time.Duration) bool {
+	return protocol.ProbeOpenAIResponsesSupport(endpoint, apiKey, model, timeout)
+}
+
 // buildChatURL constructs a chat completions endpoint URL from a provider endpoint.
 func buildChatURL(endpoint string) string {
-	url := strings.TrimSuffix(endpoint, "/")
-	if !strings.Contains(url, "/chat/completions") {
-		if strings.HasSuffix(url, "/v1") {
-			url += "/chat/completions"
-		} else {
-			url += "/v1/chat/completions"
-			url = strings.Replace(url, "/v1/v1/", "/v1/", 1)
-		}
-	}
-	return url
+	return protocol.NormalizeOpenAIChatCompletionsURL(endpoint)
+}
+
+func buildAnthropicMessagesURL(endpoint string) string {
+	return protocol.NormalizeAnthropicMessagesURL(endpoint)
 }
 
 // classifyModels splits configured models into available and unavailable slices,

@@ -11,12 +11,43 @@ import (
 // StreamTransformer coordinates translating a stream of OpenAI chunks into Anthropic SSE chunks.
 type StreamTransformer struct {
 	sentMessageStart  bool
-	sentBlockStart    bool
-	sentThinkingStart bool
+	currentBlockType  string
 	currentBlockIdx   int
-	activeToolID      string
-	activeToolName    string
-	toolArgsBuilder   strings.Builder
+	messageID         string
+	model             string
+	tools             map[int]*chatToolState
+	sentMessageStop   bool
+	pendingStopReason string
+	pendingUsage      map[string]any
+	hasPendingDelta   bool
+}
+
+type chatToolState struct {
+	index       int
+	id          string
+	name        string
+	started     bool
+	pendingArgs strings.Builder
+}
+
+type ResponsesStreamTransformer struct {
+	sentMessageStart bool
+	currentBlockType string
+	currentBlockIdx  int
+	sentMessageStop  bool
+	messageID        string
+	model            string
+	hasToolUse       bool
+	usage            map[string]any
+	tools            map[int]*responsesToolState
+}
+
+type responsesToolState struct {
+	index       int
+	id          string
+	name        string
+	started     bool
+	pendingArgs strings.Builder
 }
 
 // TranslateChunk transforms a single raw line of "data: {...}" from OpenAI into one or more Anthropic SSE events.
@@ -26,11 +57,7 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 
 	if line == "" || line == "[DONE]" {
 		if line == "[DONE]" {
-			// Stream completed, return message stop event
-			return []string{
-				"event: message_delta\ndata: " + `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
-				"event: message_stop\ndata: " + `{"type":"message_stop"}`,
-			}, nil
+			return st.Finish(), nil
 		}
 		return nil, nil
 	}
@@ -41,6 +68,15 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 		return nil, nil
 	}
 
+	if chunk.Usage != nil {
+		st.pendingUsage = chatUsage(chunk.Usage)
+	}
+	if st.messageID == "" {
+		st.messageID = chunk.ID
+	}
+	if st.model == "" {
+		st.model = chunk.Model
+	}
 	if len(chunk.Choices) == 0 {
 		return nil, nil
 	}
@@ -49,188 +85,591 @@ func (st *StreamTransformer) TranslateChunk(line string) ([]string, error) {
 	choice := chunk.Choices[0]
 	delta := choice.Delta
 
-	// 1. If we haven't emitted message_start, emit it now.
-	if !st.sentMessageStart {
-		st.sentMessageStart = true
-		msgStart := map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"id":            chunk.ID,
-				"type":          "message",
-				"role":          "assistant",
-				"content":       []any{},
-				"model":         chunk.Model,
-				"stop_reason":   nil,
-				"stop_sequence": nil,
-				"usage": map[string]any{
-					"input_tokens":  0,
-					"output_tokens": 0,
-				},
-			},
-		}
-		data, _ := json.Marshal(msgStart)
-		events = append(events, "event: message_start\ndata: "+string(data))
-	}
-
-	// 1.5 Check for Reasoning Content block delta (Thinking Mode)
 	if delta.ReasoningContent != "" {
-		if !st.sentThinkingStart {
-			st.sentThinkingStart = true
-			blockStart := map[string]any{
-				"type":  "content_block_start",
-				"index": st.currentBlockIdx,
-				"content_block": map[string]any{
-					"type": "thinking",
-				},
-			}
-			data, _ := json.Marshal(blockStart)
-			events = append(events, "event: content_block_start\ndata: "+string(data))
-		}
-
-		blockDelta := map[string]any{
+		events = append(events, st.ensureChatThinkingBlock()...)
+		events = append(events, anthEvent("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
 			"index": st.currentBlockIdx,
 			"delta": map[string]any{
 				"type":     "thinking_delta",
 				"thinking": delta.ReasoningContent,
 			},
-		}
-		data, _ := json.Marshal(blockDelta)
-		events = append(events, "event: content_block_delta\ndata: "+string(data))
+		}))
 	}
 
-	// 2. Check for Text Content block delta
 	if delta.Content != "" {
-		// If thinking block was open, close it first and increment block index
-		if st.sentThinkingStart {
-			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
-			st.sentThinkingStart = false
-			st.currentBlockIdx++
-		}
-
-		if !st.sentBlockStart {
-			st.sentBlockStart = true
-			blockStart := map[string]any{
-				"type":  "content_block_start",
-				"index": st.currentBlockIdx,
-				"content_block": map[string]any{
-					"type": "text",
-					"text": "",
-				},
-			}
-			data, _ := json.Marshal(blockStart)
-			events = append(events, "event: content_block_start\ndata: "+string(data))
-		}
-
-		blockDelta := map[string]any{
+		events = append(events, st.ensureChatTextBlock()...)
+		events = append(events, anthEvent("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
 			"index": st.currentBlockIdx,
 			"delta": map[string]any{
 				"type": "text_delta",
 				"text": delta.Content,
 			},
-		}
-		data, _ := json.Marshal(blockDelta)
-		events = append(events, "event: content_block_delta\ndata: "+string(data))
+		}))
 	}
 
-	// 3. Check for Tool Call delta
 	if len(delta.ToolCalls) > 0 {
-		tc := delta.ToolCalls[0]
-
-		// Check if a new tool call block started
-		if tc.ID != "" && tc.ID != st.activeToolID {
-			// If thinking block was open, close it first and increment block index
-			if st.sentThinkingStart {
-				events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
-				st.sentThinkingStart = false
-				st.currentBlockIdx++
+		for _, tc := range delta.ToolCalls {
+			events = append(events, st.ensureChatToolBlock(tc.Index, &tc)...)
+			if tc.Function.Arguments != "" {
+				st.tools[tc.Index].pendingArgs.WriteString(tc.Function.Arguments)
+				events = append(events, anthEvent("content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": st.tools[tc.Index].index,
+					"delta": map[string]any{
+						"type":         "input_json_delta",
+						"partial_json": tc.Function.Arguments,
+					},
+				}))
 			}
-
-			st.activeToolID = tc.ID
-			st.activeToolName = tc.Function.Name
-			st.toolArgsBuilder.Reset()
-
-			blockStart := map[string]any{
-				"type":  "content_block_start",
-				"index": st.currentBlockIdx,
-				"content_block": map[string]any{
-					"type":  "tool_use",
-					"id":    tc.ID,
-					"name":  tc.Function.Name,
-					"input": map[string]any{},
-				},
-			}
-			data, _ := json.Marshal(blockStart)
-			events = append(events, "event: content_block_start\ndata: "+string(data))
-		}
-
-		if tc.Function.Arguments != "" {
-			st.toolArgsBuilder.WriteString(tc.Function.Arguments)
-
-			blockDelta := map[string]any{
-				"type":  "content_block_delta",
-				"index": st.currentBlockIdx,
-				"delta": map[string]any{
-					"type":         "input_json_delta",
-					"partial_json": tc.Function.Arguments,
-				},
-			}
-			data, _ := json.Marshal(blockDelta)
-			events = append(events, "event: content_block_delta\ndata: "+string(data))
 		}
 	}
 
-	// 4. Check if we received finish reason
 	if choice.FinishReason != nil {
-		fr := *choice.FinishReason
-
-		// If a content block was open, close it
-		if st.sentThinkingStart {
-			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
-			st.sentThinkingStart = false
+		if st.hasPendingDelta {
+			st.pendingStopReason = mapChatStopReason(*choice.FinishReason)
+			return events, nil
 		}
-		if st.sentBlockStart {
-			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
-			st.sentBlockStart = false
+		events = append(events, st.closeCurrentChatBlock()...)
+		for _, state := range st.sortedChatTools() {
+			if state.started {
+				events = append(events, anthEvent("content_block_stop", map[string]any{
+					"type":  "content_block_stop",
+					"index": state.index,
+				}))
+			}
 		}
+		st.pendingStopReason = mapChatStopReason(*choice.FinishReason)
+		st.hasPendingDelta = true
+	}
 
-		// Handle tool call completion inside stream
-		if st.activeToolID != "" {
-			events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}", st.currentBlockIdx))
-			st.activeToolID = ""
-			st.activeToolName = ""
-			st.toolArgsBuilder.Reset()
-		}
+	return events, nil
+}
 
-		var stopReason string
-		switch fr {
-		case "stop":
-			stopReason = "end_turn"
-		case "tool_calls":
-			stopReason = "tool_use"
-		case "length":
-			stopReason = "max_tokens"
-		default:
-			stopReason = "end_turn"
-		}
-
-		msgDelta := map[string]any{
+func (st *StreamTransformer) Finish() []string {
+	if st.sentMessageStop {
+		return nil
+	}
+	events := st.ensureChatMessageStart()
+	events = append(events, st.closeCurrentChatBlock()...)
+	stopReason := st.pendingStopReason
+	if stopReason == "" {
+		stopReason = "end_turn"
+	}
+	usage := st.pendingUsage
+	if usage == nil {
+		usage = map[string]any{"input_tokens": 0, "output_tokens": 0}
+	}
+	events = append(events,
+		anthEvent("message_delta", map[string]any{
 			"type": "message_delta",
 			"delta": map[string]any{
 				"stop_reason":   stopReason,
 				"stop_sequence": nil,
 			},
+			"usage": usage,
+		}),
+		anthEvent("message_stop", map[string]any{"type": "message_stop"}),
+	)
+	st.sentMessageStop = true
+	return events
+}
+
+func (st *StreamTransformer) ensureChatMessageStart() []string {
+	if st.sentMessageStart {
+		return nil
+	}
+	st.sentMessageStart = true
+	return []string{anthEvent("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            st.messageID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []any{},
+			"model":         st.model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
 			"usage": map[string]any{
-				"output_tokens": 1,
+				"input_tokens":  0,
+				"output_tokens": 0,
 			},
+		},
+	})}
+}
+
+func (st *StreamTransformer) ensureChatThinkingBlock() []string {
+	events := st.ensureChatMessageStart()
+	if st.currentBlockType == "thinking" {
+		return events
+	}
+	events = append(events, st.closeCurrentChatBlock()...)
+	st.currentBlockType = "thinking"
+	events = append(events, anthEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": st.currentBlockIdx,
+		"content_block": map[string]any{
+			"type":     "thinking",
+			"thinking": "",
+		},
+	}))
+	return events
+}
+
+func (st *StreamTransformer) ensureChatTextBlock() []string {
+	events := st.ensureChatMessageStart()
+	if st.currentBlockType == "text" {
+		return events
+	}
+	events = append(events, st.closeCurrentChatBlock()...)
+	st.currentBlockType = "text"
+	events = append(events, anthEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": st.currentBlockIdx,
+		"content_block": map[string]any{
+			"type": "text",
+			"text": "",
+		},
+	}))
+	return events
+}
+
+func (st *StreamTransformer) ensureChatToolBlock(openAIIndex int, tc *protocol.OpenAIToolCall) []string {
+	events := st.ensureChatMessageStart()
+	events = append(events, st.closeCurrentChatBlock()...)
+	if st.tools == nil {
+		st.tools = make(map[int]*chatToolState)
+	}
+	state := st.tools[openAIIndex]
+	if state == nil {
+		state = &chatToolState{
+			index: st.currentBlockIdx,
+			id:    fmt.Sprintf("tool_call_%d", openAIIndex),
+			name:  "unknown_tool",
 		}
-		data, _ := json.Marshal(msgDelta)
-		events = append(events, "event: message_delta\ndata: "+string(data))
-		events = append(events, "event: message_stop\ndata: "+`{"type":"message_stop"}`)
+		st.currentBlockIdx++
+		st.tools[openAIIndex] = state
+	}
+	if tc != nil {
+		if tc.ID != "" {
+			state.id = tc.ID
+		}
+		if tc.Function.Name != "" {
+			state.name = tc.Function.Name
+		}
+	}
+	if state.started {
+		return events
+	}
+	state.started = true
+	events = append(events, anthEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": state.index,
+		"content_block": map[string]any{
+			"type": "tool_use",
+			"id":   state.id,
+			"name": state.name,
+		},
+	}))
+	return events
+}
+
+func (st *StreamTransformer) closeCurrentChatBlock() []string {
+	if st.currentBlockType == "" {
+		return nil
+	}
+	event := anthEvent("content_block_stop", map[string]any{
+		"type":  "content_block_stop",
+		"index": st.currentBlockIdx,
+	})
+	st.currentBlockType = ""
+	st.currentBlockIdx++
+	return []string{event}
+}
+
+func (st *StreamTransformer) sortedChatTools() []*chatToolState {
+	if len(st.tools) == 0 {
+		return nil
+	}
+	states := make([]*chatToolState, 0, len(st.tools))
+	for _, state := range st.tools {
+		states = append(states, state)
+	}
+	for i := 1; i < len(states); i++ {
+		for j := i; j > 0 && states[j-1].index > states[j].index; j-- {
+			states[j-1], states[j] = states[j], states[j-1]
+		}
+	}
+	return states
+}
+
+func mapChatStopReason(finishReason string) string {
+	switch finishReason {
+	case "stop":
+		return "end_turn"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	case "length":
+		return "max_tokens"
+	default:
+		return "end_turn"
+	}
+}
+
+func chatUsage(usage *protocol.OpenAIUsage) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	return map[string]any{
+		"input_tokens":  usage.PromptTokens,
+		"output_tokens": usage.CompletionTokens,
+	}
+}
+
+func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, error) {
+	eventName, data := parseSSEBlock(block)
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return nil, nil
+	}
+	if data == "[DONE]" {
+		return st.finish("end_turn"), nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return nil, nil
+	}
+	if st.tools == nil {
+		st.tools = make(map[int]*responsesToolState)
+	}
+
+	st.captureResponseMetadata(payload)
+
+	var events []string
+	switch eventName {
+	case "response.output_item.added":
+		item := mapFromAny(payload["item"])
+		events = append(events, st.handleResponsesOutputItem(payload, item, false)...)
+	case "response.output_item.done":
+		item := mapFromAny(payload["item"])
+		events = append(events, st.handleResponsesOutputItem(payload, item, true)...)
+	case "response.output_text.delta":
+		delta := stringFromAny(payload["delta"])
+		if delta != "" {
+			events = append(events, st.ensureResponsesTextBlock()...)
+			events = append(events, anthEvent("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": st.currentBlockIdx,
+				"delta": map[string]any{
+					"type": "text_delta",
+					"text": delta,
+				},
+			}))
+		}
+	case "response.reasoning_text.delta":
+		delta := stringFromAny(payload["delta"])
+		if delta != "" {
+			events = append(events, st.ensureResponsesThinkingBlock()...)
+			events = append(events, anthEvent("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": st.currentBlockIdx,
+				"delta": map[string]any{
+					"type":     "thinking_delta",
+					"thinking": delta,
+				},
+			}))
+		}
+	case "response.function_call_arguments.delta":
+		outputIndex := intFromAny(payload["output_index"])
+		delta := stringFromAny(payload["delta"])
+		if delta != "" {
+			events = append(events, st.ensureResponsesToolBlock(outputIndex, nil)...)
+			st.tools[outputIndex].pendingArgs.WriteString(delta)
+			events = append(events, anthEvent("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": st.tools[outputIndex].index,
+				"delta": map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": delta,
+				},
+			}))
+		}
+	case "response.function_call_arguments.done":
+		outputIndex := intFromAny(payload["output_index"])
+		args := stringFromAny(payload["arguments"])
+		if args != "" {
+			events = append(events, st.ensureResponsesToolBlock(outputIndex, nil)...)
+			if st.tools[outputIndex].pendingArgs.Len() == 0 {
+				events = append(events, anthEvent("content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": st.tools[outputIndex].index,
+					"delta": map[string]any{
+						"type":         "input_json_delta",
+						"partial_json": args,
+					},
+				}))
+			}
+		}
+	case "response.completed":
+		response := mapFromAny(payload["response"])
+		st.captureUsage(response)
+		stopReason := "end_turn"
+		if st.hasToolUse {
+			stopReason = "tool_use"
+		}
+		events = append(events, st.finish(stopReason)...)
 	}
 
 	return events, nil
+}
+
+func (st *ResponsesStreamTransformer) handleResponsesOutputItem(payload, item map[string]any, done bool) []string {
+	if len(item) == 0 {
+		return nil
+	}
+	st.captureResponseMetadata(item)
+
+	switch stringFromAny(item["type"]) {
+	case "message":
+		return st.ensureResponsesMessageStart()
+	case "function_call":
+		outputIndex := intFromAny(payload["output_index"])
+		events := st.ensureResponsesToolBlock(outputIndex, item)
+		if done {
+			if args := stringFromAny(item["arguments"]); args != "" {
+				if st.tools[outputIndex].pendingArgs.Len() == 0 {
+					events = append(events, anthEvent("content_block_delta", map[string]any{
+						"type":  "content_block_delta",
+						"index": st.tools[outputIndex].index,
+						"delta": map[string]any{
+							"type":         "input_json_delta",
+							"partial_json": args,
+						},
+					}))
+				}
+			}
+		}
+		return events
+	}
+	return nil
+}
+
+func (st *ResponsesStreamTransformer) ensureResponsesMessageStart() []string {
+	if st.sentMessageStart {
+		return nil
+	}
+	st.sentMessageStart = true
+	return []string{anthEvent("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            st.messageID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []any{},
+			"model":         st.model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	})}
+}
+
+func (st *ResponsesStreamTransformer) ensureResponsesTextBlock() []string {
+	events := st.ensureResponsesMessageStart()
+	if st.currentBlockType == "text" {
+		return events
+	}
+	events = append(events, st.closeCurrentResponsesBlock()...)
+	st.currentBlockType = "text"
+	events = append(events, anthEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": st.currentBlockIdx,
+		"content_block": map[string]any{
+			"type": "text",
+			"text": "",
+		},
+	}))
+	return events
+}
+
+func (st *ResponsesStreamTransformer) ensureResponsesThinkingBlock() []string {
+	events := st.ensureResponsesMessageStart()
+	if st.currentBlockType == "thinking" {
+		return events
+	}
+	events = append(events, st.closeCurrentResponsesBlock()...)
+	st.currentBlockType = "thinking"
+	events = append(events, anthEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": st.currentBlockIdx,
+		"content_block": map[string]any{
+			"type":     "thinking",
+			"thinking": "",
+		},
+	}))
+	return events
+}
+
+func (st *ResponsesStreamTransformer) ensureResponsesToolBlock(outputIndex int, item map[string]any) []string {
+	events := st.ensureResponsesMessageStart()
+	events = append(events, st.closeCurrentResponsesBlock()...)
+	st.hasToolUse = true
+
+	state := st.tools[outputIndex]
+	if state == nil {
+		state = &responsesToolState{
+			index: st.currentBlockIdx,
+			id:    fmt.Sprintf("call_%d", outputIndex),
+			name:  "unknown_tool",
+		}
+		st.currentBlockIdx++
+		st.tools[outputIndex] = state
+	}
+	if item != nil {
+		if id := stringFromAny(item["call_id"]); id != "" {
+			state.id = id
+		}
+		if name := stringFromAny(item["name"]); name != "" {
+			state.name = name
+		}
+	}
+	if state.started {
+		return events
+	}
+	state.started = true
+	events = append(events, anthEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": state.index,
+		"content_block": map[string]any{
+			"type": "tool_use",
+			"id":   state.id,
+			"name": state.name,
+		},
+	}))
+	return events
+}
+
+func (st *ResponsesStreamTransformer) closeCurrentResponsesBlock() []string {
+	if st.currentBlockType == "" {
+		return nil
+	}
+	event := anthEvent("content_block_stop", map[string]any{
+		"type":  "content_block_stop",
+		"index": st.currentBlockIdx,
+	})
+	st.currentBlockType = ""
+	st.currentBlockIdx++
+	return []string{event}
+}
+
+func (st *ResponsesStreamTransformer) finish(stopReason string) []string {
+	if st.sentMessageStop {
+		return nil
+	}
+	events := st.ensureResponsesMessageStart()
+	events = append(events, st.closeCurrentResponsesBlock()...)
+	var toolIndexes []int
+	for _, state := range st.tools {
+		if state.started {
+			toolIndexes = append(toolIndexes, state.index)
+		}
+	}
+	for _, index := range toolIndexes {
+		events = append(events, anthEvent("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": index,
+		}))
+	}
+	usage := st.usage
+	if usage == nil {
+		usage = map[string]any{"input_tokens": 0, "output_tokens": 0}
+	}
+	events = append(events,
+		anthEvent("message_delta", map[string]any{
+			"type": "message_delta",
+			"delta": map[string]any{
+				"stop_reason":   stopReason,
+				"stop_sequence": nil,
+			},
+			"usage": usage,
+		}),
+		anthEvent("message_stop", map[string]any{"type": "message_stop"}),
+	)
+	st.sentMessageStop = true
+	return events
+}
+
+func (st *ResponsesStreamTransformer) captureResponseMetadata(payload map[string]any) {
+	if st.messageID == "" {
+		st.messageID = stringFromAny(payload["id"])
+	}
+	if st.model == "" {
+		st.model = stringFromAny(payload["model"])
+	}
+	st.captureUsage(payload)
+}
+
+func (st *ResponsesStreamTransformer) captureUsage(payload map[string]any) {
+	usage := mapFromAny(payload["usage"])
+	if len(usage) == 0 {
+		return
+	}
+	st.usage = map[string]any{
+		"input_tokens":  intFromAny(usage["input_tokens"]),
+		"output_tokens": intFromAny(usage["output_tokens"]),
+	}
+}
+
+func parseSSEBlock(block string) (eventName string, data string) {
+	var dataLines []string
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	return eventName, strings.Join(dataLines, "\n")
+}
+
+func anthEvent(eventName string, payload map[string]any) string {
+	data, _ := json.Marshal(payload)
+	return "event: " + eventName + "\ndata: " + string(data)
+}
+
+func mapFromAny(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return nil
+}
+
+func stringFromAny(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
 }
 
 // FormatEvents formats a list of raw event strings back into SSE response payloads.

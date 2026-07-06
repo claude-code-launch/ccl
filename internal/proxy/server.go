@@ -10,11 +10,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -119,6 +119,14 @@ func (s *Server) fetchAvailableModels() {
 	s.logger.Info("Dynamically discovered available gateway models", "count", len(s.availableModels), "models", s.availableModels)
 }
 
+func (s *Server) modelPool() []string {
+	models := s.provider.Model
+	if models == "" {
+		models = s.availableModels
+	}
+	return modelrouting.SplitCSV(models)
+}
+
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -136,46 +144,29 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve incoming model alias back to real gateway model name
-	realModel := protocol.FromGatewayModelAlias(antReq.Model, strings.Split(s.availableModels, ","))
+	modelPool := s.modelPool()
+	realModel := protocol.FromGatewayModelAlias(antReq.Model, modelPool)
 	// If it matches pool models as configured, or if FromGatewayModelAlias resolved it, use that
-	mappedModel := protocol.MapModel(realModel, s.provider.Model, strings.Split(s.availableModels, ","))
+	mappedModel := protocol.MapModel(realModel, s.provider.Model, modelPool)
 
 	s.logger.Info("Mapped requested model to target gateway model", "requested", antReq.Model, "resolved_alias", realModel, "mapped", mappedModel)
 
-	// -------------------------------------------------------------
-	// Handle "openai" type provider: translation proxy
-	// -------------------------------------------------------------
-
-	// Transform Anthropic Request into OpenAI Request
-	oaReq, err := protocol.ConvertRequest(&antReq)
+	openAIResponses := provider.IsOpenAIResponsesType(s.provider.Type)
+	upstreamBody, endpoint, err := s.convertAnthropicRequestForUpstream(&antReq, mappedModel, openAIResponses)
 	if err != nil {
-		s.logger.Error("Failed to translate Anthropic request to OpenAI format", "error", err)
+		s.logger.Error("Failed to translate Anthropic request", "error", err)
 		http.Error(w, "Internal Translation Error", http.StatusInternalServerError)
 		return
 	}
-
-	oaReq.Model = mappedModel
 	s.logger.Info("Mapped requested model to target gateway model", "requested", antReq.Model, "mapped", mappedModel)
 
 	// Forward Request to Target Endpoint (OpenAI-compatible)
 	client := &http.Client{}
-	oaBody, err := json.Marshal(oaReq)
+	oaBody, err := json.Marshal(upstreamBody)
 	if err != nil {
-		s.logger.Error("Failed to encode OpenAI request", "error", err)
+		s.logger.Error("Failed to encode upstream request", "error", err)
 		http.Error(w, "Internal Encoding Error", http.StatusInternalServerError)
 		return
-	}
-
-	// The provider's Endpoint might not end with "/v1/chat/completions" — let's normalize.
-	endpoint := strings.TrimSuffix(s.provider.Endpoint, "/")
-	if endpoint == "" {
-		endpoint = "https://api.openai.com"
-	}
-	if !strings.HasSuffix(endpoint, "/chat/completions") {
-		// Append appropriate suffix for OpenAI
-		endpoint = endpoint + "/v1/chat/completions"
-		// Make sure we don't end up with /v1/v1/chat/completions
-		endpoint = strings.Replace(endpoint, "/v1/v1/", "/v1/", 1)
 	}
 
 	s.logger.Debug("Forwarding converted request to OpenAI endpoint", "url", endpoint)
@@ -212,12 +203,38 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	// Check if streaming is requested
 	if antReq.Stream {
-		s.handleStreaming(w, resp.Body)
+		if openAIResponses {
+			s.handleResponsesStreaming(w, resp.Body)
+		} else {
+			s.handleStreaming(w, resp.Body)
+		}
 		return
 	}
 
 	// Non-streaming response handling
-	s.handleUnary(w, resp.Body)
+	if openAIResponses {
+		s.handleResponsesUnary(w, resp.Body)
+	} else {
+		s.handleUnary(w, resp.Body)
+	}
+}
+
+func (s *Server) convertAnthropicRequestForUpstream(antReq *protocol.AnthropicRequest, mappedModel string, responses bool) (any, string, error) {
+	if responses {
+		req, err := protocol.ConvertRequestToResponses(antReq)
+		if err != nil {
+			return nil, "", err
+		}
+		req.Model = mappedModel
+		return req, protocol.NormalizeOpenAIResponsesURL(s.provider.Endpoint), nil
+	}
+
+	req, err := protocol.ConvertRequest(antReq)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Model = mappedModel
+	return req, protocol.NormalizeOpenAIChatCompletionsURL(s.provider.Endpoint), nil
 }
 
 func (s *Server) handleUnary(w http.ResponseWriter, body io.Reader) {
@@ -238,6 +255,32 @@ func (s *Server) handleUnary(w http.ResponseWriter, body io.Reader) {
 	antResp, err := protocol.ConvertResponse(&oaResp)
 	if err != nil {
 		s.logger.Error("Failed to convert OpenAI response to Anthropic style", "error", err)
+		http.Error(w, "Internal Mapping Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(antResp)
+}
+
+func (s *Server) handleResponsesUnary(w http.ResponseWriter, body io.Reader) {
+	respBytes, err := io.ReadAll(body)
+	if err != nil {
+		s.logger.Error("Failed to read upstream Responses response", "error", err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+
+	var oaResp protocol.OpenAIResponsesResponse
+	if err := json.Unmarshal(respBytes, &oaResp); err != nil {
+		s.logger.Error("Failed to parse OpenAI Responses response", "error", err)
+		http.Error(w, "Internal Mapping Error", http.StatusInternalServerError)
+		return
+	}
+
+	antResp, err := protocol.ConvertResponsesResponse(&oaResp)
+	if err != nil {
+		s.logger.Error("Failed to convert OpenAI Responses response to Anthropic style", "error", err)
 		http.Error(w, "Internal Mapping Error", http.StatusInternalServerError)
 		return
 	}
@@ -287,9 +330,75 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 			}
 		}
 	}
+	if formatted := FormatEvents(st.Finish()); formatted != "" {
+		if _, err := fmt.Fprint(w, formatted); err != nil {
+			s.logger.Error("Failed to write final SSE event to client", "error", err)
+			return
+		}
+		flusher.Flush()
+	}
 
 	if err := scanner.Err(); err != nil {
 		s.logger.Error("Error scanning streaming input", "error", err)
+	}
+}
+
+func (s *Server) handleResponsesStreaming(w http.ResponseWriter, body io.Reader) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.logger.Error("ResponseWriter does not support Flushing")
+		http.Error(w, "Streaming Unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	st := &ResponsesStreamTransformer{}
+	scanner := bufio.NewScanner(body)
+	var block strings.Builder
+
+	flushBlock := func() bool {
+		raw := strings.TrimSpace(block.String())
+		block.Reset()
+		if raw == "" {
+			return true
+		}
+		events, err := st.TranslateBlock(raw)
+		if err != nil {
+			s.logger.Error("Error parsing Responses stream block", "error", err)
+			return true
+		}
+		formatted := FormatEvents(events)
+		if formatted == "" {
+			return true
+		}
+		if _, err := fmt.Fprint(w, formatted); err != nil {
+			s.logger.Error("Failed to write SSE event to client", "error", err)
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			if !flushBlock() {
+				return
+			}
+			continue
+		}
+		block.WriteString(line)
+		block.WriteByte('\n')
+	}
+	if block.Len() > 0 {
+		flushBlock()
+	}
+
+	if err := scanner.Err(); err != nil {
+		s.logger.Error("Error scanning Responses streaming input", "error", err)
 	}
 }
 
@@ -298,18 +407,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	s.logger.Debug("Received models check request")
 	w.Header().Set("Content-Type", "application/json")
 
-	poolModels := []string{}
-	if s.provider.Model != "" && strings.Contains(s.provider.Model, ",") {
-		for _, m := range strings.Split(s.provider.Model, ",") {
-			m = strings.TrimSpace(m)
-			if m != "" {
-				poolModels = append(poolModels, m)
-			}
-		}
-	}
-
-	availModels := strings.Split(s.provider.Model, ",")
-	models := protocol.BatchToGatewayModelAlias(slices.Concat(poolModels, availModels))
+	models := protocol.BatchToGatewayModelAlias(s.modelPool())
 
 	var buf bytes.Buffer
 	buf.WriteString(`{"data":[`)

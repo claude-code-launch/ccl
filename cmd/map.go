@@ -2,11 +2,9 @@ package cmd
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/provider"
-	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/spf13/cobra"
 
 	tea "charm.land/bubbletea/v2"
@@ -76,7 +74,8 @@ func runMapDirect(cmd *cobra.Command, args []string) error {
 		p.HaikuModel = mapHaiku
 	}
 	if cmd.Flags().Changed("custom") {
-		p.LockModel = mapCustom
+		p.CustomModelID = mapCustom
+		p.LockModel = ""
 	}
 
 	cfg.Providers[providerName] = p
@@ -95,13 +94,13 @@ func runMapDirect(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Haiku  -> %s\n", p.HaikuModel)
 	}
 	if cmd.Flags().Changed("custom") {
-		fmt.Printf("  Custom -> %s\n", p.LockModel)
+		fmt.Printf("  Custom -> %s\n", p.CustomModelID)
 	}
 
 	return nil
 }
 
-// runMapAuto fetches available models and auto-fills the first 4 slots.
+// runMapAuto fetches available models and maps usable models to slots in order.
 func runMapAuto(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -125,7 +124,7 @@ func runMapAuto(args []string) error {
 		return fmt.Errorf("no models found from provider")
 	}
 
-	availableSet := testModelsConcurrently(models, p.Endpoint, p.APIKey)
+	availableSet := testModelsConcurrently(models, p.Endpoint, p.APIKey, p.Type)
 
 	var available []string
 	for _, m := range models {
@@ -138,29 +137,16 @@ func runMapAuto(args []string) error {
 		return fmt.Errorf("no available models found - check endpoint and API key")
 	}
 
-	sort.Strings(available)
 	fmt.Printf("Found %d available model(s) out of %d total.\n", len(available), len(models))
 
-	slots := []struct {
-		name string
-		ptr  *string
-	}{
-		{"Opus", &p.OpusModel},
-		{"Sonnet", &p.SonnetModel},
-		{"Haiku", &p.HaikuModel},
-		{"Custom", &p.LockModel},
-	}
-
-	assigned := 0
-	for i, s := range slots {
-		if i < len(available) {
-			*s.ptr = available[i]
-			assigned++
-		}
+	slots := sequentialSlotPointers(&p)
+	assigned := applySequentialSlotMapping(slots, available)
+	if p.CustomModelID != "" {
+		p.LockModel = ""
 	}
 
 	if assigned < 4 {
-		fmt.Printf("⚠ Only %d model(s) available, assigned to first %d slot(s).\n", assigned, assigned)
+		fmt.Printf("⚠ Only %d model(s) available, assigned in order to first %d slot(s).\n", assigned, assigned)
 		fmt.Println("   Use 'ccl map' to manually configure remaining slots.")
 	}
 
@@ -170,8 +156,8 @@ func runMapAuto(args []string) error {
 	}
 
 	fmt.Printf("\n✓ Auto-mapped slots for provider %q:\n", providerName)
-	for i, s := range slots {
-		if i < len(available) {
+	for _, s := range slots {
+		if *s.ptr != "" {
 			fmt.Printf("  %-6s -> %s\n", s.name, *s.ptr)
 		} else {
 			fmt.Printf("  %-6s -> (unset)\n", s.name)
@@ -179,6 +165,33 @@ func runMapAuto(args []string) error {
 	}
 
 	return nil
+}
+
+type modelSlot struct {
+	name string
+	ptr  *string
+}
+
+func sequentialSlotPointers(p *provider.Provider) []modelSlot {
+	return []modelSlot{
+		{"Opus", &p.OpusModel},
+		{"Sonnet", &p.SonnetModel},
+		{"Haiku", &p.HaikuModel},
+		{"Custom", &p.CustomModelID},
+	}
+}
+
+func applySequentialSlotMapping(slots []modelSlot, available []string) int {
+	assigned := 0
+	for i, slot := range slots {
+		if i < len(available) {
+			*slot.ptr = available[i]
+			assigned++
+		} else {
+			*slot.ptr = ""
+		}
+	}
+	return assigned
 }
 
 // runMapTUI launches the interactive TUI at page 1 (slot mapping).
@@ -230,7 +243,10 @@ func runMapTUI(args []string) error {
 	apply1MSuffix("opus", &p.OpusModel)
 	apply1MSuffix("sonnet", &p.SonnetModel)
 	apply1MSuffix("haiku", &p.HaikuModel)
-	apply1MSuffix("custom", &p.LockModel)
+	apply1MSuffix("custom", &p.CustomModelID)
+	if p.CustomModelID != "" {
+		p.LockModel = ""
+	}
 
 	cfg.Providers[providerName] = p
 	if err := config.Save(cfg); err != nil {
@@ -248,7 +264,7 @@ func runMapTUI(args []string) error {
 	printSlot("Opus", p.OpusModel)
 	printSlot("Sonnet", p.SonnetModel)
 	printSlot("Haiku", p.HaikuModel)
-	printSlot("Custom", p.LockModel)
+	printSlot("Custom", p.CustomModelID)
 
 	return nil
 }
@@ -261,25 +277,10 @@ func resolveProviderName(args []string, cfg *provider.Config) string {
 	return cfg.ActiveProvider
 }
 
-// fetchModelsForProvider fetches models from the provider API.
-func fetchModelsForProvider(p provider.Provider) []string {
-	var modelsStr string
-	var err error
-	if p.Type == "openai" {
-		modelsStr, err = protocol.GetOpenAIModels(p.Endpoint, p.APIKey)
-	} else {
-		modelsStr, err = protocol.GetAnthropicModels(p.Endpoint, p.APIKey)
-	}
-	if err != nil || modelsStr == "" {
-		return nil
-	}
-	return parseModelList(modelsStr)
-}
-
 func init() {
 	mapCmd.Flags().StringVar(&mapOpus, "opus", "", "Model for Opus slot")
 	mapCmd.Flags().StringVar(&mapSonnet, "sonnet", "", "Model for Sonnet slot")
 	mapCmd.Flags().StringVar(&mapHaiku, "haiku", "", "Model for Haiku slot")
-	mapCmd.Flags().StringVar(&mapCustom, "custom", "", "Model for Custom/Lock slot")
+	mapCmd.Flags().StringVar(&mapCustom, "custom", "", "Model for Custom slot")
 	rootCmd.AddCommand(mapCmd)
 }

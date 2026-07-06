@@ -49,6 +49,9 @@ func Load() (*provider.Config, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]provider.Provider)
 	}
+	for name, p := range cfg.Providers {
+		cfg.Providers[name] = provider.NormalizeLegacyCustomSlot(p)
+	}
 
 	return cfg, nil
 }
@@ -66,5 +69,5 @@ func Save(cfg *provider.Config) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }

@@ -7,122 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 
-	"github.com/claude-code-launch/ccl/internal/protocol"
+	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/proxy"
 )
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Model tier classification
-// ─────────────────────────────────────────────────────────────────────────────
-
-const (
-	tierOpus   = "opus"
-	tierSonnet = "sonnet"
-	tierHaiku  = "haiku"
-)
-
-// tierKeywords maps each tier to its identifying keywords, checked in priority order.
-var tierKeywords = [3]struct {
-	tier     string
-	keywords []string
-}{
-	{tierOpus, []string{"opus", "reasoning", "reasoner", "thinking", "pro", "max", "ultra"}},
-	{tierHaiku, []string{"haiku", "mini", "nano", "air", "lite", "flash"}},
-	{tierSonnet, []string{"sonnet", "turbo", "fast"}},
-}
-
-var versionRegex = regexp.MustCompile(`\d+(\.\d+)?`)
-
-// determineModelTier classifies a model name into haiku / sonnet / opus.
-func determineModelTier(model string) string {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if model == "" {
-		return tierSonnet
-	}
-
-	for _, entry := range tierKeywords {
-		for _, kw := range entry.keywords {
-			if strings.Contains(model, kw) {
-				return entry.tier
-			}
-		}
-	}
-
-	// Fall back to embedded version number.
-	switch v := extractVersion(model); {
-	case v >= 5.0:
-		return tierOpus
-	case v >= 3.0:
-		return tierSonnet
-	default:
-		return tierHaiku
-	}
-}
-
-func extractVersion(model string) float64 {
-	m := versionRegex.FindString(model)
-	if m == "" {
-		return 0
-	}
-	v, err := strconv.ParseFloat(m, 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Model pool & routing
-// ─────────────────────────────────────────────────────────────────────────────
-
-// parseModelPool splits a comma-separated model string into trimmed, non-empty names.
-func parseModelPool(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// ModelRouter routes model requests to the first available model in a tier.
-type ModelRouter struct {
-	pools map[string][]string
-}
-
-// NewModelRouter groups a flat list of model names into per-tier pools.
-func NewModelRouter(models []string) *ModelRouter {
-	pools := map[string][]string{
-		tierHaiku:  nil,
-		tierSonnet: nil,
-		tierOpus:   nil,
-	}
-	for _, m := range models {
-		t := determineModelTier(m)
-		pools[t] = append(pools[t], m)
-	}
-	return &ModelRouter{pools: pools}
-}
-
-// Select returns the first available model for tier, then tries each fallback in order.
-func (r *ModelRouter) Select(tier string, fallbackTiers ...string) string {
-	if models := r.pools[tier]; len(models) > 0 {
-		return models[0]
-	}
-	for _, t := range fallbackTiers {
-		if models := r.pools[t]; len(models) > 0 {
-			return models[0]
-		}
-	}
-	return ""
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings file
@@ -151,8 +42,10 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 		env["ANTHROPIC_API_KEY"] = p.APIKey
 	}
 
-	// 1. Custom model ID — bypasses ALL tier logic (Bedrock ARN, custom fine-tune, etc.)
+	// 1. Custom model option shown as the persistent "Custom model" row in /model.
 	if p.CustomModelID != "" {
+		env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = p.CustomModelID
+		env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = p.CustomModelID
 		env["CLAUDE_CODE_MODEL_ID"] = p.CustomModelID
 	}
 
@@ -203,10 +96,10 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 		return
 	}
 
-	router := NewModelRouter(parseModelPool(modelSpec))
-	opus := router.Select(tierOpus, tierSonnet, tierHaiku)
-	sonnet := router.Select(tierSonnet, tierOpus, tierHaiku)
-	haiku := router.Select(tierHaiku, tierSonnet)
+	models := modelrouting.SplitCSV(modelSpec)
+	opus := modelrouting.MapModel("claude-3-opus", "", models)
+	sonnet := modelrouting.MapModel("claude-3-5-sonnet", "", models)
+	haiku := modelrouting.MapModel("claude-3-5-haiku", "", models)
 
 	env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
 	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
@@ -269,7 +162,7 @@ type providerContext struct {
 func setupProvider(p provider.Provider) (*providerContext, error) {
 	// Make a COPY to avoid mutating the original provider (fixes mutation bug)
 	providerCopy := p
-	ctx := &providerContext{provider: providerCopy, useProxy: p.Type == "openai"}
+	ctx := &providerContext{provider: providerCopy, useProxy: provider.IsOpenAICompatibleType(p.Type)}
 
 	if ctx.useProxy {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -300,12 +193,6 @@ func (c *providerContext) resolveModel() error {
 		c.provider.Model = c.srv.AvailableModels()
 		return nil
 	}
-	models, err := protocol.GetAnthropicModels(c.provider.Endpoint, c.provider.APIKey)
-	if err != nil {
-		return err
-	}
-	aliases := protocol.BatchToGatewayModelAlias(strings.Split(models, ","))
-	c.provider.Model = strings.Join(aliases, ",")
 	return nil
 }
 

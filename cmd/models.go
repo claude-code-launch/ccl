@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/spf13/cobra"
 )
 
@@ -19,24 +19,16 @@ var modelsCmd = &cobra.Command{
 			return err
 		}
 
-		var modelsStr string
-		if p.Model == "" {
-			// No configured models, fetch from provider
-			if p.Type == "openai" {
-				if m, err := protocol.GetOpenAIModels(p.Endpoint, p.APIKey); err != nil {
-					return err
-				} else {
-					modelsStr = m
+		modelsStr := p.Model
+		if modelsShowAll || modelsStr == "" {
+			fetched := fetchModelsForProvider(p)
+			if len(fetched) == 0 {
+				if modelsStr == "" || modelsShowAll {
+					return fmt.Errorf("no models found from provider")
 				}
 			} else {
-				if m, err := protocol.GetAnthropicModels(p.Endpoint, p.APIKey); err != nil {
-					return err
-				} else {
-					modelsStr = m
-				}
+				modelsStr = strings.Join(fetched, ",")
 			}
-		} else {
-			modelsStr = p.Model
 		}
 
 		modelList := parseModelList(modelsStr)
@@ -45,17 +37,10 @@ var modelsCmd = &cobra.Command{
 			return nil
 		}
 
-		// Determine whether to show all or only configured
 		displayModels := modelList
-		if !modelsShowAll {
-			// Default: show configured models only (those in p.Model)
-			if p.Model != "" {
-				displayModels = parseModelList(p.Model)
-			}
-		}
 
 		// Test each model concurrently
-		availableSet := testModelsConcurrently(displayModels, p.Endpoint, p.APIKey)
+		availableSet := testModelsConcurrently(displayModels, p.Endpoint, p.APIKey, p.Type)
 
 		// Display results
 		available, unavailable := classifyModels(displayModels, availableSet)

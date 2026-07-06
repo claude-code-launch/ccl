@@ -38,11 +38,12 @@ type AnthropicMessage struct {
 }
 
 type ContentBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text,omitempty"`
-	ID    string          `json:"id,omitempty"`    // for tool_use
-	Name  string          `json:"name,omitempty"`  // for tool_use
-	Input json.RawMessage `json:"input,omitempty"` // for tool_use, can be arbitrary object
+	Type   string          `json:"type"`
+	Text   string          `json:"text,omitempty"`
+	Source *ImageSource    `json:"source,omitempty"` // for image
+	ID     string          `json:"id,omitempty"`     // for tool_use
+	Name   string          `json:"name,omitempty"`   // for tool_use
+	Input  json.RawMessage `json:"input,omitempty"`  // for tool_use, can be arbitrary object
 
 	Thinking  string `json:"thinking,omitempty"`  // for thinking
 	Signature string `json:"signature,omitempty"` // for thinking_delta
@@ -50,6 +51,13 @@ type ContentBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"` // for tool_result
 	Content   any    `json:"content,omitempty"`     // for tool_result, can be string or []ContentBlock
 	IsError   bool   `json:"is_error,omitempty"`    // for tool_result
+}
+
+type ImageSource struct {
+	Type      string `json:"type,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 type AnthropicTool struct {
@@ -96,14 +104,12 @@ func GetAnthropicModels(baseURL, key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("api key 不能为空")
 	}
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	modelsURL := NormalizeAnthropicModelsURL(baseURL)
 
 	req, err := http.NewRequestWithContext(
 		context.Background(),
 		http.MethodGet,
-		baseURL+"/v1/models",
+		modelsURL,
 		nil,
 	)
 	if err != nil {

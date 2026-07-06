@@ -12,23 +12,31 @@ import (
 
 // OpenAIRequest matches the Chat Completions endpoint payload format (/v1/chat/completions).
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice  any             `json:"tool_choice,omitempty"` // "none", "auto", or OpenAIToolChoice
+	Model         string               `json:"model"`
+	Messages      []OpenAIMessage      `json:"messages"`
+	MaxTokens     int                  `json:"max_tokens,omitempty"`
+	Stream        bool                 `json:"stream,omitempty"`
+	StreamOptions *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	TopP          *float64             `json:"top_p,omitempty"`
+	Stop          []string             `json:"stop,omitempty"`
+	Tools         []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice    any                  `json:"tool_choice,omitempty"` // "none", "auto", or OpenAIToolChoice
+}
+
+type OpenAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type OpenAIMessage struct {
-	Role             string           `json:"role"`
-	Content          any              `json:"content,omitempty"` // string or []OpenAIMessagePart
-	Name             string           `json:"name,omitempty"`    // for tool result
-	ToolCallID       string           `json:"tool_call_id,omitempty"`
-	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
-	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	Role             string              `json:"role"`
+	Content          any                 `json:"content,omitempty"` // string or []OpenAIMessagePart
+	Name             string              `json:"name,omitempty"`    // for tool result
+	ToolCallID       string              `json:"tool_call_id,omitempty"`
+	ToolCalls        []OpenAIToolCall    `json:"tool_calls,omitempty"`
+	FunctionCall     *OpenAIFunctionCall `json:"function_call,omitempty"`
+	Refusal          string              `json:"refusal,omitempty"`
+	ReasoningContent string              `json:"reasoning_content,omitempty"`
 }
 
 type OpenAIMessagePart struct {
@@ -54,6 +62,7 @@ type OpenAIFunctionDef struct {
 }
 
 type OpenAIToolCall struct {
+	Index    int                `json:"index,omitempty"`
 	ID       string             `json:"id"`
 	Type     string             `json:"type"`
 	Function OpenAIFunctionCall `json:"function"`
@@ -150,11 +159,7 @@ type ModelResponse struct {
 }
 
 func GetOpenAIModels(baseURL, apiKey string) (string, error) {
-	url := baseURL + "/models"
-	if strings.HasSuffix(baseURL, "/chat/completions") {
-		// Make sure we don't end up with /v1/v1/chat/completions
-		url = strings.Replace(baseURL, "/chat/completions", "/models", 1)
-	}
+	url := NormalizeOpenAIModelsURL(baseURL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()

@@ -95,6 +95,9 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				Model:         "dummy", // Prevent model fetching
 			},
 			check: func(t *testing.T, s settingsJSON) {
+				if s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "arn:aws:bedrock:us-east-1:123456789012:custom-model/my-model" {
+					t.Errorf("ANTHROPIC_CUSTOM_MODEL_OPTION mismatch: %s", s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"])
+				}
 				if s.Env["CLAUDE_CODE_MODEL_ID"] != "arn:aws:bedrock:us-east-1:123456789012:custom-model/my-model" {
 					t.Errorf("CLAUDE_CODE_MODEL_ID mismatch: %s", s.Env["CLAUDE_CODE_MODEL_ID"])
 				}
@@ -164,6 +167,9 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				LockModel:     "claude-opus-4",
 			},
 			check: func(t *testing.T, s settingsJSON) {
+				if s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "my-custom-model" {
+					t.Errorf("ANTHROPIC_CUSTOM_MODEL_OPTION mismatch: %s", s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"])
+				}
 				if s.Env["CLAUDE_CODE_MODEL_ID"] != "my-custom-model" {
 					t.Errorf("CLAUDE_CODE_MODEL_ID mismatch: %s", s.Env["CLAUDE_CODE_MODEL_ID"])
 				}

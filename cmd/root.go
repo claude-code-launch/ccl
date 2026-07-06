@@ -16,46 +16,15 @@ var rootCmd = &cobra.Command{
 	Short: "ccl is a multi-provider launcher for Claude Code",
 	Long:  `ccl manages different LLM providers for Claude Code and runs Claude Code with injected configurations.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !IsInstalled() {
-			err := AutoInstall()
-			if err != nil {
-				return err
-			}
-		}
-
-		p, err := resolveProvider()
-		if err != nil {
-			return err
-		}
-
-		return claude.Run(p, args)
+		return runClaude(args)
 	},
 }
 
 func Execute() {
 	if len(os.Args) > 1 {
 		firstArg := os.Args[1]
-		isCclCmd := false
-		switch firstArg {
-		case "use", "set", "list", "doctor", "settings", "models", "run", "help", "completion", "-h", "--help", "version", "env", "update", "lang", "conf", "map":
-			isCclCmd = true
-		}
 
-		if !isCclCmd {
-			if !IsInstalled() {
-				err := AutoInstall()
-				if err != nil {
-					fmt.Println(err)
-					os.Exit(1)
-				}
-			}
-
-			p, err := resolveProvider()
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-
+		if !isCclCommand(firstArg) {
 			var argsToPass []string
 			if firstArg == "claude" {
 				argsToPass = os.Args[2:]
@@ -63,7 +32,7 @@ func Execute() {
 				argsToPass = os.Args[1:]
 			}
 
-			if err := claude.Run(p, argsToPass); err != nil {
+			if err := runClaude(argsToPass); err != nil {
 				if exitErr, ok := err.(*exec.ExitError); ok {
 					os.Exit(exitErr.ExitCode())
 				}
@@ -80,6 +49,41 @@ func Execute() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func isCclCommand(arg string) bool {
+	switch arg {
+	case "help", "completion", "-h", "--help":
+		return true
+	}
+
+	for _, command := range rootCmd.Commands() {
+		if command.Name() == arg {
+			return true
+		}
+		for _, alias := range command.Aliases {
+			if alias == arg {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func runClaude(args []string) error {
+	if !IsInstalled() {
+		if err := AutoInstall(); err != nil {
+			return err
+		}
+	}
+
+	p, err := resolveProvider()
+	if err != nil {
+		return err
+	}
+
+	return claude.Run(p, args)
 }
 
 // resolveProvider determines the active provider.
@@ -131,10 +135,10 @@ func resolveProvider() (provider.Provider, error) {
 			Model:    os.Getenv("OPENAI_MODEL"),
 		}
 		if p.Endpoint == "" {
-			p.Endpoint = "https://api.openai.com"
+			p.Endpoint = "https://api.openai.com/v1"
 		}
 		return p, nil
 	}
 
-	return provider.Provider{}, fmt.Errorf("no active provider selected. Use 'ccl add' or 'ccl use', or set OPENAI_API_KEY / ANTHROPIC_API_KEY in environment")
+	return provider.Provider{}, fmt.Errorf("no active provider selected. Use 'ccl set' or 'ccl use', or set OPENAI_API_KEY / ANTHROPIC_API_KEY in environment")
 }

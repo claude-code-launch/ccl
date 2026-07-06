@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -45,6 +46,9 @@ type AdvancedConfigModel struct {
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
+	detecting      bool
+	detectProgress int
+	detectFrame    int
 
 	// Page 0
 	urlInput textinput.Model
@@ -63,6 +67,16 @@ type AdvancedConfigModel struct {
 
 	// Page 4
 	IsActiveChosen bool
+}
+
+type modelFetchTickMsg struct{}
+
+type modelFetchDoneMsg struct {
+	endpoint            string
+	apiKey              string
+	detectedType        string
+	discoveredModelsRaw string
+	err                 error
 }
 
 func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
@@ -110,7 +124,7 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	cleanAndPopulate(&m.p.OpusModel, "opus")
 	cleanAndPopulate(&m.p.SonnetModel, "sonnet")
 	cleanAndPopulate(&m.p.HaikuModel, "haiku")
-	cleanAndPopulate(&m.p.LockModel, "custom")
+	cleanAndPopulate(&m.p.CustomModelID, "custom")
 
 	return m
 }
@@ -128,6 +142,25 @@ func NewAdvancedConfigModelAtPage1(p *provider.Provider, modelPool []string) *Ad
 }
 
 func (m *AdvancedConfigModel) Init() tea.Cmd { return textinput.Blink }
+
+func modelFetchTickCmd() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return modelFetchTickMsg{}
+	})
+}
+
+func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		detectedType, discoveredModelsRaw, err := detectProtocolAndModels(endpoint, apiKey)
+		return modelFetchDoneMsg{
+			endpoint:            endpoint,
+			apiKey:              apiKey,
+			detectedType:        detectedType,
+			discoveredModelsRaw: discoveredModelsRaw,
+			err:                 err,
+		}
+	}
+}
 
 func (m *AdvancedConfigModel) updateFilteredPool() {
 	q := strings.ToLower(m.filterInput.Value())
@@ -154,7 +187,7 @@ func (m *AdvancedConfigModel) updateFilteredPool() {
 // doAutoConfig auto-fills slot models with the first 4 available from modelPool,
 // sets default effort=max, and clears 1M slots.
 func (m *AdvancedConfigModel) doAutoConfig() {
-	slots := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.LockModel}
+	slots := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID}
 	for i, ptr := range slots {
 		if i < len(m.modelPool) {
 			*ptr = m.modelPool[i]
@@ -162,6 +195,7 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 			*ptr = ""
 		}
 	}
+	m.p.LockModel = ""
 	// Default: no 1M context
 	m.oneMSlots = make(map[string]bool)
 	// Default: effort = max
@@ -177,12 +211,12 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 // 实时获取/检测协议名称
 func (m *AdvancedConfigModel) getProtocol() string {
 	if m.p.Type != "" {
-		return m.p.Type
+		return provider.ProtocolLabel(m.p.Type)
 	}
 	if strings.Contains(strings.ToLower(m.urlInput.Value()), "anthropic") {
 		return "anthropic"
 	}
-	return "openai"
+	return "openai(chat)"
 }
 
 func (m *AdvancedConfigModel) goBack() {
@@ -211,15 +245,80 @@ func (m *AdvancedConfigModel) goBack() {
 	}
 }
 
+func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw string, derr error) tea.Cmd {
+	m.p.Type = detectedType
+
+	m.modelPool = []string{}
+	if derr == nil && discoveredModelsRaw != "" {
+		for _, mod := range strings.Split(discoveredModelsRaw, ",") {
+			mod = strings.TrimSpace(mod)
+			if mod != "" && !stringInSlice(mod, m.modelPool) {
+				m.modelPool = append(m.modelPool, mod)
+			}
+		}
+	}
+	if m.p.Model != "" {
+		for _, mod := range strings.Split(m.p.Model, ",") {
+			mod = strings.TrimSpace(mod)
+			if mod != "" && !stringInSlice(mod, m.modelPool) {
+				m.modelPool = append(m.modelPool, mod)
+			}
+		}
+	}
+
+	// 协议探测 + 模型获取都失败，且没有已有模型 → 退出
+	if len(m.modelPool) == 0 {
+		if derr != nil {
+			m.detectionError = derr
+		} else {
+			m.detectionError = fmt.Errorf("%s", locale.T("未获取到任何可用模型", "no models available"))
+		}
+		return tea.Quit
+	}
+
+	m.p.Model = strings.Join(m.modelPool, ",")
+	sort.Strings(m.modelPool)
+	m.page = 5
+	m.cursor = 0
+	return nil
+}
+
 func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case modelFetchTickMsg:
+		if !m.detecting {
+			return m, nil
+		}
+		m.detectFrame++
+		if m.detectProgress < 95 {
+			m.detectProgress += 3
+			if m.detectProgress > 95 {
+				m.detectProgress = 95
+			}
+		}
+		return m, modelFetchTickCmd()
+
+	case modelFetchDoneMsg:
+		if !m.detecting || msg.endpoint != m.p.Endpoint || msg.apiKey != m.p.APIKey {
+			return m, nil
+		}
+		m.detectProgress = 100
+		m.detecting = false
+		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.err)
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		}
 
+		if m.detecting {
+			return m, nil
+		}
+
+		switch msg.String() {
 		case "esc":
 			if m.page == 1 && m.filterInput.Focused() {
 				m.filterInput.Blur()
@@ -398,43 +497,13 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.cursor == 2 {
 					m.p.Endpoint = m.urlInput.Value()
 					m.p.APIKey = m.keyInput.Value()
-
-					// 自动探测协议与模型
-					detectedType, discoveredModelsRaw, derr := detectProtocolAndModels(m.p.Endpoint, m.p.APIKey)
-					m.p.Type = detectedType
-
-					m.modelPool = []string{}
-					if derr == nil && discoveredModelsRaw != "" {
-						for _, mod := range strings.Split(discoveredModelsRaw, ",") {
-							mod = strings.TrimSpace(mod)
-							if mod != "" && !stringInSlice(mod, m.modelPool) {
-								m.modelPool = append(m.modelPool, mod)
-							}
-						}
-					}
-					if m.p.Model != "" {
-						for _, mod := range strings.Split(m.p.Model, ",") {
-							mod = strings.TrimSpace(mod)
-							if mod != "" && !stringInSlice(mod, m.modelPool) {
-								m.modelPool = append(m.modelPool, mod)
-							}
-						}
-					}
-
-					// 协议探测 + 模型获取都失败，且没有已有模型 → 退出
-					if len(m.modelPool) == 0 {
-						if derr != nil {
-							m.detectionError = derr
-						} else {
-							m.detectionError = fmt.Errorf(locale.T("未获取到任何可用模型", "no models available"))
-						}
-						return m, tea.Quit
-					}
-
-					m.p.Model = strings.Join(m.modelPool, ",")
-					sort.Strings(m.modelPool)
-					m.page = 5
-					m.cursor = 0
+					m.urlInput.Blur()
+					m.keyInput.Blur()
+					m.detectionError = nil
+					m.detecting = true
+					m.detectProgress = 5
+					m.detectFrame = 0
+					return m, tea.Batch(modelFetchCmd(m.p.Endpoint, m.p.APIKey), modelFetchTickCmd())
 				}
 			case 1:
 				if !m.filterInput.Focused() {
@@ -460,8 +529,11 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if selectedModel == locale.T("(设置为未设置/清空)", "(clear/unset)") || selectedModel == locale.T("(无匹配模型)", "(no match)") {
 						selectedModel = ""
 					}
-					ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.LockModel}[m.activeSlot]
+					ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID}[m.activeSlot]
 					*ptr = selectedModel
+					if m.activeSlot == 3 {
+						m.p.LockModel = ""
+					}
 					m.filterInput.Blur()
 				}
 			case 2:
@@ -559,6 +631,29 @@ func renderBottomButtons(page int, currentCursor int, nextIdx, backIdx int) stri
 	return fmt.Sprintf("\n%s    %s\n\n", nextStr, backStr)
 }
 
+func renderModelFetchProgress(progress, frame int) string {
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	const width = 34
+	filled := progress * width / 100
+	if filled > width {
+		filled = width
+	}
+	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	spin := spinners[frame%len(spinners)]
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	label := locale.T("正在检测协议并获取模型", "Detecting protocol and fetching models")
+	hint := locale.T("请稍候，正在验证 BaseURL 和 API Key", "Please wait while BaseURL and API Key are validated")
+	return "\n" +
+		selectedStyle.Render(fmt.Sprintf("%s %s", spin, label)) + "\n" +
+		cyanText.Render(fmt.Sprintf("[%s] %3d%%", bar, progress)) + "\n" +
+		grayText.Render(hint) + "\n"
+}
+
 //	func (m *AdvancedConfigModel) View() tea.View {
 //		var body strings.Builder
 //		protoLabel := protoBadgeStyle.Render("Protocol: " + m.getProtocol())
@@ -602,7 +697,7 @@ func renderBottomButtons(page int, currentCursor int, nextIdx, backIdx int) stri
 //				renderRow(0, "Opus", m.p.OpusModel)
 //				renderRow(1, "Sonnet", m.p.SonnetModel)
 //				renderRow(2, "Haiku", m.p.HaikuModel)
-//				renderRow(3, "Custom", m.p.LockModel)
+//				renderRow(3, "Custom", m.p.CustomModelID)
 //
 //				body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
 //				body.WriteString(grayText.Render(locale.T("↑↓ 移动光标 · ←→ 切换按钮 · enter 选择编辑/跳转", "↑↓ Move · ←→ Toggle Buttons · enter select")))
@@ -663,7 +758,7 @@ func renderBottomButtons(page int, currentCursor int, nextIdx, backIdx int) stri
 //			renderMultiRow(0, "Opus Config", m.p.OpusModel)
 //			renderMultiRow(1, "Sonnet Config", m.p.SonnetModel)
 //			renderMultiRow(2, "Haiku Config", m.p.HaikuModel)
-//			renderMultiRow(3, "Custom Config", m.p.LockModel)
+//			renderMultiRow(3, "Custom Config", m.p.CustomModelID)
 //
 //			body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
 //			body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))
@@ -759,8 +854,12 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 		paddedKeyText := purpleText.Render(fmt.Sprintf("%-14s", "API Key"))
 		body.WriteString(fmt.Sprintf("%s%s: %s\n", prefKey, paddedKeyText, m.keyInput.View()))
 
-		body.WriteString(renderBottomButtons(m.page, m.cursor, 2, 3))
-		body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
+		if m.detecting {
+			body.WriteString(renderModelFetchProgress(m.detectProgress, m.detectFrame))
+		} else {
+			body.WriteString(renderBottomButtons(m.page, m.cursor, 2, 3))
+			body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
+		}
 
 	case 1:
 		// ==================== PAGE 1: 槽位映射配置 ====================
@@ -785,7 +884,7 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 			renderRow(0, "Opus", m.p.OpusModel)
 			renderRow(1, "Sonnet", m.p.SonnetModel)
 			renderRow(2, "Haiku", m.p.HaikuModel)
-			renderRow(3, "Custom", m.p.LockModel)
+			renderRow(3, "Custom", m.p.CustomModelID)
 
 			body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
 			body.WriteString(grayText.Render(locale.T("↑↓ 移动光标 · ←→ 切换按钮 · enter 选择编辑/跳转", "↑↓ Move · ←→ Toggle Buttons · enter select")))
@@ -862,7 +961,7 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 		renderMultiRow(0, "Opus Config", m.p.OpusModel)
 		renderMultiRow(1, "Sonnet Config", m.p.SonnetModel)
 		renderMultiRow(2, "Haiku Config", m.p.HaikuModel)
-		renderMultiRow(3, "Custom Config", m.p.LockModel)
+		renderMultiRow(3, "Custom Config", m.p.CustomModelID)
 
 		body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
 		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))

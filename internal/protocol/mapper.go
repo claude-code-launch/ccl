@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/claude-code-launch/ccl/internal/modelrouting"
 )
+
+const anthropicBillingHeaderPrefix = "x-anthropic-billing-header:"
 
 // ConvertRequest maps an Anthropic Messages request to an OpenAI Chat Completions request.
 func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
@@ -14,6 +18,10 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 		Stream:      antReq.Stream,
 		Temperature: antReq.Temperature,
 		TopP:        antReq.TopP,
+		Stop:        antReq.StopSequences,
+	}
+	if antReq.Stream {
+		oaReq.StreamOptions = &OpenAIStreamOptions{IncludeUsage: true}
 	}
 
 	// 1. Process system prompt (inject as first message with "system" role if present)
@@ -21,14 +29,14 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 		var sysContent string
 		switch sys := antReq.System.(type) {
 		case string:
-			sysContent = sys
+			sysContent = stripLeadingAnthropicBillingHeader(sys)
 		case []any:
 			// If it's a list of blocks, merge text types
 			for _, item := range sys {
 				if m, ok := item.(map[string]any); ok {
 					if t, ok := m["type"].(string); ok && t == "text" {
 						if val, ok := m["text"].(string); ok {
-							sysContent += val
+							sysContent += stripLeadingAnthropicBillingHeader(val)
 						}
 					}
 				}
@@ -78,18 +86,31 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 				case "thinking":
 					oaMsg.ReasoningContent = block.Thinking
 				case "image":
-					// Try to handle image mapping if encountered, otherwise skip
-					// OpenAI expects base64 or URL. We leave empty or map to Type/ImageURL
-					// Standard Claude Code is CLI-based so it rarely sends images.
+					if block.Source != nil {
+						imageURL := block.Source.URL
+						if imageURL == "" && block.Source.Type == "base64" && block.Source.Data != "" {
+							imageURL = "data:" + block.Source.MediaType + ";base64," + block.Source.Data
+						}
+						if imageURL != "" {
+							parts = append(parts, OpenAIMessagePart{
+								Type:     "image_url",
+								ImageURL: &OpenAIImageURL{URL: imageURL},
+							})
+						}
+					}
 
 				case "tool_use":
 					// Translate incoming tool execution back to OpenAI tool_calls structure
+					args := string(block.Input)
+					if args == "" {
+						args = "{}"
+					}
 					oaMsg.ToolCalls = append(oaMsg.ToolCalls, OpenAIToolCall{
 						ID:   block.ID,
 						Type: "function",
 						Function: OpenAIFunctionCall{
 							Name:      block.Name,
-							Arguments: string(block.Input),
+							Arguments: args,
 						},
 					})
 
@@ -123,9 +144,10 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 				}
 			}
 
-			// If it's normal text-only blocks, compress to string content for better compatibility
-			if len(parts) > 0 && len(oaMsg.ToolCalls) == 0 {
-				if len(parts) == 1 && parts[0].Type == "text" {
+			if len(parts) > 0 {
+				if len(oaMsg.ToolCalls) > 0 && textBuf != "" {
+					oaMsg.Content = textBuf
+				} else if len(parts) == 1 && parts[0].Type == "text" {
 					oaMsg.Content = parts[0].Text
 				} else {
 					oaMsg.Content = parts
@@ -156,6 +178,8 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 	// 4. Map tool choice
 	if antReq.ToolChoice != nil {
 		switch antReq.ToolChoice.Type {
+		case "none":
+			oaReq.ToolChoice = "none"
 		case "any", "auto":
 			oaReq.ToolChoice = "auto"
 		case "tool":
@@ -179,40 +203,7 @@ func ConvertRequest(antReq *AnthropicRequest) (*OpenAIRequest, error) {
 // Uses the authoritative models registry for tier classification and selection when possible,
 // falling back to heuristic keyword matching for models not in the registry.
 func MapModel(requestedModel string, configuredModel string, availableModels []string) string {
-	// If the user explicitly configured a single model (no commas), use it directly.
-	if configuredModel != "" && !strings.Contains(configuredModel, ",") {
-		return configuredModel
-	}
-
-	// If the user provided a comma-separated list of models in configuration,
-	// we treat it as a constrained pool of available models.
-	var modelPool []string
-	if configuredModel != "" && strings.Contains(configuredModel, ",") {
-		parts := strings.Split(configuredModel, ",")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part != "" {
-				modelPool = append(modelPool, part)
-			}
-		}
-	} else {
-		modelPool = availableModels
-	}
-
-	// If the requested model is already a pool member, return it directly.
-	// This handles per-tier env vars (ANTHROPIC_DEFAULT_SONNET_MODEL, etc.)
-	// that already map tiers to specific backend models.
-	for _, model := range modelPool {
-		if strings.EqualFold(model, requestedModel) {
-			return model
-		}
-	}
-
-	// Global default if no model could be resolved.
-	if len(modelPool) > 0 {
-		return modelPool[0]
-	}
-	return "deepseek-chat" // Reasonable general fallback
+	return modelrouting.MapModel(requestedModel, configuredModel, availableModels)
 }
 
 // ConvertResponse translates a standard OpenAI Chat Completions response to Anthropic style Messages.
@@ -253,16 +244,17 @@ func ConvertResponse(oaResp *OpenAIResponse) (*AnthropicResponse, error) {
 			Thinking: msg.ReasoningContent,
 		})
 	}
-	if contentStr, ok := msg.Content.(string); ok && contentStr != "" {
+	antResp.Content = appendOpenAIContentBlocks(antResp.Content, msg.Content)
+	if msg.Refusal != "" {
 		antResp.Content = append(antResp.Content, ContentBlock{
 			Type: "text",
-			Text: contentStr,
+			Text: msg.Refusal,
 		})
 	}
 
 	for _, tc := range msg.ToolCalls {
 		var inputObj json.RawMessage
-		if tc.Function.Arguments != "" {
+		if tc.Function.Arguments != "" && json.Valid([]byte(tc.Function.Arguments)) {
 			inputObj = json.RawMessage(tc.Function.Arguments)
 		} else {
 			inputObj = json.RawMessage("{}")
@@ -275,8 +267,71 @@ func ConvertResponse(oaResp *OpenAIResponse) (*AnthropicResponse, error) {
 			Input: inputObj,
 		})
 	}
+	if len(msg.ToolCalls) == 0 && msg.FunctionCall != nil {
+		var inputObj json.RawMessage
+		if msg.FunctionCall.Arguments != "" && json.Valid([]byte(msg.FunctionCall.Arguments)) {
+			inputObj = json.RawMessage(msg.FunctionCall.Arguments)
+		} else {
+			inputObj = json.RawMessage("{}")
+		}
+		antResp.Content = append(antResp.Content, ContentBlock{
+			Type:  "tool_use",
+			Name:  msg.FunctionCall.Name,
+			Input: inputObj,
+		})
+		if antResp.StopReason == "end_turn" {
+			antResp.StopReason = "tool_use"
+		}
+	}
 
 	return antResp, nil
+}
+
+func appendOpenAIContentBlocks(blocks []ContentBlock, content any) []ContentBlock {
+	switch v := content.(type) {
+	case string:
+		if v != "" {
+			blocks = append(blocks, ContentBlock{Type: "text", Text: v})
+		}
+	case []any:
+		for _, item := range v {
+			part, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			partType, _ := part["type"].(string)
+			switch partType {
+			case "text", "output_text":
+				if text, ok := part["text"].(string); ok && text != "" {
+					blocks = append(blocks, ContentBlock{Type: "text", Text: text})
+				}
+			case "refusal":
+				if refusal, ok := part["refusal"].(string); ok && refusal != "" {
+					blocks = append(blocks, ContentBlock{Type: "text", Text: refusal})
+				}
+			}
+		}
+	case []OpenAIMessagePart:
+		for _, part := range v {
+			if part.Type == "text" && part.Text != "" {
+				blocks = append(blocks, ContentBlock{Type: "text", Text: part.Text})
+			}
+		}
+	}
+	return blocks
+}
+
+func stripLeadingAnthropicBillingHeader(text string) string {
+	if !strings.HasPrefix(text, anthropicBillingHeaderPrefix) {
+		return text
+	}
+	lineEnd := strings.IndexAny(text, "\r\n")
+	if lineEnd < 0 {
+		return ""
+	}
+	rest := text[lineEnd:]
+	rest = strings.TrimLeft(rest, "\r\n")
+	return strings.TrimLeft(rest, "\r\n")
 }
 
 func BatchToGatewayModelAlias(rawModels []string) []string {

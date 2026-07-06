@@ -43,28 +43,13 @@ var confLsCmd = &cobra.Command{
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		if len(cfg.Providers) == 0 {
-			fmt.Println(locale.T("还没有配置 Provider。使用 'ccl conf set' 添加一个。", "No providers configured yet. Use 'ccl conf set' to add one."))
-			return nil
-		}
-
-		var names []string
-		for name := range cfg.Providers {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-
-		fmt.Println(locale.T("已注册的 Provider：", "Registered providers:"))
-		for _, name := range names {
-			mark := " "
-			if name == cfg.ActiveProvider {
-				mark = "*"
-			}
-			p := cfg.Providers[name]
-			fmt.Printf("%s %s (%s, model: %s)\n", mark, name, p.Type, formatModelList(p.Model, lsShowAll))
-		}
-
-		return nil
+		return printProviders(
+			cmd.OutOrStdout(),
+			cfg,
+			lsShowAll,
+			locale.T("还没有配置 Provider。使用 'ccl conf set' 添加一个。", "No providers configured yet. Use 'ccl conf set' to add one."),
+			locale.T("已注册的 Provider：", "Registered providers:"),
+		)
 	},
 }
 
@@ -74,7 +59,7 @@ var confCpCmd = &cobra.Command{
 	Short: "Copy a provider configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 2 {
-			return fmt.Errorf(locale.T("请提供源和目标名称，例如: ccl conf cp <source> <target>", "please provide both source and target names, e.g.: ccl conf cp <source> <target>"))
+			return fmt.Errorf("%s", locale.T("请提供源和目标名称，例如: ccl conf cp <source> <target>", "please provide both source and target names, e.g.: ccl conf cp <source> <target>"))
 		}
 
 		cfg, err := config.Load()
@@ -86,7 +71,7 @@ var confCpCmd = &cobra.Command{
 		target := strings.TrimSpace(args[1])
 
 		if source == target {
-			return fmt.Errorf(locale.T("源和目标名称不能相同", "source and target must be different"))
+			return fmt.Errorf("%s", locale.T("源和目标名称不能相同", "source and target must be different"))
 		}
 
 		srcProvider, exists := cfg.Providers[source]
@@ -96,7 +81,7 @@ var confCpCmd = &cobra.Command{
 
 		// 检查目标是否存在，若存在，通过标准命令行 I/O 进行覆盖确认
 		if _, exists := cfg.Providers[target]; exists {
-			fmt.Printf(locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target))
+			fmt.Print(locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target))
 			var answer string
 			fmt.Scanln(&answer)
 			answer = strings.ToLower(strings.TrimSpace(answer))
@@ -133,7 +118,7 @@ var confRmCmd = &cobra.Command{
 	Short: "Delete a provider configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
-			return fmt.Errorf(locale.T("请指定要删除的 Provider 名称，例如: ccl conf rm <name>", "please specify the provider name to delete, e.g.: ccl conf rm <name>"))
+			return fmt.Errorf("%s", locale.T("请指定要删除的 Provider 名称，例如: ccl conf rm <name>", "please specify the provider name to delete, e.g.: ccl conf rm <name>"))
 		}
 
 		cfg, err := config.Load()
@@ -148,7 +133,7 @@ var confRmCmd = &cobra.Command{
 		}
 
 		// 命令行标准双重确认
-		fmt.Printf(locale.Tf("确定要删除 Provider %q？(y/N): ", "Are you sure you want to delete provider %q? (y/N): ", targetName))
+		fmt.Print(locale.Tf("确定要删除 Provider %q？(y/N): ", "Are you sure you want to delete provider %q? (y/N): ", targetName))
 		var answer string
 		fmt.Scanln(&answer)
 		answer = strings.ToLower(strings.TrimSpace(answer))
@@ -190,7 +175,7 @@ var confMvCmd = &cobra.Command{
 	Short: "Rename a provider configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 2 {
-			return fmt.Errorf(locale.T("请提供旧名称和新名称，例如: ccl conf mv <source> <target>", "please provide both source and target names, e.g.: ccl conf mv <source> <target>"))
+			return fmt.Errorf("%s", locale.T("请提供旧名称和新名称，例如: ccl conf mv <source> <target>", "please provide both source and target names, e.g.: ccl conf mv <source> <target>"))
 		}
 
 		cfg, err := config.Load()
@@ -211,7 +196,7 @@ var confMvCmd = &cobra.Command{
 		}
 
 		if _, exists := cfg.Providers[target]; exists {
-			fmt.Printf(locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target))
+			fmt.Print(locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target))
 			var answer string
 			fmt.Scanln(&answer)
 			answer = strings.ToLower(strings.TrimSpace(answer))
