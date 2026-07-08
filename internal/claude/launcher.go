@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/proxy"
 )
@@ -23,7 +24,6 @@ import (
 type settingsJSON struct {
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
-	Model                  string            `json:"model,omitempty"`          // Lock to single model
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
 }
 
@@ -32,6 +32,9 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	env := make(map[string]string)
 
 	if baseURL != "" {
+		if !useProxy && strings.EqualFold(p.Type, "anthropic") {
+			baseURL = protocol.NormalizeAnthropicBaseURLForClaude(baseURL)
+		}
 		env["ANTHROPIC_BASE_URL"] = baseURL
 	}
 
@@ -39,7 +42,11 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	case useProxy:
 		env["ANTHROPIC_API_KEY"] = "local-proxy-dummy-key"
 	case p.APIKey != "":
-		env["ANTHROPIC_API_KEY"] = p.APIKey
+		if strings.EqualFold(p.Type, "anthropic") && strings.EqualFold(p.AnthropicAuth, "bearer") {
+			env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
+		} else {
+			env["ANTHROPIC_API_KEY"] = p.APIKey
+		}
 	}
 
 	// 1. Custom model option shown as the persistent "Custom model" row in /model.
@@ -63,7 +70,7 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = p.HaikuModel
 	}
 
-	// 3. Effort level (low/medium/high)
+	// 3. Effort level; empty means ccl leaves Claude's own setting in control.
 	if p.EffortLevel != "" {
 		env["CLAUDE_CODE_EFFORT_LEVEL"] = p.EffortLevel
 	}
@@ -89,10 +96,26 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 
 // applyModelEnv writes model-related env vars into env.
 // A comma-separated model spec enables per-tier gateway routing;
-// a single name sets ANTHROPIC_MODEL directly.
+// a single name fills every missing tier and ANTHROPIC_MODEL with that model.
 func applyModelEnv(env map[string]string, modelSpec string) {
+	setIfEmpty := func(key, value string) {
+		if value == "" {
+			return
+		}
+		if _, ok := env[key]; !ok {
+			env[key] = value
+		}
+	}
+
 	if !strings.Contains(modelSpec, ",") {
-		env["ANTHROPIC_MODEL"] = modelSpec
+		model := strings.TrimSpace(modelSpec)
+		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", model)
+		setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 		return
 	}
 
@@ -101,9 +124,8 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 	sonnet := modelrouting.MapModel("claude-3-5-sonnet", "", models)
 	haiku := modelrouting.MapModel("claude-3-5-haiku", "", models)
 
-	env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-	env["ANTHROPIC_MODEL"] = sonnet
+	setIfEmpty("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1")
+	setIfEmpty("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
 
 	for _, kv := range []struct{ k, v string }{
 		{"ANTHROPIC_DEFAULT_OPUS_MODEL", opus},
@@ -113,10 +135,9 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku},
 		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", haiku},
 	} {
-		if kv.v != "" {
-			env[kv.k] = kv.v
-		}
+		setIfEmpty(kv.k, kv.v)
 	}
+	setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 }
 
 // writeSettingsFile serialises content to a temp JSON file and returns its path.
@@ -206,7 +227,6 @@ func (c *providerContext) settings() settingsJSON {
 	return settingsJSON{
 		Env:                    buildEnv(c.provider, c.baseURL, c.useProxy),
 		HasCompletedOnboarding: true,
-		Model:                  c.provider.LockModel,
 		ModelOverrides:         c.provider.ModelOverrides,
 	}
 }

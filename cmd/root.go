@@ -88,8 +88,9 @@ func runClaude(args []string) error {
 
 // resolveProvider determines the active provider.
 // Config takes priority over environment variables — once a user has an active_provider
-// in config.yaml, stale env vars (like leftover ANTHROPIC_API_KEY from a previous session)
-// should not override it. Env vars are only used as a fallback when there is no config.
+// in config.yaml, stale env vars (like leftover ANTHROPIC_API_KEY or
+// ANTHROPIC_AUTH_TOKEN from a previous session) should not override it. Env vars
+// are only used as a fallback when there is no config.
 func resolveProvider() (provider.Provider, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -107,15 +108,23 @@ func resolveProvider() (provider.Provider, error) {
 
 	// No config — fallback to environment variables
 	envAnthropicKey := os.Getenv("ANTHROPIC_API_KEY")
+	envAnthropicAuthToken := os.Getenv("ANTHROPIC_AUTH_TOKEN")
 	envAnthropicBase := os.Getenv("ANTHROPIC_BASE_URL")
 
-	if envAnthropicKey != "" {
+	if envAnthropicAuthToken != "" || envAnthropicKey != "" {
+		apiKey := envAnthropicKey
+		anthropicAuth := ""
+		if envAnthropicAuthToken != "" {
+			apiKey = envAnthropicAuthToken
+			anthropicAuth = "bearer"
+		}
 		p := provider.Provider{
-			Name:     "environment-anthropic",
-			Type:     "anthropic",
-			Endpoint: envAnthropicBase,
-			APIKey:   envAnthropicKey,
-			// Model:    os.Getenv("ANTHROx[PIC_MODEL"),
+			Name:          "environment-anthropic",
+			Type:          "anthropic",
+			Endpoint:      envAnthropicBase,
+			APIKey:        apiKey,
+			Model:         os.Getenv("ANTHROPIC_MODEL"),
+			AnthropicAuth: anthropicAuth,
 		}
 		if p.Endpoint == "" {
 			p.Endpoint = "https://api.anthropic.com"
@@ -140,5 +149,5 @@ func resolveProvider() (provider.Provider, error) {
 		return p, nil
 	}
 
-	return provider.Provider{}, fmt.Errorf("no active provider selected. Use 'ccl set' or 'ccl use', or set OPENAI_API_KEY / ANTHROPIC_API_KEY in environment")
+	return provider.Provider{}, fmt.Errorf("no active provider selected. Use 'ccl set' or 'ccl use', or set OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in environment")
 }

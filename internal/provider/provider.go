@@ -3,12 +3,18 @@ package provider
 import "strings"
 
 type Provider struct {
-	Name     string            `yaml:"name" mapstructure:"name"`
-	Type     string            `yaml:"type" mapstructure:"type"`
-	Endpoint string            `yaml:"endpoint" mapstructure:"endpoint"`
-	APIKey   string            `yaml:"apikey" mapstructure:"apikey"`
-	Model    string            `yaml:"model" mapstructure:"model"`
-	Env      map[string]string `yaml:"env,omitempty" mapstructure:"env,omitempty"`
+	Name     string `yaml:"name" mapstructure:"name"`
+	Type     string `yaml:"type" mapstructure:"type"`
+	Endpoint string `yaml:"endpoint" mapstructure:"endpoint"`
+	APIKey   string `yaml:"apikey" mapstructure:"apikey"`
+	// Model is ccl's local model pool. In OpenAI-compatible proxy mode it is
+	// also used to serve /v1/models from the local proxy; direct Anthropic
+	// providers must expose their own /v1/models to Claude Code.
+	Model string            `yaml:"model" mapstructure:"model"`
+	Env   map[string]string `yaml:"env,omitempty" mapstructure:"env,omitempty"`
+	// AnthropicAuth controls how Claude Code authenticates direct Anthropic-compatible providers.
+	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
+	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 
 	// Custom model configuration (Claude Code native features)
 	CustomModelID  string            `yaml:"customModelId,omitempty" mapstructure:"customModelId,omitempty"`   // ANTHROPIC_CUSTOM_MODEL_OPTION
@@ -16,8 +22,7 @@ type Provider struct {
 	SonnetModel    string            `yaml:"sonnetModel,omitempty" mapstructure:"sonnetModel,omitempty"`       // ANTHROPIC_DEFAULT_SONNET_MODEL
 	HaikuModel     string            `yaml:"haikuModel,omitempty" mapstructure:"haikuModel,omitempty"`         // ANTHROPIC_DEFAULT_HAIKU_MODEL
 	ModelOverrides map[string]string `yaml:"modelOverrides,omitempty" mapstructure:"modelOverrides,omitempty"` // modelOverrides in settings.json
-	EffortLevel    string            `yaml:"effortLevel,omitempty" mapstructure:"effortLevel,omitempty"`       // CLAUDE_CODE_EFFORT_LEVEL (low/medium/high)
-	LockModel      string            `yaml:"lockModel,omitempty" mapstructure:"lockModel,omitempty"`           // model in settings.json (locks to single model)
+	EffortLevel    string            `yaml:"effortLevel,omitempty" mapstructure:"effortLevel,omitempty"`       // CLAUDE_CODE_EFFORT_LEVEL; empty means Default/follow Claude
 }
 
 type Config struct {
@@ -57,15 +62,4 @@ func ProtocolLabel(providerType string) string {
 	default:
 		return "openai(chat)"
 	}
-}
-
-// NormalizeLegacyCustomSlot migrates configs created when the UI used lockModel
-// as the fourth "Custom" picker slot. LockModel remains supported for manually
-// authored provider configs that intentionally lock Claude Code to one model.
-func NormalizeLegacyCustomSlot(p Provider) Provider {
-	if strings.TrimSpace(p.CustomModelID) == "" && strings.TrimSpace(p.LockModel) != "" {
-		p.CustomModelID = p.LockModel
-		p.LockModel = ""
-	}
-	return p
 }

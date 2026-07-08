@@ -44,7 +44,17 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 			mark = "*"
 		}
 		p := cfg.Providers[name]
-		fmt.Fprintf(out, "%s %s (%s, model: %s)\n", mark, name, provider.ProtocolLabel(p.Type), formatModelList(p.Model, showAll))
+		fmt.Fprintf(
+			out,
+			"%s %s (%s, auth: %s, effort: %s, 1M: %s, model: %s)\n",
+			mark,
+			name,
+			provider.ProtocolLabel(p.Type),
+			providerAuthLabel(p),
+			providerEffortSummary(p),
+			providerOneMSummary(p),
+			formatModelList(p.Model, showAll),
+		)
 	}
 
 	return nil

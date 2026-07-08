@@ -19,7 +19,8 @@
 
 3. **交互式 TUI 配置向导**
    - 全新的 bubbletea 驱动的全屏 TUI：多页表单，键盘导航（方向键 / Tab / Enter / Esc），实时协议探测与模型拉取。
-   - 支持 6 档 Reasoning Effort（`low` ~ `ultracode`）、每个槽位独立配置模型、一键启用 1M 上下文。
+   - 支持 Default + 6 档 Reasoning Effort（`low` ~ `ultracode`）：Default 不注入 `CLAUDE_CODE_EFFORT_LEVEL`，允许 Claude 内部设置生效。
+   - 自动识别 Anthropic 兼容网关的认证方式：官方 `x-api-key` 或 Bearer token（`ANTHROPIC_AUTH_TOKEN`）。
    - **多语言支持**：中文 / English，运行时通过 `ccl lang` 随时切换。
 
 4. **智能环境探针与诊断 (`ccl doctor`)**
@@ -107,7 +108,7 @@ ccl conf set my-provider
 | Page 0 | **凭据配置** — Endpoint URL + API Key | ↑↓ 切换输入框 · Enter 下一步 |
 | Page 1 | **Slot 映射** — Opus / Sonnet / Haiku / Custom 模型选择 | ↑↓ 选槽位 · Enter 进入模型列表 · 打字过滤 · Enter 锁定 |
 | Page 2 | **1M 上下文** — 每槽位独立开关 | Space 切换 · Enter 下一步 |
-| Page 3 | **Reasoning Effort** — low ~ ultracode 6 档 | ↑↓ 选择 · Enter 确认 |
+| Page 3 | **Reasoning Effort** — Default + low ~ ultracode | ↑↓ 选择 · Enter 确认 |
 | Page 4 | **核对保存** — 确认配置并设为激活 | ←→ 切换是/否 · Enter 保存 |
 
 页面间通过 `Tab` / `Shift+Tab` 或底部按钮 `[Next]` / `[Back]` 导航。
@@ -247,7 +248,41 @@ providers:
     opusModel: deepseek-reasoner
     sonnetModel: deepseek-chat
     effortLevel: max
+  sensenova:
+    name: sensenova
+    type: anthropic
+    endpoint: https://token.sensenova.cn
+    apikey: sk-xxx
+    anthropicAuth: bearer
 ```
+
+配置字段说明：
+
+- `type: openai`：`ccl` 会启动本地代理，把 Claude Code 的 Anthropic Messages 请求转换为 OpenAI Chat Completions；`model` 是本地模型池，同时会作为本地代理的 `/v1/models` 返回给 Claude Code 做 gateway model discovery。
+- `type: anthropic`：Claude Code 直连该 endpoint，`ccl` 不在请求链路中做协议转换；`model` 只作为 `ccl` 的本地模型池，用于 TUI 列表、`map auto`、默认 slot 映射和可用性检测。Claude Code 访问 `/v1/models` 时看到的是 provider 自己返回的结果。
+- Anthropic 直连时 `endpoint` 建议使用裸域名，例如 `https://token.sensenova.cn`；`ccl set` 会自动去掉常见的 `/v1`、`/v1/messages`、`/v1/models` 后缀，避免 Claude Code 运行时拼成 `/v1/v1/messages`。
+
+## ✅ 本地验证清单
+
+开发时可以用临时 `HOME` 验证配置，不会污染真实 `~/.ccl/config.yaml`：
+
+```bash
+go test ./...
+go build -o /tmp/ccl-debug .
+
+export CCL_TEST_HOME="$(mktemp -d)"
+HOME="$CCL_TEST_HOME" /tmp/ccl-debug set sensenova
+HOME="$CCL_TEST_HOME" /tmp/ccl-debug settings
+HOME="$CCL_TEST_HOME" /tmp/ccl-debug doctor
+HOME="$CCL_TEST_HOME" /tmp/ccl-debug models --all
+```
+
+Anthropic 兼容网关（例如 `https://token.sensenova.cn`）应确认：
+
+- `endpoint` 保存为裸域名，不带 `/v1`。
+- Bearer 认证时 `settings` 里出现 `ANTHROPIC_AUTH_TOKEN`，不出现 `ANTHROPIC_API_KEY`。
+- Effort 选择 Default 时，`settings` 里不出现 `CLAUDE_CODE_EFFORT_LEVEL`。
+- `settings` 顶层不出现 `model` 字段，模型通过 slot/env 交给 Claude Code。
 
 ---
 

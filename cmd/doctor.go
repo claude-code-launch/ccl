@@ -68,8 +68,12 @@ var doctorCmd = &cobra.Command{
 		}
 
 		fmt.Printf("  - Type: %s\n", provider.ProtocolLabel(p.Type))
+		fmt.Printf("  - Auth: %s\n", providerAuthLabel(p))
 		fmt.Printf("  - Endpoint: %s\n", p.Endpoint)
 		fmt.Printf("  - Model: %s\n", p.Model)
+		fmt.Printf("  - Effort: %s\n", providerEffortSummary(p))
+		fmt.Printf("  - 1M Context: %s\n", providerOneMSummary(p))
+		printProviderExperienceWarnings(p)
 
 		// 5. Test Endpoint reachability and API Authentication key
 		if p.Endpoint != "" {
@@ -90,13 +94,7 @@ var doctorCmd = &cobra.Command{
 			if err != nil {
 				fmt.Printf("\n✗ Failed to create validation request: %v\n", err)
 			} else {
-				// Add API Key headers
-				if provider.IsOpenAICompatibleType(p.Type) {
-					req.Header.Set("Authorization", "Bearer "+p.APIKey)
-				} else {
-					req.Header.Set("x-api-key", p.APIKey)
-					req.Header.Set("anthropic-version", "2023-06-01")
-				}
+				setProviderAuthHeaders(req, p)
 
 				resp, err := client.Do(req)
 				if err != nil {
@@ -117,12 +115,7 @@ var doctorCmd = &cobra.Command{
 						if fallbackErr != nil {
 							fmt.Printf("\n✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
 						} else {
-							if provider.IsOpenAICompatibleType(p.Type) {
-								fallbackReq.Header.Set("Authorization", "Bearer "+p.APIKey)
-							} else {
-								fallbackReq.Header.Set("x-api-key", p.APIKey)
-								fallbackReq.Header.Set("anthropic-version", "2023-06-01")
-							}
+							setProviderAuthHeaders(fallbackReq, p)
 
 							fallbackResp, fallbackErr := client.Do(fallbackReq)
 							if fallbackErr != nil {
@@ -148,7 +141,7 @@ var doctorCmd = &cobra.Command{
 				configuredModels := parseModelList(p.Model)
 				if len(configuredModels) > 0 {
 					fmt.Printf("\n  - Validating %d configured model(s) with concurrent tests...\n", len(configuredModels))
-					availableSet := testModelsConcurrently(configuredModels, p.Endpoint, p.APIKey, p.Type)
+					availableSet := testModelsConcurrently(configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
 					available, unavailable := classifyModels(configuredModels, availableSet)
 					printModelReport(available, unavailable)
 
@@ -175,7 +168,7 @@ var doctorCmd = &cobra.Command{
 // testModelsConcurrently tests multiple models in batches of 50 concurrent workers.
 // Each worker sends a lightweight provider-specific POST to verify the model works.
 // Returns a set of model IDs that passed the test.
-func testModelsConcurrently(models []string, endpoint, apiKey, providerType string) map[string]bool {
+func testModelsConcurrently(models []string, endpoint, apiKey, providerType, anthropicAuth string) map[string]bool {
 	const batchSize = 50
 	const requestTimeout = 10 * time.Second
 
@@ -225,7 +218,7 @@ func testModelsConcurrently(models []string, endpoint, apiKey, providerType stri
 			wg.Add(1)
 			go func(m string) {
 				defer wg.Done()
-				ok := testSingleModel(m, endpoint, apiKey, providerType, requestTimeout)
+				ok := testSingleModel(m, endpoint, apiKey, providerType, anthropicAuth, requestTimeout)
 				if ok {
 					mu.Lock()
 					available[m] = true
@@ -257,10 +250,13 @@ func buildProgressBar(width int, pct int) string {
 	sb.WriteByte(']')
 	return sb.String()
 }
-func testSingleModel(model, endpoint, apiKey, providerType string, timeout time.Duration) bool {
+func testSingleModel(model, endpoint, apiKey, providerType, anthropicAuth string, timeout time.Duration) bool {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	if providerType == "anthropic" {
-		return testSingleAnthropicModel(model, endpoint, apiKey, timeout)
+		if strings.TrimSpace(anthropicAuth) == "" {
+			anthropicAuth = "x-api-key"
+		}
+		return testSingleAnthropicModelWithAuth(model, endpoint, apiKey, anthropicAuth, timeout)
 	}
 	if provider.IsOpenAIResponsesType(providerType) {
 		return testSingleOpenAIResponsesModel(model, endpoint, apiKey, timeout)
@@ -297,6 +293,10 @@ func testSingleOpenAIModel(model, endpoint, apiKey string, timeout time.Duration
 }
 
 func testSingleAnthropicModel(model, endpoint, apiKey string, timeout time.Duration) bool {
+	return testSingleAnthropicModelWithAuth(model, endpoint, apiKey, "x-api-key", timeout)
+}
+
+func testSingleAnthropicModelWithAuth(model, endpoint, apiKey, authStyle string, timeout time.Duration) bool {
 	body, err := json.Marshal(map[string]any{
 		"model":      model,
 		"max_tokens": 1,
@@ -314,7 +314,11 @@ func testSingleAnthropicModel(model, endpoint, apiKey string, timeout time.Durat
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
+	if strings.EqualFold(authStyle, "bearer") {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	} else {
+		req.Header.Set("x-api-key", apiKey)
+	}
 	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := (&http.Client{Timeout: timeout}).Do(req)

@@ -40,7 +40,7 @@ var modelsCmd = &cobra.Command{
 		displayModels := modelList
 
 		// Test each model concurrently
-		availableSet := testModelsConcurrently(displayModels, p.Endpoint, p.APIKey, p.Type)
+		availableSet := testModelsConcurrently(displayModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
 
 		// Display results
 		available, unavailable := classifyModels(displayModels, availableSet)

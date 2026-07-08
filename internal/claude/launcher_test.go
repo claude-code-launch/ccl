@@ -3,7 +3,6 @@ package claude_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -15,7 +14,6 @@ import (
 type settingsJSON struct {
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
-	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"`
 }
 
@@ -63,6 +61,28 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				}
 				if s.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "" {
 					t.Error("Sonnet model should be set from pool")
+				}
+			},
+		},
+		{
+			name: "Native Anthropic with bearer auth",
+			provider: provider.Provider{
+				Name:          "sensenova",
+				Type:          "anthropic",
+				Endpoint:      "https://token.sensenova.cn/v1",
+				APIKey:        "sk-test",
+				Model:         "sensenova-6.7-flash-lite",
+				AnthropicAuth: "bearer",
+			},
+			check: func(t *testing.T, s settingsJSON) {
+				if s.Env["ANTHROPIC_BASE_URL"] != "https://token.sensenova.cn" {
+					t.Errorf("ANTHROPIC_BASE_URL should strip /v1 for Claude Code: %s", s.Env["ANTHROPIC_BASE_URL"])
+				}
+				if s.Env["ANTHROPIC_AUTH_TOKEN"] != "sk-test" {
+					t.Errorf("ANTHROPIC_AUTH_TOKEN mismatch: %s", s.Env["ANTHROPIC_AUTH_TOKEN"])
+				}
+				if s.Env["ANTHROPIC_API_KEY"] != "" {
+					t.Errorf("ANTHROPIC_API_KEY should not be set for bearer auth: %s", s.Env["ANTHROPIC_API_KEY"])
 				}
 			},
 		},
@@ -141,22 +161,7 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 			},
 		},
 		{
-			name: "Lock Model",
-			provider: provider.Provider{
-				Name:      "lock-test",
-				Type:      "anthropic",
-				Endpoint:  "https://api.anthropic.com",
-				APIKey:    "sk-test",
-				LockModel: "claude-sonnet-4-20250514",
-			},
-			check: func(t *testing.T, s settingsJSON) {
-				if s.Model != "claude-sonnet-4-20250514" {
-					t.Errorf("LockModel mismatch: %s", s.Model)
-				}
-			},
-		},
-		{
-			name: "Combined: CustomModelID + EffortLevel + LockModel",
+			name: "Combined: CustomModelID + EffortLevel",
 			provider: provider.Provider{
 				Name:          "combined",
 				Type:          "anthropic",
@@ -164,7 +169,6 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				APIKey:        "sk-test",
 				CustomModelID: "my-custom-model",
 				EffortLevel:   "high",
-				LockModel:     "claude-opus-4",
 			},
 			check: func(t *testing.T, s settingsJSON) {
 				if s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "my-custom-model" {
@@ -175,9 +179,6 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				}
 				if s.Env["CLAUDE_CODE_EFFORT_LEVEL"] != "high" {
 					t.Errorf("Effort level mismatch: %s", s.Env["CLAUDE_CODE_EFFORT_LEVEL"])
-				}
-				if s.Model != "claude-opus-4" {
-					t.Errorf("LockModel mismatch: %s", s.Model)
 				}
 			},
 		},
@@ -191,10 +192,6 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				t.Fatalf("Failed to parse settings JSON: %v. JSON: %s", err, result)
 			}
 			tt.check(t, s)
-
-			// Print for debugging
-			data, _ := json.MarshalIndent(s, "", "  ")
-			fmt.Printf("\n=== %s ===\n%s\n", tt.name, string(data))
 		})
 	}
 }
@@ -259,6 +256,93 @@ func TestLauncherDynamicDiscovery(t *testing.T) {
 	// Haiku model tier should be mapped to deepseek-v4-flash
 	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "deepseek-v4-flash" {
 		t.Errorf("Expected default haiku model to be 'deepseek-v4-flash', got: %q", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+}
+
+func TestPreviewSettingsOmitsDefaultEffortAndTopLevelModel(t *testing.T) {
+	p := provider.Provider{
+		Name:     "default-effort",
+		Type:     "anthropic",
+		Endpoint: "https://api.anthropic.com",
+		APIKey:   "sk-test",
+		Model:    "claude-sonnet-4",
+	}
+
+	settingsJSONStr := claude.PreviewSettings(p)
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(settingsJSONStr), &raw); err != nil {
+		t.Fatalf("Failed to parse settings JSON: %v. JSON: %s", err, settingsJSONStr)
+	}
+	if _, ok := raw["model"]; ok {
+		t.Fatalf("settings JSON should not include top-level model lock: %s", settingsJSONStr)
+	}
+
+	env, ok := raw["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("No env block found in settings: %s", settingsJSONStr)
+	}
+	if _, ok := env["CLAUDE_CODE_EFFORT_LEVEL"]; ok {
+		t.Fatalf("default effort should not inject CLAUDE_CODE_EFFORT_LEVEL: %s", settingsJSONStr)
+	}
+}
+
+func TestPreviewSettingsSingleModelPoolFillsDefaultSlots(t *testing.T) {
+	p := provider.Provider{
+		Name:     "single-model-pool",
+		Type:     "anthropic",
+		Endpoint: "https://api.anthropic.com",
+		APIKey:   "sk-test",
+		Model:    "sensenova-u1-fast",
+	}
+
+	settingsJSONStr := claude.PreviewSettings(p)
+
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(settingsJSONStr), &settings); err != nil {
+		t.Fatalf("Failed to parse settings JSON: %v. JSON: %s", err, settingsJSONStr)
+	}
+	for _, key := range []string{
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_MODEL",
+	} {
+		if settings.Env[key] != "sensenova-u1-fast" {
+			t.Fatalf("expected %s to use the single model pool value, got %q", key, settings.Env[key])
+		}
+	}
+}
+
+func TestPreviewSettingsModelPoolDoesNotOverrideExplicitSlots(t *testing.T) {
+	p := provider.Provider{
+		Name:        "partial-explicit-slots",
+		Type:        "anthropic",
+		Endpoint:    "https://api.anthropic.com",
+		APIKey:      "sk-test",
+		Model:       "claude-opus-auto,claude-sonnet-auto,claude-haiku-auto",
+		OpusModel:   "manual-opus",
+		HaikuModel:  "manual-haiku",
+		SonnetModel: "",
+	}
+
+	settingsJSONStr := claude.PreviewSettings(p)
+
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(settingsJSONStr), &settings); err != nil {
+		t.Fatalf("Failed to parse settings JSON: %v. JSON: %s", err, settingsJSONStr)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "manual-opus" {
+		t.Fatalf("expected explicit opus slot to be preserved, got %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "manual-haiku" {
+		t.Fatalf("expected explicit haiku slot to be preserved, got %q", settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "claude-sonnet-auto" {
+		t.Fatalf("expected missing sonnet slot to be filled from model pool, got %q", settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_MODEL"] != "claude-sonnet-auto" {
+		t.Fatalf("expected ANTHROPIC_MODEL to follow final sonnet fallback, got %q", settings.Env["ANTHROPIC_MODEL"])
 	}
 }
 

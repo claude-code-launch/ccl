@@ -16,7 +16,7 @@ func fetchModelsForProvider(p provider.Provider) []string {
 	if provider.IsOpenAICompatibleType(p.Type) {
 		modelsStr, err = protocol.GetOpenAIModels(p.Endpoint, p.APIKey)
 	} else {
-		modelsStr, err = protocol.GetAnthropicModels(p.Endpoint, p.APIKey)
+		modelsStr, err = protocol.GetAnthropicModelsWithAuth(p.Endpoint, p.APIKey, p.AnthropicAuth)
 	}
 	if err != nil || modelsStr == "" {
 		return nil

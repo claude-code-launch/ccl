@@ -99,8 +99,13 @@ type AnthropicModelResponse struct {
 	LastId  string `json:"lastId"`
 }
 
-// GetAnthropicModels 通过 API Key 和 BaseURL 获取 Anthropic 模型列表
 func GetAnthropicModels(baseURL, key string) (string, error) {
+	return GetAnthropicModelsWithAuth(baseURL, key, "x-api-key")
+}
+
+// GetAnthropicModelsWithAuth fetches Anthropic-compatible models using either
+// the official x-api-key header or a Bearer token used by some routers.
+func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("api key 不能为空")
 	}
@@ -116,25 +121,21 @@ func GetAnthropicModels(baseURL, key string) (string, error) {
 		return "", fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	req.Header.Set("x-api-key", key)
+	if strings.EqualFold(authStyle, "bearer") {
+		req.Header.Set("Authorization", "Bearer "+key)
+	} else {
+		req.Header.Set("x-api-key", key)
+	}
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
 
 	httpClient := &http.Client{Timeout: 15 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		fmt.Printf("Failed to get Anthropic models: %s\n", err.Error())
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-
-		// errmsg, err := io.ReadAll(resp.Body)
-		// if err != nil {
-		// 	fmt.Printf("Failed to get Anthropic models: %s\n", err.Error())
-		// 	return "", err
-		// }
-		// fmt.Printf("[Anthropic config error] url:%s,key:%s, status:%d, msg:%s \n", baseURL, key, resp.StatusCode, string(errmsg))
 		return "", errors.New(resp.Status)
 	}
 

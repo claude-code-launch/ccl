@@ -124,31 +124,7 @@ func RunConfSet(args []string) error {
 		return nil
 	}
 
-	// 1M 后置处理
-	hasAny1M := false
-	apply1M := func(slotName string, ptr *string) {
-		if ptr == nil || *ptr == "" {
-			return
-		}
-		if updatedModel.oneMSlots[slotName] {
-			*ptr = *ptr + "[1m]"
-			hasAny1M = true
-		}
-	}
-	apply1M("opus", &p.OpusModel)
-	apply1M("sonnet", &p.SonnetModel)
-	apply1M("haiku", &p.HaikuModel)
-	apply1M("custom", &p.CustomModelID)
-	if p.CustomModelID != "" {
-		p.LockModel = ""
-	}
-
-	if hasAny1M {
-		if p.Env == nil {
-			p.Env = make(map[string]string)
-		}
-		p.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
-	}
+	applyOneMConfig(&p, updatedModel.oneMSlots)
 
 	cfg.Providers[p.Name] = p
 	if updatedModel.IsActiveChosen {
@@ -185,53 +161,75 @@ func stringInSlice(s string, slice []string) bool {
 }
 
 // detectProtocolAndModels probes, in priority order: Anthropic Messages, then
-// OpenAI-compatible (which is further split into the "openai(agent)" Responses
-// protocol and the "openai(chat)" Chat Completions protocol — see
-// detectOpenAIVariant). Returns (protocol, comma-separated-models, error).
-// error is non-nil when every API call fails (endpoint unreachable or auth
-// rejected); the returned protocol is then just a URL-based guess and models
-// is empty.
+// OpenAI-compatible Chat Completions. Responses remains supported for manually
+// authored provider configs, but automatic setup intentionally does not select
+// it: several Codex-oriented /responses gateways accept simple probes while
+// rejecting real Claude Code agent traffic unless it comes from the official
+// Codex client.
+// Returns (protocol, comma-separated-models, error).
+// error is non-nil when every supported protocol probe fails; protocol and
+// models are then empty.
 func detectProtocolAndModels(endpoint, apiKey string) (string, string, error) {
-	endpoint = strings.TrimSuffix(endpoint, "/")
-	if models, err := protocol.GetAnthropicModels(endpoint, apiKey); err == nil {
-		return "anthropic", models, nil
-	}
-	if models, err := protocol.GetOpenAIModels(endpoint, apiKey); err == nil {
-		return detectOpenAIVariant(endpoint, apiKey, models), models, nil
-	}
-	// 两种协议都连不上：按 URL 猜一个协议，模型为空，返回错误
-	guess := "openai"
-	if strings.Contains(endpoint, "anthropic.com") {
-		guess = "anthropic"
-	}
-	return guess, "", fmt.Errorf("%s", locale.T(
-		"无法连接到端点或鉴权失败，请检查 URL 和 API Key",
-		"failed to connect to endpoint or authenticate; please check URL and API Key",
-	))
+	result := detectProtocolAndModelsDetailed(endpoint, apiKey)
+	return result.protocol, result.models, result.err
 }
 
-// openAIResponsesProbeTimeout bounds each concurrent /v1/responses probe request
-// issued by detectOpenAIVariant.
-const openAIResponsesProbeTimeout = 6 * time.Second
+type protocolDetectionResult struct {
+	protocol      string
+	models        string
+	anthropicAuth string
+	err           error
+}
 
-// maxOpenAIResponsesProbeCandidates caps how many discovered models are probed
-// against the Responses endpoint, keeping detection latency bounded on gateways
-// that expose long model catalogs.
-const maxOpenAIResponsesProbeCandidates = 5
+const (
+	anthropicAuthXAPIKey = "x-api-key"
+	anthropicAuthBearer  = "bearer"
+)
 
-// detectOpenAIVariant determines which OpenAI-compatible protocol variant an
-// endpoint actually implements:
-//   - "openai_responses" — the newer, agent-oriented Responses API, displayed
-//     to users as "openai(agent)".
-//   - "openai" — the legacy Chat Completions API, displayed as "openai(chat)".
-//
-// Listing models (/v1/models) alone cannot tell these apart since both
-// protocols commonly share the same model catalog, so this issues real,
-// minimal generation requests to /v1/responses for a handful of discovered
-// models concurrently. If any of them succeeds, the gateway is treated as
-// supporting the agent protocol (preferred, since it is the more capable,
-// forward-looking one); otherwise it falls back to plain Chat Completions.
-func detectOpenAIVariant(endpoint, apiKey, modelsCSV string) string {
+func detectProtocolAndModelsDetailed(endpoint, apiKey string) protocolDetectionResult {
+	endpoint = strings.TrimSuffix(endpoint, "/")
+	if models, err := protocol.GetAnthropicModels(endpoint, apiKey); err == nil {
+		if probeAnthropicMessagesWithAuth(endpoint, apiKey, models, anthropicAuthXAPIKey) {
+			return protocolDetectionResult{protocol: "anthropic", models: models, anthropicAuth: anthropicAuthXAPIKey}
+		}
+	}
+	if models, err := protocol.GetAnthropicModelsWithAuth(endpoint, apiKey, anthropicAuthBearer); err == nil {
+		if probeAnthropicMessagesWithAuth(endpoint, apiKey, models, anthropicAuthBearer) {
+			return protocolDetectionResult{protocol: "anthropic", models: models, anthropicAuth: anthropicAuthBearer}
+		}
+	}
+	if models, err := protocol.GetOpenAIModels(endpoint, apiKey); err == nil {
+		if authStyle, ok := detectAnthropicMessagesVariant(endpoint, apiKey, models); ok {
+			return protocolDetectionResult{protocol: "anthropic", models: models, anthropicAuth: authStyle}
+		}
+		if probeOpenAIChat(endpoint, apiKey, models) {
+			return protocolDetectionResult{protocol: "openai", models: models}
+		}
+	}
+	return protocolDetectionResult{err: fmt.Errorf("%s", locale.T(
+		"暂不支持这个协议：Anthropic Messages 与 OpenAI Chat Completions 探测均失败",
+		"unsupported protocol: both Anthropic Messages and OpenAI Chat Completions probes failed",
+	))}
+}
+
+// anthropicMessagesProbeTimeout bounds each concurrent /v1/messages probe used
+// when a gateway exposes OpenAI /models but only implements Anthropic /messages
+// (not Anthropic /models). Several Anthropic-compatible routers have that shape.
+const anthropicMessagesProbeTimeout = 6 * time.Second
+
+const maxAnthropicMessagesProbeCandidates = 5
+
+func detectAnthropicMessagesVariant(endpoint, apiKey, modelsCSV string) (string, bool) {
+	if probeAnthropicMessagesWithAuth(endpoint, apiKey, modelsCSV, anthropicAuthXAPIKey) {
+		return anthropicAuthXAPIKey, true
+	}
+	if probeAnthropicMessagesWithAuth(endpoint, apiKey, modelsCSV, anthropicAuthBearer) {
+		return anthropicAuthBearer, true
+	}
+	return "", false
+}
+
+func probeAnthropicMessagesWithAuth(endpoint, apiKey, modelsCSV, authStyle string) bool {
 	var candidates []string
 	for _, model := range strings.Split(modelsCSV, ",") {
 		model = strings.TrimSpace(model)
@@ -239,24 +237,61 @@ func detectOpenAIVariant(endpoint, apiKey, modelsCSV string) string {
 			continue
 		}
 		candidates = append(candidates, model)
-		if len(candidates) == maxOpenAIResponsesProbeCandidates {
+		if len(candidates) == maxAnthropicMessagesProbeCandidates {
 			break
 		}
 	}
 	if len(candidates) == 0 {
-		return "openai"
+		return false
 	}
 
 	results := make(chan bool, len(candidates))
 	for _, model := range candidates {
 		go func(m string) {
-			results <- protocol.ProbeOpenAIResponsesSupport(endpoint, apiKey, m, openAIResponsesProbeTimeout)
+			results <- testSingleAnthropicModelWithAuth(m, endpoint, apiKey, authStyle, anthropicMessagesProbeTimeout)
 		}(model)
 	}
 	for range candidates {
 		if <-results {
-			return "openai_responses"
+			return true
 		}
 	}
-	return "openai"
+	return false
+}
+
+// openAIChatProbeTimeout bounds each concurrent /v1/chat/completions probe used
+// after /v1/models succeeds. Some gateways expose a model list but do not
+// implement Chat Completions, so listing models alone is not enough.
+const openAIChatProbeTimeout = 6 * time.Second
+
+const maxOpenAIChatProbeCandidates = 5
+
+func probeOpenAIChat(endpoint, apiKey, modelsCSV string) bool {
+	var candidates []string
+	for _, model := range strings.Split(modelsCSV, ",") {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		candidates = append(candidates, model)
+		if len(candidates) == maxOpenAIChatProbeCandidates {
+			break
+		}
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+
+	results := make(chan bool, len(candidates))
+	for _, model := range candidates {
+		go func(m string) {
+			results <- testSingleOpenAIModel(m, endpoint, apiKey, openAIChatProbeTimeout)
+		}(model)
+	}
+	for range candidates {
+		if <-results {
+			return true
+		}
+	}
+	return false
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -75,8 +76,9 @@ func runMapDirect(cmd *cobra.Command, args []string) error {
 	}
 	if cmd.Flags().Changed("custom") {
 		p.CustomModelID = mapCustom
-		p.LockModel = ""
 	}
+
+	applyOneMConfig(&p, oneMSlotsFromProvider(p))
 
 	cfg.Providers[providerName] = p
 	if err := config.Save(cfg); err != nil {
@@ -124,26 +126,21 @@ func runMapAuto(args []string) error {
 		return fmt.Errorf("no models found from provider")
 	}
 
-	availableSet := testModelsConcurrently(models, p.Endpoint, p.APIKey, p.Type)
-
-	var available []string
-	for _, m := range models {
-		if availableSet[m] {
-			available = append(available, m)
-		}
-	}
+	availableSet := testModelsConcurrently(models, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
+	available, unavailable := classifyModels(models, availableSet)
 
 	if len(available) == 0 {
 		return fmt.Errorf("no available models found - check endpoint and API key")
 	}
 
+	p.Model = strings.Join(append(available, unavailable...), ",")
+
 	fmt.Printf("Found %d available model(s) out of %d total.\n", len(available), len(models))
 
+	oneMSlots := oneMSlotsFromProvider(p)
 	slots := sequentialSlotPointers(&p)
 	assigned := applySequentialSlotMapping(slots, available)
-	if p.CustomModelID != "" {
-		p.LockModel = ""
-	}
+	applyOneMConfig(&p, oneMSlots)
 
 	if assigned < 4 {
 		fmt.Printf("⚠ Only %d model(s) available, assigned in order to first %d slot(s).\n", assigned, assigned)
@@ -231,22 +228,7 @@ func runMapTUI(args []string) error {
 	updatedModel := finalModel.(*AdvancedConfigModel)
 	p = *updatedModel.p
 
-	// Apply 1M suffix from toggles
-	apply1MSuffix := func(slotName string, ptr *string) {
-		if ptr == nil || *ptr == "" {
-			return
-		}
-		if updatedModel.oneMSlots[slotName] {
-			*ptr = *ptr + "[1m]"
-		}
-	}
-	apply1MSuffix("opus", &p.OpusModel)
-	apply1MSuffix("sonnet", &p.SonnetModel)
-	apply1MSuffix("haiku", &p.HaikuModel)
-	apply1MSuffix("custom", &p.CustomModelID)
-	if p.CustomModelID != "" {
-		p.LockModel = ""
-	}
+	applyOneMConfig(&p, updatedModel.oneMSlots)
 
 	cfg.Providers[providerName] = p
 	if err := config.Save(cfg); err != nil {

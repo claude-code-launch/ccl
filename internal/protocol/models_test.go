@@ -128,14 +128,39 @@ func TestNormalizeVersionedURLs(t *testing.T) {
 			want: "https://example.com/responses",
 		},
 		{
-			name: "unversioned anthropic messages appends directly",
+			name: "unversioned anthropic messages appends v1",
 			got:  protocol.NormalizeAnthropicMessagesURL("https://example.com"),
-			want: "https://example.com/messages",
+			want: "https://example.com/v1/messages",
+		},
+		{
+			name: "unversioned anthropic models appends v1",
+			got:  protocol.NormalizeAnthropicModelsURL("https://example.com"),
+			want: "https://example.com/v1/models",
 		},
 		{
 			name: "empty openai uses official v1 default",
 			got:  protocol.NormalizeOpenAIModelsURL(""),
 			want: "https://api.openai.com/v1/models",
+		},
+		{
+			name: "anthropic claude base strips v1",
+			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://token.sensenova.cn/v1"),
+			want: "https://token.sensenova.cn",
+		},
+		{
+			name: "anthropic claude base strips v1 messages",
+			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://token.sensenova.cn/v1/messages"),
+			want: "https://token.sensenova.cn",
+		},
+		{
+			name: "anthropic claude base strips v1 models",
+			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://token.sensenova.cn/v1/models"),
+			want: "https://token.sensenova.cn",
+		},
+		{
+			name: "anthropic claude base preserves custom path",
+			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://example.com/api/v3"),
+			want: "https://example.com/api/v3",
 		},
 	}
 

@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/claude-code-launch/ccl/internal/locale"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -75,6 +76,7 @@ type modelFetchDoneMsg struct {
 	endpoint            string
 	apiKey              string
 	detectedType        string
+	anthropicAuth       string
 	discoveredModelsRaw string
 	err                 error
 }
@@ -100,8 +102,8 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		urlInput:       ui,
 		keyInput:       ki,
 		filterInput:    fi,
-		effortLevels:   []string{"low", "medium", "high", "xhigh", "max", "ultracode"},
-		effortCursor:   1,
+		effortLevels:   []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
+		effortCursor:   0,
 		IsActiveChosen: true,
 	}
 
@@ -116,9 +118,9 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	}
 
 	cleanAndPopulate := func(modelStr *string, slotKey string) {
-		if strings.HasSuffix(*modelStr, "[1m]") {
+		if hasOneMSuffix(*modelStr) {
 			m.oneMSlots[slotKey] = true
-			*modelStr = strings.TrimSuffix(*modelStr, "[1m]")
+			*modelStr = stripOneMSuffix(*modelStr)
 		}
 	}
 	cleanAndPopulate(&m.p.OpusModel, "opus")
@@ -151,13 +153,14 @@ func modelFetchTickCmd() tea.Cmd {
 
 func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 	return func() tea.Msg {
-		detectedType, discoveredModelsRaw, err := detectProtocolAndModels(endpoint, apiKey)
+		result := detectProtocolAndModelsDetailed(endpoint, apiKey)
 		return modelFetchDoneMsg{
 			endpoint:            endpoint,
 			apiKey:              apiKey,
-			detectedType:        detectedType,
-			discoveredModelsRaw: discoveredModelsRaw,
-			err:                 err,
+			detectedType:        result.protocol,
+			anthropicAuth:       result.anthropicAuth,
+			discoveredModelsRaw: result.models,
+			err:                 result.err,
 		}
 	}
 }
@@ -185,7 +188,7 @@ func (m *AdvancedConfigModel) updateFilteredPool() {
 }
 
 // doAutoConfig auto-fills slot models with the first 4 available from modelPool,
-// sets default effort=max, and clears 1M slots.
+// leaves Claude's own effort setting in control, and clears 1M slots.
 func (m *AdvancedConfigModel) doAutoConfig() {
 	slots := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID}
 	for i, ptr := range slots {
@@ -195,17 +198,11 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 			*ptr = ""
 		}
 	}
-	m.p.LockModel = ""
 	// Default: no 1M context
 	m.oneMSlots = make(map[string]bool)
-	// Default: effort = max
-	m.p.EffortLevel = "max"
-	for i, level := range m.effortLevels {
-		if level == "max" {
-			m.effortCursor = i
-			break
-		}
-	}
+	// Default: do not override Claude's own effort setting.
+	m.p.EffortLevel = ""
+	m.effortCursor = 0
 }
 
 // 实时获取/检测协议名称
@@ -240,13 +237,48 @@ func (m *AdvancedConfigModel) goBack() {
 			m.cursor = 4
 		}
 		if m.page == 3 {
-			m.cursor = 6
+			m.cursor = m.effortNextCursor()
 		}
 	}
 }
 
-func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw string, derr error) tea.Cmd {
+func (m *AdvancedConfigModel) effortNextCursor() int {
+	return len(m.effortLevels)
+}
+
+func (m *AdvancedConfigModel) effortBackCursor() int {
+	return len(m.effortLevels) + 1
+}
+
+func (m *AdvancedConfigModel) effortLabel(level string) string {
+	if level == "" {
+		return locale.T("默认（跟随 Claude 设置）", "Default (follow Claude setting)")
+	}
+	return level
+}
+
+func reviewOneMSummary(oneMSlots map[string]bool) string {
+	var slots []string
+	for _, slot := range []string{"opus", "sonnet", "haiku", "custom"} {
+		if oneMSlots[slot] {
+			slots = append(slots, slot)
+		}
+	}
+	if len(slots) == 0 {
+		return "off"
+	}
+	return strings.Join(slots, ",")
+}
+
+func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, anthropicAuth string, derr error) tea.Cmd {
 	m.p.Type = detectedType
+	m.p.AnthropicAuth = ""
+	if detectedType == "anthropic" {
+		m.p.Endpoint = protocol.NormalizeAnthropicBaseURLForClaude(m.p.Endpoint)
+		if anthropicAuth != "" {
+			m.p.AnthropicAuth = anthropicAuth
+		}
+	}
 
 	m.modelPool = []string{}
 	if derr == nil && discoveredModelsRaw != "" {
@@ -306,7 +338,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.detectProgress = 100
 		m.detecting = false
-		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.err)
+		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.err)
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -347,8 +379,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = 3
 				} else if m.page == 2 && (m.cursor == 4 || m.cursor == 5) {
 					m.cursor = 3
-				} else if m.page == 3 && (m.cursor == 6 || m.cursor == 7) {
-					m.cursor = 5
+				} else if m.page == 3 && (m.cursor == m.effortNextCursor() || m.cursor == m.effortBackCursor()) {
+					m.cursor = len(m.effortLevels) - 1
 				} else if m.page == 5 && m.cursor > 0 {
 					m.cursor--
 				} else if m.cursor > 0 {
@@ -381,7 +413,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor++
 				}
 			} else if m.page == 3 {
-				if m.cursor < 7 {
+				if m.cursor < m.effortBackCursor() {
 					m.cursor++
 				}
 			} else if m.page == 4 {
@@ -404,8 +436,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 2 && m.cursor == 5 {
 				m.cursor = 4
 			}
-			if m.page == 3 && m.cursor == 7 {
-				m.cursor = 6
+			if m.page == 3 && m.cursor == m.effortBackCursor() {
+				m.cursor = m.effortNextCursor()
 			}
 			if m.page == 4 && m.cursor < 2 {
 				m.IsActiveChosen = true
@@ -421,8 +453,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 2 && m.cursor == 4 {
 				m.cursor = 5
 			}
-			if m.page == 3 && m.cursor == 6 {
-				m.cursor = 7
+			if m.page == 3 && m.cursor == m.effortNextCursor() {
+				m.cursor = m.effortBackCursor()
 			}
 			if m.page == 4 && m.cursor < 2 {
 				m.IsActiveChosen = false
@@ -447,7 +479,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			} else if m.page == 2 && m.cursor > 5 {
 				m.cursor = 0
-			} else if m.page == 3 && m.cursor > 7 {
+			} else if m.page == 3 && m.cursor > m.effortBackCursor() {
 				m.cursor = 0
 			} else if m.page == 4 && m.cursor > 2 {
 				m.cursor = 0
@@ -471,7 +503,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.page == 2 {
 					m.cursor = 5
 				} else if m.page == 3 {
-					m.cursor = 7
+					m.cursor = m.effortBackCursor()
 				} else if m.page == 4 {
 					m.cursor = 2
 				} else if m.page == 5 {
@@ -481,7 +513,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			// 如果点击了底部的“上一步”按钮，直接返回
-			if (m.page == 0 && m.cursor == 3) || (m.page == 1 && m.cursor == 5) || (m.page == 2 && m.cursor == 5) || (m.page == 3 && m.cursor == 7) {
+			if (m.page == 0 && m.cursor == 3) || (m.page == 1 && m.cursor == 5) || (m.page == 2 && m.cursor == 5) || (m.page == 3 && m.cursor == m.effortBackCursor()) {
 				m.goBack()
 				return m, nil
 			}
@@ -531,9 +563,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID}[m.activeSlot]
 					*ptr = selectedModel
-					if m.activeSlot == 3 {
-						m.p.LockModel = ""
-					}
 					m.filterInput.Blur()
 				}
 			case 2:
@@ -545,10 +574,10 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.cursor == 4 {
 					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
 					m.page = 3
-					m.cursor = 6 // default to Next button
+					m.cursor = m.effortNextCursor() // default to Next button
 				}
 			case 3:
-				if m.cursor < 6 {
+				if m.cursor < len(m.effortLevels) {
 					m.effortCursor = m.cursor
 				} else {
 					m.p.EffortLevel = m.effortLevels[m.effortCursor]
@@ -654,182 +683,6 @@ func renderModelFetchProgress(progress, frame int) string {
 		grayText.Render(hint) + "\n"
 }
 
-//	func (m *AdvancedConfigModel) View() tea.View {
-//		var body strings.Builder
-//		protoLabel := protoBadgeStyle.Render("Protocol: " + m.getProtocol())
-//
-//		switch m.page {
-//		case 0:
-//			// ==================== PAGE 0: 凭据配置 ====================
-//			body.WriteString(titleStyle.Render(locale.T("基础凭据配置", "Base Credentials")) + badgeStyle.Render("Credentials") + protoLabel + "\n\n")
-//			prefURL := "  "
-//			if m.cursor == 0 {
-//				prefURL = selectedStyle.Render("> ")
-//			}
-//			body.WriteString(fmt.Sprintf("%s%-14s: %s\n", prefURL, purpleText.Render("Endpoint URL"), m.urlInput.View()))
-//
-//			prefKey := "  "
-//			if m.cursor == 1 {
-//				prefKey = selectedStyle.Render("> ")
-//			}
-//			body.WriteString(fmt.Sprintf("%s%-14s: %s\n", prefKey, purpleText.Render("API Key"), m.keyInput.View()))
-//
-//			body.WriteString(renderBottomButtons(m.page, m.cursor, 2, 3))
-//			body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
-//
-//		case 1:
-//			// ==================== PAGE 1: 槽位映射配置 ====================
-//			if !m.filterInput.Focused() {
-//				body.WriteString(titleStyle.Render(locale.T("Claude Slot 映射配置", "Claude Slot Mapping")) + badgeStyle.Render("Slot List") + protoLabel + "\n\n")
-//				renderRow := func(idx int, label, val string) {
-//					prefix := "  "
-//					labelStr := purpleText.Render(label)
-//					if m.cursor == idx {
-//						prefix = selectedStyle.Render("> ")
-//						labelStr = selectedStyle.Render(label) + grayText.Render(" ("+locale.T("enter 筛选", "enter to list")+")")
-//					}
-//					modelStr := cyanText.Render(val)
-//					if val == "" {
-//						modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
-//					}
-//					body.WriteString(fmt.Sprintf("%s%-6s – %s\n", prefix, labelStr, modelStr))
-//				}
-//				renderRow(0, "Opus", m.p.OpusModel)
-//				renderRow(1, "Sonnet", m.p.SonnetModel)
-//				renderRow(2, "Haiku", m.p.HaikuModel)
-//				renderRow(3, "Custom", m.p.CustomModelID)
-//
-//				body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
-//				body.WriteString(grayText.Render(locale.T("↑↓ 移动光标 · ←→ 切换按钮 · enter 选择编辑/跳转", "↑↓ Move · ←→ Toggle Buttons · enter select")))
-//			} else {
-//				slotName := []string{"Opus", "Sonnet", "Haiku", "Custom"}[m.activeSlot]
-//				body.WriteString(titleStyle.Render(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName)))
-//				body.WriteString("\n" + filterStyle.Render(locale.T("🔍 过滤模型: ", "🔍 Filter model: ")) + m.filterInput.View() + "\n")
-//				for i, mod := range m.filteredPool {
-//					prefix := "   "
-//					line := grayText.Render(mod)
-//					if i == m.slotListCursor {
-//						prefix = selectedStyle.Render(" > ")
-//						line = selectedStyle.Render(mod)
-//					}
-//					body.WriteString(prefix + line + "\n")
-//				}
-//				body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("键盘输入任意字符快速过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Type to filter · ↑↓ Scroll · enter lock · esc cancel")) + "\n")
-//			}
-//
-//		case 2:
-//			// ==================== PAGE 2: 1M 上下文配置页 (精简) ====================
-//			body.WriteString(titleStyle.Render(locale.T("1M 上下文配置", "1M Context")) + badgeStyle.Render("MultiSelect") + protoLabel + "\n")
-//			body.WriteString(grayText.Render(locale.T("enter 切换开关状态", "enter Toggle Slot Status")) + "\n\n")
-//			renderMultiRow := func(idx int, label, modelVal string) {
-//				box := "[ ]"
-//				slotKey := []string{"opus", "sonnet", "haiku", "custom"}[idx]
-//				if m.oneMSlots[slotKey] {
-//					box = "[x]"
-//				}
-//
-//				// ✅ 核心修复：将游标和方括号合并渲染，避免 \x1b[0m[ 贴在一起导致终端解析错误
-//				var indicator string
-//				if m.cursor == idx {
-//					indicator = selectedStyle.Render("> " + box)
-//				} else {
-//					indicator = "  " + box
-//				}
-//
-//				itemText := grayText.Render(label)
-//				if m.cursor == idx {
-//					itemText = titleStyle.Render(label)
-//				}
-//
-//				modelStr := cyanText.Render(modelVal)
-//				if modelVal == "" {
-//					modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
-//				}
-//
-//				suffix := ""
-//				if m.oneMSlots[slotKey] {
-//					suffix = " " + lightning
-//				}
-//
-//				// 这里改用组合好的 indicator 替换原先的 %s%s
-//				body.WriteString(fmt.Sprintf("%s  %-14s – %s%s\n", indicator, itemText, modelStr, suffix))
-//			}
-//
-//			renderMultiRow(0, "Opus Config", m.p.OpusModel)
-//			renderMultiRow(1, "Sonnet Config", m.p.SonnetModel)
-//			renderMultiRow(2, "Haiku Config", m.p.HaikuModel)
-//			renderMultiRow(3, "Custom Config", m.p.CustomModelID)
-//
-//			body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
-//			body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))
-//		case 3:
-//			// ==================== PAGE 3: Reasoning Effort 思考流配置 ====================
-//			body.WriteString(titleStyle.Render(locale.T("Reasoning Effort 思考流配置", "Reasoning Effort")) + badgeStyle.Render("Effort") + protoLabel + "\n\n")
-//			for i, level := range m.effortLevels {
-//				prefix := "  "
-//				if m.cursor == i {
-//					prefix = selectedStyle.Render("> ")
-//				}
-//				radio := "( )"
-//				if m.effortCursor == i {
-//					radio = purpleText.Render("(●)")
-//				}
-//				itemText := grayText.Render(level)
-//				if m.cursor == i {
-//					itemText = titleStyle.Render(level)
-//				}
-//				body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radio, itemText))
-//			}
-//
-//			body.WriteString(renderBottomButtons(m.page, m.cursor, 6, 7))
-//			body.WriteString(grayText.Render(locale.T("↑↓ 移动选择级别 · ←→ 切换按钮 · enter 前进/后退", "↑↓ Move · ←→ Toggle Buttons · enter next/back")))
-//
-//		case 4:
-//			// ==================== PAGE 4: 核对并应用此配置 ====================
-//			body.WriteString(titleStyle.Render(locale.T("核对并应用此 Provider 配置", "Review & Apply")) + badgeStyle.Render("Confirm") + "\n\n")
-//			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Endpoint", cyanText.Render(m.p.Endpoint)))
-//			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Protocol", purpleText.Render(m.getProtocol())))
-//			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Effort Level", purpleText.Render(m.effortLevels[m.effortCursor])))
-//
-//			body.WriteString("\n  " + locale.T("是否将该 Provider 设为当前激活配置？", "Set as active provider right now?") + "\n\n")
-//
-//			yesStr, noStr := " "+locale.T("是", "Yes")+" ", " "+locale.T("否", "No")+" "
-//			if m.IsActiveChosen {
-//				yesStr = selectedStyle.Render(" > " + locale.T("是", "Yes") + " <")
-//				noStr = grayText.Render("  " + locale.T("否", "No") + " ")
-//			} else {
-//				yesStr = grayText.Render("  " + locale.T("是", "Yes") + " ")
-//				noStr = selectedStyle.Render(" > " + locale.T("否", "No") + " <")
-//			}
-//			if m.cursor == 0 || m.cursor == 1 {
-//				body.WriteString("  " + yesStr + "  " + noStr + "\n")
-//			} else {
-//				body.WriteString("    " + strings.TrimSpace(yesStr) + "    " + strings.TrimSpace(noStr) + "\n")
-//			}
-//
-//			saveStr := "  " + locale.T("完成并保存", "Save & Finish")
-//			if m.cursor == 2 {
-//				saveStr = selectedStyle.Render("> " + locale.T("完成并保存", "Save & Finish"))
-//			}
-//			body.WriteString("\n" + saveStr + "\n\n")
-//			body.WriteString(grayText.Render(locale.T("←→ 切换激活选项 · ↑↓ 移动 · enter 保存", "←→ Toggle · ↑↓ Move · enter save")))
-//		}
-//
-//		// 指示器
-//		dots := []string{grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫")}
-//		activeColors := []string{"🔵", "🟣", "🟢", "🟡", "🔴"}
-//		dots[m.page] = activeColors[m.page]
-//		pager := fmt.Sprintf("\n\n%s", lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(strings.Join(dots, "   ")))
-//
-//		langTipMsg := locale.T(
-//			"💡 提示: 想要更改终端显示语言？使用 `ccl lang` 即可轻松修改",
-//			"💡 Tip: Want to change TUI display language? Use `ccl lang` to modify it",
-//		)
-//		langTipBanner := "\n" + lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(langTipStyle.Render(langTipMsg))
-//
-//		finalStr := windowStyle.Render(body.String()) + pager + langTipBanner
-//		return tea.NewView(finalStr)
-//	}
 func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 	var body strings.Builder
 	protoLabel := protoBadgeStyle.Render("Protocol: " + m.getProtocol())
@@ -970,6 +823,7 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 		// ==================== PAGE 3: Reasoning Effort 思考流配置 ====================
 		body.WriteString(titleStyle.Render(locale.T("Reasoning Effort 思考流配置", "Reasoning Effort")) + badgeStyle.Render("Effort") + protoLabel + "\n\n")
 		for i, level := range m.effortLevels {
+			label := m.effortLabel(level)
 			prefix := "  "
 			if m.cursor == i {
 				prefix = selectedStyle.Render("> ")
@@ -978,14 +832,14 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 			if m.effortCursor == i {
 				radio = purpleText.Render("(●)")
 			}
-			itemText := grayText.Render(level)
+			itemText := grayText.Render(label)
 			if m.cursor == i {
-				itemText = titleStyle.Render(level)
+				itemText = titleStyle.Render(label)
 			}
 			body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radio, itemText))
 		}
 
-		body.WriteString(renderBottomButtons(m.page, m.cursor, 6, 7))
+		body.WriteString(renderBottomButtons(m.page, m.cursor, m.effortNextCursor(), m.effortBackCursor()))
 		body.WriteString(grayText.Render(locale.T("↑↓ 移动选择级别 · ←→ 切换按钮 · enter 前进/后退", "↑↓ Move · ←→ Toggle Buttons · enter next/back")))
 
 	case 4:
@@ -993,7 +847,9 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 		body.WriteString(titleStyle.Render(locale.T("核对并应用此 Provider 配置", "Review & Apply")) + badgeStyle.Render("Confirm") + "\n\n")
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Endpoint", cyanText.Render(m.p.Endpoint)))
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Protocol", purpleText.Render(m.getProtocol())))
-		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Effort Level", purpleText.Render(m.effortLevels[m.effortCursor])))
+		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
+		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Effort Level", purpleText.Render(m.effortLabel(m.effortLevels[m.effortCursor]))))
+		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "1M Context", purpleText.Render(reviewOneMSummary(m.oneMSlots))))
 
 		body.WriteString("\n  " + locale.T("是否将该 Provider 设为当前激活配置？", "Set as active provider right now?") + "\n\n")
 
@@ -1025,7 +881,7 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 
 		autoPrefix := "  "
 		autoLabel := grayText.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
-		autoDesc := grayText.Render("    " + locale.T("自动填入前 4 个可用模型，Effort = max，跳过 1M 配置", "Auto-fill first 4 models, Effort=max, skip 1M"))
+		autoDesc := grayText.Render("    " + locale.T("自动填入前 4 个可用模型，Effort = Default，跳过 1M 配置", "Auto-fill first 4 models, Effort=Default, skip 1M"))
 		if m.cursor == 0 {
 			autoPrefix = selectedStyle.Render("> ")
 			autoLabel = selectedStyle.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))

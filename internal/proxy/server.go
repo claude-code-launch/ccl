@@ -194,6 +194,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		respBody = annotateUpstreamError(respBody)
 		s.logger.Error("Upstream returned non-200 status", "status", resp.StatusCode, "body", string(respBody))
 		// Pipe the exact error details back
 		w.WriteHeader(resp.StatusCode)
@@ -430,4 +431,33 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleFallback(w http.ResponseWriter, r *http.Request) {
 	s.logger.Warn("Fallback catch-all route triggered", "path", r.URL.Path, "method", r.Method)
 	http.Error(w, "Endpoint Not Supported by Local Proxy", http.StatusNotFound)
+}
+
+func annotateUpstreamError(body []byte) []byte {
+	if !bytes.Contains(body, []byte("codex_access_restricted")) {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	errObj, ok := payload["error"].(map[string]any)
+	if !ok {
+		return body
+	}
+	msg, _ := errObj["message"].(string)
+	hint := "提示：该 endpoint 似乎是 Codex 客户端专用路由，不适合 Claude Code/ccl；请使用普通 Anthropic/OpenAI 兼容 endpoint，或直接用 Codex CLI。"
+	if strings.Contains(msg, hint) {
+		return body
+	}
+	if msg == "" {
+		errObj["message"] = hint
+	} else {
+		errObj["message"] = msg + "；" + hint
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
 }
