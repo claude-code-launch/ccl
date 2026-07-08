@@ -1,0 +1,40 @@
+README.md
+  s_08539fc66dd4bc::t_c1882ebf185bdc 15,79,115,119-121,124-125,128-129,132-138,215,281,289-291,313,315,320,324
+cmd/doctor.go
+  s_08539fc66dd4bc::t_a86a77fcbdeaa8 89,255
+cmd/preview.go
+  s_08539fc66dd4bc::t_461a5b3a2559d6 10-11,14,18-27,29
+cmd/provider.go
+  s_08539fc66dd4bc::t_75aca3920ec919 10,14-17,20-31,34-42,45-53,55-64,66-75,77-86,88-92,94-97,99-103,105-106,109-113,115-116,118-123,125-128,130-131,136,139,141-145,147-148,151-155,157-160,162-164,166-173,175,177-182,184-188,190,192-194,196-198,200-207,209-213,215-238,240-241,243-255,257,261-270
+cmd/provider_display.go
+  s_08539fc66dd4bc::t_89799e3fb9b4a6 6,16,73-83
+cmd/set.go
+  s_08539fc66dd4bc::t_165ccc1512a15c 25,29
+cmd/use.go
+  s_08539fc66dd4bc::t_32dc5a12e72c34 12
+internal/claude/launcher.go
+  s_08539fc66dd4bc::t_1fe1d2d01a428f 35,45
+internal/provider/provider_test.go
+  s_08539fc66dd4bc::t_24b047b4943793 18,22,36,41,49,58-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fd6fd7fae051bc54bdf4b4a8401371161a0aba07",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_08539fc66dd4bc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3b36-0484-7011-b6ee-f734503afe42",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
