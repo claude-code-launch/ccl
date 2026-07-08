@@ -3,7 +3,7 @@ name: Release and Publish
 on:
   push:
     tags:
-      - 'v*'
+      - '**'
   workflow_dispatch:
 
 permissions:
@@ -79,21 +79,36 @@ jobs:
 
       # 💡 核心注入：从 Git Tag 中提取版本号（去掉开头的 v），并直接动态写入 package.json
       - name: Sync Version from Git Tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          # ${GITHUB_REF_NAME} 在 tag 触发时就是 "v1.0.1"
-          # sed 's/^v//' 会把开头的 "v" 剥离掉，变成 "1.0.1"
-          # 提取纯数字版本号
-          RAW_VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          # TAG_NAME 在 tag 触发时可能是 "v1.0.1"、"1.0.1" 或 "release/v1.0.1"。
+          # 取最后一段并剥离开头的 v，得到 npm 可用版本号。
+          TAG_VERSION="${TAG_NAME##*/}"
+          RAW_VERSION="${TAG_VERSION#v}"
           if [[ "$RAW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               CLEAN_VERSION=$(echo "$RAW_VERSION" | sed -E 's/\.([0-9]+)$/-\1/')
           else
               CLEAN_VERSION="$RAW_VERSION"
           fi
-          echo "Original Tag: ${{ github.ref_name }}"
+          echo "Original Tag: $TAG_NAME"
           echo "Sanitized npm version: $CLEAN_VERSION"
 
           # 使用 npm 官方自带命令动态修改 package.json 的版本号，且不触发任何 git commit
           npm version $CLEAN_VERSION --no-git-tag-version
 
+      - name: Check npm Version
+        id: npm_version
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${PKG_NAME}@${PKG_VERSION} already exists; skipping npm publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm with Trusted Publishing
+        if: steps.npm_version.outputs.exists != 'true'
         run: npm publish --provenance --access public
