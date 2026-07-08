@@ -33,16 +33,25 @@ type Config struct {
 
 func IsOpenAIResponsesType(providerType string) bool {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
-	return providerType == "openai_responses" || providerType == "openai-responses" || providerType == "responses"
+	return providerType == "openai_responses" ||
+		providerType == "openai-responses" ||
+		providerType == "responses" ||
+		providerType == "openai(agent)"
 }
 
 func IsOpenAICompatibleType(providerType string) bool {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
-	return providerType == "openai" || IsOpenAIResponsesType(providerType)
+	return providerType == "openai" ||
+		providerType == "openai(chat)" ||
+		IsOpenAIResponsesType(providerType)
+}
+
+func IsAnthropicType(providerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(providerType), "anthropic")
 }
 
 // ProtocolLabel returns a short, human-friendly protocol name for display purposes
-// (e.g. in the `set` TUI, `ccl list`, and `ccl doctor` output). It intentionally does
+// (e.g. in the `set` TUI, `ccl ls`, and `ccl doctor` output). It intentionally does
 // NOT change the underlying stored provider.Type value, which remains a stable,
 // machine-readable string ("anthropic", "openai", "openai_responses", ...) relied on
 // throughout the codebase for dispatch logic (proxy, launcher, doctor, ...).
@@ -57,7 +66,7 @@ func ProtocolLabel(providerType string) string {
 		return ""
 	case IsOpenAIResponsesType(trimmed):
 		return "openai(agent)"
-	case strings.EqualFold(trimmed, "anthropic"):
+	case IsAnthropicType(trimmed):
 		return "anthropic"
 	default:
 		return "openai(chat)"

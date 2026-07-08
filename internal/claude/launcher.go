@@ -32,7 +32,7 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	env := make(map[string]string)
 
 	if baseURL != "" {
-		if !useProxy && strings.EqualFold(p.Type, "anthropic") {
+		if !useProxy && provider.IsAnthropicType(p.Type) {
 			baseURL = protocol.NormalizeAnthropicBaseURLForClaude(baseURL)
 		}
 		env["ANTHROPIC_BASE_URL"] = baseURL
@@ -42,7 +42,7 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	case useProxy:
 		env["ANTHROPIC_API_KEY"] = "local-proxy-dummy-key"
 	case p.APIKey != "":
-		if strings.EqualFold(p.Type, "anthropic") && strings.EqualFold(p.AnthropicAuth, "bearer") {
+		if provider.IsAnthropicType(p.Type) && strings.EqualFold(p.AnthropicAuth, "bearer") {
 			env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
 		} else {
 			env["ANTHROPIC_API_KEY"] = p.APIKey

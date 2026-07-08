@@ -12,7 +12,7 @@
      - 💎 **Opus 强推理档** → 优先匹配 `deepseek-reasoner` (R1) 或 `o1`、`o3-mini`、`gpt-4o`
      - 🚀 **Sonnet 黄金档** → 优先匹配 `deepseek-chat` (V3)、`gpt-4o`、`claude-3-5-sonnet`
      - ⚡ **Haiku 极速档** → 优先匹配 `gpt-4o-mini`、`gpt-3.5-turbo`
-   - 若通过 `ccl set` / `ccl conf set` 手动为某个档位指定了模型，则该档位的自动映射被覆盖，其余未配置的档位仍走自动映射。
+   - 若通过 `ccl set` 手动为某个档位指定了模型，则该档位的自动映射被覆盖，其余未配置的档位仍走自动映射。
 
 2. **零感协议翻译与流式代理**
    - 采用本地轻量级的高性能并发 socket 服务（TCP），自动拦截并完美将 Anthropic 专有的 `Messages` 协议以及 `Streaming (SSE)` 转换为标准的 `OpenAI / Chat Completions` 协议。
@@ -76,7 +76,7 @@ go install github.com/claude-code-launch/ccl@latest
 
 ## 🛠️ 命令参考
 
-### `ccl set` / `ccl conf set` — 添加/更新 Provider
+### `ccl set` — 添加/更新 Provider
 
 ```bash
 # 交互式选择已有 provider 或新建
@@ -84,7 +84,6 @@ ccl set
 
 # 直接指定名称新建或更新
 ccl set my-provider
-ccl conf set my-provider
 ```
 
 无参数时弹出 **Provider 选择框**（↑↓ 选择，Enter 确认）：
@@ -113,21 +112,30 @@ ccl conf set my-provider
 
 页面间通过 `Tab` / `Shift+Tab` 或底部按钮 `[Next]` / `[Back]` 导航。
 
-### `ccl conf` — Provider 配置管理
+### Provider 配置管理
 
 ```bash
 # 列出所有 provider
-ccl conf ls
-ccl conf ls -a        # 显示全部模型（默认只显示前 3 个）
+ccl ls
+ccl ls -a             # 展开详情与完整模型池（默认显示扫描表）
+ccl provider ls       # 完整语义入口，输出同 ccl ls
 
 # 复制配置
-ccl conf cp source target
+ccl cp source target
+ccl provider cp source target
 
 # 重命名
-ccl conf mv old-name new-name
+ccl mv old-name new-name
+ccl provider mv old-name new-name
 
 # 删除
-ccl conf rm name
+ccl rm name
+ccl provider rm name
+
+# 其他 provider 子命令
+ccl provider set my-provider
+ccl provider use my-provider
+ccl provider preview
 ```
 
 ### `ccl env` — 环境变量管理
@@ -204,9 +212,7 @@ ccl map --custom gpt-5.1 my-provider
 三种模式：交互式 TUI（直接跳转到 Slot 映射页面）、自动检测填充、CLI 参数直接映射。
 
 ```bash
-ccl list
-# 或
-ccl conf ls
+ccl ls
 ```
 
 ### `ccl update` — 升级
@@ -272,7 +278,7 @@ go build -o /tmp/ccl-debug .
 
 export CCL_TEST_HOME="$(mktemp -d)"
 HOME="$CCL_TEST_HOME" /tmp/ccl-debug set sensenova
-HOME="$CCL_TEST_HOME" /tmp/ccl-debug settings
+HOME="$CCL_TEST_HOME" /tmp/ccl-debug preview
 HOME="$CCL_TEST_HOME" /tmp/ccl-debug doctor
 HOME="$CCL_TEST_HOME" /tmp/ccl-debug models --all
 ```
@@ -280,9 +286,9 @@ HOME="$CCL_TEST_HOME" /tmp/ccl-debug models --all
 Anthropic 兼容网关（例如 `https://token.sensenova.cn`）应确认：
 
 - `endpoint` 保存为裸域名，不带 `/v1`。
-- Bearer 认证时 `settings` 里出现 `ANTHROPIC_AUTH_TOKEN`，不出现 `ANTHROPIC_API_KEY`。
-- Effort 选择 Default 时，`settings` 里不出现 `CLAUDE_CODE_EFFORT_LEVEL`。
-- `settings` 顶层不出现 `model` 字段，模型通过 slot/env 交给 Claude Code。
+- Bearer 认证时 `preview` 里出现 `ANTHROPIC_AUTH_TOKEN`，不出现 `ANTHROPIC_API_KEY`。
+- Effort 选择 Default 时，`preview` 里不出现 `CLAUDE_CODE_EFFORT_LEVEL`。
+- `preview` 顶层不出现 `model` 字段，模型通过 slot/env 交给 Claude Code。
 
 ---
 
@@ -304,18 +310,18 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 ```text
 ├── cmd/
 │   ├── advanced_config.go     # TUI 配置向导（5 页表单 + 协议探测）
-│   ├── conf.go                # Provider 配置管理（cp/ls/mv/rm/set）
+│   ├── provider.go            # Provider 配置管理（cp/ls/mv/rm/set/preview）
 │   ├── env.go                 # 环境变量管理（ls/rm/mv）
-│   ├── set.go                 # set 命令入口 + RunConfSet 共享逻辑
+│   ├── set.go                 # set 命令入口 + RunProviderSet 共享逻辑
 │   ├── select.go              # 通用 TUI 选择器组件
 │   ├── doctor.go              # 环境及密钥连通性自检
 │   ├── install.go             # Claude CLI 自动安装
 │   ├── lang_cmd.go            # ccl lang 命令
-│   ├── list.go                # list 命令
+│   ├── list.go                # ls 命令
 │   ├── map.go                 # ccl map 命令（交互式/自动/CLI 三种映射模式）
 │   ├── models.go              # 模型列表展示 + 可用性检测
 │   ├── root.go                # ccl 主入口 + passthrough 模式
-│   ├── settings.go            # 预览 settings.json
+│   ├── preview.go             # 预览 settings JSON
 │   ├── update.go              # 自动升级
 │   ├── use.go                 # 切换激活 provider
 │   └── version.go             # 版本信息

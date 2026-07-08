@@ -7,20 +7,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var settingsCmd = &cobra.Command{
-	Use:   "settings",
+var previewCmd = &cobra.Command{
+	Use:   "preview",
 	Short: "Preview the settings JSON for the active provider",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		p, err := resolveProvider()
-		if err != nil {
-			return err
-		}
-
-		fmt.Println(claude.PreviewSettings(p))
-		return nil
+		return runPreview()
 	},
 }
 
+func runPreview() error {
+	p, err := resolveProvider()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(claude.PreviewSettings(p))
+	return nil
+}
+
 func init() {
-	rootCmd.AddCommand(settingsCmd)
+	rootCmd.AddCommand(previewCmd)
 }

@@ -15,9 +15,11 @@ func TestProtocolLabel(t *testing.T) {
 		{"anthropic", "anthropic", "anthropic"},
 		{"anthropic mixed case", "Anthropic", "anthropic"},
 		{"openai chat", "openai", "openai(chat)"},
+		{"openai chat display label", "openai(chat)", "openai(chat)"},
 		{"openai responses canonical", "openai_responses", "openai(agent)"},
 		{"openai responses hyphenated", "openai-responses", "openai(agent)"},
 		{"openai responses bare", "responses", "openai(agent)"},
+		{"openai responses display label", "openai(agent)", "openai(agent)"},
 		{"empty", "", ""},
 	}
 
@@ -31,12 +33,12 @@ func TestProtocolLabel(t *testing.T) {
 }
 
 func TestIsOpenAIResponsesType(t *testing.T) {
-	for _, v := range []string{"openai_responses", "openai-responses", "responses", "OPENAI_RESPONSES"} {
+	for _, v := range []string{"openai_responses", "openai-responses", "responses", "OPENAI_RESPONSES", "openai(agent)"} {
 		if !provider.IsOpenAIResponsesType(v) {
 			t.Errorf("IsOpenAIResponsesType(%q) = false, want true", v)
 		}
 	}
-	for _, v := range []string{"openai", "anthropic", ""} {
+	for _, v := range []string{"openai", "openai(chat)", "anthropic", ""} {
 		if provider.IsOpenAIResponsesType(v) {
 			t.Errorf("IsOpenAIResponsesType(%q) = true, want false", v)
 		}
@@ -44,12 +46,25 @@ func TestIsOpenAIResponsesType(t *testing.T) {
 }
 
 func TestIsOpenAICompatibleType(t *testing.T) {
-	for _, v := range []string{"openai", "openai_responses", "openai-responses", "responses"} {
+	for _, v := range []string{"openai", "openai(chat)", "openai_responses", "openai-responses", "responses", "openai(agent)"} {
 		if !provider.IsOpenAICompatibleType(v) {
 			t.Errorf("IsOpenAICompatibleType(%q) = false, want true", v)
 		}
 	}
 	if provider.IsOpenAICompatibleType("anthropic") {
 		t.Errorf("IsOpenAICompatibleType(\"anthropic\") = true, want false")
+	}
+}
+
+func TestIsAnthropicType(t *testing.T) {
+	for _, v := range []string{"anthropic", "Anthropic", " ANTHROPIC "} {
+		if !provider.IsAnthropicType(v) {
+			t.Errorf("IsAnthropicType(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"openai", "openai(chat)", "openai(agent)", ""} {
+		if provider.IsAnthropicType(v) {
+			t.Errorf("IsAnthropicType(%q) = true, want false", v)
+		}
 	}
 }

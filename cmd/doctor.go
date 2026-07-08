@@ -86,7 +86,7 @@ var doctorCmd = &cobra.Command{
 			defer cancel()
 
 			modelsURL := protocol.NormalizeOpenAIModelsURL(p.Endpoint)
-			if p.Type == "anthropic" {
+			if provider.IsAnthropicType(p.Type) {
 				modelsURL = protocol.NormalizeAnthropicModelsURL(p.Endpoint)
 			}
 
@@ -252,7 +252,7 @@ func buildProgressBar(width int, pct int) string {
 }
 func testSingleModel(model, endpoint, apiKey, providerType, anthropicAuth string, timeout time.Duration) bool {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
-	if providerType == "anthropic" {
+	if provider.IsAnthropicType(providerType) {
 		if strings.TrimSpace(anthropicAuth) == "" {
 			anthropicAuth = "x-api-key"
 		}

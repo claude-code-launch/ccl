@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -12,7 +13,7 @@ func providerAuthLabel(p provider.Provider) string {
 	if provider.IsOpenAICompatibleType(p.Type) {
 		return "bearer"
 	}
-	if strings.EqualFold(p.Type, "anthropic") {
+	if provider.IsAnthropicType(p.Type) {
 		if strings.EqualFold(p.AnthropicAuth, "bearer") {
 			return "bearer"
 		}
@@ -69,4 +70,15 @@ func printProviderExperienceWarnings(p provider.Provider) {
 	if strings.TrimSpace(p.EffortLevel) != "" {
 		fmt.Println("  ! Effort is pinned by ccl; choose Default in ccl set if Claude /model effort changes should apply.")
 	}
+	if provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
+		fmt.Println("  ! OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")
+	}
+}
+
+func endpointPathIsEmpty(endpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return false
+	}
+	return strings.Trim(u.Path, "/") == ""
 }

@@ -22,11 +22,11 @@ var setCmd = &cobra.Command{
 	Use:   "set [name]",
 	Short: "Add or update an LLM provider configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return RunConfSet(args)
+		return RunProviderSet(args)
 	},
 }
 
-func RunConfSet(args []string) error {
+func RunProviderSet(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
