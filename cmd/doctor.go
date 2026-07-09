@@ -31,63 +31,68 @@ func newDoctorCommand(use string) *cobra.Command {
 }
 
 func runDoctor() error {
-	fmt.Println("Diagnosing ccl environment:")
+	fmt.Println("ccl Doctor")
+	fmt.Println("==========")
+	fmt.Println("Environment")
 
 	// 1. Check Node.js
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
-		fmt.Println("- Info: Node.js is not installed (no longer required by newer native Claude Code binaries)")
+		fmt.Println("  • Node.js: not installed (not required by newer native Claude Code binaries)")
 	} else {
-		fmt.Printf("✓ Node.js found at: %s\n", nodePath)
+		fmt.Printf("  ✓ Node.js: %s\n", nodePath)
 	}
 
 	// 2. Check Claude CLI
 	claudeInstalled := IsInstalled()
 	if !claudeInstalled {
-		fmt.Println("✗ Claude Code CLI is not installed or not in PATH.")
+		fmt.Println("  ✗ Claude Code CLI: not installed or not in PATH")
 		// Prompt to install automatically
 		err := AutoInstall()
 		if err != nil {
-			fmt.Printf("✗ Auto-installation failed: %v. Please install manually by visiting: https://code.claude.com/\n", err)
+			fmt.Printf("  ✗ Auto-installation failed: %v\n", err)
+			fmt.Println("    Install manually: https://code.claude.com/")
 		}
 	} else {
 		claudePath, _ := exec.LookPath("claude")
-		fmt.Printf("✓ Claude Code CLI installed at: %s\n", claudePath)
+		fmt.Printf("  ✓ Claude Code CLI: %s\n", claudePath)
 	}
 
 	// 3. Check Configuration File
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Printf("✗ Failed to load config: %v\n", err)
+		fmt.Printf("  ✗ Config: %v\n", err)
 		return nil
 	}
-	fmt.Printf("✓ Config file found at: %s\n", config.ConfigPath())
+	fmt.Printf("  ✓ Config: %s\n", config.ConfigPath())
 
 	// 4. Check Active Provider
 	if cfg.ActiveProvider == "" {
-		fmt.Println("✗ Active provider is not selected. Use 'ccl set' or 'ccl use'")
+		fmt.Println("\nProvider\n  ✗ No active provider. Use `ccl set` or `ccl use`.")
 		return nil
 	}
-	fmt.Printf("✓ Active provider: %s\n", cfg.ActiveProvider)
+	fmt.Printf("\nProvider · %s\n", cfg.ActiveProvider)
 
 	p, ok := cfg.Providers[cfg.ActiveProvider]
 	if !ok {
-		fmt.Printf("✗ Selected provider %q does not exist in config\n", cfg.ActiveProvider)
+		fmt.Printf("  ✗ Selected provider %q does not exist in config\n", cfg.ActiveProvider)
 		return nil
 	}
 
-	fmt.Printf("  - Type: %s\n", provider.ProtocolLabel(p.Type))
-	fmt.Printf("  - Auth: %s\n", providerAuthLabel(p))
-	fmt.Printf("  - Endpoint: %s\n", p.Endpoint)
-	fmt.Printf("  - Model: %s\n", p.Model)
-	fmt.Printf("  - Effort: %s\n", providerEffortSummary(p))
-	fmt.Printf("  - 1M Context: %s\n", providerOneMSummary(p))
+	fmt.Printf("  Protocol: %s\n", provider.ProtocolLabel(p.Type))
+	fmt.Printf("  Auth: %s\n", providerAuthLabel(p))
+	fmt.Printf("  Endpoint: %s\n", p.Endpoint)
+	fmt.Printf("  Model pool: %d configured\n", len(parseModelList(p.Model)))
+	fmt.Printf("  Effort: %s\n", providerEffortSummary(p))
+	fmt.Printf("  1M Context: %s\n", providerOneMSummary(p))
+	printProviderModelMappings(p)
 	printProviderExperienceWarnings(p)
 
 	// 5. Test Endpoint reachability and API Authentication key
 	if p.Endpoint != "" {
 		endpointReachable := false
-		fmt.Printf("  - Testing reachability and auth key validation...\n")
+		fmt.Printf("\nConnectivity\n")
+		fmt.Printf("  Checking endpoint and credentials...\n")
 		client := http.Client{
 			Timeout: 5 * time.Second,
 		}
@@ -101,20 +106,20 @@ func runDoctor() error {
 
 		req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 		if err != nil {
-			fmt.Printf("\n✗ Failed to create validation request: %v\n", err)
+			fmt.Printf("  ✗ Failed to create validation request: %v\n", err)
 		} else {
 			setProviderAuthHeaders(req, p)
 
 			resp, err := client.Do(req)
 			if err != nil {
-				fmt.Printf("\n✗ Endpoint is unreachable: %v\n", err)
+				fmt.Printf("  ✗ Endpoint is unreachable: %v\n", err)
 			} else {
 				defer resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
-					fmt.Printf(" Success! Connected and verified. (HTTP %d)\n", resp.StatusCode)
+					fmt.Printf("  ✓ Connected and verified (HTTP %d)\n", resp.StatusCode)
 					endpointReachable = true
 				} else if resp.StatusCode == http.StatusUnauthorized {
-					fmt.Printf("\n✗ Authentication failed! (HTTP %d). Please verify your API Key.\n", resp.StatusCode)
+					fmt.Printf("  ✗ Authentication failed (HTTP %d). Verify the API key.\n", resp.StatusCode)
 				} else if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
 					// Fallback strategy if GET models returns 404 or 403 on third-party proxies
 					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -122,25 +127,25 @@ func runDoctor() error {
 
 					fallbackReq, fallbackErr := http.NewRequestWithContext(fallbackCtx, "GET", p.Endpoint, nil)
 					if fallbackErr != nil {
-						fmt.Printf("\n✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
+						fmt.Printf("  ✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
 					} else {
 						setProviderAuthHeaders(fallbackReq, p)
 
 						fallbackResp, fallbackErr := client.Do(fallbackReq)
 						if fallbackErr != nil {
-							fmt.Printf("\n✗ Models discovery returned HTTP %d, and base endpoint fallback is unreachable: %v\n", resp.StatusCode, fallbackErr)
+							fmt.Printf("  ✗ Models discovery returned HTTP %d; base endpoint fallback is unreachable: %v\n", resp.StatusCode, fallbackErr)
 						} else {
 							defer fallbackResp.Body.Close()
 							if fallbackResp.StatusCode == http.StatusUnauthorized || fallbackResp.StatusCode == http.StatusForbidden {
-								fmt.Printf("\n✗ Authentication failed! Base endpoint returned HTTP %d. Please verify your API Key.\n", fallbackResp.StatusCode)
+								fmt.Printf("  ✗ Authentication failed. Base endpoint returned HTTP %d. Verify the API key.\n", fallbackResp.StatusCode)
 							} else {
-								fmt.Printf(" Success! Connected and verified. (HTTP %d, models discovery bypassed)\n", resp.StatusCode)
+								fmt.Printf("  ✓ Connected and verified (HTTP %d, models discovery bypassed)\n", resp.StatusCode)
 								endpointReachable = true
 							}
 						}
 					}
 				} else {
-					fmt.Printf(" Connected, but returned unexpected status (HTTP %d)\n", resp.StatusCode)
+					fmt.Printf("  ! Connected, but returned unexpected status (HTTP %d)\n", resp.StatusCode)
 				}
 			}
 		}
@@ -149,10 +154,13 @@ func runDoctor() error {
 		if endpointReachable && p.Model != "" {
 			configuredModels := parseModelList(p.Model)
 			if len(configuredModels) > 0 {
-				fmt.Printf("\n  - Validating %d configured model(s) with concurrent tests...\n", len(configuredModels))
+				fmt.Printf("\nModel verification\n")
 				availableSet := testModelsConcurrently(configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
 				available, unavailable := classifyModels(configuredModels, availableSet)
-				printModelReport(available, unavailable)
+				fmt.Printf("  %s\n", modelVerificationSummary(available, unavailable))
+				if len(unavailable) > 0 {
+					fmt.Println("  Run `ccl models` to inspect individual model results.")
+				}
 
 				// Reorder and save: available first, unavailable last
 				reordered := append(available, unavailable...)
@@ -185,33 +193,12 @@ func testModelsConcurrently(models []string, endpoint, apiKey, providerType, ant
 	var completed, okCount, failCount int64
 	total := int64(len(models))
 
-	// Progress bar ticker
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				c := atomic.LoadInt64(&completed)
-				o := atomic.LoadInt64(&okCount)
-				f := atomic.LoadInt64(&failCount)
-				pct := int(float64(c) / float64(total) * 100)
-				bar := buildProgressBar(30, pct)
-				fmt.Printf("\r  %s %d/%d ✓%d ✗%d", bar, c, total, o, f)
-			}
-		}
-	}()
+	fmt.Printf("  Checking %d model(s)...\n", total)
 	defer func() {
-		close(done)
-		// Print final 100%% bar
 		c := atomic.LoadInt64(&completed)
 		o := atomic.LoadInt64(&okCount)
 		f := atomic.LoadInt64(&failCount)
-		bar := buildProgressBar(30, 100)
-		fmt.Printf("\r  %s %d/%d ✓%d ✗%d\n", bar, c, total, o, f)
+		fmt.Printf("  Done: %d/%d checked, %d available, %d unavailable\n", c, total, o, f)
 	}()
 
 	for start := 0; start < len(models); start += batchSize {
@@ -243,36 +230,29 @@ func testModelsConcurrently(models []string, endpoint, apiKey, providerType, ant
 	return available
 }
 
-// buildProgressBar returns a visual progress bar string.
-func buildProgressBar(width int, pct int) string {
-	filled := pct * width / 100
-	var sb strings.Builder
-	sb.WriteByte('[')
-	for i := 0; i < width; i++ {
-		if i < filled {
-			sb.WriteString("█")
-		} else {
-			sb.WriteString("░")
-		}
-	}
-	sb.WriteByte(']')
-	return sb.String()
-}
 func testSingleModel(model, endpoint, apiKey, providerType, anthropicAuth string, timeout time.Duration) bool {
+	return testSingleModelContext(context.Background(), model, endpoint, apiKey, providerType, anthropicAuth, timeout)
+}
+
+func testSingleModelContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, timeout time.Duration) bool {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	if provider.IsAnthropicType(providerType) {
 		if strings.TrimSpace(anthropicAuth) == "" {
 			anthropicAuth = "x-api-key"
 		}
-		return testSingleAnthropicModelWithAuth(model, endpoint, apiKey, anthropicAuth, timeout)
+		return testSingleAnthropicModelWithAuthContext(ctx, model, endpoint, apiKey, anthropicAuth, timeout)
 	}
 	if provider.IsOpenAIResponsesType(providerType) {
-		return testSingleOpenAIResponsesModel(model, endpoint, apiKey, timeout)
+		return testSingleOpenAIResponsesModelContext(ctx, model, endpoint, apiKey, timeout)
 	}
-	return testSingleOpenAIModel(model, endpoint, apiKey, timeout)
+	return testSingleOpenAIModelContext(ctx, model, endpoint, apiKey, timeout)
 }
 
 func testSingleOpenAIModel(model, endpoint, apiKey string, timeout time.Duration) bool {
+	return testSingleOpenAIModelContext(context.Background(), model, endpoint, apiKey, timeout)
+}
+
+func testSingleOpenAIModelContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) bool {
 	body, err := json.Marshal(map[string]any{
 		"model":      model,
 		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
@@ -282,7 +262,7 @@ func testSingleOpenAIModel(model, endpoint, apiKey string, timeout time.Duration
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", buildChatURL(endpoint), bytes.NewReader(body))
@@ -305,6 +285,10 @@ func testSingleAnthropicModel(model, endpoint, apiKey string, timeout time.Durat
 }
 
 func testSingleAnthropicModelWithAuth(model, endpoint, apiKey, authStyle string, timeout time.Duration) bool {
+	return testSingleAnthropicModelWithAuthContext(context.Background(), model, endpoint, apiKey, authStyle, timeout)
+}
+
+func testSingleAnthropicModelWithAuthContext(parent context.Context, model, endpoint, apiKey, authStyle string, timeout time.Duration) bool {
 	body, err := json.Marshal(map[string]any{
 		"model":      model,
 		"max_tokens": 1,
@@ -314,7 +298,7 @@ func testSingleAnthropicModelWithAuth(model, endpoint, apiKey, authStyle string,
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", buildAnthropicMessagesURL(endpoint), bytes.NewReader(body))
@@ -338,7 +322,11 @@ func testSingleAnthropicModelWithAuth(model, endpoint, apiKey, authStyle string,
 }
 
 func testSingleOpenAIResponsesModel(model, endpoint, apiKey string, timeout time.Duration) bool {
-	return protocol.ProbeOpenAIResponsesSupport(endpoint, apiKey, model, timeout)
+	return testSingleOpenAIResponsesModelContext(context.Background(), model, endpoint, apiKey, timeout)
+}
+
+func testSingleOpenAIResponsesModelContext(ctx context.Context, model, endpoint, apiKey string, timeout time.Duration) bool {
+	return protocol.ProbeOpenAIResponsesSupportContext(ctx, endpoint, apiKey, model, timeout)
 }
 
 // buildChatURL constructs a chat completions endpoint URL from a provider endpoint.
@@ -367,21 +355,51 @@ func classifyModels(configured []string, availableSet map[string]bool) (availabl
 	return
 }
 
-// printModelReport displays which models are available and which are not.
+func modelVerificationSummary(available, unavailable []string) string {
+	return fmt.Sprintf("%d available · %d unavailable", len(available), len(unavailable))
+}
+
+func printProviderModelMappings(p provider.Provider) {
+	mappings := []struct {
+		label string
+		model string
+	}{
+		{"Opus", p.OpusModel},
+		{"Sonnet", p.SonnetModel},
+		{"Haiku", p.HaikuModel},
+		{"Custom", p.CustomModelID},
+	}
+
+	fmt.Println("  Slot mappings:")
+	for _, mapping := range mappings {
+		model := mapping.model
+		if model == "" {
+			model = "(unset)"
+		}
+		fmt.Printf("    %-7s %s\n", mapping.label+":", model)
+	}
+}
+
+// printModelReport displays the complete availability report for `ccl models`.
 func printModelReport(available, unavailable []string) {
-	for _, m := range available {
-		fmt.Printf("    ✓ %s\n", m)
+	if len(available) > 0 {
+		fmt.Printf("Available (%d)\n", len(available))
+		for _, m := range available {
+			fmt.Printf("  ✓ %s\n", m)
+		}
 	}
-	for _, m := range unavailable {
-		fmt.Printf("    ✗ %s (unavailable)\n", m)
+
+	if len(unavailable) > 0 {
+		if len(available) > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("Unavailable (%d)\n", len(unavailable))
+		for _, m := range unavailable {
+			fmt.Printf("  ✗ %s\n", m)
+		}
 	}
-	if len(available) > 0 && len(unavailable) > 0 {
-		fmt.Printf("  %d available, %d unavailable\n", len(available), len(unavailable))
-	} else if len(available) > 0 {
-		fmt.Printf("  All %d model(s) available.\n", len(available))
-	} else if len(unavailable) > 0 {
-		fmt.Printf("  All %d model(s) unavailable - check endpoint and API key.\n", len(unavailable))
-	}
+
+	fmt.Printf("\nSummary: %s\n", modelVerificationSummary(available, unavailable))
 }
 
 func RootCmd() *cobra.Command {

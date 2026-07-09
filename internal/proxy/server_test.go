@@ -282,6 +282,127 @@ func TestProxyServerModelsUsesDiscoveredModels(t *testing.T) {
 	}
 }
 
+func TestProxyServerModelsEscapesModelIDsAndRejectsNonGET(t *testing.T) {
+	rawModel := "custom\"model\nwith-newline"
+	p := provider.Provider{
+		Name:     "escaped-model",
+		Type:     "openai",
+		Endpoint: "https://example.test/v1",
+		APIKey:   "mock-key",
+		Model:    rawModel,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxyServer := proxy.NewServer("127.0.0.1:0", p, logger)
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxyServer.Stop()
+
+	resp, err := http.Get("http://" + proxyServer.Addr() + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET /v1/models: %v", err)
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models response: %v", err)
+	}
+	if len(payload.Data) != 1 || payload.Data[0].ID != protocol.ToGatewayModelAlias(rawModel) || payload.Data[0].Type != "model" {
+		t.Fatalf("unexpected models response: %+v", payload.Data)
+	}
+
+	methodReq, err := http.NewRequest(http.MethodPost, "http://"+proxyServer.Addr()+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("create POST request: %v", err)
+	}
+	methodResp, err := (&http.Client{}).Do(methodReq)
+	if err != nil {
+		t.Fatalf("POST /v1/models: %v", err)
+	}
+	defer methodResp.Body.Close()
+	if methodResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/models status = %d, want %d", methodResp.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestProxyServerStreamingSupportsLargeSSEEvent(t *testing.T) {
+	largeContent := strings.Repeat("x", 128*1024)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeChunk := func(payload any) {
+			data, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal stream chunk: %v", err)
+			}
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		writeChunk(map[string]any{
+			"id": "chatcmpl-large", "model": "gpt-large",
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": largeContent}, "finish_reason": nil}},
+		})
+		writeChunk(map[string]any{
+			"id": "chatcmpl-large", "model": "gpt-large",
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		})
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+
+	upstreamAddr := startHTTPServer(t, mux)
+	p := provider.Provider{
+		Name:     "large-stream",
+		Type:     "openai",
+		Endpoint: "http://" + upstreamAddr + "/v1",
+		APIKey:   "mock-key",
+		Model:    "gpt-large",
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxyServer := proxy.NewServer("127.0.0.1:0", p, logger)
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxyServer.Stop()
+
+	antReq := protocol.AnthropicRequest{
+		Model: "claude-3-5-sonnet",
+		Messages: []protocol.AnthropicMessage{{
+			Role: "user", Content: "Hello",
+		}},
+		Stream: true,
+	}
+	body, err := json.Marshal(antReq)
+	if err != nil {
+		t.Fatalf("marshal Anthropic request: %v", err)
+	}
+	resp, err := http.Post("http://"+proxyServer.Addr()+"/v1/messages", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /v1/messages: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status %d: %s", resp.StatusCode, responseBody)
+	}
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read translated stream: %v", err)
+	}
+	if !bytes.Contains(responseBody, []byte(largeContent)) {
+		t.Fatalf("translated stream did not contain the %d-byte content delta", len(largeContent))
+	}
+	if !bytes.Contains(responseBody, []byte(`"type":"message_stop"`)) {
+		t.Fatalf("translated stream did not finish cleanly")
+	}
+}
+
 func TestProxyServerResponsesStreaming(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {

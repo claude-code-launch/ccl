@@ -1,6 +1,7 @@
 package protocol_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -53,5 +54,35 @@ func TestProbeOpenAIResponsesSupportFailsOnNotFound(t *testing.T) {
 func TestProbeOpenAIResponsesSupportFailsOnUnreachable(t *testing.T) {
 	if protocol.ProbeOpenAIResponsesSupport("http://127.0.0.1:1", "test-key", "gpt-5", 500*time.Millisecond) {
 		t.Fatalf("expected ProbeOpenAIResponsesSupport to fail when endpoint is unreachable")
+	}
+}
+
+func TestProbeOpenAIResponsesSupportContextCanBeCanceled(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(100 * time.Millisecond):
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan bool, 1)
+	go func() {
+		result <- protocol.ProbeOpenAIResponsesSupportContext(ctx, server.URL+"/v1", "test-key", "gpt-5", 10*time.Second)
+	}()
+
+	<-started
+	cancel()
+	select {
+	case ok := <-result:
+		if ok {
+			t.Fatal("expected canceled probe to fail")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled probe did not return promptly")
 	}
 }

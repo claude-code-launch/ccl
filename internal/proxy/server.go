@@ -29,10 +29,20 @@ type Server struct {
 	availableModels string
 }
 
+const (
+	initialSSEScannerBuffer = 64 * 1024
+	maxSSEScannerTokenBytes = 4 * 1024 * 1024
+	maxUpstreamErrorBody    = 64 * 1024
+	maxUpstreamErrorPreview = 4 * 1024
+)
+
 type modelsResponse struct {
-	Data []struct {
-		ID string `json:"id"`
-	} `json:"data"`
+	Data []modelInfo `json:"data"`
+}
+
+type modelInfo struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
 }
 
 func NewServer(addr string, p provider.Provider, logger *slog.Logger) *Server {
@@ -193,12 +203,22 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, truncated, readErr := readLimitedResponseBody(resp.Body, maxUpstreamErrorBody)
+		if readErr != nil {
+			s.logger.Error("Failed to read upstream error response", "error", readErr)
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			return
+		}
+		if truncated {
+			s.logger.Error("Upstream error response exceeded limit", "status", resp.StatusCode, "limit_bytes", maxUpstreamErrorBody)
+			http.Error(w, "Upstream error response exceeded proxy limit", resp.StatusCode)
+			return
+		}
 		respBody = annotateUpstreamError(respBody)
-		s.logger.Error("Upstream returned non-200 status", "status", resp.StatusCode, "body", string(respBody))
+		s.logger.Error("Upstream returned non-200 status", "status", resp.StatusCode, "body_preview", responseBodyPreview(respBody, maxUpstreamErrorPreview))
 		// Pipe the exact error details back
 		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		_, _ = w.Write(respBody)
 		return
 	}
 
@@ -303,7 +323,7 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 	}
 
 	st := &StreamTransformer{}
-	scanner := bufio.NewScanner(body)
+	scanner := newSSEScanner(body)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -331,6 +351,10 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		s.logger.Error("Error scanning streaming input", "error", err)
+		return
+	}
 	if formatted := FormatEvents(st.Finish()); formatted != "" {
 		if _, err := fmt.Fprint(w, formatted); err != nil {
 			s.logger.Error("Failed to write final SSE event to client", "error", err)
@@ -339,9 +363,6 @@ func (s *Server) handleStreaming(w http.ResponseWriter, body io.Reader) {
 		flusher.Flush()
 	}
 
-	if err := scanner.Err(); err != nil {
-		s.logger.Error("Error scanning streaming input", "error", err)
-	}
 }
 
 func (s *Server) handleResponsesStreaming(w http.ResponseWriter, body io.Reader) {
@@ -357,7 +378,7 @@ func (s *Server) handleResponsesStreaming(w http.ResponseWriter, body io.Reader)
 	}
 
 	st := &ResponsesStreamTransformer{}
-	scanner := bufio.NewScanner(body)
+	scanner := newSSEScanner(body)
 	var block strings.Builder
 
 	flushBlock := func() bool {
@@ -394,38 +415,57 @@ func (s *Server) handleResponsesStreaming(w http.ResponseWriter, body io.Reader)
 		block.WriteString(line)
 		block.WriteByte('\n')
 	}
-	if block.Len() > 0 {
-		flushBlock()
-	}
-
 	if err := scanner.Err(); err != nil {
 		s.logger.Error("Error scanning Responses streaming input", "error", err)
+		return
+	}
+	if block.Len() > 0 {
+		flushBlock()
 	}
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
 	s.logger.Debug("Received models check request")
 	w.Header().Set("Content-Type", "application/json")
 
 	models := protocol.BatchToGatewayModelAlias(s.modelPool())
-
-	var buf bytes.Buffer
-	buf.WriteString(`{"data":[`)
-	first := true
-	writeModel := func(id string) {
-		if !first {
-			buf.WriteString(",")
-		}
-		first = false
-		buf.WriteString(fmt.Sprintf(`{"id":"%s","type":"model"}`, id))
-	}
+	response := modelsResponse{Data: make([]modelInfo, 0, len(models))}
 	for _, id := range models {
-		writeModel(id)
+		response.Data = append(response.Data, modelInfo{ID: id, Type: "model"})
 	}
-	buf.WriteString(`]}`)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.Error("Failed to encode model list", "error", err)
+	}
+}
 
-	w.Write(buf.Bytes())
+func newSSEScanner(body io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, initialSSEScannerBuffer), maxSSEScannerTokenBytes)
+	return scanner
+}
+
+func readLimitedResponseBody(body io.Reader, limit int64) ([]byte, bool, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > limit {
+		return data[:limit], true, nil
+	}
+	return data, false, nil
+}
+
+func responseBodyPreview(body []byte, limit int) string {
+	text := strings.TrimSpace(string(body))
+	if len(text) <= limit {
+		return text
+	}
+	return text[:limit] + "...(truncated)"
 }
 
 func (s *Server) handleFallback(w http.ResponseWriter, r *http.Request) {

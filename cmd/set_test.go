@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -300,6 +302,155 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 	view := m.View()
 	if !strings.Contains(view.Content, "models failed") {
 		t.Fatalf("expected detection error to be visible in view, got %q", view.Content)
+	}
+}
+
+func TestAdvancedConfigViewUsesCompactHeaderAndLanguageTip(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 3
+
+	view := m.View().Content
+	if !strings.Contains(view, "Reasoning Effort") || !strings.Contains(view, "Step 5/6") {
+		t.Fatalf("expected compact page header, got %q", view)
+	}
+	if !strings.Contains(view, "Change the TUI display language") || !strings.Contains(view, "●") || !strings.Contains(view, "○") {
+		t.Fatalf("expected language tip and step progress, got %q", view)
+	}
+}
+
+func TestConfigModeIsSecondWorkflowStep(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 5
+
+	view := m.View().Content
+	if !strings.Contains(view, "Config Mode") || !strings.Contains(view, "Step 2/6") {
+		t.Fatalf("expected config-mode page to be step 2, got %q", view)
+	}
+}
+
+func TestReviewPageShowsModelMapping(t *testing.T) {
+	p := provider.Provider{
+		Type:          "openai",
+		Endpoint:      "https://example.test/v1",
+		OpusModel:     "model-opus",
+		SonnetModel:   "model-sonnet",
+		HaikuModel:    "model-haiku",
+		CustomModelID: "model-custom",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 4
+	m.oneMSlots["sonnet"] = true
+
+	view := m.View().Content
+	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "⚡1M"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
+		}
+	}
+}
+
+func TestReorderModelsByAvailability(t *testing.T) {
+	models := []string{"model-unavailable", "model-available-a", "model-unknown", "model-available-b"}
+	statuses := map[string]modelAvailability{
+		"model-unavailable": modelAvailabilityUnavailable,
+		"model-available-a": modelAvailabilityAvailable,
+		"model-available-b": modelAvailabilityAvailable,
+	}
+
+	got := reorderModelsByAvailability(models, statuses)
+	want := []string{"model-available-a", "model-available-b", "model-unknown", "model-unavailable"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("reordered models = %v, want %v", got, want)
+	}
+}
+
+func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
+	m := NewAdvancedConfigModelAtPage1(&p, []string{"model-unavailable", "model-available"})
+	m.cursor = slotTestCursor
+
+	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.modelTesting || cmd == nil {
+		t.Fatalf("expected availability test to start, testing=%t cmd=%v", m.modelTesting, cmd)
+	}
+
+	next, _ = m.Update(modelAvailabilityDoneMsg{statuses: map[string]modelAvailability{
+		"model-unavailable": modelAvailabilityUnavailable,
+		"model-available":   modelAvailabilityAvailable,
+	}, testID: m.modelTestID})
+	m = next.(*AdvancedConfigModel)
+	if m.modelTesting {
+		t.Fatal("expected availability test to finish")
+	}
+	if got, want := strings.Join(m.modelPool, ","), "model-available,model-unavailable"; got != want {
+		t.Fatalf("model pool = %q, want %q", got, want)
+	}
+	if got, want := p.Model, "model-available,model-unavailable"; got != want {
+		t.Fatalf("stored model pool = %q, want %q", got, want)
+	}
+
+	m.activeSlot = 0
+	m.filterInput.Focus()
+	m.updateFilteredPool()
+	view := m.View().Content
+	if !strings.Contains(view, "✓ available") || !strings.Contains(view, "✗ unavailable") {
+		t.Fatalf("expected availability labels in picker, got %q", view)
+	}
+	if strings.Index(view, "model-available") > strings.Index(view, "model-unavailable") {
+		t.Fatalf("expected available model to be listed first, got %q", view)
+	}
+}
+
+func TestSlotModelAvailabilityTestCanBeCanceled(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
+	m := NewAdvancedConfigModelAtPage1(&p, []string{"model-a"})
+	m.cursor = slotTestCursor
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	testID := m.modelTestID
+	if !m.modelTesting || m.modelTestCancel == nil {
+		t.Fatalf("expected cancelable test, testing=%t cancel=%v", m.modelTesting, m.modelTestCancel)
+	}
+
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	m = next.(*AdvancedConfigModel)
+	if m.modelTesting || !m.modelTestCanceled {
+		t.Fatalf("expected canceled test state, testing=%t canceled=%t", m.modelTesting, m.modelTestCanceled)
+	}
+
+	next, _ = m.Update(modelAvailabilityDoneMsg{
+		testID: testID,
+		statuses: map[string]modelAvailability{
+			"model-a": modelAvailabilityAvailable,
+		},
+	})
+	m = next.(*AdvancedConfigModel)
+	if len(m.modelAvailability) != 0 {
+		t.Fatalf("expected canceled test result to be ignored, got %v", m.modelAvailability)
+	}
+	if view := m.View().Content; !strings.Contains(view, "Test canceled; results were not applied") {
+		t.Fatalf("expected cancellation feedback, got %q", view)
+	}
+}
+
+func TestAdvancedConfigViewAdaptsToWindowSize(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
+	m := NewAdvancedConfigModel(&p)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 48})
+	m = next.(*AdvancedConfigModel)
+
+	if got, want := m.panelWidth(), preferredPanelWidth; got != want {
+		t.Fatalf("panel width = %d, want %d", got, want)
+	}
+	if got, want := m.urlInput.Width(), preferredPanelWidth-8; got != want {
+		t.Fatalf("URL input width = %d, want %d", got, want)
+	}
+	if got := m.View().Content; !strings.Contains(got, "Change the TUI display language") {
+		t.Fatalf("expected footer in resized view, got %q", got)
 	}
 }
 

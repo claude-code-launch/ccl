@@ -30,6 +30,7 @@ func runModels(showAll bool) error {
 	}
 
 	modelsStr := p.Model
+	source := "configured model pool"
 	if showAll || modelsStr == "" {
 		fetched := fetchModelsForProvider(p)
 		if len(fetched) == 0 {
@@ -38,6 +39,7 @@ func runModels(showAll bool) error {
 			}
 		} else {
 			modelsStr = strings.Join(fetched, ",")
+			source = "provider API"
 		}
 	}
 
@@ -47,13 +49,13 @@ func runModels(showAll bool) error {
 		return nil
 	}
 
-	displayModels := modelList
+	fmt.Printf("Models · %s\n", p.Name)
+	fmt.Printf("Source: %s · %d model(s)\n\n", source, len(modelList))
 
-	availableSet := testModelsConcurrently(displayModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
-	available, unavailable := classifyModels(displayModels, availableSet)
-	fmt.Printf("Models for %s:\n\n", p.Name)
+	availableSet := testModelsConcurrently(modelList, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
+	available, unavailable := classifyModels(modelList, availableSet)
+	fmt.Println()
 	printModelReport(available, unavailable)
-	fmt.Printf("\nTotal: %d model(s)\n", len(displayModels))
 
 	return nil
 }

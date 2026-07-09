@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/compat"
 
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -16,29 +19,46 @@ import (
 )
 
 var (
+	// Each semantic color has a high-contrast light and dark terminal variant.
+	colorBorder    = compat.AdaptiveColor{Light: lipgloss.Color("#8A93A0"), Dark: lipgloss.Color("#687386")}
+	colorAccent    = compat.AdaptiveColor{Light: lipgloss.Color("#0B72E7"), Dark: lipgloss.Color("#65B7FF")}
+	colorSecondary = compat.AdaptiveColor{Light: lipgloss.Color("#6E4BB6"), Dark: lipgloss.Color("#B79CFF")}
+	colorData      = compat.AdaptiveColor{Light: lipgloss.Color("#007C7C"), Dark: lipgloss.Color("#41D7C8")}
+	colorWarning   = compat.AdaptiveColor{Light: lipgloss.Color("#9A6700"), Dark: lipgloss.Color("#F0B84D")}
+	colorError     = compat.AdaptiveColor{Light: lipgloss.Color("#B42318"), Dark: lipgloss.Color("#FF8A80")}
+
 	windowStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("237")).
+			BorderForeground(colorBorder).
 			Padding(1, 2).
 			Width(70)
 
-	titleStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
-	badgeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true).MarginLeft(2)
-	protoBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).MarginLeft(2)
-	cyanText        = lipgloss.NewStyle().Foreground(lipgloss.Color("49"))
-	purpleText      = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
-	grayText        = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
-	errorText       = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	selectedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
-	lightning       = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render("⚡1M")
-	filterStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
-
-	langTipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("239")).Padding(0, 1).MarginTop(1)
+	titleStyle       = lipgloss.NewStyle().Bold(true)
+	badgeStyle       = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).MarginLeft(1)
+	protoBadgeStyle  = lipgloss.NewStyle().Foreground(colorSecondary).MarginLeft(1)
+	cyanText         = lipgloss.NewStyle().Foreground(colorData)
+	purpleText       = lipgloss.NewStyle().Foreground(colorSecondary)
+	grayText         = lipgloss.NewStyle().Faint(true)
+	errorBoxStyle    = lipgloss.NewStyle().Foreground(colorError).Border(lipgloss.NormalBorder()).BorderForeground(colorError).Padding(0, 1).Width(62)
+	stepStyle        = lipgloss.NewStyle().Faint(true).MarginLeft(1)
+	dividerStyle     = lipgloss.NewStyle().Faint(true)
+	selectedStyle    = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	lightning        = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("⚡1M")
+	filterStyle      = lipgloss.NewStyle().Foreground(colorAccent)
+	availableStyle   = lipgloss.NewStyle().Foreground(colorData).Bold(true)
+	unavailableStyle = lipgloss.NewStyle().Foreground(colorError)
 )
 
 const (
-	filterViewHeight     = 15 // max visible items in filter list
-	credentialInputWidth = 58
+	filterViewHeight      = 15 // max visible items in filter list
+	credentialInputWidth  = 58
+	preferredPanelWidth   = 82
+	minimumPanelWidth     = 54
+	minimumTerminalMargin = 4
+	slotTestCursor        = 4
+	slotNextCursor        = 5
+	slotBackCursor        = 6
+	slotTestConcurrency   = 50
 )
 
 type AdvancedConfigModel struct {
@@ -52,6 +72,8 @@ type AdvancedConfigModel struct {
 
 	page   int
 	cursor int
+	width  int
+	height int
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -69,6 +91,12 @@ type AdvancedConfigModel struct {
 	filteredPool      []string
 	slotListCursor    int
 	filterWindowStart int // first visible index in filter list
+	modelAvailability map[string]modelAvailability
+	modelTesting      bool
+	modelTestCancel   context.CancelFunc
+	modelTestFrame    int
+	modelTestID       uint64
+	modelTestCanceled bool
 
 	// Page 3
 	effortLevels []string
@@ -79,6 +107,23 @@ type AdvancedConfigModel struct {
 }
 
 type modelFetchTickMsg struct{}
+
+type modelAvailability uint8
+
+const (
+	modelAvailabilityUnknown modelAvailability = iota
+	modelAvailabilityAvailable
+	modelAvailabilityUnavailable
+)
+
+type modelAvailabilityDoneMsg struct {
+	testID   uint64
+	statuses map[string]modelAvailability
+}
+
+type modelAvailabilityTickMsg struct {
+	testID uint64
+}
 
 type modelFetchDoneMsg struct {
 	endpoint            string
@@ -110,17 +155,18 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	fi.Placeholder = ""
 
 	m := &AdvancedConfigModel{
-		p:               p,
-		oneMSlots:       make(map[string]bool),
-		page:            0,
-		cursor:          0,
-		urlInput:        ui,
-		keyInput:        ki,
-		filterInput:     fi,
-		effortLevels:    []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
-		effortCursor:    0,
-		IsActiveChosen:  true,
-		clearStaleSlots: true,
+		p:                 p,
+		oneMSlots:         make(map[string]bool),
+		page:              0,
+		cursor:            0,
+		urlInput:          ui,
+		keyInput:          ki,
+		filterInput:       fi,
+		effortLevels:      []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
+		effortCursor:      0,
+		IsActiveChosen:    true,
+		clearStaleSlots:   true,
+		modelAvailability: make(map[string]modelAvailability),
 	}
 
 	// 从已有配置中读取 EffortLevel 的默认值
@@ -152,7 +198,7 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 func NewAdvancedConfigModelAtPage1(p *provider.Provider, modelPool []string) *AdvancedConfigModel {
 	m := NewAdvancedConfigModel(p)
 	m.page = 1
-	m.cursor = 4 // start at Opus slot
+	m.cursor = slotNextCursor
 	m.modelPool = modelPool
 	m.urlInput.Blur()
 	m.keyInput.Blur()
@@ -192,6 +238,61 @@ func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 	}
 }
 
+func modelAvailabilityTickCmd(testID uint64) tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return modelAvailabilityTickMsg{testID: testID}
+	})
+}
+
+func modelAvailabilityTestCmd(ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth string) tea.Cmd {
+	models = append([]string(nil), models...)
+	return func() tea.Msg {
+		statuses := make(map[string]modelAvailability, len(models))
+		if len(models) == 0 {
+			return modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
+		}
+
+		jobs := make(chan string, len(models))
+		for _, model := range models {
+			jobs <- model
+		}
+		close(jobs)
+
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		workers := min(slotTestConcurrency, len(models))
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case model, ok := <-jobs:
+						if !ok {
+							return
+						}
+						status := modelAvailabilityUnavailable
+						if testSingleModelContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, 10*time.Second) {
+							status = modelAvailabilityAvailable
+						}
+						if ctx.Err() != nil {
+							return
+						}
+						mu.Lock()
+						statuses[model] = status
+						mu.Unlock()
+					}
+				}
+			}()
+		}
+
+		wg.Wait()
+		return modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
+	}
+}
+
 func (m *AdvancedConfigModel) updateFilteredPool() {
 	q := strings.ToLower(m.filterInput.Value())
 	if q == "" {
@@ -212,6 +313,71 @@ func (m *AdvancedConfigModel) updateFilteredPool() {
 	if len(m.filteredPool) > 0 && m.slotListCursor >= len(m.filteredPool) {
 		m.slotListCursor = len(m.filteredPool) - 1
 	}
+}
+
+func reorderModelsByAvailability(models []string, statuses map[string]modelAvailability) []string {
+	available := make([]string, 0, len(models))
+	unknown := make([]string, 0, len(models))
+	unavailable := make([]string, 0, len(models))
+	for _, model := range models {
+		switch statuses[model] {
+		case modelAvailabilityAvailable:
+			available = append(available, model)
+		case modelAvailabilityUnavailable:
+			unavailable = append(unavailable, model)
+		default:
+			unknown = append(unknown, model)
+		}
+	}
+	return append(append(available, unknown...), unavailable...)
+}
+
+func (m *AdvancedConfigModel) availabilityFor(model string) modelAvailability {
+	if status, ok := m.modelAvailability[model]; ok {
+		return status
+	}
+	return modelAvailabilityUnknown
+}
+
+func (m *AdvancedConfigModel) availabilityLabel(model string) string {
+	switch m.availabilityFor(model) {
+	case modelAvailabilityAvailable:
+		return availableStyle.Render(locale.T("✓ 可用", "✓ available"))
+	case modelAvailabilityUnavailable:
+		return unavailableStyle.Render(locale.T("✗ 不可用", "✗ unavailable"))
+	default:
+		return grayText.Render(locale.T("? 未测试", "? not tested"))
+	}
+}
+
+func (m *AdvancedConfigModel) availabilityCounts() (available, unavailable int) {
+	for _, model := range m.modelPool {
+		switch m.availabilityFor(model) {
+		case modelAvailabilityAvailable:
+			available++
+		case modelAvailabilityUnavailable:
+			unavailable++
+		}
+	}
+	return available, unavailable
+}
+
+func (m *AdvancedConfigModel) panelWidth() int {
+	if m.width <= 0 {
+		return 70
+	}
+	available := m.width - minimumTerminalMargin
+	if available < minimumPanelWidth {
+		return max(available, 1)
+	}
+	return min(available, preferredPanelWidth)
+}
+
+func (m *AdvancedConfigModel) updateInputWidths() {
+	inputWidth := max(m.panelWidth()-8, 20)
+	m.urlInput.SetWidth(inputWidth)
+	m.keyInput.SetWidth(inputWidth)
+	m.filterInput.SetWidth(inputWidth)
 }
 
 // doAutoConfig auto-fills slot models with the first 4 available from modelPool,
@@ -331,7 +497,7 @@ func (m *AdvancedConfigModel) goBack() {
 			m.cursor = 2
 		}
 		if m.page == 1 {
-			m.cursor = 4
+			m.cursor = slotNextCursor
 		}
 		if m.page == 2 {
 			m.cursor = 4
@@ -356,6 +522,27 @@ func (m *AdvancedConfigModel) effortLabel(level string) string {
 		return locale.T("默认（跟随 Claude 设置）", "Default (follow Claude setting)")
 	}
 	return level
+}
+
+// workflowStep keeps the visible flow independent from the internal page IDs.
+// Page 5 is the config-mode choice shown immediately after credentials.
+func (m *AdvancedConfigModel) workflowStep() int {
+	switch m.page {
+	case 0:
+		return 1
+	case 5:
+		return 2
+	case 1:
+		return 3
+	case 2:
+		return 4
+	case 3:
+		return 5
+	case 4:
+		return 6
+	default:
+		return 1
+	}
 }
 
 func reviewOneMSummary(oneMSlots map[string]bool) string {
@@ -399,6 +586,10 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 
 	m.modelPool = []string{}
 	m.modelPoolFromDiscovery = false
+	m.modelAvailability = make(map[string]modelAvailability)
+	m.modelTesting = false
+	m.modelTestCancel = nil
+	m.modelTestCanceled = false
 	if derr == nil && len(discoveredModels) > 0 {
 		m.modelPool = discoveredModels
 		m.modelPoolFromDiscovery = true
@@ -451,6 +642,12 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.updateInputWidths()
+		return m, nil
+
 	case modelFetchTickMsg:
 		if !m.detecting {
 			return m, nil
@@ -488,6 +685,28 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.detectedEndpoint, msg.err)
 
+	case modelAvailabilityDoneMsg:
+		if !m.modelTesting || msg.testID != m.modelTestID {
+			return m, nil
+		}
+		m.modelTesting = false
+		m.modelTestCancel = nil
+		m.modelTestCanceled = false
+		m.modelAvailability = msg.statuses
+		m.modelPool = reorderModelsByAvailability(m.modelPool, m.modelAvailability)
+		m.p.Model = strings.Join(m.modelPool, ",")
+		m.updateFilteredPool()
+		available, unavailable := m.availabilityCounts()
+		setDebugf("model availability test finished model_count=%d available=%d unavailable=%d", len(m.modelPool), available, unavailable)
+		return m, nil
+
+	case modelAvailabilityTickMsg:
+		if !m.modelTesting || msg.testID != m.modelTestID {
+			return m, nil
+		}
+		m.modelTestFrame++
+		return m, modelAvailabilityTickCmd(msg.testID)
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -497,7 +716,19 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.detecting {
 			return m, nil
 		}
-
+		if m.modelTesting {
+			if msg.String() == "esc" {
+				if m.modelTestCancel != nil {
+					m.modelTestCancel()
+				}
+				m.modelTesting = false
+				m.modelTestCancel = nil
+				m.modelTestCanceled = true
+				m.cursor = slotTestCursor
+				setDebugf("model availability test canceled test_id=%d", m.modelTestID)
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "esc":
 			if m.page == 1 && m.filterInput.Focused() {
@@ -526,8 +757,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				if m.page == 0 && (m.cursor == 2 || m.cursor == 3) {
 					m.cursor = 1
-				} else if m.page == 1 && (m.cursor == 4 || m.cursor == 5) {
-					m.cursor = 3
+				} else if m.page == 1 && (m.cursor == slotNextCursor || m.cursor == slotBackCursor) {
+					m.cursor = slotTestCursor
 				} else if m.page == 2 && (m.cursor == 4 || m.cursor == 5) {
 					m.cursor = 3
 				} else if m.page == 3 && (m.cursor == m.effortNextCursor() || m.cursor == m.effortBackCursor()) {
@@ -556,7 +787,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor++
 				}
 			} else if m.page == 1 {
-				if m.cursor < 4 {
+				if m.cursor < slotNextCursor {
 					m.cursor++
 				}
 			} else if m.page == 2 {
@@ -581,8 +812,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 0 && m.cursor == 3 {
 				m.cursor = 2
 			}
-			if m.page == 1 && m.cursor == 5 {
-				m.cursor = 4
+			if m.page == 1 && m.cursor == slotBackCursor {
+				m.cursor = slotNextCursor
 			}
 			if m.page == 2 && m.cursor == 5 {
 				m.cursor = 4
@@ -603,8 +834,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 0 && m.cursor == 2 {
 				m.cursor = 3
 			}
-			if m.page == 1 && m.cursor == 4 {
-				m.cursor = 5
+			if m.page == 1 && m.cursor == slotNextCursor {
+				m.cursor = slotBackCursor
 			}
 			if m.page == 2 && m.cursor == 4 {
 				m.cursor = 5
@@ -636,7 +867,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor++
 			if m.page == 0 && m.cursor > 3 {
 				m.cursor = 0
-			} else if m.page == 1 && m.cursor > 5 {
+			} else if m.page == 1 && m.cursor > slotBackCursor {
 				m.cursor = 0
 			} else if m.page == 2 && m.cursor > 5 {
 				m.cursor = 0
@@ -662,7 +893,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.page == 0 {
 					m.cursor = 3
 				} else if m.page == 1 {
-					m.cursor = 5
+					m.cursor = slotBackCursor
 				} else if m.page == 2 {
 					m.cursor = 5
 				} else if m.page == 3 {
@@ -676,7 +907,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			// 如果点击了底部的“上一步”按钮，直接返回
-			if (m.page == 0 && m.cursor == 3) || (m.page == 1 && m.cursor == 5) || (m.page == 2 && m.cursor == 5) || (m.page == 3 && m.cursor == m.effortBackCursor()) {
+			if (m.page == 0 && m.cursor == 3) || (m.page == 1 && m.cursor == slotBackCursor) || (m.page == 2 && m.cursor == 5) || (m.page == 3 && m.cursor == m.effortBackCursor()) {
 				m.goBack()
 				return m, nil
 			}
@@ -705,11 +936,24 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case 1:
 				if !m.filterInput.Focused() {
-					if m.cursor == 4 {
+					if m.cursor == slotTestCursor {
+						m.modelTestID++
+						testID := m.modelTestID
+						ctx, cancel := context.WithCancel(context.Background())
+						m.modelTesting = true
+						m.modelTestCancel = cancel
+						m.modelTestFrame = 0
+						m.modelTestCanceled = false
+						setDebugf("model availability test started model_count=%d", len(m.modelPool))
+						return m, tea.Batch(
+							modelAvailabilityTestCmd(ctx, testID, m.modelPool, m.p.Endpoint, m.p.APIKey, m.p.Type, m.p.AnthropicAuth),
+							modelAvailabilityTickCmd(testID),
+						)
+					} else if m.cursor == slotNextCursor {
 						m.page = 2
 						m.cursor = 4 // default to Next button
 						setDebugf("page1 next to page2 slots=%s", slotDebugSummary(*m.p))
-					} else {
+					} else if m.cursor >= 0 && m.cursor < slotTestCursor {
 						m.activeSlot = m.cursor
 						m.filterInput.Focus()
 						m.filterInput.SetValue("")
@@ -778,7 +1022,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Manual Config: go to slot mapping (old page 1)
 					m.applyStaleSlotPolicy()
 					m.page = 1
-					m.cursor = 4
+					m.cursor = slotNextCursor
 					setDebugf("page5 manual config selected next_page=%d cursor=%d clear_stale_slots=%t slots=%s", m.page, m.cursor, m.clearStaleSlots, slotDebugSummary(*m.p))
 				} else if m.cursor == 2 && m.showStaleSlotToggle() {
 					m.clearStaleSlots = !m.clearStaleSlots
@@ -875,14 +1119,48 @@ func renderCredentialField(label, value string, focused bool) string {
 	return fmt.Sprintf("%s%s\n  %s\n\n", prefix, labelText, value)
 }
 
+func (m *AdvancedConfigModel) renderPageHeader(title, badge string) string {
+	line := titleStyle.Render(title) + badgeStyle.Render(badge)
+	if protocol := m.getProtocol(); protocol != "" {
+		line += protoBadgeStyle.Render("Protocol: " + protocol)
+	}
+	step := fmt.Sprintf(locale.T("步骤 %d/6", "Step %d/6"), m.workflowStep())
+	line += stepStyle.Render(step)
+	dividerWidth := max(m.panelWidth()-6, 16)
+	return line + "\n" + dividerStyle.Render(strings.Repeat("─", dividerWidth)) + "\n\n"
+}
+
+func (m *AdvancedConfigModel) renderStepProgress() string {
+	const totalSteps = 6
+	dots := make([]string, 0, totalSteps)
+	for step := 1; step <= totalSteps; step++ {
+		if step == m.workflowStep() {
+			dots = append(dots, cyanText.Render("●"))
+			continue
+		}
+		dots = append(dots, grayText.Render("○"))
+	}
+	return strings.Join(dots, "  ")
+}
+
+func renderReviewModelMapping(label, model string, oneM bool) string {
+	value := cyanText.Render(model)
+	if strings.TrimSpace(model) == "" {
+		value = grayText.Render(locale.T("(未设置)", "(unset)"))
+	}
+	if oneM {
+		value += " " + lightning
+	}
+	return fmt.Sprintf("    %-7s -> %s\n", label, value)
+}
+
 func (m *AdvancedConfigModel) View() tea.View {
 	var body strings.Builder
-	protoLabel := protoBadgeStyle.Render("Protocol: " + m.getProtocol())
 
 	switch m.page {
 	case 0:
 		// ==================== PAGE 0: 凭据配置 ====================
-		body.WriteString(titleStyle.Render(locale.T("基础凭据配置", "Base Credentials")) + badgeStyle.Render("Credentials") + protoLabel + "\n\n")
+		body.WriteString(m.renderPageHeader(locale.T("基础凭据配置", "Base Credentials"), "Credentials"))
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == 0))
 		body.WriteString(renderCredentialField("API Key", m.keyInput.View(), m.cursor == 1))
 
@@ -890,8 +1168,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(renderModelFetchProgress(m.detectProgress, m.detectFrame))
 		} else {
 			if m.detectionError != nil {
-				body.WriteString(errorText.Render(locale.T("检测失败，无法继续：", "Detection failed; cannot continue:")) + "\n")
-				body.WriteString(errorText.Render("  "+m.detectionError.Error()) + "\n\n")
+				errorWidth := max(m.panelWidth()-8, 20)
+				body.WriteString(errorBoxStyle.Width(errorWidth).Render(locale.T("检测失败，无法继续", "Detection failed; cannot continue")+"\n"+m.detectionError.Error()) + "\n\n")
 			}
 			body.WriteString(renderBottomButtons(m.page, m.cursor, 2, 3))
 			body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
@@ -900,7 +1178,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 	case 1:
 		// ==================== PAGE 1: 槽位映射配置 ====================
 		if !m.filterInput.Focused() {
-			body.WriteString(titleStyle.Render(locale.T("Claude Slot 映射配置", "Claude Slot Mapping")) + badgeStyle.Render("Slot List") + protoLabel + "\n\n")
+			body.WriteString(m.renderPageHeader(locale.T("Claude Slot 映射配置", "Claude Slot Mapping"), "Slot List"))
 			renderRow := func(idx int, label, val string) {
 				prefix := "  "
 				var labelStr string
@@ -922,8 +1200,31 @@ func (m *AdvancedConfigModel) View() tea.View {
 			renderRow(2, "Haiku", m.p.HaikuModel)
 			renderRow(3, "Custom", m.p.CustomModelID)
 
-			body.WriteString(renderBottomButtons(m.page, m.cursor, 4, 5))
-			body.WriteString(grayText.Render(locale.T("↑↓ 移动光标 · ←→ 切换按钮 · enter 选择编辑/跳转", "↑↓ Move · ←→ Toggle Buttons · enter select")))
+			testPrefix := "  "
+			testLabel := locale.T("测试模型可用性", "Test model availability")
+			testDetail := locale.T("将为每个模型发送一次最小请求", "Sends one minimal request per model")
+			if m.modelTesting {
+				spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+				spin := spinners[m.modelTestFrame%len(spinners)]
+				testLabel = fmt.Sprintf("%s %s", spin, locale.T("正在测试模型可用性...", "Testing model availability..."))
+				testDetail = locale.T("测试进行中 · 按 esc 取消", "Test in progress · press esc to cancel")
+			} else if len(m.modelAvailability) > 0 {
+				available, unavailable := m.availabilityCounts()
+				testDetail = fmt.Sprintf(locale.T("%d 个可用 · %d 个不可用 · 可用模型已前置", "%d available · %d unavailable · available models first"), available, unavailable)
+			} else if m.modelTestCanceled {
+				testDetail = locale.T("测试已取消，结果未应用", "Test canceled; results were not applied")
+			}
+			if m.cursor == slotTestCursor {
+				testPrefix = selectedStyle.Render("> ")
+				testLabel = selectedStyle.Render(testLabel)
+			} else {
+				testLabel = purpleText.Render(testLabel)
+			}
+			body.WriteString("\n" + testPrefix + testLabel + "\n")
+			body.WriteString(grayText.Render("    "+testDetail) + "\n")
+
+			body.WriteString(renderBottomButtons(m.page, m.cursor, slotNextCursor, slotBackCursor))
+			body.WriteString(grayText.Render(locale.T("↑↓ 移动光标 · ←→ 切换按钮 · enter 选择、测试或跳转", "↑↓ Move · ←→ Toggle Buttons · enter select, test, or continue")))
 		} else {
 			slotName := []string{"Opus", "Sonnet", "Haiku", "Custom"}[m.activeSlot]
 			body.WriteString(titleStyle.Render(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName)))
@@ -941,21 +1242,25 @@ func (m *AdvancedConfigModel) View() tea.View {
 				mod := m.filteredPool[i]
 				prefix := "   "
 				line := grayText.Render(mod)
+				status := ""
+				if stringInSlice(mod, m.modelPool) {
+					status = "  " + m.availabilityLabel(mod)
+				}
 				if i == m.slotListCursor {
 					prefix = selectedStyle.Render(" > ")
 					line = selectedStyle.Render(mod)
 				}
-				body.WriteString(prefix + line + "\n")
+				body.WriteString(prefix + line + status + "\n")
 			}
 			if end < len(m.filteredPool) {
 				body.WriteString(grayText.Render(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filteredPool)-end)) + "\n")
 			}
-			body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("键盘输入任意字符快速过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Type to filter · ↑↓ Scroll · enter lock · esc cancel")) + "\n")
+			body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel")) + "\n")
 		}
 
 	case 2:
 		// ==================== PAGE 2: 1M 上下文配置页 ====================
-		body.WriteString(titleStyle.Render(locale.T("1M 上下文配置", "1M Context")) + badgeStyle.Render("MultiSelect") + protoLabel + "\n")
+		body.WriteString(m.renderPageHeader(locale.T("1M 上下文配置", "1M Context"), "MultiSelect"))
 		body.WriteString(grayText.Render(locale.T("enter 切换开关状态", "enter Toggle Slot Status")) + "\n\n")
 
 		renderMultiRow := func(idx int, label, modelVal string) {
@@ -1004,7 +1309,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 3:
 		// ==================== PAGE 3: Reasoning Effort 思考流配置 ====================
-		body.WriteString(titleStyle.Render(locale.T("Reasoning Effort 思考流配置", "Reasoning Effort")) + badgeStyle.Render("Effort") + protoLabel + "\n\n")
+		body.WriteString(m.renderPageHeader(locale.T("Reasoning Effort 思考流配置", "Reasoning Effort"), "Effort"))
 		for i, level := range m.effortLevels {
 			label := m.effortLabel(level)
 			prefix := "  "
@@ -1027,12 +1332,17 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 4:
 		// ==================== PAGE 4: 核对并应用此配置 ====================
-		body.WriteString(titleStyle.Render(locale.T("核对并应用此 Provider 配置", "Review & Apply")) + badgeStyle.Render("Confirm") + "\n\n")
+		body.WriteString(m.renderPageHeader(locale.T("核对并应用此 Provider 配置", "Review & Apply"), "Confirm"))
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Endpoint", cyanText.Render(m.p.Endpoint)))
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Protocol", purpleText.Render(m.getProtocol())))
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Effort Level", purpleText.Render(m.effortLabel(m.effortLevels[m.effortCursor]))))
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "1M Context", purpleText.Render(reviewOneMSummary(m.oneMSlots))))
+		body.WriteString("\n  " + grayText.Render(locale.T("模型映射", "Model Mapping")) + "\n")
+		body.WriteString(renderReviewModelMapping("Opus", m.p.OpusModel, m.oneMSlots["opus"]))
+		body.WriteString(renderReviewModelMapping("Sonnet", m.p.SonnetModel, m.oneMSlots["sonnet"]))
+		body.WriteString(renderReviewModelMapping("Haiku", m.p.HaikuModel, m.oneMSlots["haiku"]))
+		body.WriteString(renderReviewModelMapping("Custom", m.p.CustomModelID, m.oneMSlots["custom"]))
 
 		body.WriteString("\n  " + locale.T("是否将该 Provider 设为当前激活配置？", "Set as active provider right now?") + "\n\n")
 
@@ -1059,7 +1369,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 5:
 		// ==================== PAGE 5: 配置模式选择 ====================
-		body.WriteString(titleStyle.Render(locale.T("配置模式选择", "Config Mode")) + badgeStyle.Render("Choice") + protoLabel + "\n\n")
+		body.WriteString(m.renderPageHeader(locale.T("配置模式选择", "Config Mode"), "Choice"))
 		body.WriteString(grayText.Render(fmt.Sprintf(locale.T("已从接口获取 %d 个模型，请选择配置方式：", "Fetched %d models from provider API. Choose config mode:"), len(m.modelPool))) + "\n")
 		if m.modelPoolFromDiscovery && m.hadLocalModelPool {
 			body.WriteString(grayText.Render(locale.T("旧本地模型池将用本次接口结果刷新。", "The local model pool will be refreshed with this API result.")) + "\n")
@@ -1111,19 +1421,17 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(grayText.Render(locale.T("↑↓ 选择 · ←→ 切换清理选项 · enter 确认 · esc 返回", "↑↓ Select · ←→ Toggle cleanup · enter confirm · esc back")))
 	}
 
-	// 指示器
-	dots := []string{grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫"), grayText.Render("⚫")}
-	activeColors := []string{"🔵", "🟣", "🟢", "🟡", "🔴", "🟠"}
-	dots[m.page] = activeColors[m.page]
-	pager := fmt.Sprintf("\n\n%s", lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(strings.Join(dots, "   ")))
-
+	panel := windowStyle.Width(m.panelWidth()).Render(body.String())
 	langTipMsg := locale.T(
-		"💡 提示: 想要更改终端显示语言？使用 `ccl lang` 即可轻松修改",
-		"💡 Tip: Want to change TUI display language? Use `ccl lang` to modify it",
+		"💡 提示: 使用 `ccl lang` 更改终端显示语言",
+		"💡 Tip: Change the TUI display language with `ccl lang`",
 	)
-	langTipBanner := "\n" + lipgloss.NewStyle().Width(70).Align(lipgloss.Center).Render(langTipStyle.Render(langTipMsg))
-
-	finalStr := windowStyle.Render(body.String()) + pager + langTipBanner
+	footer := m.renderStepProgress() + "\n" + grayText.Render(langTipMsg)
+	content := panel + "\n\n" + footer
+	finalStr := content
+	if m.width > 0 && m.height > 0 {
+		finalStr = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	}
 	v := tea.NewView(finalStr)
 	v.AltScreen = true
 	return v

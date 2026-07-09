@@ -94,6 +94,11 @@ type OpenAIResponsesUsage struct {
 // commonly share the same model catalog — an actual call to /v1/responses is
 // required. Returns true only when the upstream responds with a 2xx status.
 func ProbeOpenAIResponsesSupport(endpoint, apiKey, model string, timeout time.Duration) bool {
+	return ProbeOpenAIResponsesSupportContext(context.Background(), endpoint, apiKey, model, timeout)
+}
+
+// ProbeOpenAIResponsesSupportContext is ProbeOpenAIResponsesSupport with caller-controlled cancellation.
+func ProbeOpenAIResponsesSupportContext(parent context.Context, endpoint, apiKey, model string, timeout time.Duration) bool {
 	store := false
 	body, err := json.Marshal(map[string]any{
 		"model": model,
@@ -107,7 +112,7 @@ func ProbeOpenAIResponsesSupport(endpoint, apiKey, model string, timeout time.Du
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, NormalizeOpenAIResponsesURL(endpoint), bytes.NewReader(body))

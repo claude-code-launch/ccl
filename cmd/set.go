@@ -421,17 +421,6 @@ func fetchCandidateModelsForDetection(candidate modelProbeCandidate, apiKey stri
 	return fetchModelListForDetection(req, 8*time.Second)
 }
 
-func fetchBearerModelsForDetection(endpoint, apiKey string) (modelListDetection, error) {
-	modelsURL := protocol.NormalizeOpenAIModelsURL(endpoint)
-	setDebugf("models probe start protocol=openai auth=bearer url=%q", modelsURL)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, modelsURL, nil)
-	if err != nil {
-		return modelListDetection{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	return fetchModelListForDetection(req, 4*time.Second)
-}
-
 func endpointHasVersionSuffix(endpoint string) bool {
 	return endpointVersionSuffix(endpoint) != ""
 }

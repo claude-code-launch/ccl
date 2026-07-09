@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -9,21 +10,47 @@ import (
 )
 
 func ConfigPath() string {
-	home, _ := os.UserHomeDir()
-	newPath := filepath.Join(home, ".ccl", "config.yaml")
+	path, _ := configPath()
+	return path
+}
 
-	// Automatic Migration logic:
-	// If the new config directory ~/.ccl does not exist, but old ~/.cc/config.yaml exists,
-	// automatically migrate/move it to the new path.
-	oldPath := filepath.Join(home, ".cc", "config.yaml")
-	if _, err := os.Stat(newPath); os.IsNotExist(err) {
-		if _, errOld := os.Stat(oldPath); errOld == nil {
-			_ = os.MkdirAll(filepath.Dir(newPath), 0755)
-			_ = os.Rename(oldPath, newPath)
-		}
+func configPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".ccl", "config.yaml"), nil
+}
+
+func migrateLegacyConfig(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat config: %w", err)
 	}
 
-	return newPath
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory for migration: %w", err)
+	}
+	legacyPath := filepath.Join(home, ".cc", "config.yaml")
+	if _, err := os.Stat(legacyPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat legacy config: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config directory for migration: %w", err)
+	}
+	if err := os.Rename(legacyPath, path); err != nil {
+		return fmt.Errorf("migrate legacy config: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("secure migrated config permissions: %w", err)
+	}
+	return nil
 }
 
 func Load() (*provider.Config, error) {
@@ -31,7 +58,13 @@ func Load() (*provider.Config, error) {
 		Providers: make(map[string]provider.Provider),
 	}
 
-	path := ConfigPath()
+	path, err := configPath()
+	if err != nil {
+		return cfg, err
+	}
+	if err := migrateLegacyConfig(path); err != nil {
+		return cfg, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		// If the config file does not exist, return an empty initialized config
@@ -53,9 +86,15 @@ func Load() (*provider.Config, error) {
 }
 
 func Save(cfg *provider.Config) error {
-	path := ConfigPath()
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	if err := migrateLegacyConfig(path); err != nil {
+		return err
+	}
 
-	err := os.MkdirAll(filepath.Dir(path), 0755)
+	err = os.MkdirAll(filepath.Dir(path), 0o700)
 	if err != nil {
 		return err
 	}
@@ -65,5 +104,38 @@ func Save(cfg *provider.Config) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0600)
+	return writeFileAtomic(path, data, 0o600)
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set temporary config permissions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temporary config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace config atomically: %w", err)
+	}
+	return nil
 }

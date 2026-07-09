@@ -1,0 +1,84 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/claude-code-launch/ccl/internal/provider"
+)
+
+func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	want := &provider.Config{
+		ActiveProvider: "gateway",
+		Providers: map[string]provider.Provider{
+			"gateway": {
+				Name:     "gateway",
+				Type:     "openai",
+				Endpoint: "https://example.test/v1",
+				APIKey:   "secret",
+				Model:    "model-a",
+			},
+		},
+	}
+	if err := Save(want); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	path := filepath.Join(home, ".ccl", "config.yaml")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat saved config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config permissions = %o, want 600", got)
+	}
+	if matches, err := filepath.Glob(filepath.Join(home, ".ccl", ".config-*.tmp")); err != nil || len(matches) != 0 {
+		t.Fatalf("temporary config files = %v, err=%v", matches, err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got.ActiveProvider != want.ActiveProvider || got.Providers["gateway"].APIKey != "secret" {
+		t.Fatalf("loaded config = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyDir := filepath.Join(home, ".cc")
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatalf("create legacy dir: %v", err)
+	}
+	legacyPath := filepath.Join(legacyDir, "config.yaml")
+	legacyData := []byte("active_provider: legacy\nproviders:\n  legacy:\n    name: legacy\n    type: openai\n    endpoint: https://example.test/v1\n    apikey: secret\n")
+	if err := os.WriteFile(legacyPath, legacyData, 0o644); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got.ActiveProvider != "legacy" || got.Providers["legacy"].Endpoint != "https://example.test/v1" {
+		t.Fatalf("legacy config was not loaded: %+v", got)
+	}
+
+	path := filepath.Join(home, ".ccl", "config.yaml")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat migrated config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("migrated config permissions = %o, want 600", got)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy config should be moved, stat err=%v", err)
+	}
+}

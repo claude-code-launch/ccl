@@ -24,6 +24,7 @@ import (
 type settingsJSON struct {
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
+	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
 }
 
@@ -227,6 +228,7 @@ func (c *providerContext) settings() settingsJSON {
 	return settingsJSON{
 		Env:                    buildEnv(c.provider, c.baseURL, c.useProxy),
 		HasCompletedOnboarding: true,
+		Model:                  c.provider.CustomModelID,
 		ModelOverrides:         c.provider.ModelOverrides,
 	}
 }

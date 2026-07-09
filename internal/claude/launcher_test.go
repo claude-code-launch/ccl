@@ -14,6 +14,7 @@ import (
 type settingsJSON struct {
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
+	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"`
 }
 
@@ -176,6 +177,9 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				}
 				if s.Env["CLAUDE_CODE_MODEL_ID"] != "my-custom-model" {
 					t.Errorf("CLAUDE_CODE_MODEL_ID mismatch: %s", s.Env["CLAUDE_CODE_MODEL_ID"])
+				}
+				if s.Model != "my-custom-model" {
+					t.Errorf("top-level model mismatch: %s", s.Model)
 				}
 				if s.Env["CLAUDE_CODE_EFFORT_LEVEL"] != "high" {
 					t.Errorf("Effort level mismatch: %s", s.Env["CLAUDE_CODE_EFFORT_LEVEL"])
