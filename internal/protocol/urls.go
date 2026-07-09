@@ -95,7 +95,7 @@ func NormalizeAnthropicBaseURLForClaude(baseURL string) string {
 }
 
 func appendAnthropicPath(endpoint, suffix string) string {
-	if endpointPathEmpty(endpoint) {
+	if endpointPathEmpty(endpoint) || endpointPathHasSuffix(endpoint, "anthropic") {
 		return endpoint + "/v1" + suffix
 	}
 	return endpoint + suffix
@@ -107,4 +107,17 @@ func endpointPathEmpty(endpoint string) bool {
 		return false
 	}
 	return strings.Trim(u.Path, "/") == ""
+}
+
+func endpointPathHasSuffix(endpoint, suffix string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	path := strings.Trim(u.Path, "/")
+	if path == "" {
+		return false
+	}
+	parts := strings.Split(path, "/")
+	return strings.EqualFold(parts[len(parts)-1], suffix)
 }

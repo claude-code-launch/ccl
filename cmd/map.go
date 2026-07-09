@@ -11,17 +11,21 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-var (
-	mapOpus   string
-	mapSonnet string
-	mapHaiku  string
-	mapCustom string
-)
+var mapCmd = newMapCommand("map [provider-name]")
 
-var mapCmd = &cobra.Command{
-	Use:   "map [provider-name]",
-	Short: "Quickly set Claude slot-to-model mappings",
-	Long: `Set which provider model each Claude slot uses.
+type mapOptions struct {
+	opus   string
+	sonnet string
+	haiku  string
+	custom string
+}
+
+func newMapCommand(use string) *cobra.Command {
+	opts := &mapOptions{}
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: "Quickly set Claude slot-to-model mappings",
+		Long: `Set which provider model each Claude slot uses.
 
 Modes:
   ccl map                        Interactive TUI - enter slot mapping page directly
@@ -30,26 +34,35 @@ Modes:
 
 Examples:
   ccl map
+  ccl provider map
   ccl map auto
+  ccl provider map auto
   ccl map auto my-provider
   ccl map --opus gpt-5.1 --sonnet gpt-5.1-codex-max
-  ccl map --custom gpt-5.1 my-provider`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		hasFlag := cmd.Flags().Changed("opus") || cmd.Flags().Changed("sonnet") ||
-			cmd.Flags().Changed("haiku") || cmd.Flags().Changed("custom")
+  ccl map --custom gpt-5.1 my-provider
+  ccl provider map --custom gpt-5.1 my-provider`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			hasFlag := cmd.Flags().Changed("opus") || cmd.Flags().Changed("sonnet") ||
+				cmd.Flags().Changed("haiku") || cmd.Flags().Changed("custom")
 
-		if hasFlag {
-			return runMapDirect(cmd, args)
-		}
-		if len(args) > 0 && args[0] == "auto" {
-			return runMapAuto(args[1:])
-		}
-		return runMapTUI(args)
-	},
+			if hasFlag {
+				return runMapDirect(cmd, args, opts)
+			}
+			if len(args) > 0 && args[0] == "auto" {
+				return runMapAuto(args[1:])
+			}
+			return runMapTUI(args)
+		},
+	}
+	cmd.Flags().StringVar(&opts.opus, "opus", "", "Model for Opus slot")
+	cmd.Flags().StringVar(&opts.sonnet, "sonnet", "", "Model for Sonnet slot")
+	cmd.Flags().StringVar(&opts.haiku, "haiku", "", "Model for Haiku slot")
+	cmd.Flags().StringVar(&opts.custom, "custom", "", "Model for Custom slot")
+	return cmd
 }
 
 // runMapDirect applies --opus/--sonnet/--haiku/--custom flags.
-func runMapDirect(cmd *cobra.Command, args []string) error {
+func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -66,16 +79,16 @@ func runMapDirect(cmd *cobra.Command, args []string) error {
 	}
 
 	if cmd.Flags().Changed("opus") {
-		p.OpusModel = mapOpus
+		p.OpusModel = opts.opus
 	}
 	if cmd.Flags().Changed("sonnet") {
-		p.SonnetModel = mapSonnet
+		p.SonnetModel = opts.sonnet
 	}
 	if cmd.Flags().Changed("haiku") {
-		p.HaikuModel = mapHaiku
+		p.HaikuModel = opts.haiku
 	}
 	if cmd.Flags().Changed("custom") {
-		p.CustomModelID = mapCustom
+		p.CustomModelID = opts.custom
 	}
 
 	applyOneMConfig(&p, oneMSlotsFromProvider(p))
@@ -260,9 +273,5 @@ func resolveProviderName(args []string, cfg *provider.Config) string {
 }
 
 func init() {
-	mapCmd.Flags().StringVar(&mapOpus, "opus", "", "Model for Opus slot")
-	mapCmd.Flags().StringVar(&mapSonnet, "sonnet", "", "Model for Sonnet slot")
-	mapCmd.Flags().StringVar(&mapHaiku, "haiku", "", "Model for Haiku slot")
-	mapCmd.Flags().StringVar(&mapCustom, "custom", "", "Model for Custom slot")
 	rootCmd.AddCommand(mapCmd)
 }

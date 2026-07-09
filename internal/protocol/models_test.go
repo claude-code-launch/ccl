@@ -138,6 +138,16 @@ func TestNormalizeVersionedURLs(t *testing.T) {
 			want: "https://example.com/v1/models",
 		},
 		{
+			name: "anthropic suffix messages appends v1",
+			got:  protocol.NormalizeAnthropicMessagesURL("https://example.com/api/anthropic"),
+			want: "https://example.com/api/anthropic/v1/messages",
+		},
+		{
+			name: "anthropic suffix models appends v1",
+			got:  protocol.NormalizeAnthropicModelsURL("https://example.com/api/anthropic"),
+			want: "https://example.com/api/anthropic/v1/models",
+		},
+		{
 			name: "empty openai uses official v1 default",
 			got:  protocol.NormalizeOpenAIModelsURL(""),
 			want: "https://api.openai.com/v1/models",

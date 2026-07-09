@@ -135,6 +135,10 @@ ccl provider rm name
 # 其他 provider 子命令
 ccl provider set my-provider
 ccl provider use my-provider
+ccl provider map
+ccl provider models
+ccl provider env
+ccl provider doctor
 ccl provider preview
 ```
 
@@ -146,12 +150,15 @@ ccl env ls
 
 # 设置/修改
 ccl env KEY VALUE
+ccl provider env KEY VALUE
 
 # 重命名
 ccl env mv OLD_KEY NEW_KEY
+ccl provider env mv OLD_KEY NEW_KEY
 
 # 删除
 ccl env rm KEY
+ccl provider env rm KEY
 ```
 
 ### `ccl use` — 切换激活 Provider
@@ -177,6 +184,7 @@ ccl lang en       # English
 
 ```bash
 ccl doctor
+ccl provider doctor
 ```
 
 检查本地依赖、Endpoint 连通性、API 鉴权。**并发测试所有配置模型**，自动将可用模型排在配置前列，显示实时进度条。如果 Claude CLI 未安装，自动触发一键安装。
@@ -189,6 +197,7 @@ ccl models
 
 # 查看 Provider 全部模型
 ccl models --all
+ccl provider models --all
 ```
 
 并发测试每个模型，显示 `✓`（可用）或 `✗ (unavailable)`（不可用），带实时进度条。
@@ -198,15 +207,18 @@ ccl models --all
 ```bash
 # 交互式 TUI — 直接进入 Slot 映射页面
 ccl map
+ccl provider map
 
 # 自动填充 — 自动检测可用模型并填入前 4 个槽位
 ccl map auto
 ccl map auto my-provider
+ccl provider map auto
 
 # 直接指定 — 通过 CLI 参数快速映射
 ccl map --opus gpt-5.1 --sonnet gpt-5.1-codex-max
 ccl map --opus gpt-5.1 --sonnet gpt-5.1-mini --haiku gpt-4o-mini
 ccl map --custom gpt-5.1 my-provider
+ccl provider map --custom gpt-5.1 my-provider
 ```
 
 三种模式：交互式 TUI（直接跳转到 Slot 映射页面）、自动检测填充、CLI 参数直接映射。
@@ -215,6 +227,15 @@ ccl map --custom gpt-5.1 my-provider
 ccl ls
 ```
 
+### `ccl preview` — 预览 Claude Code 注入配置
+
+```bash
+ccl preview
+ccl provider preview
+```
+
+输出当前激活 Provider 会生成的 settings JSON，适合检查 `ANTHROPIC_BASE_URL`、认证变量、slot 模型和 effort 注入结果。
+
 ### `ccl update` — 升级
 
 ```bash
@@ -222,6 +243,25 @@ ccl update
 ```
 
 支持通过 `npm` / `go install` 一键升级。
+
+### `ccl version` — 查看版本
+
+```bash
+ccl version
+```
+
+显示当前二进制版本。Release 构建会从 tag 注入版本号。
+
+### `ccl completion` — Shell 补全脚本
+
+```bash
+ccl completion zsh
+ccl completion bash
+ccl completion fish
+ccl completion powershell
+```
+
+由 Cobra 自动生成对应 shell 的补全脚本。
 
 ### `ccl` — 启动 Claude Code
 
@@ -310,7 +350,7 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 ```text
 ├── cmd/
 │   ├── advanced_config.go     # TUI 配置向导（5 页表单 + 协议探测）
-│   ├── provider.go            # Provider 配置管理（cp/ls/mv/rm/set/preview）
+│   ├── provider.go            # Provider 子命令入口（cp/ls/mv/rm/set/map/models/env/doctor/preview）
 │   ├── env.go                 # 环境变量管理（ls/rm/mv）
 │   ├── set.go                 # set 命令入口 + RunProviderSet 共享逻辑
 │   ├── select.go              # 通用 TUI 选择器组件

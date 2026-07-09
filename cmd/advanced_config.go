@@ -23,11 +23,12 @@ var (
 			Width(70)
 
 	titleStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
-	badgeStyle      = lipgloss.NewStyle().Background(lipgloss.Color("99")).Foreground(lipgloss.Color("255")).Padding(0, 1).MarginLeft(2)
-	protoBadgeStyle = lipgloss.NewStyle().Background(lipgloss.Color("141")).Foreground(lipgloss.Color("255")).Padding(0, 1).MarginLeft(2)
+	badgeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true).MarginLeft(2)
+	protoBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).MarginLeft(2)
 	cyanText        = lipgloss.NewStyle().Foreground(lipgloss.Color("49"))
 	purpleText      = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	grayText        = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	errorText       = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	selectedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	lightning       = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render("⚡1M")
 	filterStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -35,12 +36,19 @@ var (
 	langTipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("239")).Padding(0, 1).MarginTop(1)
 )
 
-const filterViewHeight = 15 // max visible items in filter list
+const (
+	filterViewHeight     = 15 // max visible items in filter list
+	credentialInputWidth = 58
+)
 
 type AdvancedConfigModel struct {
 	p         *provider.Provider
 	modelPool []string
 	oneMSlots map[string]bool
+
+	modelPoolFromDiscovery bool
+	clearStaleSlots        bool
+	hadLocalModelPool      bool
 
 	page   int
 	cursor int
@@ -76,6 +84,7 @@ type modelFetchDoneMsg struct {
 	endpoint            string
 	apiKey              string
 	detectedType        string
+	detectedEndpoint    string
 	anthropicAuth       string
 	discoveredModelsRaw string
 	err                 error
@@ -83,28 +92,35 @@ type modelFetchDoneMsg struct {
 
 func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	ui := textinput.New()
+	ui.Prompt = ""
 	ui.Placeholder = "https://api.openai.com/v1"
+	ui.SetWidth(credentialInputWidth)
 	ui.Focus()
 	ui.SetValue(p.Endpoint)
 
 	ki := textinput.New()
+	ki.Prompt = ""
 	ki.Placeholder = "sk-..."
+	ki.EchoMode = textinput.EchoPassword
+	ki.EchoCharacter = '*'
+	ki.SetWidth(credentialInputWidth)
 	ki.SetValue(p.APIKey)
 
 	fi := textinput.New()
 	fi.Placeholder = ""
 
 	m := &AdvancedConfigModel{
-		p:              p,
-		oneMSlots:      make(map[string]bool),
-		page:           0,
-		cursor:         0,
-		urlInput:       ui,
-		keyInput:       ki,
-		filterInput:    fi,
-		effortLevels:   []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
-		effortCursor:   0,
-		IsActiveChosen: true,
+		p:               p,
+		oneMSlots:       make(map[string]bool),
+		page:            0,
+		cursor:          0,
+		urlInput:        ui,
+		keyInput:        ki,
+		filterInput:     fi,
+		effortLevels:    []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
+		effortCursor:    0,
+		IsActiveChosen:  true,
+		clearStaleSlots: true,
 	}
 
 	// 从已有配置中读取 EffortLevel 的默认值
@@ -153,11 +169,22 @@ func modelFetchTickCmd() tea.Cmd {
 
 func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 	return func() tea.Msg {
+		setDebugf("modelFetchCmd start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
 		result := detectProtocolAndModelsDetailed(endpoint, apiKey)
+		setDebugf(
+			"modelFetchCmd done endpoint=%q detected_endpoint=%q protocol=%q anthropic_auth=%q model_count=%d err=%v",
+			endpoint,
+			result.baseURL,
+			result.protocol,
+			result.anthropicAuth,
+			countCSV(result.models),
+			result.err,
+		)
 		return modelFetchDoneMsg{
 			endpoint:            endpoint,
 			apiKey:              apiKey,
 			detectedType:        result.protocol,
+			detectedEndpoint:    result.baseURL,
 			anthropicAuth:       result.anthropicAuth,
 			discoveredModelsRaw: result.models,
 			err:                 result.err,
@@ -203,6 +230,77 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 	// Default: do not override Claude's own effort setting.
 	m.p.EffortLevel = ""
 	m.effortCursor = 0
+	setDebugf("doAutoConfig model_pool_count=%d slots=%s effort=%q one_m=%s", len(m.modelPool), slotDebugSummary(*m.p), m.p.EffortLevel, reviewOneMSummary(m.oneMSlots))
+}
+
+type advancedSlotRef struct {
+	key string
+	ptr *string
+}
+
+func advancedSlotRefs(p *provider.Provider) []advancedSlotRef {
+	return []advancedSlotRef{
+		{key: "opus", ptr: &p.OpusModel},
+		{key: "sonnet", ptr: &p.SonnetModel},
+		{key: "haiku", ptr: &p.HaikuModel},
+		{key: "custom", ptr: &p.CustomModelID},
+	}
+}
+
+func uniqueModels(models []string) []string {
+	var out []string
+	for _, mod := range models {
+		mod = strings.TrimSpace(mod)
+		if mod != "" && !stringInSlice(mod, out) {
+			out = append(out, mod)
+		}
+	}
+	return out
+}
+
+func (m *AdvancedConfigModel) staleSlotCount() int {
+	if !m.modelPoolFromDiscovery {
+		return 0
+	}
+	count := 0
+	for _, slot := range advancedSlotRefs(m.p) {
+		model := strings.TrimSpace(*slot.ptr)
+		if model != "" && !stringInSlice(model, m.modelPool) {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *AdvancedConfigModel) showStaleSlotToggle() bool {
+	return m.staleSlotCount() > 0
+}
+
+func (m *AdvancedConfigModel) page5MaxCursor() int {
+	if m.showStaleSlotToggle() {
+		return 2
+	}
+	return 1
+}
+
+func (m *AdvancedConfigModel) applyStaleSlotPolicy() {
+	if !m.clearStaleSlots || !m.modelPoolFromDiscovery {
+		return
+	}
+
+	cleared := 0
+	for _, slot := range advancedSlotRefs(m.p) {
+		model := strings.TrimSpace(*slot.ptr)
+		if model == "" || stringInSlice(model, m.modelPool) {
+			continue
+		}
+		*slot.ptr = ""
+		delete(m.oneMSlots, slot.key)
+		cleared++
+	}
+	if cleared > 0 {
+		setDebugf("applyStaleSlotPolicy cleared=%d slots=%s one_m=%s", cleared, slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots))
+	}
 }
 
 // 实时获取/检测协议名称
@@ -217,6 +315,8 @@ func (m *AdvancedConfigModel) getProtocol() string {
 }
 
 func (m *AdvancedConfigModel) goBack() {
+	oldPage := m.page
+	oldCursor := m.cursor
 	if m.page == 1 {
 		// Go back from slot mapping to config mode choice
 		m.page = 5
@@ -240,6 +340,7 @@ func (m *AdvancedConfigModel) goBack() {
 			m.cursor = m.effortNextCursor()
 		}
 	}
+	setDebugf("goBack old_page=%d old_cursor=%d new_page=%d new_cursor=%d", oldPage, oldCursor, m.page, m.cursor)
 }
 
 func (m *AdvancedConfigModel) effortNextCursor() int {
@@ -270,9 +371,25 @@ func reviewOneMSummary(oneMSlots map[string]bool) string {
 	return strings.Join(slots, ",")
 }
 
-func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, anthropicAuth string, derr error) tea.Cmd {
-	m.p.Type = detectedType
-	m.p.AnthropicAuth = ""
+func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, anthropicAuth, detectedEndpoint string, derr error) tea.Cmd {
+	discoveredModels := uniqueModels(parseModelList(discoveredModelsRaw))
+	m.hadLocalModelPool = countCSV(m.p.Model) > 0
+	setDebugf(
+		"applyModelDetectionResult start detected_type=%q detected_endpoint=%q anthropic_auth=%q discovered_model_count=%d existing_model_count=%d err=%v",
+		detectedType,
+		detectedEndpoint,
+		anthropicAuth,
+		len(discoveredModels),
+		countCSV(m.p.Model),
+		derr,
+	)
+	if detectedEndpoint != "" {
+		m.p.Endpoint = detectedEndpoint
+	}
+	if detectedType != "" {
+		m.p.Type = detectedType
+		m.p.AnthropicAuth = ""
+	}
 	if detectedType == "anthropic" {
 		m.p.Endpoint = protocol.NormalizeAnthropicBaseURLForClaude(m.p.Endpoint)
 		if anthropicAuth != "" {
@@ -281,37 +398,52 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 	}
 
 	m.modelPool = []string{}
-	if derr == nil && discoveredModelsRaw != "" {
-		for _, mod := range strings.Split(discoveredModelsRaw, ",") {
-			mod = strings.TrimSpace(mod)
-			if mod != "" && !stringInSlice(mod, m.modelPool) {
-				m.modelPool = append(m.modelPool, mod)
-			}
-		}
-	}
-	if m.p.Model != "" {
-		for _, mod := range strings.Split(m.p.Model, ",") {
-			mod = strings.TrimSpace(mod)
-			if mod != "" && !stringInSlice(mod, m.modelPool) {
-				m.modelPool = append(m.modelPool, mod)
-			}
-		}
+	m.modelPoolFromDiscovery = false
+	if derr == nil && len(discoveredModels) > 0 {
+		m.modelPool = discoveredModels
+		m.modelPoolFromDiscovery = true
+		m.p.Model = strings.Join(discoveredModels, ",")
+		setDebugf("applyModelDetectionResult using discovered model pool count=%d", len(m.modelPool))
 	}
 
-	// 协议探测 + 模型获取都失败，且没有已有模型 → 退出
+	if derr != nil {
+		m.detectionError = derr
+		m.page = 0
+		m.cursor = 2
+		setDebugf("applyModelDetectionResult detection failed detection_error=%v model_count=%d", m.detectionError, len(m.modelPool))
+		return nil
+	}
+
+	// 本次 set 必须以接口返回的模型为准；不再用旧的本地模型池兜底。
 	if len(m.modelPool) == 0 {
 		if derr != nil {
 			m.detectionError = derr
 		} else {
-			m.detectionError = fmt.Errorf("%s", locale.T("未获取到任何可用模型", "no models available"))
+			m.detectionError = fmt.Errorf("%s", locale.T(
+				"未从接口获取到任何可用模型，未使用本地旧模型池",
+				"no models were fetched from the provider API; local cached models were not used",
+			))
 		}
-		return tea.Quit
+		m.page = 0
+		m.cursor = 2
+		setDebugf("applyModelDetectionResult no models detection_error=%v", m.detectionError)
+		return nil
 	}
 
-	m.p.Model = strings.Join(m.modelPool, ",")
 	sort.Strings(m.modelPool)
 	m.page = 5
 	m.cursor = 0
+	setDebugf(
+		"applyModelDetectionResult success provider_type=%q endpoint=%q anthropic_auth=%q model_count=%d stale_slot_count=%d clear_stale_slots=%t page=%d cursor=%d",
+		m.p.Type,
+		m.p.Endpoint,
+		m.p.AnthropicAuth,
+		len(m.modelPool),
+		m.staleSlotCount(),
+		m.clearStaleSlots,
+		m.page,
+		m.cursor,
+	)
 	return nil
 }
 
@@ -334,11 +466,27 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelFetchDoneMsg:
 		if !m.detecting || msg.endpoint != m.p.Endpoint || msg.apiKey != m.p.APIKey {
+			setDebugf(
+				"modelFetchDone ignored detecting=%t endpoint_match=%t api_key_match=%t msg_endpoint=%q provider_endpoint=%q",
+				m.detecting,
+				msg.endpoint == m.p.Endpoint,
+				msg.apiKey == m.p.APIKey,
+				msg.endpoint,
+				m.p.Endpoint,
+			)
 			return m, nil
 		}
 		m.detectProgress = 100
 		m.detecting = false
-		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.err)
+		setDebugf(
+			"modelFetchDone accepted detected_type=%q detected_endpoint=%q anthropic_auth=%q model_count=%d err=%v",
+			msg.detectedType,
+			msg.detectedEndpoint,
+			msg.anthropicAuth,
+			countCSV(msg.discoveredModelsRaw),
+			msg.err,
+		)
+		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.detectedEndpoint, msg.err)
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -354,10 +502,13 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			if m.page == 1 && m.filterInput.Focused() {
 				m.filterInput.Blur()
+				setDebugf("esc closed slot picker active_slot=%d page=%d cursor=%d", m.activeSlot, m.page, m.cursor)
 			} else {
 				if m.page == 0 {
+					setDebugf("esc quit from credentials page cursor=%d endpoint_set=%t api_key_len=%d", m.cursor, strings.TrimSpace(m.urlInput.Value()) != "", len(m.keyInput.Value()))
 					return m, tea.Quit
 				}
+				setDebugf("esc goBack from page=%d cursor=%d", m.page, m.cursor)
 				m.goBack()
 			}
 			return m, nil
@@ -421,7 +572,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor++
 				}
 			} else if m.page == 5 {
-				if m.cursor < 1 {
+				if m.cursor < m.page5MaxCursor() {
 					m.cursor++
 				}
 			}
@@ -441,6 +592,11 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.page == 4 && m.cursor < 2 {
 				m.IsActiveChosen = true
+				setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
+			}
+			if m.page == 5 && m.cursor == 2 && m.showStaleSlotToggle() {
+				m.clearStaleSlots = true
+				setDebugf("page5 stale slot cleanup toggled clear_stale_slots=%t stale_slot_count=%d", m.clearStaleSlots, m.staleSlotCount())
 			}
 
 		case "right", "l":
@@ -458,6 +614,11 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.page == 4 && m.cursor < 2 {
 				m.IsActiveChosen = false
+				setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
+			}
+			if m.page == 5 && m.cursor == 2 && m.showStaleSlotToggle() {
+				m.clearStaleSlots = false
+				setDebugf("page5 stale slot cleanup toggled clear_stale_slots=%t stale_slot_count=%d", m.clearStaleSlots, m.staleSlotCount())
 			}
 
 		case "tab":
@@ -483,6 +644,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			} else if m.page == 4 && m.cursor > 2 {
 				m.cursor = 0
+			} else if m.page == 5 && m.cursor > m.page5MaxCursor() {
+				m.cursor = 0
 			}
 
 		// case "space":
@@ -507,7 +670,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.page == 4 {
 					m.cursor = 2
 				} else if m.page == 5 {
-					m.cursor = 1
+					m.cursor = m.page5MaxCursor()
 				}
 			}
 
@@ -524,8 +687,10 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = 1
 					m.urlInput.Blur()
 					m.keyInput.Focus()
+					setDebugf("page0 enter endpoint field complete next_cursor=%d endpoint=%q", m.cursor, m.urlInput.Value())
 				} else if m.cursor == 1 {
 					m.cursor = 2
+					setDebugf("page0 enter api key field complete next_cursor=%d api_key_len=%d", m.cursor, len(m.keyInput.Value()))
 				} else if m.cursor == 2 {
 					m.p.Endpoint = m.urlInput.Value()
 					m.p.APIKey = m.keyInput.Value()
@@ -535,6 +700,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.detecting = true
 					m.detectProgress = 5
 					m.detectFrame = 0
+					setDebugf("page0 start detection endpoint=%q api_key_len=%d", m.p.Endpoint, len(m.p.APIKey))
 					return m, tea.Batch(modelFetchCmd(m.p.Endpoint, m.p.APIKey), modelFetchTickCmd())
 				}
 			case 1:
@@ -542,12 +708,14 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.cursor == 4 {
 						m.page = 2
 						m.cursor = 4 // default to Next button
+						setDebugf("page1 next to page2 slots=%s", slotDebugSummary(*m.p))
 					} else {
 						m.activeSlot = m.cursor
 						m.filterInput.Focus()
 						m.filterInput.SetValue("")
 						m.slotListCursor = 0
 						m.updateFilteredPool()
+						setDebugf("page1 open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
 					}
 				} else {
 					// Safety: clamp cursor to valid range before accessing filteredPool
@@ -564,43 +732,57 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID}[m.activeSlot]
 					*ptr = selectedModel
 					m.filterInput.Blur()
+					setDebugf("page1 slot selected active_slot=%d model=%q slots=%s", m.activeSlot, selectedModel, slotDebugSummary(*m.p))
 				}
 			case 2:
 				if m.cursor < 4 {
 					// 当光标在槽位上时，按 enter 切换 1M 状态
 					slot := []string{"opus", "sonnet", "haiku", "custom"}[m.cursor]
 					m.oneMSlots[slot] = !m.oneMSlots[slot]
+					setDebugf("page2 toggle one_m slot=%s enabled=%t summary=%s", slot, m.oneMSlots[slot], reviewOneMSummary(m.oneMSlots))
 					m.cursor++
 				} else if m.cursor == 4 {
 					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
 					m.page = 3
 					m.cursor = m.effortNextCursor() // default to Next button
+					setDebugf("page2 next to page3 one_m=%s", reviewOneMSummary(m.oneMSlots))
 				}
 			case 3:
 				if m.cursor < len(m.effortLevels) {
 					m.effortCursor = m.cursor
+					setDebugf("page3 effort selected cursor=%d level=%q label=%q", m.cursor, m.effortLevels[m.effortCursor], m.effortLabel(m.effortLevels[m.effortCursor]))
 				} else {
 					m.p.EffortLevel = m.effortLevels[m.effortCursor]
 					m.page = 4
 					m.cursor = 2 // default to Save & Finish
+					setDebugf("page3 next to review effort=%q label=%q", m.p.EffortLevel, m.effortLabel(m.p.EffortLevel))
 				}
 			case 4:
 				if m.cursor < 2 {
 					m.cursor = 2
+					setDebugf("page4 active choice confirmed active_chosen=%t cursor=%d", m.IsActiveChosen, m.cursor)
 				} else {
+					setDebugf("page4 save requested provider=%q type=%q effort=%q model_count=%d slots=%s one_m=%s active_chosen=%t", m.p.Name, m.p.Type, m.p.EffortLevel, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.IsActiveChosen)
 					return m, tea.Quit
 				}
 			case 5:
 				// Page 5: Auto / Manual config choice
 				if m.cursor == 0 {
 					// Auto Config: auto-fill slots, set effort=max, skip 1M, go to save
+					m.applyStaleSlotPolicy()
 					m.doAutoConfig()
 					m.page = 4
 					m.cursor = 2 // focus on save button
-				} else {
+					setDebugf("page5 auto config selected next_page=%d cursor=%d slots=%s effort=%q", m.page, m.cursor, slotDebugSummary(*m.p), m.p.EffortLevel)
+				} else if m.cursor == 1 {
 					// Manual Config: go to slot mapping (old page 1)
+					m.applyStaleSlotPolicy()
 					m.page = 1
 					m.cursor = 4
+					setDebugf("page5 manual config selected next_page=%d cursor=%d clear_stale_slots=%t slots=%s", m.page, m.cursor, m.clearStaleSlots, slotDebugSummary(*m.p))
+				} else if m.cursor == 2 && m.showStaleSlotToggle() {
+					m.clearStaleSlots = !m.clearStaleSlots
+					setDebugf("page5 stale slot cleanup toggled clear_stale_slots=%t stale_slot_count=%d", m.clearStaleSlots, m.staleSlotCount())
 				}
 			}
 		}
@@ -683,7 +865,17 @@ func renderModelFetchProgress(progress, frame int) string {
 		grayText.Render(hint) + "\n"
 }
 
-func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
+func renderCredentialField(label, value string, focused bool) string {
+	prefix := "  "
+	labelText := purpleText.Render(label)
+	if focused {
+		prefix = selectedStyle.Render("> ")
+		labelText = selectedStyle.Render(label)
+	}
+	return fmt.Sprintf("%s%s\n  %s\n\n", prefix, labelText, value)
+}
+
+func (m *AdvancedConfigModel) View() tea.View {
 	var body strings.Builder
 	protoLabel := protoBadgeStyle.Render("Protocol: " + m.getProtocol())
 
@@ -691,25 +883,16 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 	case 0:
 		// ==================== PAGE 0: 凭据配置 ====================
 		body.WriteString(titleStyle.Render(locale.T("基础凭据配置", "Base Credentials")) + badgeStyle.Render("Credentials") + protoLabel + "\n\n")
-		prefURL := "  "
-		if m.cursor == 0 {
-			prefURL = selectedStyle.Render("> ")
-		}
-		// ✅ 修复：先对纯文本 "Endpoint URL" 填充至 14 宽，再加颜色
-		paddedURLText := purpleText.Render(fmt.Sprintf("%-14s", "Endpoint URL"))
-		body.WriteString(fmt.Sprintf("%s%s: %s\n", prefURL, paddedURLText, m.urlInput.View()))
-
-		prefKey := "  "
-		if m.cursor == 1 {
-			prefKey = selectedStyle.Render("> ")
-		}
-		// ✅ 修复：先对纯文本 "API Key" 填充至 14 宽，再加颜色
-		paddedKeyText := purpleText.Render(fmt.Sprintf("%-14s", "API Key"))
-		body.WriteString(fmt.Sprintf("%s%s: %s\n", prefKey, paddedKeyText, m.keyInput.View()))
+		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == 0))
+		body.WriteString(renderCredentialField("API Key", m.keyInput.View(), m.cursor == 1))
 
 		if m.detecting {
 			body.WriteString(renderModelFetchProgress(m.detectProgress, m.detectFrame))
 		} else {
+			if m.detectionError != nil {
+				body.WriteString(errorText.Render(locale.T("检测失败，无法继续：", "Detection failed; cannot continue:")) + "\n")
+				body.WriteString(errorText.Render("  "+m.detectionError.Error()) + "\n\n")
+			}
 			body.WriteString(renderBottomButtons(m.page, m.cursor, 2, 3))
 			body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
 		}
@@ -877,7 +1060,11 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 	case 5:
 		// ==================== PAGE 5: 配置模式选择 ====================
 		body.WriteString(titleStyle.Render(locale.T("配置模式选择", "Config Mode")) + badgeStyle.Render("Choice") + protoLabel + "\n\n")
-		body.WriteString(grayText.Render(locale.T("模型已获取，请选择配置方式：", "Models fetched. Choose config mode:")) + "\n\n")
+		body.WriteString(grayText.Render(fmt.Sprintf(locale.T("已从接口获取 %d 个模型，请选择配置方式：", "Fetched %d models from provider API. Choose config mode:"), len(m.modelPool))) + "\n")
+		if m.modelPoolFromDiscovery && m.hadLocalModelPool {
+			body.WriteString(grayText.Render(locale.T("旧本地模型池将用本次接口结果刷新。", "The local model pool will be refreshed with this API result.")) + "\n")
+		}
+		body.WriteString("\n")
 
 		autoPrefix := "  "
 		autoLabel := grayText.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
@@ -899,7 +1086,29 @@ func (m *AdvancedConfigModel) View() tea.View { // ✅ 确保返回值为 string
 		body.WriteString(manualPrefix + manualLabel + "\n")
 		body.WriteString(manualDesc + "\n\n")
 
-		body.WriteString(grayText.Render(locale.T("↑↓ 选择 · enter 确认 · esc 返回", "↑↓ Select · enter confirm · esc back")))
+		if m.showStaleSlotToggle() {
+			cleanupPrefix := "  "
+			cleanupLabel := grayText.Render(locale.T("手动配置时清理旧槽位", "Clean stale slots for manual config"))
+			if m.cursor == 2 {
+				cleanupPrefix = selectedStyle.Render("> ")
+				cleanupLabel = selectedStyle.Render(locale.T("手动配置时清理旧槽位", "Clean stale slots for manual config"))
+			}
+			box := "[ ]"
+			state := locale.T("否", "No")
+			if m.clearStaleSlots {
+				box = "[x]"
+				state = locale.T("是", "Yes")
+			}
+			cleanupDesc := grayText.Render(fmt.Sprintf("    %s %s · %s",
+				box,
+				state,
+				fmt.Sprintf(locale.T("将清空 %d 个不在接口模型列表中的旧槽位", "Clear %d old slot(s) not present in the API model list"), m.staleSlotCount()),
+			))
+			body.WriteString(cleanupPrefix + cleanupLabel + "\n")
+			body.WriteString(cleanupDesc + "\n\n")
+		}
+
+		body.WriteString(grayText.Render(locale.T("↑↓ 选择 · ←→ 切换清理选项 · enter 确认 · esc 返回", "↑↓ Select · ←→ Toggle cleanup · enter confirm · esc back")))
 	}
 
 	// 指示器

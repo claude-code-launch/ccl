@@ -67,13 +67,28 @@ func TestProviderHelpUsesShortSubcommands(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"ccl provider [command]", "  ls", "  cp", "  mv", "  rm", "  preview", "  set", "  use"} {
+	for _, want := range []string{"ccl provider [command]", "  ls", "  cp", "  mv", "  rm", "  preview", "  set", "  use", "  map", "  models", "  env", "  doctor"} {
 		if !contains(out, want) {
 			t.Fatalf("expected provider help to contain %q, got:\n%s", want, out)
 		}
 	}
 	if contains(out, "\n  list") {
 		t.Fatalf("provider help should prefer ls over list, got:\n%s", out)
+	}
+}
+
+func TestProviderSubcommandAliasesExist(t *testing.T) {
+	for _, args := range [][]string{
+		{"provider", "map", "--help"},
+		{"provider", "models", "--help"},
+		{"provider", "env", "--help"},
+		{"provider", "doctor", "--help"},
+		{"version", "--help"},
+		{"update", "--help"},
+	} {
+		if _, err := executeCommand(RootCmd(), args...); err != nil {
+			t.Fatalf("expected %v to be registered, got error: %v", args, err)
+		}
 	}
 }
 
@@ -167,6 +182,26 @@ func TestReviewPageShowsBearerForOpenAIChatDisplayLabel(t *testing.T) {
 	}
 	if contains(view, "unknown") {
 		t.Fatalf("review page should not show unknown auth, got: %s", view)
+	}
+}
+
+func TestCredentialPageMasksAPIKey(t *testing.T) {
+	p := provider.Provider{
+		Name:     "masked-key",
+		Type:     "anthropic",
+		Endpoint: "https://open.bigmodel.cn/api/anthropic",
+		APIKey:   "super-secret-api-key-1234567890",
+	}
+	m := NewAdvancedConfigModel(&p)
+	view := m.View().Content
+
+	for _, want := range []string{"Endpoint URL", "API Key", "Protocol: anthropic"} {
+		if !contains(view, want) {
+			t.Fatalf("expected credential page to contain %q, got: %s", want, view)
+		}
+	}
+	if contains(view, p.APIKey) {
+		t.Fatalf("credential page should mask API key, got: %s", view)
 	}
 }
 
