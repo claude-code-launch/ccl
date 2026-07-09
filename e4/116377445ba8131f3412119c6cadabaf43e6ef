@@ -1,0 +1,46 @@
+.github/workflows/ci.yml
+  s_2e7ca770783629::t_87be72d39af78c 1-34
+.github/workflows/release.yml
+  s_2e7ca770783629::t_cd7a63a09fd486 6,25-33,107
+cmd/doctor.go
+  s_2e7ca770783629::t_d4bc5b2bb4eacf 34-36,41,43,49,53-54,58,64,67,71,74,78,82-88,94-95,109,115,119,122,130,136,140,142,148,157,160-163,196,201,234-237,243,246,248,252-255,265,288-291,301,325-329,358-370,372-379,381-389,391-402
+cmd/doctor_test.go
+  s_2e7ca770783629::t_02a19c7a33ab45 1-24
+cmd/models.go
+  s_2e7ca770783629::t_22c0b0d36b7739 33,42,52-53,55-57
+cmd/set_test.go
+  s_2e7ca770783629::t_1d8e592794ca0e 12-13,308-456
+internal/config/config.go
+  s_2e7ca770783629::t_f78e5bb42c1285 4,13-39,41,44-53,61-67,89-95,97,107-140
+internal/config/config_test.go
+  s_2e7ca770783629::t_101b60a7639acb 1-84
+internal/protocol/responses.go
+  s_2e7ca770783629::t_53811490a1b890 97-101,115
+internal/protocol/responses_probe_test.go
+  s_2e7ca770783629::t_a5d729f472986c 4,59-88
+internal/proxy/server.go
+  s_2e7ca770783629::t_14bd669bb98e27 32-38,40-45,206-216,218,221,326,354-357,381,420-423,428-431,437-444,446-455,457-458,460-461,463-468
+internal/proxy/server_test.go
+  s_2e7ca770783629::t_c9690651eac7f7 285-405
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e4116377445ba8131f3412119c6cadabaf43e6ef",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_2e7ca770783629": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f40de-fae7-7d40-aea0-dcc2b5d82b31",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
