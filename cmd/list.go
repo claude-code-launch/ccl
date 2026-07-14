@@ -50,7 +50,7 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, " \tNAME\tTYPE\tAUTH\tEFFORT\t1M\tMODELS\tSLOTS")
+	fmt.Fprintln(tw, " \tNAME\tTYPE\tAUTH\tEFFORT\tCONTEXT\tMODELS\tSLOTS")
 	for _, name := range names {
 		mark := " "
 		if name == cfg.ActiveProvider {
@@ -89,7 +89,7 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 		}
 		fmt.Fprintf(out, "    Endpoint : %s\n", p.Endpoint)
 		fmt.Fprintf(out, "    Effort   : %s\n", providerEffortSummary(p))
-		fmt.Fprintf(out, "    1M       : %s\n", providerOneMSummary(p))
+		fmt.Fprintf(out, "    Context  : %s\n", providerOneMSummary(p))
 		fmt.Fprintf(out, "    Models   : %s\n", formatModelCount(p.Model))
 		fmt.Fprintf(out, "    Slots    : %s\n", formatSlotSummaryLong(p))
 		if p.Model != "" {

@@ -415,12 +415,59 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	m.page = 4
 	m.oneMSlots["sonnet"] = true
+	m.compactPreset = compactPreset1M
+	m.compactState = compactConfigState{preset: compactPreset1M}
 
 	view := m.View().Content
-	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "⚡1M"} {
+	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "⚡1M", "1M / 90%"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
 		}
+	}
+}
+
+func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
+	p := provider.Provider{
+		OpusModel:     "gpt-5.6-sol",
+		SonnetModel:   "gpt-5.6-terra",
+		HaikuModel:    "gpt-5.6-luna",
+		CustomModelID: "gpt-5.6-sol",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 2
+	view := m.View().Content
+	if !strings.Contains(view, "Recommended: GPT-5.6 uses 1M / 90%") {
+		t.Fatalf("expected GPT-5.6 recommendation, got %q", view)
+	}
+
+	p.CustomModelID = "unknown-model"
+	m = NewAdvancedConfigModel(&p)
+	m.page = 2
+	view = m.View().Content
+	if strings.Contains(view, "Recommended: GPT-5.6 uses 1M / 90%") {
+		t.Fatalf("did not expect recommendation for mixed unknown models, got %q", view)
+	}
+	if !strings.Contains(view, "never assumed to be 200K") {
+		t.Fatalf("expected unknown-model safety note, got %q", view)
+	}
+}
+
+func TestCompactPresetCyclesFromPreserveToConfirmed200K(t *testing.T) {
+	p := provider.Provider{Env: map[string]string{
+		autoCompactWindowEnv: "750000",
+		autoCompactPctEnv:    "82",
+	}}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 2
+	m.cursor = oneMPresetCursor
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.compactPreset != compactPreset200K {
+		t.Fatalf("compact preset = %v, want confirmed 200K", m.compactPreset)
+	}
+	if got := m.compactSummary(); got != "Confirmed 200K / 70%" {
+		t.Fatalf("compact summary = %q", got)
 	}
 }
 

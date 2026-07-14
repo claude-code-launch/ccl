@@ -102,7 +102,7 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 		}
 	}
 
-	applyOneMConfig(&p, oneMSlotsFromProvider(p))
+	applyCompactConfig(&p, oneMSlotsFromProvider(p), compactPresetPreserve)
 
 	cfg.Providers[providerName] = p
 	if err := config.Save(cfg); err != nil {
@@ -165,9 +165,20 @@ func runMapAuto(args []string) error {
 	fmt.Printf("Found %d available model(s) out of %d total.\n", len(available), len(models))
 
 	oneMSlots := oneMSlotsFromProvider(p)
+	hadOneMSlots := len(oneMSlots) > 0
 	slots := sequentialSlotPointers(&p)
 	assigned := applySequentialSlotMapping(slots, available)
-	applyOneMConfig(&p, oneMSlots)
+	for _, slot := range advancedSlotRefs(&p) {
+		if oneMSlots[slot.key] && !recommendedOneMModel(*slot.ptr) {
+			delete(oneMSlots, slot.key)
+		}
+	}
+	preset := compactStateFromProvider(p).preset
+	if hadOneMSlots && !allConfiguredModelsRecommendOneM(p) {
+		oneMSlots = make(map[string]bool)
+		preset = compactPresetOff
+	}
+	applyCompactConfig(&p, oneMSlots, preset)
 
 	if assigned < 4 {
 		fmt.Printf("⚠ Only %d model(s) available, assigned in order to first %d slot(s).\n", assigned, assigned)
@@ -255,7 +266,7 @@ func runMapTUI(args []string) error {
 	updatedModel := finalModel.(*AdvancedConfigModel)
 	p = *updatedModel.p
 
-	applyOneMConfig(&p, updatedModel.oneMSlots)
+	applyCompactConfig(&p, updatedModel.oneMSlots, updatedModel.compactPreset)
 
 	cfg.Providers[providerName] = p
 	if err := config.Save(cfg); err != nil {

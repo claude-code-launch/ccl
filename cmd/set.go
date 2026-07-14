@@ -174,15 +174,15 @@ func RunProviderSet(args []string) error {
 		return nil
 	}
 
-	applyOneMConfig(&p, updatedModel.oneMSlots)
+	applyCompactConfig(&p, updatedModel.oneMSlots, updatedModel.compactPreset)
 	setDebugf(
-		"after applyOneMConfig provider=%q type=%q effort=%q model_count=%d slots=%s one_m=%s active_chosen=%t",
+		"after applyCompactConfig provider=%q type=%q effort=%q model_count=%d slots=%s compact=%s active_chosen=%t",
 		p.Name,
 		p.Type,
 		p.EffortLevel,
 		countCSV(p.Model),
 		slotDebugSummary(p),
-		reviewOneMSummary(updatedModel.oneMSlots),
+		updatedModel.compactSummary(),
 		updatedModel.IsActiveChosen,
 	)
 

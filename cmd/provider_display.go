@@ -48,28 +48,22 @@ func subagentMappingDisplay(p provider.Provider) string {
 }
 
 func providerOneMSummary(p provider.Provider) string {
-	var slots []string
-	for _, slot := range []struct {
-		name  string
-		model string
-	}{
-		{"opus", p.OpusModel},
-		{"sonnet", p.SonnetModel},
-		{"haiku", p.HaikuModel},
-		{"custom", p.CustomModelID},
-		{"subagent", p.SubagentModel},
-	} {
-		if hasOneMSuffix(slot.model) {
-			slots = append(slots, slot.name)
-		}
+	state := compactStateFromProvider(p)
+	slots := oneMSlotsFromProvider(p)
+	if state.legacy {
+		return "legacy 1M"
 	}
-	if len(slots) == 0 && p.Env != nil && p.Env[autoCompactWindowEnv] == "1000000" {
-		return "enabled"
+	if state.custom {
+		return "custom"
 	}
-	if len(slots) == 0 {
+	switch state.preset {
+	case compactPreset1M:
+		return "1M/90 " + reviewOneMSummary(slots)
+	case compactPreset200K:
+		return "200K/70"
+	default:
 		return "off"
 	}
-	return strings.Join(slots, ",")
 }
 
 func setProviderAuthHeaders(req *http.Request, p provider.Provider) {

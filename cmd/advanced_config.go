@@ -60,16 +60,19 @@ const (
 	slotTestCursor        = slotMappingCount
 	slotNextCursor        = slotTestCursor + 1
 	slotBackCursor        = slotNextCursor + 1
-	oneMNextCursor        = slotMappingCount
+	oneMPresetCursor      = slotMappingCount
+	oneMNextCursor        = oneMPresetCursor + 1
 	oneMBackCursor        = oneMNextCursor + 1
 	slotTestConcurrency   = 50
 	lowCostProbeModel     = "gpt-5.4-mini"
 )
 
 type AdvancedConfigModel struct {
-	p         *provider.Provider
-	modelPool []string
-	oneMSlots map[string]bool
+	p             *provider.Provider
+	modelPool     []string
+	oneMSlots     map[string]bool
+	compactPreset compactPreset
+	compactState  compactConfigState
 
 	probeEndpoint string
 	probeAPIKey   string
@@ -164,9 +167,12 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	fi := textinput.New()
 	fi.Placeholder = ""
 
+	compactState := compactStateFromProvider(*p)
 	m := &AdvancedConfigModel{
 		p:                 p,
 		oneMSlots:         make(map[string]bool),
+		compactPreset:     compactState.preset,
+		compactState:      compactState,
 		probeEndpoint:     p.Endpoint,
 		probeAPIKey:       p.APIKey,
 		page:              0,
@@ -477,8 +483,24 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 		}
 	}
 	m.p.SubagentModel = ""
-	// Default: no 1M context
+	// Auto mode recommends 1M only for the strict allowlist. Otherwise it
+	// preserves custom/200K settings, but clears stale per-slot 1M state.
+	hadOneMSlots := len(m.oneMSlots) > 0
 	m.oneMSlots = make(map[string]bool)
+	m.compactPreset = m.compactState.preset
+	if hadOneMSlots {
+		m.compactPreset = compactPresetOff
+		m.compactState = compactConfigState{preset: compactPresetOff}
+	}
+	if allConfiguredModelsRecommendOneM(*m.p) {
+		for _, slot := range advancedSlotRefs(m.p) {
+			if strings.TrimSpace(*slot.ptr) != "" {
+				m.oneMSlots[slot.key] = true
+			}
+		}
+		m.compactPreset = compactPreset1M
+		m.compactState = compactConfigState{preset: compactPreset1M, window: compactWindow1M, pct: compactPct1M}
+	}
 	// Default: do not override Claude's own effort setting.
 	m.p.EffortLevel = ""
 	m.effortCursor = 0
@@ -705,6 +727,37 @@ func (m *AdvancedConfigModel) workflowStep() int {
 	}
 }
 
+func (m *AdvancedConfigModel) cycleCompactPreset() {
+	switch m.compactPreset {
+	case compactPresetPreserve:
+		m.compactPreset = compactPreset200K
+		m.oneMSlots = make(map[string]bool)
+	case compactPreset200K:
+		m.compactPreset = compactPreset1M
+		for _, slot := range advancedSlotRefs(m.p) {
+			if strings.TrimSpace(*slot.ptr) != "" && recommendedOneMModel(*slot.ptr) {
+				m.oneMSlots[slot.key] = true
+			}
+		}
+	case compactPreset1M:
+		m.compactPreset = compactPresetOff
+		m.oneMSlots = make(map[string]bool)
+	default:
+		m.compactPreset = compactPresetPreserve
+	}
+	m.compactState = compactConfigState{preset: m.compactPreset}
+}
+
+func (m *AdvancedConfigModel) compactSummary() string {
+	state := m.compactState
+	state.preset = m.compactPreset
+	if m.compactPreset != compactPresetPreserve {
+		state.legacy = false
+		state.custom = false
+	}
+	return compactStateSummary(state, m.oneMSlots)
+}
+
 func reviewOneMSummary(oneMSlots map[string]bool) string {
 	var slots []string
 	for _, slot := range []string{"opus", "sonnet", "haiku", "custom", "subagent"} {
@@ -924,7 +977,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.page == 1 && (m.cursor == slotNextCursor || m.cursor == slotBackCursor) {
 					m.cursor = slotTestCursor
 				} else if m.page == 2 && (m.cursor == oneMNextCursor || m.cursor == oneMBackCursor) {
-					m.cursor = slotMappingCount - 1
+					m.cursor = oneMPresetCursor
 				} else if m.page == 3 && (m.cursor == m.effortNextCursor() || m.cursor == m.effortBackCursor()) {
 					m.cursor = len(m.effortLevels) - 1
 				} else if m.page == 5 && m.cursor > 0 {
@@ -1170,14 +1223,18 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case 2:
 				if m.cursor < slotMappingCount {
-					// 当光标在槽位上时，按 enter 切换 1M 状态
+					// Slot toggles imply the explicit 1M / 90% preset.
 					slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.cursor]
 					if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
 						return m, nil
 					}
 					m.oneMSlots[slot] = !m.oneMSlots[slot]
+					m.compactPreset = compactPreset1M
+					m.compactState = compactConfigState{preset: compactPreset1M}
 					setDebugf("page2 toggle one_m slot=%s enabled=%t summary=%s", slot, m.oneMSlots[slot], reviewOneMSummary(m.oneMSlots))
 					m.cursor++
+				} else if m.cursor == oneMPresetCursor {
+					m.cycleCompactPreset()
 				} else if m.cursor == oneMNextCursor {
 					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
 					m.page = 3
@@ -1484,9 +1541,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 
 	case 2:
-		// ==================== PAGE 2: 1M 上下文配置页 ====================
-		body.WriteString(m.renderPageHeader(locale.T("1M 上下文配置", "1M Context"), "MultiSelect"))
-		body.WriteString(grayText.Render(locale.T("enter 切换开关状态", "enter Toggle Slot Status")) + "\n\n")
+		// ==================== PAGE 2: Context & Compact ====================
+		body.WriteString(m.renderPageHeader(locale.T("上下文与自动压缩", "Context & Compact"), "Preset"))
+		body.WriteString(grayText.Render(locale.T("压缩窗口是 Provider 全局设置；未知模型不会自动假定为 200K", "Compact settings apply to the whole provider; unknown models are never assumed to be 200K")) + "\n")
+		if allConfiguredModelsRecommendOneM(*m.p) {
+			body.WriteString(availableStyle.Render(locale.T("推荐：GPT-5.6 使用 1M / 90%", "Recommended: GPT-5.6 uses 1M / 90%")) + "\n")
+		}
+		body.WriteString(grayText.Render(locale.T("enter 切换槽位或预设", "enter toggles a slot or cycles the preset")) + "\n\n")
 
 		renderMultiRow := func(idx int, label, modelVal string) {
 			box := "[ ]"
@@ -1529,6 +1590,14 @@ func (m *AdvancedConfigModel) View() tea.View {
 		renderMultiRow(2, "Haiku Config", m.p.HaikuModel)
 		renderMultiRow(3, "Custom Config", m.p.CustomModelID)
 		renderMultiRow(4, "Subagent", subagentMappingDisplay(*m.p))
+
+		presetPrefix := "  "
+		presetLabel := purpleText.Render(m.compactSummary())
+		if m.cursor == oneMPresetCursor {
+			presetPrefix = selectedStyle.Render("> ")
+			presetLabel = selectedStyle.Render(m.compactSummary())
+		}
+		body.WriteString(fmt.Sprintf("\n%s%-16s %s\n", presetPrefix, locale.T("压缩预设:", "Compact preset:"), presetLabel))
 
 		body.WriteString(renderBottomButtons(m.page, m.cursor, oneMNextCursor, oneMBackCursor))
 		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))
@@ -1580,7 +1649,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
 		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Effort Level", purpleText.Render(m.effortLabel(m.effortLevels[m.effortCursor]))))
-		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "1M Context", purpleText.Render(reviewOneMSummary(m.oneMSlots))))
+		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Context", purpleText.Render(reviewOneMSummary(m.oneMSlots))))
+		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Compact", purpleText.Render(m.compactSummary())))
 		body.WriteString("\n  " + grayText.Render(locale.T("模型映射", "Model Mapping")) + "\n")
 		body.WriteString(renderReviewModelMapping("Opus", m.p.OpusModel, m.oneMSlots["opus"]))
 		body.WriteString(renderReviewModelMapping("Sonnet", m.p.SonnetModel, m.oneMSlots["sonnet"]))

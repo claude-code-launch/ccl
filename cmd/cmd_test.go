@@ -300,7 +300,7 @@ func TestMapAutoClearsUnassignedTrailingSlots(t *testing.T) {
 	}
 }
 
-func TestMapAutoRefreshesModelPoolAndPreservesOneMSlots(t *testing.T) {
+func TestMapAutoRefreshesModelPoolWithoutTransferringOneMToUnknownModels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
 
@@ -337,14 +337,14 @@ func TestMapAutoRefreshesModelPoolAndPreservesOneMSlots(t *testing.T) {
 	if p.Model != "model-a,model-b,model-c,model-d" {
 		t.Fatalf("expected refreshed model pool, got %q", p.Model)
 	}
-	if p.OpusModel != "model-a[1m]" {
-		t.Fatalf("expected opus 1M preference to be preserved, got %q", p.OpusModel)
+	if p.OpusModel != "model-a" {
+		t.Fatalf("expected unknown replacement model to lose 1M marker, got %q", p.OpusModel)
 	}
 	if p.SonnetModel != "model-b" || p.HaikuModel != "model-c" || p.CustomModelID != "model-d" {
 		t.Fatalf("unexpected slot mapping: %+v", p)
 	}
-	if p.Env[autoCompactWindowEnv] != "1000000" {
-		t.Fatalf("expected auto compact window env to remain enabled, got %+v", p.Env)
+	if _, ok := p.Env[autoCompactWindowEnv]; ok {
+		t.Fatalf("expected stale 1M compact window removed for unknown models, got %+v", p.Env)
 	}
 }
 
