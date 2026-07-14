@@ -82,6 +82,12 @@ func Load() (*provider.Config, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]provider.Provider)
 	}
+	for name, p := range cfg.Providers {
+		if p.OAuthProvider == "" {
+			p.OAuthProvider = provider.InferOAuthProvider(name, p.Endpoint)
+			cfg.Providers[name] = p
+		}
+	}
 	return cfg, nil
 }
 

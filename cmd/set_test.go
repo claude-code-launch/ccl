@@ -581,6 +581,33 @@ func TestOpenAIReviewStartsOnProtocolSelection(t *testing.T) {
 	}
 }
 
+func TestAdvancedConfigOnlyConfirmsSaveFromReviewAction(t *testing.T) {
+	p := provider.Provider{
+		Name:     "complete-provider",
+		Type:     "openai",
+		Endpoint: "https://example.test/v1",
+		APIKey:   "test-key",
+		Model:    "gpt-test",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 5
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+	m = next.(*AdvancedConfigModel)
+	if m.saveConfirmed {
+		t.Fatal("Ctrl+C must not confirm or save a complete provider")
+	}
+
+	m = NewAdvancedConfigModel(&p)
+	m.page = 4
+	m.cursor = m.page4SaveCursor()
+	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.saveConfirmed || cmd == nil {
+		t.Fatalf("review save action did not confirm save: confirmed=%t cmd=%v", m.saveConfirmed, cmd)
+	}
+}
+
 func TestReorderModelsByAvailability(t *testing.T) {
 	models := []string{"model-unavailable", "model-available-a", "model-unknown", "model-available-b"}
 	statuses := map[string]modelAvailability{

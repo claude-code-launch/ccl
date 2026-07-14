@@ -113,6 +113,7 @@ type AdvancedConfigModel struct {
 	// Page 4
 	IsActiveChosen bool
 	manualConfig   bool
+	saveConfirmed  bool
 }
 
 type modelFetchTickMsg struct{}
@@ -1199,7 +1200,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.cursor == m.page4ActiveYesCursor() || m.cursor == m.page4ActiveNoCursor() {
 					m.cursor = m.page4SaveCursor()
 					setDebugf("page4 active choice confirmed active_chosen=%t cursor=%d", m.IsActiveChosen, m.cursor)
-				} else {
+				} else if m.cursor == m.page4SaveCursor() {
+					m.saveConfirmed = true
 					setDebugf("page4 save requested provider=%q type=%q effort=%q model_count=%d slots=%s one_m=%s active_chosen=%t", m.p.Name, m.p.Type, m.p.EffortLevel, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.IsActiveChosen)
 					return m, tea.Quit
 				}

@@ -87,3 +87,54 @@ func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
 		t.Fatalf("legacy config should be moved, stat err=%v", err)
 	}
 }
+
+func TestLoadInfersOAuthProviderForLegacyAuthEndpoints(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".ccl")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	data := []byte(`providers:
+  chatgpt:
+    name: chatgpt
+    type: openai_responses
+    endpoint: oauth://codex
+    model: gpt-5.4-mini
+  codex:
+    name: codex
+    type: openai_responses
+    endpoint: oauth://codex
+    model: gpt-5.4-mini
+  gemini:
+    name: gemini
+    type: openai
+    endpoint: oauth://antigravity
+    model: gemini-test
+  regular:
+    name: regular
+    type: openai
+    endpoint: https://example.test/v1
+    model: gpt-test
+`)
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got := cfg.Providers["chatgpt"].OAuthProvider; got != "chatgpt" {
+		t.Fatalf("chatgpt OAuth provider = %q", got)
+	}
+	if got := cfg.Providers["codex"].OAuthProvider; got != "codex" {
+		t.Fatalf("legacy Codex OAuth provider = %q", got)
+	}
+	if got := cfg.Providers["gemini"].OAuthProvider; got != "gemini" {
+		t.Fatalf("Gemini OAuth provider = %q", got)
+	}
+	if got := cfg.Providers["regular"].OAuthProvider; got != "" {
+		t.Fatalf("ordinary provider inferred as OAuth: %q", got)
+	}
+}

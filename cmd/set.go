@@ -142,6 +142,11 @@ func RunProviderSet(args []string) error {
 		updatedModel.detectionError,
 		len(updatedModel.modelPool),
 	)
+	if !updatedModel.saveConfirmed {
+		setDebugf("abort: save was not confirmed")
+		fmt.Fprintln(os.Stderr, locale.T("ℹ️ 已取消配置，未保存。", "ℹ️ Configuration canceled; no changes were saved."))
+		return nil
+	}
 
 	// 协议探测/模型获取失败 → 直接退出，不保存
 	if updatedModel.detectionError != nil {

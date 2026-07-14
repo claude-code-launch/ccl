@@ -1,6 +1,9 @@
 package provider
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 type Provider struct {
 	Name     string `yaml:"name" mapstructure:"name"`
@@ -33,6 +36,29 @@ type Config struct {
 	ActiveProvider string              `yaml:"active_provider" mapstructure:"active_provider"`
 	Lang           string              `yaml:"lang,omitempty" mapstructure:"lang,omitempty"`
 	Providers      map[string]Provider `yaml:"providers" mapstructure:"providers"`
+}
+
+// InferOAuthProvider restores the public OAuth provider name for configs
+// written before oauthProvider was persisted. The oauth:// endpoint is an
+// internal backend marker, so ordinary HTTP providers are never inferred.
+func InferOAuthProvider(providerName, endpoint string) string {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || !strings.EqualFold(u.Scheme, "oauth") {
+		return ""
+	}
+
+	backend := strings.ToLower(strings.TrimSpace(u.Host))
+	switch backend {
+	case "codex", "chatgpt":
+		if strings.EqualFold(strings.TrimSpace(providerName), "codex") {
+			return "codex"
+		}
+		return "chatgpt"
+	case "antigravity", "gemini":
+		return "gemini"
+	default:
+		return ""
+	}
 }
 
 func IsOpenAIResponsesType(providerType string) bool {

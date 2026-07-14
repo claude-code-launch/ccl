@@ -33,6 +33,31 @@ func TestProtocolLabel(t *testing.T) {
 	}
 }
 
+func TestInferOAuthProvider(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerName string
+		endpoint     string
+		want         string
+	}{
+		{name: "ChatGPT Codex backend", providerName: "chatgpt", endpoint: "oauth://codex", want: "chatgpt"},
+		{name: "renamed ChatGPT provider", providerName: "my-account", endpoint: "oauth://codex", want: "chatgpt"},
+		{name: "legacy Codex provider", providerName: "codex", endpoint: "oauth://codex", want: "codex"},
+		{name: "Gemini Antigravity backend", providerName: "gemini", endpoint: "oauth://antigravity", want: "gemini"},
+		{name: "Gemini public backend", providerName: "google-account", endpoint: "oauth://gemini", want: "gemini"},
+		{name: "ordinary HTTP provider", providerName: "chatgpt", endpoint: "https://example.test/v1", want: ""},
+		{name: "unknown OAuth backend", providerName: "other", endpoint: "oauth://other", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := provider.InferOAuthProvider(tt.providerName, tt.endpoint); got != tt.want {
+				t.Fatalf("InferOAuthProvider(%q, %q) = %q, want %q", tt.providerName, tt.endpoint, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsOpenAIResponsesType(t *testing.T) {
 	for _, v := range []string{"openai_responses", "openai-responses", "responses", "OPENAI_RESPONSES", "openai(responses)", "openai(agent)"} {
 		if !provider.IsOpenAIResponsesType(v) {
