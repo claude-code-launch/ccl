@@ -160,6 +160,37 @@ func TestPrepareProviderRuntimeRoutesManualResponsesThroughCodexAdapter(t *testi
 	}
 }
 
+func TestPrepareProviderRuntimeRoutesManualChatThroughCLIProxyAPI(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(upstream.Close)
+	original := provider.Provider{
+		Name:     "openai-chat",
+		Type:     "openai",
+		Endpoint: upstream.URL + "/v1",
+		APIKey:   "upstream-key",
+		Model:    "gpt-5.4-mini",
+	}
+
+	runtimeProvider, cleanup, err := prepareProviderRuntime(original)
+	if err != nil {
+		t.Fatalf("prepareProviderRuntime() error: %v", err)
+	}
+	defer cleanup()
+
+	if !strings.HasPrefix(runtimeProvider.Endpoint, "http://127.0.0.1:") {
+		t.Fatalf("runtime endpoint = %q", runtimeProvider.Endpoint)
+	}
+	if runtimeProvider.Endpoint == original.Endpoint {
+		t.Fatal("manual Chat provider bypassed embedded CLIProxyAPI")
+	}
+	if runtimeProvider.APIKey == "" || runtimeProvider.APIKey == original.APIKey {
+		t.Fatalf("runtime API key was not isolated: %q", runtimeProvider.APIKey)
+	}
+	if original.Endpoint != upstream.URL+"/v1" || original.APIKey != "upstream-key" {
+		t.Fatalf("original provider was mutated: %+v", original)
+	}
+}
+
 func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

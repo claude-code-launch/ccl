@@ -82,6 +82,25 @@ func TestIsOpenAICompatibleType(t *testing.T) {
 	}
 }
 
+func TestRuntimeModelSpecIncludesSlotsSubagentAndOverrides(t *testing.T) {
+	p := provider.Provider{
+		Model:         "gpt-5.4-mini,gpt-5.6-sol",
+		CustomModelID: "gpt-5.4-mini",
+		OpusModel:     "gpt-5.6-sol[1m]",
+		SonnetModel:   "gpt-5.6-terra",
+		HaikuModel:    "gpt-5.6-luna",
+		SubagentModel: "gpt-5.6-terra[1m]",
+		ModelOverrides: map[string]string{
+			"claude-haiku": "gpt-5.4-mini",
+			"claude-opus":  "gpt-5.5",
+		},
+	}
+	want := "gpt-5.4-mini,gpt-5.6-sol,gpt-5.6-sol[1m],gpt-5.6-terra,gpt-5.6-luna,gpt-5.6-terra[1m],gpt-5.5"
+	if got := provider.RuntimeModelSpec(p); got != want {
+		t.Fatalf("RuntimeModelSpec() = %q, want %q", got, want)
+	}
+}
+
 func TestIsAnthropicType(t *testing.T) {
 	for _, v := range []string{"anthropic", "Anthropic", " ANTHROPIC "} {
 		if !provider.IsAnthropicType(v) {

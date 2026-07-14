@@ -4,18 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
-	"github.com/claude-code-launch/ccl/internal/proxy"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,8 +32,11 @@ const (
 	SubagentModelEnv          = "CLAUDE_CODE_SUBAGENT_MODEL"
 	ToolUseConcurrencyEnv     = "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"
 	ToolSearchEnv             = "ENABLE_TOOL_SEARCH"
+	MaxOutputTokensEnv        = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 	DefaultToolUseConcurrency = "3"
 	DefaultToolSearch         = "false"
+	DefaultMaxOutputTokens    = "32000"
+	MaxOutputTokensUpperLimit = 128000
 )
 
 // RuntimeSettings are ccl's Claude Code process defaults. Provider Env values
@@ -44,6 +45,7 @@ type RuntimeSettings struct {
 	SubagentModel      string
 	ToolUseConcurrency string
 	ToolSearch         string
+	MaxOutputTokens    string
 }
 
 func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
@@ -55,6 +57,7 @@ func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
 		SubagentModel:      subagentModel,
 		ToolUseConcurrency: DefaultToolUseConcurrency,
 		ToolSearch:         DefaultToolSearch,
+		MaxOutputTokens:    DefaultMaxOutputTokens,
 	}
 	if value, ok := p.Env[SubagentModelEnv]; ok {
 		settings.SubagentModel = value
@@ -65,7 +68,24 @@ func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
 	if value, ok := p.Env[ToolSearchEnv]; ok {
 		settings.ToolSearch = value
 	}
+	if value, ok := p.Env[MaxOutputTokensEnv]; ok {
+		if normalized, err := NormalizeMaxOutputTokens(value); err == nil {
+			settings.MaxOutputTokens = normalized
+		}
+	}
 	return settings
+}
+
+// NormalizeMaxOutputTokens validates Claude Code's per-response output cap.
+// Context window sizes such as 200K or 1M are separate settings and must not
+// be used here.
+func NormalizeMaxOutputTokens(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	tokens, err := strconv.Atoi(value)
+	if err != nil || tokens < 1 || tokens > MaxOutputTokensUpperLimit {
+		return "", fmt.Errorf("must be an integer between 1 and %d", MaxOutputTokensUpperLimit)
+	}
+	return strconv.Itoa(tokens), nil
 }
 
 func defaultSubagentModel(p provider.Provider) string {
@@ -95,7 +115,7 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 
 	switch {
 	case useProxy:
-		env["ANTHROPIC_API_KEY"] = "local-proxy-dummy-key"
+		env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
 	case p.APIKey != "":
 		if provider.IsAnthropicType(p.Type) && strings.EqualFold(p.AnthropicAuth, "bearer") {
 			env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
@@ -151,10 +171,67 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	}
 	env[ToolUseConcurrencyEnv] = runtimeSettings.ToolUseConcurrency
 	env[ToolSearchEnv] = runtimeSettings.ToolSearch
+	env[MaxOutputTokensEnv] = runtimeSettings.MaxOutputTokens
 
-	// Provider-level overrides take final precedence.
+	// Provider-level overrides take final precedence except for embedded-proxy
+	// transport values, which must match the runtime started for this session.
 	for k, v := range p.Env {
 		env[k] = v
+	}
+	if useProxy {
+		removeEnvKey(env, "ANTHROPIC_API_KEY")
+		removeEnvKey(env, "ANTHROPIC_BASE_URL")
+		removeEnvKey(env, "ANTHROPIC_AUTH_TOKEN")
+		env["ANTHROPIC_BASE_URL"] = baseURL
+		env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
+	}
+	// Keep this safety-critical value validated even when an older config
+	// contains an invalid context-window-sized override.
+	env[MaxOutputTokensEnv] = runtimeSettings.MaxOutputTokens
+	return env
+}
+
+func sameEnvKey(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func removeEnvKey(env map[string]string, key string) {
+	for existing := range env {
+		if sameEnvKey(existing, key) {
+			delete(env, existing)
+		}
+	}
+}
+
+func isProxyTransportEnv(key string) bool {
+	return sameEnvKey(key, "ANTHROPIC_API_KEY") ||
+		sameEnvKey(key, "ANTHROPIC_AUTH_TOKEN") ||
+		sameEnvKey(key, "ANTHROPIC_BASE_URL")
+}
+
+// buildProcessEnv prevents ambient Anthropic credentials from overriding the
+// per-session endpoint and bearer token used by the embedded proxy.
+func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) []string {
+	if !useProxy {
+		return inherited
+	}
+
+	env := make([]string, 0, len(inherited)+2)
+	for _, entry := range inherited {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && isProxyTransportEnv(key) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	if value := settings.Env["ANTHROPIC_BASE_URL"]; value != "" {
+		env = append(env, "ANTHROPIC_BASE_URL="+value)
+	}
+	if value := settings.Env["ANTHROPIC_AUTH_TOKEN"]; value != "" {
+		env = append(env, "ANTHROPIC_AUTH_TOKEN="+value)
 	}
 	return env
 }
@@ -240,7 +317,6 @@ type providerContext struct {
 	provider provider.Provider // copy, not reference — safe to mutate
 	baseURL  string
 	useProxy bool
-	srv      *proxy.Server // non-nil only when a local proxy was started
 	oauth    *oauthproxy.Runtime
 }
 
@@ -250,41 +326,39 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 	// Make a COPY to avoid mutating the original provider (fixes mutation bug)
 	providerCopy := p
 	ctx := &providerContext{provider: providerCopy, useProxy: provider.IsOpenAICompatibleType(p.Type)}
-	if providerCopy.OAuthProvider != "" {
-		if !ctx.useProxy {
-			return nil, fmt.Errorf(
-				"OAuth provider %q requires the OpenAI Chat or Responses protocol",
-				providerCopy.OAuthProvider,
-			)
-		}
-		runtime, err := oauthproxy.Start(context.Background(), providerCopy.OAuthProvider)
-		if err != nil {
-			return nil, fmt.Errorf("start OAuth proxy: %w", err)
-		}
-		ctx.oauth = runtime
-		providerCopy.Endpoint = runtime.Endpoint()
-		providerCopy.APIKey = runtime.APIKey()
-		ctx.provider = providerCopy
-	} else if provider.IsOpenAIResponsesType(providerCopy.Type) {
-		runtime, err := oauthproxy.StartCodexAPI(context.Background(), providerCopy.Endpoint, providerCopy.APIKey, providerCopy.Model)
-		if err != nil {
-			return nil, fmt.Errorf("start Codex Responses proxy: %w", err)
-		}
-		ctx.oauth = runtime
-		providerCopy.Endpoint = runtime.Endpoint()
-		providerCopy.APIKey = runtime.APIKey()
-		ctx.provider = providerCopy
+	if providerCopy.OAuthProvider != "" && !ctx.useProxy {
+		return nil, fmt.Errorf(
+			"OAuth provider %q requires the OpenAI Chat or Responses protocol",
+			providerCopy.OAuthProvider,
+		)
 	}
-
 	if ctx.useProxy {
-		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		srv := proxy.NewServer("127.0.0.1:0", providerCopy, logger)
-		ctx.srv = srv
-		if err := srv.Start(); err != nil {
-			ctx.cleanup()
-			return nil, fmt.Errorf("start proxy: %w", err)
+		if providerCopy.OAuthProvider == "" && strings.TrimSpace(providerCopy.Model) == "" {
+			models, err := protocol.GetOpenAIModels(providerCopy.Endpoint, providerCopy.APIKey)
+			if err != nil {
+				return nil, fmt.Errorf("discover OpenAI models before starting CLIProxyAPI: %w", err)
+			}
+			providerCopy.Model = models
 		}
-		ctx.baseURL = "http://" + srv.Addr()
+		upstreamProtocol := oauthproxy.ProtocolOpenAIChat
+		if provider.IsOpenAIResponsesType(providerCopy.Type) {
+			upstreamProtocol = oauthproxy.ProtocolOpenAIResponses
+		}
+		runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
+			Protocol:      upstreamProtocol,
+			Endpoint:      providerCopy.Endpoint,
+			APIKey:        providerCopy.APIKey,
+			ModelSpec:     provider.RuntimeModelSpec(providerCopy),
+			OAuthProvider: providerCopy.OAuthProvider,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
+		}
+		ctx.oauth = runtime
+		providerCopy.Endpoint = runtime.Endpoint()
+		providerCopy.APIKey = runtime.APIKey()
+		ctx.provider = providerCopy
+		ctx.baseURL = runtime.ClaudeBaseURL()
 	} else {
 		ctx.baseURL = providerCopy.Endpoint
 	}
@@ -302,17 +376,17 @@ func (c *providerContext) resolveModel() error {
 	if c.provider.Model != "" {
 		return nil
 	}
-	if c.srv != nil {
-		c.provider.Model = c.srv.AvailableModels()
-		return nil
+	if c.oauth != nil {
+		models, err := protocol.GetOpenAIModels(c.provider.Endpoint, c.provider.APIKey)
+		if err != nil {
+			return fmt.Errorf("discover embedded CLIProxyAPI models: %w", err)
+		}
+		c.provider.Model = models
 	}
 	return nil
 }
 
 func (c *providerContext) cleanup() {
-	if c.srv != nil {
-		c.srv.Stop()
-	}
 	if c.oauth != nil {
 		c.oauth.Stop()
 	}
@@ -359,7 +433,8 @@ func Run(p provider.Provider, args []string) error {
 	}
 	defer ctx.cleanup()
 
-	settingsPath, err := writeSettingsFile(ctx.settings())
+	sessionSettings := ctx.settings()
+	settingsPath, err := writeSettingsFile(sessionSettings)
 	if err != nil {
 		return fmt.Errorf("create settings file: %w", err)
 	}
@@ -378,7 +453,7 @@ func Run(p provider.Provider, args []string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = buildProcessEnv(os.Environ(), sessionSettings, ctx.useProxy)
 
 	return cmd.Run()
 }

@@ -573,6 +573,66 @@ data: {"response":{"id":"resp_stream","model":"gpt-5","status":"completed","usag
 	}
 }
 
+func TestProxyServerResponsesStreamingCompletedOutputOnly(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, `event: response.completed
+data: {"response":{"id":"resp_compact","model":"gpt-5.4-mini","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"compact summary"}]}],"usage":{"input_tokens":40000,"output_tokens":20}}}
+
+`)
+	})
+
+	upstreamAddr := startHTTPServer(t, mux)
+	p := provider.Provider{
+		Name:     "mock-openai-responses-compact",
+		Type:     "openai_responses",
+		Endpoint: "http://" + upstreamAddr + "/v1",
+		APIKey:   "mock-key",
+		Model:    "gpt-5.4-mini",
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxyServer := proxy.NewServer("127.0.0.1:0", p, logger)
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxyServer.Stop()
+
+	antReq := protocol.AnthropicRequest{
+		Model: "claude-3-5-sonnet",
+		Messages: []protocol.AnthropicMessage{{
+			Role:    "user",
+			Content: "Summarize the conversation",
+		}},
+		Stream: true,
+	}
+	reqBody, _ := json.Marshal(antReq)
+	resp, err := http.Post(
+		"http://"+proxyServer.Addr()+"/v1/messages",
+		"application/json",
+		bytes.NewReader(reqBody),
+	)
+	if err != nil {
+		t.Fatalf("request proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read translated stream: %v", err)
+	}
+	body := string(responseBody)
+	if count := strings.Count(body, `"text":"compact summary"`); count != 1 {
+		t.Fatalf("expected one compact summary, got %d: %s", count, body)
+	}
+	if count := strings.Count(body, `"type":"message_stop"`); count != 1 {
+		t.Fatalf("expected one message_stop, got %d: %s", count, body)
+	}
+	if strings.Contains(body, `event: error`) {
+		t.Fatalf("completed compact output should not be an error: %s", body)
+	}
+}
+
 func TestProxyServerStreaming(t *testing.T) {
 	// 1. Create a mock target endpoint server simulating OpenAI Streaming.
 	mux := http.NewServeMux()

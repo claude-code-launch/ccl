@@ -31,17 +31,17 @@ type chatToolState struct {
 }
 
 type ResponsesStreamTransformer struct {
-	sentMessageStart   bool
-	currentBlockType   string
-	currentBlockIdx    int
-	sentMessageStop    bool
-	messageID          string
-	model              string
-	hasToolUse         bool
-	usage              map[string]any
-	tools              map[int]*responsesToolState
-	textDeltaSeen      map[int]bool
-	reasoningDeltaSeen map[int]bool
+	sentMessageStart    bool
+	currentBlockType    string
+	currentBlockIdx     int
+	sentMessageStop     bool
+	messageID           string
+	model               string
+	hasToolUse          bool
+	usage               map[string]any
+	tools               map[int]*responsesToolState
+	textOutputSeen      map[int]bool
+	reasoningOutputSeen map[int]bool
 }
 
 type responsesToolState struct {
@@ -346,11 +346,11 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 	if st.tools == nil {
 		st.tools = make(map[int]*responsesToolState)
 	}
-	if st.textDeltaSeen == nil {
-		st.textDeltaSeen = make(map[int]bool)
+	if st.textOutputSeen == nil {
+		st.textOutputSeen = make(map[int]bool)
 	}
-	if st.reasoningDeltaSeen == nil {
-		st.reasoningDeltaSeen = make(map[int]bool)
+	if st.reasoningOutputSeen == nil {
+		st.reasoningOutputSeen = make(map[int]bool)
 	}
 
 	// Many OpenAI-compatible gateways omit the SSE "event:" line and only put
@@ -382,7 +382,7 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 			}
 		}
 		if delta != "" {
-			st.textDeltaSeen[outputIndex] = true
+			st.textOutputSeen[outputIndex] = true
 			events = append(events, st.ensureResponsesTextBlock()...)
 			events = append(events, anthEvent("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
@@ -392,6 +392,23 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 					"text": delta,
 				},
 			}))
+		}
+	case "response.output_text.done":
+		outputIndex := intFromAny(payload["output_index"])
+		text := stringFromAny(payload["text"])
+		if text != "" && !st.textOutputSeen[outputIndex] {
+			st.textOutputSeen[outputIndex] = true
+			events = append(events, st.responsesTextDelta(text)...)
+		}
+	case "response.content_part.done":
+		outputIndex := intFromAny(payload["output_index"])
+		part := mapFromAny(payload["part"])
+		partType := stringFromAny(part["type"])
+		text := stringFromAny(part["text"])
+		if text != "" && !st.textOutputSeen[outputIndex] &&
+			(partType == "output_text" || partType == "text" || partType == "refusal" || partType == "") {
+			st.textOutputSeen[outputIndex] = true
+			events = append(events, st.responsesTextDelta(text)...)
 		}
 	case "response.reasoning_text.delta",
 		"response.reasoning_summary_text.delta",
@@ -404,7 +421,7 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 			}
 		}
 		if delta != "" {
-			st.reasoningDeltaSeen[outputIndex] = true
+			st.reasoningOutputSeen[outputIndex] = true
 			events = append(events, st.ensureResponsesThinkingBlock()...)
 			events = append(events, anthEvent("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
@@ -449,6 +466,11 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 	case "response.completed":
 		response := mapFromAny(payload["response"])
 		st.captureUsage(response)
+		events = append(events, st.handleResponsesFinalOutput(response)...)
+		if !st.anyResponsesTextOutputSeen() && !st.hasToolUse {
+			events = append(events, st.responsesErrorWithFallback(payload, "OpenAI Responses stream completed without assistant output")...)
+			break
+		}
 		stopReason := "end_turn"
 		if st.hasToolUse {
 			stopReason = "tool_use"
@@ -459,15 +481,18 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 	case "response.incomplete":
 		response := mapFromAny(payload["response"])
 		st.captureUsage(response)
+		events = append(events, st.handleResponsesFinalOutput(response)...)
+		if !st.anyResponsesTextOutputSeen() && !st.hasToolUse {
+			events = append(events, st.responsesErrorWithFallback(payload, "OpenAI Responses stream ended incomplete without assistant output")...)
+			break
+		}
 		stopReason := "max_tokens"
 		if st.hasToolUse {
 			stopReason = "tool_use"
 		}
 		events = append(events, st.finish(stopReason)...)
 	case "response.failed", "error":
-		// Surface a finished Anthropic stream so Claude Code does not hang.
-		// Prefer max_tokens over end_turn for failed generation.
-		events = append(events, st.finish("max_tokens")...)
+		events = append(events, st.responsesErrorWithFallback(payload, "OpenAI Responses stream failed")...)
 	}
 
 	return events, nil
@@ -484,7 +509,7 @@ func (st *ResponsesStreamTransformer) handleResponsesOutputItem(payload, item ma
 		events := st.ensureResponsesMessageStart()
 		// Some gateways only emit full text on output_item.done (no deltas).
 		outputIndex := intFromAny(payload["output_index"])
-		if done && !st.textDeltaSeen[outputIndex] {
+		if done && !st.textOutputSeen[outputIndex] {
 			for _, partAny := range sliceFromAny(item["content"]) {
 				part := mapFromAny(partAny)
 				text := stringFromAny(part["text"])
@@ -493,15 +518,8 @@ func (st *ResponsesStreamTransformer) handleResponsesOutputItem(payload, item ma
 					continue
 				}
 				if partType == "output_text" || partType == "text" || partType == "refusal" || partType == "" {
-					events = append(events, st.ensureResponsesTextBlock()...)
-					events = append(events, anthEvent("content_block_delta", map[string]any{
-						"type":  "content_block_delta",
-						"index": st.currentBlockIdx,
-						"delta": map[string]any{
-							"type": "text_delta",
-							"text": text,
-						},
-					}))
+					st.textOutputSeen[outputIndex] = true
+					events = append(events, st.responsesTextDelta(text)...)
 				}
 			}
 		}
@@ -509,10 +527,11 @@ func (st *ResponsesStreamTransformer) handleResponsesOutputItem(payload, item ma
 	case "reasoning":
 		events := st.ensureResponsesMessageStart()
 		outputIndex := intFromAny(payload["output_index"])
-		if done && !st.reasoningDeltaSeen[outputIndex] {
+		if done && !st.reasoningOutputSeen[outputIndex] {
 			for _, partAny := range sliceFromAny(item["summary"]) {
 				part := mapFromAny(partAny)
 				if text := stringFromAny(part["text"]); text != "" {
+					st.reasoningOutputSeen[outputIndex] = true
 					events = append(events, st.ensureResponsesThinkingBlock()...)
 					events = append(events, anthEvent("content_block_delta", map[string]any{
 						"type":  "content_block_delta",
@@ -546,6 +565,79 @@ func (st *ResponsesStreamTransformer) handleResponsesOutputItem(payload, item ma
 		return events
 	}
 	return nil
+}
+
+func (st *ResponsesStreamTransformer) handleResponsesFinalOutput(response map[string]any) []string {
+	var events []string
+	output := sliceFromAny(response["output"])
+	for outputIndex, itemAny := range output {
+		item := mapFromAny(itemAny)
+		events = append(events, st.handleResponsesOutputItem(
+			map[string]any{"output_index": outputIndex},
+			item,
+			true,
+		)...)
+	}
+
+	// A few compatible gateways expose only the SDK-style flattened text on
+	// the completed response. Preserve it when no indexed text was emitted.
+	if text := stringFromAny(response["output_text"]); text != "" && !st.anyResponsesTextOutputSeen() {
+		st.textOutputSeen[0] = true
+		events = append(events, st.responsesTextDelta(text)...)
+	}
+	return events
+}
+
+func (st *ResponsesStreamTransformer) responsesTextDelta(text string) []string {
+	events := st.ensureResponsesTextBlock()
+	return append(events, anthEvent("content_block_delta", map[string]any{
+		"type":  "content_block_delta",
+		"index": st.currentBlockIdx,
+		"delta": map[string]any{
+			"type": "text_delta",
+			"text": text,
+		},
+	}))
+}
+
+func (st *ResponsesStreamTransformer) anyResponsesTextOutputSeen() bool {
+	for _, seen := range st.textOutputSeen {
+		if seen {
+			return true
+		}
+	}
+	return false
+}
+
+func (st *ResponsesStreamTransformer) responsesErrorWithFallback(payload map[string]any, fallback string) []string {
+	if st.sentMessageStop {
+		return nil
+	}
+
+	detail := mapFromAny(payload["error"])
+	response := mapFromAny(payload["response"])
+	if len(detail) == 0 {
+		detail = mapFromAny(response["error"])
+	}
+	message := stringFromAny(detail["message"])
+	if message == "" {
+		message = stringFromAny(payload["message"])
+	}
+	if message == "" {
+		message = fallback
+	}
+
+	// An Anthropic stream may terminate with an error event after HTTP headers
+	// have already been sent. Mark the stream terminal so the EOF fallback does
+	// not append an empty successful assistant message after the error.
+	st.sentMessageStop = true
+	return []string{anthEvent("error", map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    "api_error",
+			"message": message,
+		},
+	})}
 }
 
 func sliceFromAny(v any) []any {

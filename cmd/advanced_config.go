@@ -1667,6 +1667,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 				locale.T("工具搜索", "Tool Search"),
 				purpleText.Render(runtimeSettings.ToolSearch),
 			))
+			body.WriteString(fmt.Sprintf("  %s %s\n",
+				locale.T("最大输出", "Max Output"),
+				purpleText.Render(runtimeSettings.MaxOutputTokens),
+			))
 		}
 
 		body.WriteString("\n  " + locale.T("是否将该 Provider 设为当前激活配置？", "Set as active provider right now?") + "\n\n")

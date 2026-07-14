@@ -3,27 +3,42 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
 func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), error) {
-	var runtime *oauthproxy.Runtime
-	var err error
-	if p.OAuthProvider != "" {
-		if !provider.IsOpenAICompatibleType(p.Type) {
+	if !provider.IsOpenAICompatibleType(p.Type) {
+		if p.OAuthProvider != "" {
 			return provider.Provider{}, nil, fmt.Errorf(
 				"OAuth provider %q requires the OpenAI Chat or Responses protocol",
 				p.OAuthProvider,
 			)
 		}
-		runtime, err = oauthproxy.Start(context.Background(), p.OAuthProvider)
-	} else if provider.IsOpenAIResponsesType(p.Type) {
-		runtime, err = oauthproxy.StartCodexAPI(context.Background(), p.Endpoint, p.APIKey, p.Model)
-	} else {
 		return p, func() {}, nil
 	}
+
+	if p.OAuthProvider == "" && strings.TrimSpace(p.Model) == "" {
+		models, err := protocol.GetOpenAIModels(p.Endpoint, p.APIKey)
+		if err != nil {
+			return provider.Provider{}, nil, fmt.Errorf("discover OpenAI models before starting CLIProxyAPI: %w", err)
+		}
+		p.Model = models
+	}
+	upstreamProtocol := oauthproxy.ProtocolOpenAIChat
+	if provider.IsOpenAIResponsesType(p.Type) {
+		upstreamProtocol = oauthproxy.ProtocolOpenAIResponses
+	}
+	runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
+		Protocol:      upstreamProtocol,
+		Endpoint:      p.Endpoint,
+		APIKey:        p.APIKey,
+		ModelSpec:     provider.RuntimeModelSpec(p),
+		OAuthProvider: p.OAuthProvider,
+	})
 	if err != nil {
 		return provider.Provider{}, nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
 	}

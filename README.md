@@ -15,7 +15,7 @@
    - 若通过 `ccl set` 手动为某个档位指定了模型，则该档位的自动映射被覆盖，其余未配置的档位仍走自动映射。
 
 2. **零感协议翻译与流式代理**
-   - 采用本地轻量级的高性能并发 socket 服务（TCP），自动拦截并完美将 Anthropic 专有的 `Messages` 协议以及 `Streaming (SSE)` 转换为标准的 `OpenAI / Chat Completions` 协议。
+   - 源码嵌入 CLIProxyAPI Go SDK。OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一由 SDK 暴露本机 `/v1/messages`，负责请求、流式响应、工具调用和模型别名转换；Anthropic provider 保持直连。
 
 3. **交互式 TUI 配置向导**
    - 全新的 bubbletea 驱动的全屏 TUI：多页表单，键盘导航（方向键 / Tab / Enter / Esc），实时协议探测与模型拉取。
@@ -34,11 +34,11 @@
    - 支持添加、切换、列出、复制、重命名、删除以及管理多个独立网关。
    - 配置统一存储在 `~/.ccl/config.yaml`，方便备份与迁移。
 
-6. **订阅账号 OAuth 代理**
+6. **统一 CLIProxyAPI 运行时与 OAuth**
    - 源码集成 CLIProxyAPI Go SDK，无需安装或管理第二个代理进程。
    - 支持 `ccl auth chatgpt` 和 `ccl auth gemini`；ChatGPT 在底层使用 CLIProxyAPI 的 Codex OAuth backend。
    - OAuth 凭据保存在 `~/.ccl/auth`，运行时仅绑定本机回环地址，并使用随机会话 key。
-   - ChatGPT 默认走 OpenAI Responses，Gemini 默认走 OpenAI Chat；两者都复用 ccl 的 Anthropic Messages 转换层。
+   - ChatGPT 默认走 OpenAI Responses，Gemini 默认走 OpenAI Chat；手动 API key provider 与 OAuth provider 共用同一套 SDK 运行时。
 
 ---
 
@@ -348,13 +348,13 @@ providers:
 
 配置字段说明：
 
-- `type: openai`（显示为 `openai(chat)`）：`ccl` 会启动本地代理，把 Claude Code 的 Anthropic Messages 请求转换为 OpenAI **Chat Completions**；`model` 是本地模型池，同时会作为本地代理的 `/v1/models` 返回给 Claude Code 做 gateway model discovery。
-- `type: openai_responses`（显示为 `openai(responses)`）：同样走本地代理，但上游使用 OpenAI **Responses** API（`/v1/responses`）。手动 API provider 会先经过内嵌 CLIProxyAPI 的 Codex API-key adapter，由它补齐当前 Codex CLI 标识并规范化请求体；`ccl set` 获取模型后，可在核对页的 Protocol 行用 ←→ / Enter 在 `openai(chat)` 与 `openai(responses)` 之间切换。
+- `type: openai`（显示为 `openai(chat)`）：`ccl` 启动内嵌 CLIProxyAPI 的 OpenAI Compatibility runtime。Claude Code 直接连接 SDK 的 `/v1/messages`，由 SDK 转换到上游 **Chat Completions**；`model`、各 Claude slot、Subagent 与 `[1m]` 名称会注册为 SDK 模型路由或别名。
+- `type: openai_responses`（显示为 `openai(responses)`）：Claude Code 同样直接连接 CLIProxyAPI，但 SDK 使用 **Responses** API（`/v1/responses`）和 Codex API-key executor。它负责 Codex 客户端标识、请求规范化、流式响应与工具调用转换；`ccl set` 获取模型后，可在核对页的 Protocol 行用 ←→ / Enter 在 `openai(chat)` 与 `openai(responses)` 之间切换。
 - Codex 专用路由应填写服务商给出的生成基址，例如 `https://example.com/codex`。ccl 获取模型时会请求 `https://example.com/codex/models`，不会把额外路径写回 endpoint；若填写成 `/codex/v1`，ccl 会提示正确地址并停止，而不是静默修改。Codex 路径在最终核对页默认选择 Responses，仍可手动切换为 Chat。
 - 以 `/claude` 或 `/anthropic` 结尾的网关基址按 Anthropic 处理，模型列表请求会自动使用 `<endpoint>/v1/models`；其他 OpenAI 基址使用 `<endpoint>/models`。
 - `type: anthropic`：Claude Code 直连该 endpoint，`ccl` 不在请求链路中做协议转换；`model` 只作为 `ccl` 的本地模型池，用于 TUI 列表、`map auto`、默认 slot 映射和可用性检测。Claude Code 访问 `/v1/models` 时看到的是 provider 自己返回的结果。
-- `oauthProvider`：启用源码内嵌的 CLIProxyAPI OAuth runtime。运行时 `endpoint` 和 API key 会替换为仅本次会话有效的本机地址与随机 key，不会写回配置文件。
-- Claude Code 运行时默认使用当前 Custom/Sonnet 映射作为子代理模型，将工具并发限制为 `3`，并设置 `ENABLE_TOOL_SEARCH=false`。这些值会在手动配置的 Review & Apply 页显示，也可通过 `ccl env` 覆盖。
+- `oauthProvider`：让相同的 CLIProxyAPI runtime 使用已保存的 OAuth 凭据。运行时 `endpoint` 和上游凭据会替换为仅本次会话有效的本机地址与随机 Bearer token，不会写回配置文件；OpenAI Chat/Responses provider 也使用相同的会话认证方式，避免 Claude Code 把代理 token 当作新的 Anthropic API key 反复确认。
+- Claude Code 运行时默认使用当前 Custom/Sonnet 映射作为子代理模型，将工具并发限制为 `3`，设置 `ENABLE_TOOL_SEARCH=false`，并将 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` 固定为 Claude Code 默认值 `32000`。输出上限与 200K/1M 上下文窗口是两个独立概念；可通过 `ccl env` 覆盖输出上限，但必须位于 `1..128000`。这些值会在手动配置的 Review & Apply 页显示。
 - Anthropic 直连时 `endpoint` 建议使用裸域名，例如 `https://token.sensenova.cn`；`ccl set` 会自动去掉常见的 `/v1`、`/v1/messages`、`/v1/models` 后缀，避免 Claude Code 运行时拼成 `/v1/v1/messages`。
 
 ## ✅ 本地验证清单
@@ -420,7 +420,7 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 │   ├── config/                # yaml 配置文件读写
 │   ├── locale/                # 多语言支持（中文 / English）
 │   ├── oauthproxy/            # CLIProxyAPI SDK 登录与内嵌运行时
-│   ├── protocol/              # Anthropic ↔ OpenAI 协议转换
+│   ├── protocol/              # Endpoint、模型发现与协议辅助逻辑
 │   ├── provider/              # Provider & Config 数据结构
 │   └── proxy/                 # 本地 TCP 代理服务
 └── main.go

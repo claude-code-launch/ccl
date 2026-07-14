@@ -553,6 +553,7 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 		"Subagent", "gpt-5.6-sol",
 		"Concurrency", "3",
 		"Tool Search", "false",
+		"Max Output", "32000",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected manual review to contain %q, got %q", expected, view)

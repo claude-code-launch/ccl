@@ -2,6 +2,7 @@ package provider
 
 import (
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -79,6 +80,46 @@ func IsOpenAICompatibleType(providerType string) bool {
 
 func IsAnthropicType(providerType string) bool {
 	return strings.EqualFold(strings.TrimSpace(providerType), "anthropic")
+}
+
+// RuntimeModelSpec returns every model ID that Claude Code may send for this
+// provider. Embedded runtimes use the list to register model routes and aliases.
+func RuntimeModelSpec(p Provider) string {
+	models := make([]string, 0)
+	seen := make(map[string]bool)
+	add := func(model string) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return
+		}
+		key := strings.ToLower(model)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		models = append(models, model)
+	}
+	for _, model := range strings.Split(p.Model, ",") {
+		add(model)
+	}
+	for _, model := range []string{
+		p.CustomModelID,
+		p.OpusModel,
+		p.SonnetModel,
+		p.HaikuModel,
+		p.SubagentModel,
+	} {
+		add(model)
+	}
+	overrideKeys := make([]string, 0, len(p.ModelOverrides))
+	for key := range p.ModelOverrides {
+		overrideKeys = append(overrideKeys, key)
+	}
+	sort.Strings(overrideKeys)
+	for _, key := range overrideKeys {
+		add(p.ModelOverrides[key])
+	}
+	return strings.Join(models, ",")
 }
 
 // ProtocolLabel returns a short, human-friendly protocol name for display purposes
