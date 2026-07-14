@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -88,6 +89,14 @@ func runDoctor() error {
 	printProviderModelMappings(p)
 	printProviderExperienceWarnings(p)
 
+	configuredProvider := p
+	p, cleanup, err := prepareProviderRuntime(p)
+	if err != nil {
+		fmt.Printf("\nConnectivity\n  ✗ %v\n", err)
+		return nil
+	}
+	defer cleanup()
+
 	// 5. Test Endpoint reachability and API Authentication key
 	if p.Endpoint != "" {
 		endpointReachable := false
@@ -166,8 +175,8 @@ func runDoctor() error {
 				reordered := append(available, unavailable...)
 				newModel := strings.Join(reordered, ",")
 				if newModel != p.Model {
-					p.Model = newModel
-					cfg.Providers[cfg.ActiveProvider] = p
+					configuredProvider.Model = newModel
+					cfg.Providers[cfg.ActiveProvider] = configuredProvider
 					if err := config.Save(cfg); err != nil {
 						fmt.Printf("  ✗ Failed to save reordered models: %v\n", err)
 					} else {
@@ -277,6 +286,7 @@ func testSingleOpenAIModelContext(parent context.Context, model, endpoint, apiKe
 		return false
 	}
 	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
@@ -318,6 +328,7 @@ func testSingleAnthropicModelWithAuthContext(parent context.Context, model, endp
 		return false
 	}
 	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
@@ -368,6 +379,7 @@ func printProviderModelMappings(p provider.Provider) {
 		{"Sonnet", p.SonnetModel},
 		{"Haiku", p.HaikuModel},
 		{"Custom", p.CustomModelID},
+		{"Subagent", subagentMappingDisplay(p)},
 	}
 
 	fmt.Println("  Slot mappings:")
@@ -376,7 +388,7 @@ func printProviderModelMappings(p provider.Provider) {
 		if model == "" {
 			model = "(unset)"
 		}
-		fmt.Printf("    %-7s %s\n", mapping.label+":", model)
+		fmt.Printf("    %-10s %s\n", mapping.label+":", model)
 	}
 }
 

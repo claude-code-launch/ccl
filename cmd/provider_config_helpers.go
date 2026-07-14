@@ -28,6 +28,7 @@ func applyOneMConfig(p *provider.Provider, oneMSlots map[string]bool) {
 	apply("sonnet", &p.SonnetModel)
 	apply("haiku", &p.HaikuModel)
 	apply("custom", &p.CustomModelID)
+	apply("subagent", &p.SubagentModel)
 
 	if hasAny1M {
 		if p.Env == nil {
@@ -55,6 +56,7 @@ func oneMSlotsFromProvider(p provider.Provider) map[string]bool {
 		{"sonnet", p.SonnetModel},
 		{"haiku", p.HaikuModel},
 		{"custom", p.CustomModelID},
+		{"subagent", p.SubagentModel},
 	} {
 		if hasOneMSuffix(slot.model) {
 			slots[slot.name] = true

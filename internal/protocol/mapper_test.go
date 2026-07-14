@@ -447,8 +447,20 @@ func TestConvertRequestToResponses(t *testing.T) {
 	if respReq.Input[1].Type != "message" || respReq.Input[1].Role != "assistant" {
 		t.Fatalf("assistant text should remain a message before function call: %+v", respReq.Input[1])
 	}
+	// Assistant history must use output_text (OpenAI rejects input_text on assistant).
+	parts, ok := respReq.Input[1].Content.([]protocol.ResponsesContentPart)
+	if !ok || len(parts) != 1 || parts[0].Type != "output_text" {
+		t.Fatalf("assistant text part type should be output_text: %+v", respReq.Input[1].Content)
+	}
+	userParts, ok := respReq.Input[0].Content.([]protocol.ResponsesContentPart)
+	if !ok || len(userParts) < 1 || userParts[0].Type != "input_text" {
+		t.Fatalf("user text part type should be input_text: %+v", respReq.Input[0].Content)
+	}
 	if respReq.Input[2].Type != "function_call" || respReq.Input[2].CallID != "call_1" || respReq.Input[2].Name != "read_file" {
 		t.Fatalf("tool_use not mapped to function_call: %+v", respReq.Input[2])
+	}
+	if respReq.Input[2].Status != "completed" {
+		t.Fatalf("function_call replay should set status=completed: %+v", respReq.Input[2])
 	}
 	if respReq.Input[3].Type != "function_call_output" || respReq.Input[3].Output != "ok" {
 		t.Fatalf("tool_result not mapped to function_call_output: %+v", respReq.Input[3])
@@ -459,6 +471,42 @@ func TestConvertRequestToResponses(t *testing.T) {
 	choice, ok := respReq.ToolChoice.(map[string]string)
 	if !ok || choice["type"] != "function" || choice["name"] != "read_file" {
 		t.Fatalf("tool_choice not mapped: %+v", respReq.ToolChoice)
+	}
+}
+
+func TestConvertRequestToResponsesDropsThinkingAndNormalizesArgs(t *testing.T) {
+	antReq := &protocol.AnthropicRequest{
+		Model: "claude-3-5-sonnet",
+		Messages: []protocol.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "thinking", "thinking": "secret chain of thought"},
+					map[string]any{"type": "text", "text": "done"},
+					map[string]any{
+						"type":  "tool_use",
+						"id":    "call_x",
+						"name":  "run",
+						"input": "not-json",
+					},
+				},
+			},
+		},
+	}
+
+	respReq, err := protocol.ConvertRequestToResponses(antReq)
+	if err != nil {
+		t.Fatalf("ConvertRequestToResponses failed: %v", err)
+	}
+	if len(respReq.Input) != 2 {
+		t.Fatalf("expected message + function_call (thinking dropped), got %+v", respReq.Input)
+	}
+	parts, ok := respReq.Input[0].Content.([]protocol.ResponsesContentPart)
+	if !ok || len(parts) != 1 || parts[0].Type != "output_text" || parts[0].Text != "done" {
+		t.Fatalf("assistant text mapping wrong: %+v", respReq.Input[0])
+	}
+	if respReq.Input[1].Type != "function_call" || !json.Valid([]byte(respReq.Input[1].Arguments)) {
+		t.Fatalf("function args should be valid JSON: %+v", respReq.Input[1])
 	}
 }
 

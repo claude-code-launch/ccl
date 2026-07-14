@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
@@ -14,10 +15,11 @@ import (
 var mapCmd = newMapCommand("map [provider-name]")
 
 type mapOptions struct {
-	opus   string
-	sonnet string
-	haiku  string
-	custom string
+	opus     string
+	sonnet   string
+	haiku    string
+	custom   string
+	subagent string
 }
 
 func newMapCommand(use string) *cobra.Command {
@@ -40,10 +42,12 @@ Examples:
   ccl map auto my-provider
   ccl map --opus gpt-5.1 --sonnet gpt-5.1-codex-max
   ccl map --custom gpt-5.1 my-provider
+  ccl map --subagent gpt-5.4-mini my-provider
   ccl provider map --custom gpt-5.1 my-provider`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hasFlag := cmd.Flags().Changed("opus") || cmd.Flags().Changed("sonnet") ||
-				cmd.Flags().Changed("haiku") || cmd.Flags().Changed("custom")
+				cmd.Flags().Changed("haiku") || cmd.Flags().Changed("custom") ||
+				cmd.Flags().Changed("subagent")
 
 			if hasFlag {
 				return runMapDirect(cmd, args, opts)
@@ -58,10 +62,11 @@ Examples:
 	cmd.Flags().StringVar(&opts.sonnet, "sonnet", "", "Model for Sonnet slot")
 	cmd.Flags().StringVar(&opts.haiku, "haiku", "", "Model for Haiku slot")
 	cmd.Flags().StringVar(&opts.custom, "custom", "", "Model for Custom slot")
+	cmd.Flags().StringVar(&opts.subagent, "subagent", "", "Model for Claude Code subagents (empty uses automatic selection)")
 	return cmd
 }
 
-// runMapDirect applies --opus/--sonnet/--haiku/--custom flags.
+// runMapDirect applies direct slot mapping flags.
 func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -90,6 +95,12 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	if cmd.Flags().Changed("custom") {
 		p.CustomModelID = opts.custom
 	}
+	if cmd.Flags().Changed("subagent") {
+		p.SubagentModel = opts.subagent
+		if p.Env != nil {
+			delete(p.Env, claude.SubagentModelEnv)
+		}
+	}
 
 	applyOneMConfig(&p, oneMSlotsFromProvider(p))
 
@@ -110,6 +121,9 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	}
 	if cmd.Flags().Changed("custom") {
 		fmt.Printf("  Custom -> %s\n", p.CustomModelID)
+	}
+	if cmd.Flags().Changed("subagent") {
+		fmt.Printf("  Subagent -> %s\n", subagentMappingDisplay(p))
 	}
 
 	return nil
@@ -251,15 +265,16 @@ func runMapTUI(args []string) error {
 	fmt.Printf("\n✓ Slot mapping saved for provider %q:\n", providerName)
 	printSlot := func(label, val string) {
 		if val != "" {
-			fmt.Printf("  %-6s -> %s\n", label, val)
+			fmt.Printf("  %-9s -> %s\n", label, val)
 		} else {
-			fmt.Printf("  %-6s -> (unset)\n", label)
+			fmt.Printf("  %-9s -> (unset)\n", label)
 		}
 	}
 	printSlot("Opus", p.OpusModel)
 	printSlot("Sonnet", p.SonnetModel)
 	printSlot("Haiku", p.HaikuModel)
 	printSlot("Custom", p.CustomModelID)
+	printSlot("Subagent", subagentMappingDisplay(p))
 
 	return nil
 }

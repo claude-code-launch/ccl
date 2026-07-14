@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -88,7 +89,7 @@ type OpenAIResponsesUsage struct {
 
 // ProbeOpenAIResponsesSupport sends a minimal, real generation request to the
 // /v1/responses endpoint to determine whether an OpenAI-compatible gateway
-// implements the newer, agent-oriented Responses API ("openai(agent)") as
+// implements the newer Responses API ("openai(responses)") as
 // opposed to only the legacy Chat Completions API ("openai(chat)"). Listing
 // models alone (/v1/models) cannot distinguish these two, since both protocols
 // commonly share the same model catalog — an actual call to /v1/responses is
@@ -127,6 +128,7 @@ func ProbeOpenAIResponsesSupportContext(parent context.Context, endpoint, apiKey
 		return false
 	}
 	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
@@ -153,11 +155,15 @@ func ConvertRequestToResponses(antReq *AnthropicRequest) (*OpenAIResponsesReques
 	}
 
 	for _, antTool := range antReq.Tools {
+		params := antTool.InputSchema
+		if len(params) == 0 {
+			params = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
 		respReq.Tools = append(respReq.Tools, OpenAIResponsesTool{
 			Type:        "function",
 			Name:        antTool.Name,
 			Description: antTool.Description,
-			Parameters:  antTool.InputSchema,
+			Parameters:  params,
 		})
 	}
 
@@ -168,21 +174,58 @@ func ConvertRequestToResponses(antReq *AnthropicRequest) (*OpenAIResponsesReques
 	return respReq, nil
 }
 
+// responsesTextPartType returns the Responses content part type for a message role.
+// OpenAI rejects assistant history that uses "input_text"; assistant text must be "output_text".
+func responsesTextPartType(role string) string {
+	if strings.EqualFold(strings.TrimSpace(role), "assistant") {
+		return "output_text"
+	}
+	return "input_text"
+}
+
+func normalizeFunctionCallArguments(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(raw)) {
+		return raw
+	}
+	// Best-effort: wrap non-JSON tool args as a single string field.
+	b, err := json.Marshal(map[string]string{"value": raw})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 func convertAnthropicMessageToResponsesItems(msg AnthropicMessage) ([]ResponsesInputItem, error) {
+	role := msg.Role
+	if role == "" {
+		role = "user"
+	}
+	textType := responsesTextPartType(role)
+
 	if text, ok := msg.Content.(string); ok {
 		return []ResponsesInputItem{{
 			Type:    "message",
-			Role:    msg.Role,
-			Content: []ResponsesContentPart{{Type: "input_text", Text: text}},
+			Role:    role,
+			Content: []ResponsesContentPart{{Type: textType, Text: text}},
 		}}, nil
 	}
 
 	blocks, ok := msg.Content.([]any)
 	if !ok {
+		// Unknown shape: stringify rather than forwarding raw content that
+		// Responses gateways will reject.
+		raw, err := json.Marshal(msg.Content)
+		if err != nil {
+			return nil, err
+		}
 		return []ResponsesInputItem{{
 			Type:    "message",
-			Role:    msg.Role,
-			Content: msg.Content,
+			Role:    role,
+			Content: []ResponsesContentPart{{Type: textType, Text: string(raw)}},
 		}}, nil
 	}
 
@@ -194,7 +237,7 @@ func convertAnthropicMessageToResponsesItems(msg AnthropicMessage) ([]ResponsesI
 		}
 		items = append(items, ResponsesInputItem{
 			Type:    "message",
-			Role:    msg.Role,
+			Role:    role,
 			Content: contentParts,
 		})
 		contentParts = nil
@@ -214,9 +257,14 @@ func convertAnthropicMessageToResponsesItems(msg AnthropicMessage) ([]ResponsesI
 		switch block.Type {
 		case "text":
 			contentParts = append(contentParts, ResponsesContentPart{
-				Type: "input_text",
+				Type: textType,
 				Text: block.Text,
 			})
+		case "thinking":
+			// Historical Anthropic thinking blocks cannot be replayed as Responses
+			// "reasoning" items (those require provider-issued IDs / encrypted content).
+			// Drop them so multi-turn requests stay valid.
+			continue
 		case "image":
 			if block.Source == nil {
 				continue
@@ -230,28 +278,42 @@ func convertAnthropicMessageToResponsesItems(msg AnthropicMessage) ([]ResponsesI
 				imageURL = "data:" + mediaType + ";base64," + block.Source.Data
 			}
 			if imageURL != "" {
-				contentParts = append(contentParts, ResponsesContentPart{
-					Type:     "input_image",
-					ImageURL: imageURL,
-				})
+				// input_image is only valid on user/system turns; for assistant
+				// history fall back to a textual placeholder.
+				if textType == "input_text" {
+					contentParts = append(contentParts, ResponsesContentPart{
+						Type:     "input_image",
+						ImageURL: imageURL,
+					})
+				} else {
+					contentParts = append(contentParts, ResponsesContentPart{
+						Type: textType,
+						Text: "[image]",
+					})
+				}
 			}
 		case "tool_use":
 			flushMessage()
-			args := string(block.Input)
-			if args == "" {
-				args = "{}"
+			callID := block.ID
+			if callID == "" {
+				callID = fmt.Sprintf("call_%d", len(items)+1)
 			}
 			items = append(items, ResponsesInputItem{
 				Type:      "function_call",
-				CallID:    block.ID,
+				CallID:    callID,
 				Name:      block.Name,
-				Arguments: args,
+				Arguments: normalizeFunctionCallArguments(string(block.Input)),
+				Status:    "completed",
 			})
 		case "tool_result":
 			flushMessage()
+			callID := block.ToolUseID
+			if callID == "" {
+				callID = fmt.Sprintf("call_%d", len(items)+1)
+			}
 			items = append(items, ResponsesInputItem{
 				Type:   "function_call_output",
-				CallID: block.ToolUseID,
+				CallID: callID,
 				Output: stringifyToolResult(block.Content),
 			})
 		}
@@ -278,7 +340,7 @@ func ConvertResponsesResponse(resp *OpenAIResponsesResponse) (*AnthropicResponse
 	}
 
 	hasToolUse := false
-	for _, item := range resp.Output {
+	for i, item := range resp.Output {
 		switch item.Type {
 		case "reasoning":
 			for _, summary := range item.Summary {
@@ -289,25 +351,67 @@ func ConvertResponsesResponse(resp *OpenAIResponsesResponse) (*AnthropicResponse
 					})
 				}
 			}
+			// Some gateways put reasoning text in content parts instead of summary.
+			for _, part := range item.Content {
+				if part.Text == "" {
+					continue
+				}
+				if part.Type == "summary_text" || part.Type == "reasoning_text" || part.Type == "text" || part.Type == "output_text" {
+					antResp.Content = append(antResp.Content, ContentBlock{
+						Type:     "thinking",
+						Thinking: part.Text,
+					})
+				}
+			}
 		case "message":
 			for _, part := range item.Content {
-				if (part.Type == "output_text" || part.Type == "text") && part.Text != "" {
-					antResp.Content = append(antResp.Content, ContentBlock{
-						Type: "text",
-						Text: part.Text,
-					})
+				switch part.Type {
+				case "output_text", "text":
+					if part.Text != "" {
+						antResp.Content = append(antResp.Content, ContentBlock{
+							Type: "text",
+							Text: part.Text,
+						})
+					}
+				case "refusal":
+					if part.Text != "" {
+						antResp.Content = append(antResp.Content, ContentBlock{
+							Type: "text",
+							Text: part.Text,
+						})
+					}
 				}
 			}
 		case "function_call":
 			hasToolUse = true
 			input := json.RawMessage("{}")
-			if item.Arguments != "" && json.Valid([]byte(item.Arguments)) {
-				input = json.RawMessage(item.Arguments)
+			if item.Arguments != "" {
+				if json.Valid([]byte(item.Arguments)) {
+					input = json.RawMessage(item.Arguments)
+				} else {
+					// Keep Claude Code happy with a JSON object even if upstream
+					// returned malformed arguments.
+					b, _ := json.Marshal(map[string]string{"value": item.Arguments})
+					if len(b) > 0 {
+						input = b
+					}
+				}
+			}
+			callID := item.CallID
+			if callID == "" {
+				callID = item.ID
+			}
+			if callID == "" {
+				callID = fmt.Sprintf("call_%d", i+1)
+			}
+			name := item.Name
+			if name == "" {
+				name = "unknown_tool"
 			}
 			antResp.Content = append(antResp.Content, ContentBlock{
 				Type:  "tool_use",
-				ID:    item.CallID,
-				Name:  item.Name,
+				ID:    callID,
+				Name:  name,
 				Input: input,
 			})
 		}
@@ -315,10 +419,15 @@ func ConvertResponsesResponse(resp *OpenAIResponsesResponse) (*AnthropicResponse
 
 	if hasToolUse {
 		antResp.StopReason = "tool_use"
-	} else if resp.Status == "incomplete" {
+	} else if resp.Status == "incomplete" || resp.Status == "failed" {
 		antResp.StopReason = "max_tokens"
 	} else {
 		antResp.StopReason = "end_turn"
+	}
+
+	// Claude Code expects a non-nil content array.
+	if antResp.Content == nil {
+		antResp.Content = []ContentBlock{}
 	}
 
 	return antResp, nil

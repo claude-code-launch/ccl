@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +203,50 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 	}
 }
 
+func TestPreviewSettingsWithEmbeddedCodexOAuth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	credential := []byte(`{"type":"codex","access_token":"test-token","refresh_token":"test-refresh","email":"test@example.com"}`)
+	if err := os.WriteFile(filepath.Join(authDir, "codex-test.json"), credential, 0o600); err != nil {
+		t.Fatalf("write credential: %v", err)
+	}
+
+	result := claude.PreviewSettings(provider.Provider{
+		Name:          "codex",
+		Type:          "openai_responses",
+		Endpoint:      "oauth://codex",
+		OAuthProvider: "codex",
+		Model:         "gpt-test",
+		CustomModelID: "gpt-test",
+	})
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(result), &settings); err != nil {
+		t.Fatalf("PreviewSettings() returned invalid JSON: %v; result=%s", err, result)
+	}
+	if settings.Model != "gpt-test" || settings.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "gpt-test" {
+		t.Fatalf("OAuth settings = %+v", settings)
+	}
+	baseURL := settings.Env["ANTHROPIC_BASE_URL"]
+	if baseURL == "" || baseURL == "oauth://codex" {
+		t.Fatalf("OAuth provider did not use ccl local proxy: %q", baseURL)
+	}
+}
+
+func TestPreviewSettingsRejectsAnthropicOAuthProvider(t *testing.T) {
+	result := claude.PreviewSettings(provider.Provider{
+		Name:          "codex",
+		Type:          "anthropic",
+		OAuthProvider: "codex",
+	})
+	if !strings.Contains(result, "requires the OpenAI Chat or Responses protocol") {
+		t.Fatalf("PreviewSettings() = %q, want OAuth protocol validation error", result)
+	}
+}
+
 func TestLauncherDynamicDiscovery(t *testing.T) {
 	// Start an OpenAI-style mock server
 	mux := http.NewServeMux()
@@ -315,6 +362,76 @@ func TestPreviewSettingsSingleModelPoolFillsDefaultSlots(t *testing.T) {
 		if settings.Env[key] != "sensenova-u1-fast" {
 			t.Fatalf("expected %s to use the single model pool value, got %q", key, settings.Env[key])
 		}
+	}
+}
+
+func TestPreviewSettingsAppliesRuntimeDefaults(t *testing.T) {
+	p := provider.Provider{
+		Name:          "runtime-defaults",
+		Type:          "anthropic",
+		Endpoint:      "https://api.anthropic.com",
+		APIKey:        "sk-test",
+		Model:         "gpt-5.6-sol,gpt-5.6-mini",
+		CustomModelID: "gpt-5.6-sol",
+	}
+
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env[claude.SubagentModelEnv] != "gpt-5.6-sol" {
+		t.Fatalf("subagent model = %q", settings.Env[claude.SubagentModelEnv])
+	}
+	if settings.Env[claude.ToolUseConcurrencyEnv] != claude.DefaultToolUseConcurrency {
+		t.Fatalf("tool concurrency = %q", settings.Env[claude.ToolUseConcurrencyEnv])
+	}
+	if settings.Env[claude.ToolSearchEnv] != claude.DefaultToolSearch {
+		t.Fatalf("tool search = %q", settings.Env[claude.ToolSearchEnv])
+	}
+}
+
+func TestPreviewSettingsAppliesExplicitSubagentMapping(t *testing.T) {
+	p := provider.Provider{
+		Name:          "subagent-mapping",
+		Type:          "anthropic",
+		Endpoint:      "https://api.anthropic.com",
+		APIKey:        "sk-test",
+		CustomModelID: "main-model",
+		SubagentModel: "cheap-subagent-model",
+	}
+
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if got := settings.Env[claude.SubagentModelEnv]; got != "cheap-subagent-model" {
+		t.Fatalf("subagent model = %q, want explicit mapping", got)
+	}
+}
+
+func TestPreviewSettingsRuntimeDefaultsCanBeOverridden(t *testing.T) {
+	p := provider.Provider{
+		Name:          "runtime-overrides",
+		Type:          "anthropic",
+		Endpoint:      "https://api.anthropic.com",
+		APIKey:        "sk-test",
+		SonnetModel:   "default-sonnet",
+		SubagentModel: "mapped-subagent",
+		Env: map[string]string{
+			claude.SubagentModelEnv:      "override-subagent",
+			claude.ToolUseConcurrencyEnv: "7",
+			claude.ToolSearchEnv:         "true",
+		},
+	}
+
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env[claude.SubagentModelEnv] != "override-subagent" ||
+		settings.Env[claude.ToolUseConcurrencyEnv] != "7" ||
+		settings.Env[claude.ToolSearchEnv] != "true" {
+		t.Fatalf("runtime overrides not applied: %+v", settings.Env)
 	}
 }
 

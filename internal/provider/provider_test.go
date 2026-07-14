@@ -16,10 +16,11 @@ func TestProtocolLabel(t *testing.T) {
 		{"anthropic mixed case", "Anthropic", "anthropic"},
 		{"openai chat", "openai", "openai(chat)"},
 		{"openai chat display label", "openai(chat)", "openai(chat)"},
-		{"openai responses canonical", "openai_responses", "openai(agent)"},
-		{"openai responses hyphenated", "openai-responses", "openai(agent)"},
-		{"openai responses bare", "responses", "openai(agent)"},
-		{"openai responses display label", "openai(agent)", "openai(agent)"},
+		{"openai responses canonical", "openai_responses", "openai(responses)"},
+		{"openai responses hyphenated", "openai-responses", "openai(responses)"},
+		{"openai responses bare", "responses", "openai(responses)"},
+		{"openai responses display label", "openai(responses)", "openai(responses)"},
+		{"openai responses legacy display label", "openai(agent)", "openai(responses)"},
 		{"empty", "", ""},
 	}
 
@@ -33,7 +34,7 @@ func TestProtocolLabel(t *testing.T) {
 }
 
 func TestIsOpenAIResponsesType(t *testing.T) {
-	for _, v := range []string{"openai_responses", "openai-responses", "responses", "OPENAI_RESPONSES", "openai(agent)"} {
+	for _, v := range []string{"openai_responses", "openai-responses", "responses", "OPENAI_RESPONSES", "openai(responses)", "openai(agent)"} {
 		if !provider.IsOpenAIResponsesType(v) {
 			t.Errorf("IsOpenAIResponsesType(%q) = false, want true", v)
 		}
@@ -46,7 +47,7 @@ func TestIsOpenAIResponsesType(t *testing.T) {
 }
 
 func TestIsOpenAICompatibleType(t *testing.T) {
-	for _, v := range []string{"openai", "openai(chat)", "openai_responses", "openai-responses", "responses", "openai(agent)"} {
+	for _, v := range []string{"openai", "openai(chat)", "openai_responses", "openai-responses", "responses", "openai(responses)", "openai(agent)"} {
 		if !provider.IsOpenAICompatibleType(v) {
 			t.Errorf("IsOpenAICompatibleType(%q) = false, want true", v)
 		}

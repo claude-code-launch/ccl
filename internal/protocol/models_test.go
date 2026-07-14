@@ -148,6 +148,16 @@ func TestNormalizeVersionedURLs(t *testing.T) {
 			want: "https://example.com/api/anthropic/v1/models",
 		},
 		{
+			name: "claude suffix models appends v1",
+			got:  protocol.NormalizeAnthropicModelsURL("https://example.com/api/claude"),
+			want: "https://example.com/api/claude/v1/models",
+		},
+		{
+			name: "claude suffix messages appends v1",
+			got:  protocol.NormalizeAnthropicMessagesURL("https://example.com/api/claude"),
+			want: "https://example.com/api/claude/v1/messages",
+		},
+		{
 			name: "empty openai uses official v1 default",
 			got:  protocol.NormalizeOpenAIModelsURL(""),
 			want: "https://api.openai.com/v1/models",
@@ -180,5 +190,28 @@ func TestNormalizeVersionedURLs(t *testing.T) {
 				t.Fatalf("got %q, want %q", tt.got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDedicatedCodexEndpointClassification(t *testing.T) {
+	if !protocol.IsCodexBaseEndpoint("https://new.sharedchat.cc/codex") {
+		t.Fatal("expected /codex to be classified as a dedicated Codex base endpoint")
+	}
+	if protocol.IsCodexBaseEndpoint("https://new.sharedchat.cc/codex/v1") {
+		t.Fatal("/codex/v1 must not be classified as a valid Codex base endpoint")
+	}
+
+	for _, endpoint := range []string{
+		"https://new.sharedchat.cc/codex/v1",
+		"https://new.sharedchat.cc/codex/v1/models",
+		"https://new.sharedchat.cc/codex/v1/responses",
+	} {
+		suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint)
+		if !invalid || suggestion != "https://new.sharedchat.cc/codex" {
+			t.Errorf("InvalidCodexV1EndpointSuggestion(%q) = %q, %t", endpoint, suggestion, invalid)
+		}
+	}
+	if _, invalid := protocol.InvalidCodexV1EndpointSuggestion("https://api.openai.com/v1"); invalid {
+		t.Fatal("ordinary OpenAI /v1 endpoint was incorrectly rejected")
 	}
 }

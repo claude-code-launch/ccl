@@ -247,6 +247,9 @@ func (s *Server) convertAnthropicRequestForUpstream(antReq *protocol.AnthropicRe
 			return nil, "", err
 		}
 		req.Model = mappedModel
+		// Claude request-tracing metadata is not needed for model execution and
+		// Codex-compatible Responses endpoints reject it.
+		req.Metadata = nil
 		return req, protocol.NormalizeOpenAIResponsesURL(s.provider.Endpoint), nil
 	}
 
@@ -422,6 +425,15 @@ func (s *Server) handleResponsesStreaming(w http.ResponseWriter, body io.Reader)
 	if block.Len() > 0 {
 		flushBlock()
 	}
+	// Some gateways drop the final response.completed / [DONE] events. Always
+	// emit a terminal Anthropic frame so Claude Code does not hang mid-stream.
+	if formatted := FormatEvents(st.finish("end_turn")); formatted != "" {
+		if _, err := fmt.Fprint(w, formatted); err != nil {
+			s.logger.Error("Failed to write final Responses SSE event to client", "error", err)
+			return
+		}
+		flusher.Flush()
+	}
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -486,7 +498,7 @@ func annotateUpstreamError(body []byte) []byte {
 		return body
 	}
 	msg, _ := errObj["message"].(string)
-	hint := "提示：该 endpoint 似乎是 Codex 客户端专用路由，不适合 Claude Code/ccl；请使用普通 Anthropic/OpenAI 兼容 endpoint，或直接用 Codex CLI。"
+	hint := "提示：ccl 已通过内嵌 CLIProxyAPI 发送 Codex 兼容请求，但上游仍拒绝访问；请检查 API Key、Codex Responses 权限或更新 ccl 的内置适配。"
 	if strings.Contains(msg, hint) {
 		return body
 	}

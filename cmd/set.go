@@ -109,6 +109,14 @@ func RunProviderSet(args []string) error {
 
 	// 🚀 运行基于特定域 v2 架构的超级大面板
 	m := NewAdvancedConfigModel(&p)
+	if p.OAuthProvider != "" {
+		runtimeProvider, cleanup, err := prepareProviderRuntime(p)
+		if err != nil {
+			return fmt.Errorf("prepare OAuth provider for configuration: %w", err)
+		}
+		defer cleanup()
+		m.configureOAuthRuntime(runtimeProvider.Endpoint, runtimeProvider.APIKey)
+	}
 	program := tea.NewProgram(m)
 	finalModel, err := program.Run()
 	if err != nil {
@@ -145,7 +153,7 @@ func RunProviderSet(args []string) error {
 	}
 
 	// 未完成探测就退出（如在凭据页按 Esc）→ 不保存半成品配置
-	if p.Endpoint == "" || p.APIKey == "" || p.Type == "" || p.Model == "" {
+	if !providerConfigurationComplete(p) {
 		setDebugf(
 			"abort: incomplete config endpoint_empty=%t api_key_empty=%t type_empty=%t model_empty=%t type=%q model_count=%d effort=%q slots=%s",
 			p.Endpoint == "",
@@ -192,6 +200,16 @@ func RunProviderSet(args []string) error {
 	return nil
 }
 
+func providerConfigurationComplete(p provider.Provider) bool {
+	if strings.TrimSpace(p.Type) == "" || strings.TrimSpace(p.Model) == "" {
+		return false
+	}
+	if strings.TrimSpace(p.OAuthProvider) != "" {
+		return true
+	}
+	return strings.TrimSpace(p.Endpoint) != "" && strings.TrimSpace(p.APIKey) != ""
+}
+
 func init() {
 	rootCmd.AddCommand(setCmd)
 }
@@ -233,11 +251,12 @@ func countCSV(csv string) int {
 
 func slotDebugSummary(p provider.Provider) string {
 	return fmt.Sprintf(
-		"opus_set=%t sonnet_set=%t haiku_set=%t custom_set=%t",
+		"opus_set=%t sonnet_set=%t haiku_set=%t custom_set=%t subagent_set=%t",
 		strings.TrimSpace(p.OpusModel) != "",
 		strings.TrimSpace(p.SonnetModel) != "",
 		strings.TrimSpace(p.HaikuModel) != "",
 		strings.TrimSpace(p.CustomModelID) != "",
+		strings.TrimSpace(p.SubagentModel) != "",
 	)
 }
 
@@ -250,15 +269,15 @@ func stringInSlice(s string, slice []string) bool {
 	return false
 }
 
-// detectProtocolAndModels probes model-list endpoints only. Detection is
-// path-driven first:
-//   - paths ending in /vN are probed at /models with Bearer auth;
-//   - other paths are probed at /v1/models with Bearer auth first, covering
-//     the common gateway case where the user omitted /v1;
-//   - x-api-key Anthropic probing remains as a fallback for native Claude APIs.
+// detectProtocolAndModels probes only the /models endpoint derived from the
+// exact user-supplied base URL. Paths ending in /vN or /codex prefer OpenAI
+// Bearer auth; unversioned paths ending in /claude or /anthropic prefer native
+// Anthropic x-api-key auth. The returned model-list shape takes precedence over
+// those path hints.
 //
-// Responses remains supported for manually authored provider configs, but
-// automatic setup intentionally does not select it.
+// OpenAI Chat and Responses share the same model-list shape, so automatic
+// detection intentionally stops at the OpenAI family. The user chooses the
+// concrete OpenAI protocol on the Review page without an extra paid request.
 // Returns (protocol, comma-separated-models, error).
 // error is non-nil when protocol detection fails.
 func detectProtocolAndModels(endpoint, apiKey string) (string, string, error) {
@@ -282,6 +301,12 @@ const (
 func detectProtocolAndModelsDetailed(endpoint, apiKey string) protocolDetectionResult {
 	endpoint = strings.TrimSuffix(endpoint, "/")
 	setDebugf("detectProtocolAndModelsDetailed start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
+	if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint); invalid {
+		return protocolDetectionResult{err: fmt.Errorf("%s", locale.T(
+			fmt.Sprintf("Codex endpoint 应填写为 %s，不要包含 /v1；获取模型时 ccl 会请求 %s/models", suggestion, suggestion),
+			fmt.Sprintf("Codex endpoint must be %s without /v1; ccl will request %s/models for model discovery", suggestion, suggestion),
+		))}
+	}
 
 	var failures []modelProbeFailure
 	for _, candidate := range buildModelProbeCandidates(endpoint) {
@@ -298,7 +323,7 @@ func detectProtocolAndModelsDetailed(endpoint, apiKey string) protocolDetectionR
 			failures = append(failures, modelProbeFailure{candidate: candidate, err: err})
 			continue
 		}
-		if detection, ok := classifyModelProbeResult(candidate, result, apiKey); ok {
+		if detection, ok := classifyModelProbeResult(candidate, result); ok {
 			return detection
 		}
 		err = fmt.Errorf("unexpected model list shape %q for %s", result.shape, candidate.expect)
@@ -364,23 +389,22 @@ type modelProbeFailure struct {
 }
 
 func buildModelProbeCandidates(endpoint string) []modelProbeCandidate {
-	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
-	if endpointHasVersionSuffix(endpoint) {
-		modelsURL := protocol.NormalizeOpenAIModelsURL(endpoint)
+	baseURL := normalizeModelBaseURL(endpoint)
+	if endpointLikelyAnthropic(baseURL) {
+		modelsURL := protocol.NormalizeAnthropicModelsURL(baseURL)
 		return []modelProbeCandidate{
-			{name: "version-bearer-openai", modelsURL: modelsURL, baseURL: normalizeModelBaseURL(endpoint), auth: modelProbeAuthBearer, expect: modelProbeExpectOpenAI},
-			{name: "version-x-api-key-anthropic", modelsURL: modelsURL, baseURL: normalizeModelBaseURL(endpoint), auth: modelProbeAuthXAPIKey, expect: modelProbeExpectAnthropic},
+			{name: "anthropic-path-x-api-key", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthXAPIKey, expect: modelProbeExpectAnthropic},
+			{name: "anthropic-path-bearer", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthBearer, expect: modelProbeExpectAnthropic},
 		}
 	}
-
-	v1ModelsURL := normalizeV1ModelsURL(endpoint)
+	modelsURL := protocol.NormalizeOpenAIModelsURL(baseURL)
 	return []modelProbeCandidate{
-		{name: "non-version-v1-bearer-openai", modelsURL: v1ModelsURL, baseURL: appendV1BaseURL(endpoint), auth: modelProbeAuthBearer, expect: modelProbeExpectOpenAI},
-		{name: "non-version-v1-x-api-key-anthropic", modelsURL: v1ModelsURL, baseURL: endpoint, auth: modelProbeAuthXAPIKey, expect: modelProbeExpectAnthropic},
+		{name: "openai-path-bearer", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthBearer, expect: modelProbeExpectOpenAI},
+		{name: "openai-path-x-api-key", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthXAPIKey, expect: modelProbeExpectAnthropic},
 	}
 }
 
-func classifyModelProbeResult(candidate modelProbeCandidate, result modelListDetection, apiKey string) (protocolDetectionResult, bool) {
+func classifyModelProbeResult(candidate modelProbeCandidate, result modelListDetection) (protocolDetectionResult, bool) {
 	if result.shape == modelListShapeAnthropic {
 		auth := anthropicAuthXAPIKey
 		if candidate.auth == modelProbeAuthBearer {
@@ -390,13 +414,16 @@ func classifyModelProbeResult(candidate modelProbeCandidate, result modelListDet
 		return protocolDetectionResult{protocol: "anthropic", models: result.models, baseURL: candidate.baseURL, anthropicAuth: auth}, true
 	}
 
-	if candidate.expect == modelProbeExpectAnthropic {
-		return protocolDetectionResult{}, false
-	}
-
-	if result.shape == modelListShapeOpenAI || result.shape == modelListShapeUnknown {
-		setDebugf("detect selected openai model_count=%d shape=%q probe=%s base_url=%q", countCSV(result.models), result.shape, candidate.name, candidate.baseURL)
+	if result.shape == modelListShapeOpenAI || candidate.expect == modelProbeExpectOpenAI {
+		setDebugf("detect selected openai family model_count=%d shape=%q probe=%s base_url=%q", countCSV(result.models), result.shape, candidate.name, candidate.baseURL)
 		return protocolDetectionResult{protocol: "openai", models: result.models, baseURL: candidate.baseURL}, true
+	}
+	if result.shape == modelListShapeUnknown && candidate.expect == modelProbeExpectAnthropic {
+		auth := anthropicAuthXAPIKey
+		if candidate.auth == modelProbeAuthBearer {
+			auth = anthropicAuthBearer
+		}
+		return protocolDetectionResult{protocol: "anthropic", models: result.models, baseURL: candidate.baseURL, anthropicAuth: auth}, true
 	}
 
 	return protocolDetectionResult{}, false
@@ -423,6 +450,22 @@ func fetchCandidateModelsForDetection(candidate modelProbeCandidate, apiKey stri
 
 func endpointHasVersionSuffix(endpoint string) bool {
 	return endpointVersionSuffix(endpoint) != ""
+}
+
+func endpointLikelyAnthropic(endpoint string) bool {
+	if endpointHasVersionSuffix(endpoint) {
+		return false
+	}
+	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(endpoint), "/"))
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) == 0 {
+		return false
+	}
+	last := strings.ToLower(parts[len(parts)-1])
+	return last == "claude" || last == "anthropic"
 }
 
 func endpointVersionSuffix(endpoint string) string {
@@ -468,34 +511,6 @@ func normalizeModelBaseURL(endpoint string) string {
 		return strings.TrimSuffix(endpoint, "/messages")
 	default:
 		return endpoint
-	}
-}
-
-func appendV1BaseURL(endpoint string) string {
-	endpoint = normalizeModelBaseURL(endpoint)
-	if endpoint == "" {
-		return "https://api.openai.com/v1"
-	}
-	if endpointHasVersionSuffix(endpoint) {
-		return endpoint
-	}
-	return endpoint + "/v1"
-}
-
-func normalizeV1ModelsURL(endpoint string) string {
-	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
-	if endpoint == "" {
-		return "https://api.anthropic.com/v1/models"
-	}
-	switch {
-	case strings.HasSuffix(endpoint, "/v1/models"):
-		return endpoint
-	case strings.HasSuffix(endpoint, "/models"):
-		return strings.TrimSuffix(endpoint, "/models") + "/v1/models"
-	case strings.HasSuffix(endpoint, "/messages"):
-		return strings.TrimSuffix(endpoint, "/messages") + "/models"
-	default:
-		return endpoint + "/v1/models"
 	}
 }
 
@@ -552,7 +567,7 @@ func summarizeProbeFailures(failures []modelProbeFailure) string {
 	case hasUnauthorized:
 		return locale.T("地址可访问，但 API Key 或鉴权方式不正确", "endpoint is reachable, but API key or auth type is invalid")
 	case hasNotFound:
-		return locale.T("模型列表路径不存在，可能缺少 /v1 或服务商不支持 /models", "model-list path was not found; /v1 may be missing or the provider may not support /models")
+		return locale.T("模型列表路径不存在，请检查 endpoint 或确认服务商支持 /models", "model-list path was not found; check the endpoint or confirm the provider supports /models")
 	case hasMethodNotAllowed:
 		return locale.T("模型列表 endpoint 存在但不接受 GET 方法", "model-list endpoint exists but does not accept GET")
 	case hasHTML:

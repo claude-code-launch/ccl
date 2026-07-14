@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/proxy"
@@ -26,6 +28,58 @@ type settingsJSON struct {
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
+}
+
+const (
+	SubagentModelEnv          = "CLAUDE_CODE_SUBAGENT_MODEL"
+	ToolUseConcurrencyEnv     = "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"
+	ToolSearchEnv             = "ENABLE_TOOL_SEARCH"
+	DefaultToolUseConcurrency = "3"
+	DefaultToolSearch         = "false"
+)
+
+// RuntimeSettings are ccl's Claude Code process defaults. Provider Env values
+// override these defaults so advanced users retain an escape hatch.
+type RuntimeSettings struct {
+	SubagentModel      string
+	ToolUseConcurrency string
+	ToolSearch         string
+}
+
+func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
+	subagentModel := strings.TrimSpace(p.SubagentModel)
+	if subagentModel == "" {
+		subagentModel = defaultSubagentModel(p)
+	}
+	settings := RuntimeSettings{
+		SubagentModel:      subagentModel,
+		ToolUseConcurrency: DefaultToolUseConcurrency,
+		ToolSearch:         DefaultToolSearch,
+	}
+	if value, ok := p.Env[SubagentModelEnv]; ok {
+		settings.SubagentModel = value
+	}
+	if value, ok := p.Env[ToolUseConcurrencyEnv]; ok {
+		settings.ToolUseConcurrency = value
+	}
+	if value, ok := p.Env[ToolSearchEnv]; ok {
+		settings.ToolSearch = value
+	}
+	return settings
+}
+
+func defaultSubagentModel(p provider.Provider) string {
+	if model := strings.TrimSpace(p.CustomModelID); model != "" {
+		return model
+	}
+	if model := strings.TrimSpace(p.SonnetModel); model != "" {
+		return model
+	}
+	models := modelrouting.SplitCSV(p.Model)
+	if len(models) == 0 {
+		return ""
+	}
+	return modelrouting.MapModel("claude-3-5-sonnet", "", models)
 }
 
 // buildEnv constructs the env-var overrides for a settings file.
@@ -87,6 +141,16 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 		env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
 		env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	}
+
+	// Claude Code runtime defaults. Subagents use the explicit mapping when set
+	// and otherwise follow the effective main model. Provider-level Env values
+	// below can override every default.
+	runtimeSettings := ResolveRuntimeSettings(p)
+	if runtimeSettings.SubagentModel != "" {
+		env[SubagentModelEnv] = runtimeSettings.SubagentModel
+	}
+	env[ToolUseConcurrencyEnv] = runtimeSettings.ToolUseConcurrency
+	env[ToolSearchEnv] = runtimeSettings.ToolSearch
 
 	// Provider-level overrides take final precedence.
 	for k, v := range p.Env {
@@ -177,6 +241,7 @@ type providerContext struct {
 	baseURL  string
 	useProxy bool
 	srv      *proxy.Server // non-nil only when a local proxy was started
+	oauth    *oauthproxy.Runtime
 }
 
 // setupProvider starts a proxy if needed and resolves the final model list.
@@ -185,14 +250,40 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 	// Make a COPY to avoid mutating the original provider (fixes mutation bug)
 	providerCopy := p
 	ctx := &providerContext{provider: providerCopy, useProxy: provider.IsOpenAICompatibleType(p.Type)}
+	if providerCopy.OAuthProvider != "" {
+		if !ctx.useProxy {
+			return nil, fmt.Errorf(
+				"OAuth provider %q requires the OpenAI Chat or Responses protocol",
+				providerCopy.OAuthProvider,
+			)
+		}
+		runtime, err := oauthproxy.Start(context.Background(), providerCopy.OAuthProvider)
+		if err != nil {
+			return nil, fmt.Errorf("start OAuth proxy: %w", err)
+		}
+		ctx.oauth = runtime
+		providerCopy.Endpoint = runtime.Endpoint()
+		providerCopy.APIKey = runtime.APIKey()
+		ctx.provider = providerCopy
+	} else if provider.IsOpenAIResponsesType(providerCopy.Type) {
+		runtime, err := oauthproxy.StartCodexAPI(context.Background(), providerCopy.Endpoint, providerCopy.APIKey, providerCopy.Model)
+		if err != nil {
+			return nil, fmt.Errorf("start Codex Responses proxy: %w", err)
+		}
+		ctx.oauth = runtime
+		providerCopy.Endpoint = runtime.Endpoint()
+		providerCopy.APIKey = runtime.APIKey()
+		ctx.provider = providerCopy
+	}
 
 	if ctx.useProxy {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		srv := proxy.NewServer("127.0.0.1:0", providerCopy, logger)
+		ctx.srv = srv
 		if err := srv.Start(); err != nil {
+			ctx.cleanup()
 			return nil, fmt.Errorf("start proxy: %w", err)
 		}
-		ctx.srv = srv
 		ctx.baseURL = "http://" + srv.Addr()
 	} else {
 		ctx.baseURL = providerCopy.Endpoint
@@ -221,6 +312,9 @@ func (c *providerContext) resolveModel() error {
 func (c *providerContext) cleanup() {
 	if c.srv != nil {
 		c.srv.Stop()
+	}
+	if c.oauth != nil {
+		c.oauth.Stop()
 	}
 }
 

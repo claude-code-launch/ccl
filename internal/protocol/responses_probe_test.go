@@ -51,6 +51,42 @@ func TestProbeOpenAIResponsesSupportFailsOnNotFound(t *testing.T) {
 	}
 }
 
+func TestProbeOpenAIResponsesSupportDrainsResponseBody(t *testing.T) {
+	headersSent := make(chan struct{})
+	finishBody := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: first\n\n"))
+		w.(http.Flusher).Flush()
+		close(headersSent)
+		<-finishBody
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	result := make(chan bool, 1)
+	go func() {
+		result <- protocol.ProbeOpenAIResponsesSupport(server.URL+"/v1", "test-key", "gpt-5", 2*time.Second)
+	}()
+
+	<-headersSent
+	select {
+	case <-result:
+		t.Fatal("probe returned before the streaming response body completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finishBody)
+	select {
+	case ok := <-result:
+		if !ok {
+			t.Fatal("expected probe to succeed after draining the response")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("probe did not return after the response body completed")
+	}
+}
+
 func TestProbeOpenAIResponsesSupportFailsOnUnreachable(t *testing.T) {
 	if protocol.ProbeOpenAIResponsesSupport("http://127.0.0.1:1", "test-key", "gpt-5", 500*time.Millisecond) {
 		t.Fatalf("expected ProbeOpenAIResponsesSupport to fail when endpoint is unreachable")

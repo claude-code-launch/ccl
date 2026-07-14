@@ -16,11 +16,13 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 		ActiveProvider: "gateway",
 		Providers: map[string]provider.Provider{
 			"gateway": {
-				Name:     "gateway",
-				Type:     "openai",
-				Endpoint: "https://example.test/v1",
-				APIKey:   "secret",
-				Model:    "model-a",
+				Name:          "gateway",
+				Type:          "openai",
+				Endpoint:      "https://example.test/v1",
+				APIKey:        "secret",
+				Model:         "model-a",
+				OAuthProvider: "codex",
+				SubagentModel: "model-subagent",
 			},
 		},
 	}
@@ -44,7 +46,10 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if got.ActiveProvider != want.ActiveProvider || got.Providers["gateway"].APIKey != "secret" {
+	if got.ActiveProvider != want.ActiveProvider ||
+		got.Providers["gateway"].APIKey != "secret" ||
+		got.Providers["gateway"].OAuthProvider != "codex" ||
+		got.Providers["gateway"].SubagentModel != "model-subagent" {
 		t.Fatalf("loaded config = %+v, want %+v", got, want)
 	}
 }

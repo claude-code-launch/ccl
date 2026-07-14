@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -147,7 +149,7 @@ func TestDetectProtocolAndModelsTreatsOpenAIShapedBearerModelsAsOpenAIWithoutMes
 	var xAPIKeyCalls int32
 	var messageCalls int32
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "" {
 			atomic.AddInt32(&xAPIKeyCalls, 1)
 			w.Header().Set("Content-Type", "application/json")
@@ -187,8 +189,8 @@ func TestDetectProtocolAndModelsTreatsOpenAIShapedBearerModelsAsOpenAIWithoutMes
 	if result.anthropicAuth != "" {
 		t.Fatalf("expected empty Anthropic auth, got %q", result.anthropicAuth)
 	}
-	if result.baseURL != server.URL+"/v1" {
-		t.Fatalf("expected corrected base URL %q, got %q", server.URL+"/v1", result.baseURL)
+	if result.baseURL != server.URL {
+		t.Fatalf("expected original base URL %q, got %q", server.URL, result.baseURL)
 	}
 	if result.models != "sensenova-6.7-flash-lite" {
 		t.Fatalf("unexpected models: %q", result.models)
@@ -244,6 +246,73 @@ func TestApplyModelDetectionResultNormalizesAnthropicEndpoint(t *testing.T) {
 	}
 	if p.Model != "sensenova-u1-fast" {
 		t.Fatalf("expected detected model pool to be saved, got %q", p.Model)
+	}
+}
+
+func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testing.T) {
+	p := provider.Provider{
+		Name:          "chatgpt",
+		Type:          "openai_responses",
+		Endpoint:      "oauth://codex",
+		OAuthProvider: "chatgpt",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.configureOAuthRuntime("http://127.0.0.1:54321/v1", "ccl-session-secret")
+
+	view := m.View().Content
+	for _, want := range []string{"OAuth Credentials", "oauth/chatgpt", "Ready (this session only)"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("OAuth credential page should contain %q, got %q", want, view)
+		}
+	}
+	for _, secret := range []string{"http://127.0.0.1:54321/v1", "ccl-session-secret", "Endpoint URL"} {
+		if strings.Contains(view, secret) {
+			t.Fatalf("OAuth credential page exposed %q: %q", secret, view)
+		}
+	}
+
+	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.detecting || cmd == nil {
+		t.Fatalf("OAuth model discovery did not start: detecting=%t cmd=%v", m.detecting, cmd)
+	}
+
+	next, _ = m.Update(modelFetchDoneMsg{
+		endpoint:            "http://127.0.0.1:54321/v1",
+		apiKey:              "ccl-session-secret",
+		detectedType:        "openai",
+		detectedEndpoint:    "http://127.0.0.1:54321/v1",
+		discoveredModelsRaw: "gpt-5.6-sol,gpt-5.6-codex",
+	})
+	m = next.(*AdvancedConfigModel)
+	if m.page != 5 || m.detectionError != nil {
+		t.Fatalf("OAuth discovery result was not accepted: page=%d err=%v", m.page, m.detectionError)
+	}
+	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
+		t.Fatalf("temporary OAuth runtime values leaked into provider: %+v", p)
+	}
+	if p.Model != "gpt-5.6-sol,gpt-5.6-codex" {
+		t.Fatalf("OAuth models = %q", p.Model)
+	}
+}
+
+func TestProviderConfigurationCompleteAcceptsOAuthWithoutAPIKey(t *testing.T) {
+	oauthProvider := provider.Provider{
+		Type:          "openai_responses",
+		OAuthProvider: "chatgpt",
+		Model:         "gpt-5.6-sol",
+	}
+	if !providerConfigurationComplete(oauthProvider) {
+		t.Fatal("OAuth provider should not require a persisted endpoint or API key")
+	}
+
+	apiKeyProvider := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", Model: "gpt-5"}
+	if providerConfigurationComplete(apiKeyProvider) {
+		t.Fatal("regular provider should still require an API key")
+	}
+	apiKeyProvider.APIKey = "test-key"
+	if !providerConfigurationComplete(apiKeyProvider) {
+		t.Fatal("complete regular provider was rejected")
 	}
 }
 
@@ -314,6 +383,9 @@ func TestAdvancedConfigViewUsesCompactHeaderAndLanguageTip(t *testing.T) {
 	if !strings.Contains(view, "Reasoning Effort") || !strings.Contains(view, "Step 5/6") {
 		t.Fatalf("expected compact page header, got %q", view)
 	}
+	if !strings.Contains(view, "Protocol: OpenAI") || strings.Contains(view, "Protocol: openai(chat)") {
+		t.Fatalf("expected the pre-review header to show only the OpenAI family, got %q", view)
+	}
 	if !strings.Contains(view, "Change the TUI display language") || !strings.Contains(view, "●") || !strings.Contains(view, "○") {
 		t.Fatalf("expected language tip and step progress, got %q", view)
 	}
@@ -338,16 +410,174 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 		SonnetModel:   "model-sonnet",
 		HaikuModel:    "model-haiku",
 		CustomModelID: "model-custom",
+		SubagentModel: "model-subagent",
 	}
 	m := NewAdvancedConfigModel(&p)
 	m.page = 4
 	m.oneMSlots["sonnet"] = true
 
 	view := m.View().Content
-	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "⚡1M"} {
+	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "⚡1M"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
 		}
+	}
+}
+
+func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
+	p := provider.Provider{
+		Type:          "openai_responses",
+		Endpoint:      "https://example.test/v1",
+		CustomModelID: "main-model",
+		Env: map[string]string{
+			"CLAUDE_CODE_SUBAGENT_MODEL": "legacy-env-model",
+		},
+	}
+	m := NewAdvancedConfigModelAtPage1(&p, []string{"main-model", "cheap-subagent-model"})
+	m.cursor = 4
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.filterInput.Focused() || m.activeSlot != 4 {
+		t.Fatalf("subagent picker was not opened: focused=%t activeSlot=%d", m.filterInput.Focused(), m.activeSlot)
+	}
+	m.slotListCursor = 2 // clear/unset is index 0
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+
+	if p.SubagentModel != "cheap-subagent-model" {
+		t.Fatalf("subagent mapping = %q", p.SubagentModel)
+	}
+	if _, ok := p.Env["CLAUDE_CODE_SUBAGENT_MODEL"]; ok {
+		t.Fatal("managed subagent mapping should remove the legacy env override")
+	}
+}
+
+func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
+	p := provider.Provider{
+		Type:          "openai_responses",
+		Endpoint:      "https://example.test/v1",
+		CustomModelID: "subagent-model",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 2
+	m.cursor = 4
+	m.width = 110
+	m.height = 30
+
+	view := m.View().Content
+	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "(auto: subagent-model)") {
+		t.Fatalf("1M page does not show Subagent: %q", view)
+	}
+	if height := lipgloss.Height(view); height > m.height {
+		t.Fatalf("1M page height = %d, terminal height = %d", height, m.height)
+	}
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.oneMSlots["subagent"] {
+		t.Fatal("Subagent 1M option was not enabled")
+	}
+	if p.SubagentModel != "subagent-model" {
+		t.Fatalf("automatic subagent model was not materialized: %q", p.SubagentModel)
+	}
+
+	applyOneMConfig(&p, m.oneMSlots)
+	if p.SubagentModel != "subagent-model[1m]" {
+		t.Fatalf("subagent model = %q, want 1M suffix", p.SubagentModel)
+	}
+	if p.Env[autoCompactWindowEnv] != "1000000" {
+		t.Fatalf("auto compact window = %q", p.Env[autoCompactWindowEnv])
+	}
+}
+
+func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
+	p := provider.Provider{
+		Type:          "openai_responses",
+		Endpoint:      "https://example.test/v1",
+		CustomModelID: "gpt-5.6-sol",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 4
+	m.manualConfig = true
+
+	view := m.View().Content
+	for _, expected := range []string{
+		"Runtime Defaults",
+		"Subagent", "gpt-5.6-sol",
+		"Concurrency", "3",
+		"Tool Search", "false",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("expected manual review to contain %q, got %q", expected, view)
+		}
+	}
+}
+
+func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
+	p := provider.Provider{
+		Type:          "openai_responses",
+		Endpoint:      "https://example.test/v1",
+		OpusModel:     "gpt-5.6-sol",
+		SonnetModel:   "gpt-5.6-terra",
+		HaikuModel:    "gpt-5.6-luna",
+		CustomModelID: "gpt-5.4-mini",
+		SubagentModel: "gpt-5.6-terra",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 4
+	m.manualConfig = true
+	m.width = 110
+	m.height = 30
+
+	view := m.View().Content
+	if height := lipgloss.Height(view); height > m.height {
+		t.Fatalf("review height = %d, terminal height = %d\n%s", height, m.height, view)
+	}
+	if !strings.Contains(view, "Save & Finish") {
+		t.Fatalf("review action is not visible: %q", view)
+	}
+}
+
+func TestAutoReviewPageOmitsRuntimeDefaults(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", CustomModelID: "gpt-5.6-sol"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 4
+	m.manualConfig = false
+
+	if view := m.View().Content; strings.Contains(view, "Claude Code Runtime Defaults") {
+		t.Fatalf("auto review should omit manual runtime summary, got %q", view)
+	}
+}
+
+func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 4
+	m.cursor = m.page4ProtocolCursor()
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if p.Type != "openai_responses" {
+		t.Fatalf("protocol toggle stored %q, want openai_responses", p.Type)
+	}
+	view := m.View().Content
+	for _, want := range []string{"( ) openai(chat)", "(●) openai(responses)", "←→/enter select"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Responses review should contain %q, got %q", want, view)
+		}
+	}
+}
+
+func TestOpenAIReviewStartsOnProtocolSelection(t *testing.T) {
+	p := provider.Provider{Type: "openai_responses", Endpoint: "https://example.test/v1"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 3
+	m.cursor = m.effortNextCursor()
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.page != 4 || m.cursor != m.page4ProtocolCursor() {
+		t.Fatalf("review opened at page=%d cursor=%d, want protocol cursor %d", m.page, m.cursor, m.page4ProtocolCursor())
 	}
 }
 
@@ -437,6 +667,55 @@ func TestSlotModelAvailabilityTestCanBeCanceled(t *testing.T) {
 	}
 }
 
+func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
+	var requestCount atomic.Int64
+	var requestedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requestedModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_probe","status":"completed","output":[]}`))
+	}))
+	defer server.Close()
+
+	models := []string{"gpt-expensive-a", "gpt-expensive-b", lowCostProbeModel}
+	cmd := modelAvailabilityTestCmd(
+		context.Background(),
+		42,
+		models,
+		server.URL+"/v1",
+		"test-key",
+		"openai_responses",
+		"",
+		lowCostProbeModel,
+	)
+	msg := cmd().(modelAvailabilityDoneMsg)
+	if requestCount.Load() != 1 {
+		t.Fatalf("OAuth availability request count = %d, want 1", requestCount.Load())
+	}
+	if requestedModel != lowCostProbeModel {
+		t.Fatalf("OAuth availability model = %q, want %q", requestedModel, lowCostProbeModel)
+	}
+	for _, model := range models {
+		if msg.statuses[model] != modelAvailabilityAvailable {
+			t.Fatalf("status for %q = %v, want available", model, msg.statuses[model])
+		}
+	}
+
+	p := provider.Provider{OAuthProvider: "chatgpt"}
+	m := NewAdvancedConfigModelAtPage1(&p, models)
+	if view := m.View().Content; !strings.Contains(view, "Uses one low-cost test request with gpt-5.4-mini") {
+		t.Fatalf("OAuth test cost hint missing from view: %q", view)
+	}
+}
+
 func TestAdvancedConfigViewAdaptsToWindowSize(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
@@ -491,8 +770,19 @@ func TestApplyModelDetectionResultUsesDiscoveredModelsOnly(t *testing.T) {
 	}
 }
 
-func TestDetectProtocolAndModelsDefaultsOpenAIToChatEvenWhenResponsesWorks(t *testing.T) {
-	server := newMockGatewayServer(t, []string{"gpt-5"}, true)
+func TestDetectProtocolAndModelsStopsAtOpenAIFamily(t *testing.T) {
+	var responsesCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.4-mini"}]}`))
+	})
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		responsesCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
 
 	proto, models, err := detectProtocolAndModels(server.URL+"/v1", "test-key")
 	if err != nil {
@@ -501,16 +791,96 @@ func TestDetectProtocolAndModelsDefaultsOpenAIToChatEvenWhenResponsesWorks(t *te
 	if proto != "openai" {
 		t.Errorf("expected protocol 'openai' (openai(chat)), got %q", proto)
 	}
-	if models != "gpt-5" {
-		t.Errorf("expected models 'gpt-5', got %q", models)
+	if models != "gpt-5.4-mini" {
+		t.Errorf("expected models 'gpt-5.4-mini', got %q", models)
+	}
+	if calls := responsesCalls.Load(); calls != 0 {
+		t.Fatalf("automatic detection called /responses %d time(s), want 0", calls)
 	}
 }
 
-func TestDetectProtocolAndModelsNonVersionProbeFallsBackToXAPIKeyV1Models(t *testing.T) {
+func TestDetectProtocolAndModelsPreservesDedicatedCodexBase(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/codex/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.4-mini"}]}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	endpoint := server.URL + "/codex"
+	result := detectProtocolAndModelsDetailed(endpoint, "test-key")
+	if result.err != nil {
+		t.Fatalf("detectProtocolAndModelsDetailed() error: %v", result.err)
+	}
+	if result.protocol != "openai" || result.models != "gpt-5.4-mini" {
+		t.Fatalf("unexpected detection result: %+v", result)
+	}
+	if result.baseURL != endpoint {
+		t.Fatalf("Codex endpoint was rewritten to %q; want %q", result.baseURL, endpoint)
+	}
+}
+
+func TestModelProbeCandidatesUseConfiguredBaseAndPathHints(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		wantURL  string
+		wantAuth modelProbeAuth
+	}{
+		{name: "anthropic suffix", endpoint: "https://example.test/anthropic", wantURL: "https://example.test/anthropic/v1/models", wantAuth: modelProbeAuthXAPIKey},
+		{name: "claude suffix", endpoint: "https://example.test/claude", wantURL: "https://example.test/claude/v1/models", wantAuth: modelProbeAuthXAPIKey},
+		{name: "version suffix", endpoint: "https://example.test/api/v4", wantURL: "https://example.test/api/v4/models", wantAuth: modelProbeAuthBearer},
+		{name: "codex suffix", endpoint: "https://example.test/codex", wantURL: "https://example.test/codex/models", wantAuth: modelProbeAuthBearer},
+		{name: "generic OpenAI base", endpoint: "https://example.test/api", wantURL: "https://example.test/api/models", wantAuth: modelProbeAuthBearer},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := buildModelProbeCandidates(tt.endpoint)
+			if len(candidates) != 2 {
+				t.Fatalf("candidate count = %d, want 2", len(candidates))
+			}
+			if candidates[0].modelsURL != tt.wantURL {
+				t.Fatalf("first model URL = %q, want %q", candidates[0].modelsURL, tt.wantURL)
+			}
+			if candidates[0].auth != tt.wantAuth {
+				t.Fatalf("first auth = %q, want %q", candidates[0].auth, tt.wantAuth)
+			}
+		})
+	}
+}
+
+func TestApplyModelDetectionResultDefaultsCodexToResponses(t *testing.T) {
+	p := provider.Provider{Endpoint: "https://example.test/codex", APIKey: "test-key"}
+	m := NewAdvancedConfigModel(&p)
+
+	_ = m.applyModelDetectionResult("openai", "gpt-5.4-mini", "", p.Endpoint, nil)
+
+	if p.Type != "openai_responses" {
+		t.Fatalf("Codex protocol = %q, want openai_responses", p.Type)
+	}
+	if !m.canToggleOpenAIProtocol() {
+		t.Fatal("Codex protocol must remain selectable on the review page")
+	}
+}
+
+func TestDetectProtocolAndModelsRejectsCodexV1Base(t *testing.T) {
+	result := detectProtocolAndModelsDetailed("https://new.sharedchat.cc/codex/v1", "test-key")
+	if result.err == nil || !strings.Contains(result.err.Error(), "https://new.sharedchat.cc/codex") {
+		t.Fatalf("expected actionable Codex endpoint error, got %v", result.err)
+	}
+}
+
+func TestDetectProtocolAndModelsNonVersionProbeFallsBackToXAPIKeyModels(t *testing.T) {
 	var bearerCalls int32
 	var xAPIKeyCalls int32
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
 			atomic.AddInt32(&bearerCalls, 1)
 			http.Error(w, "bearer unsupported", http.StatusUnauthorized)
@@ -549,11 +919,11 @@ func TestDetectProtocolAndModelsNonVersionProbeFallsBackToXAPIKeyV1Models(t *tes
 	}
 }
 
-func TestDetectProtocolAndModelsFallsBackToBearerWhenV1Missing(t *testing.T) {
+func TestDetectProtocolAndModelsUsesBearerOnUnversionedOpenAIPath(t *testing.T) {
 	var xAPIKeyCalls int32
 	var bearerCalls int32
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "" {
 			atomic.AddInt32(&xAPIKeyCalls, 1)
 			http.Error(w, "x-api-key unsupported", http.StatusUnauthorized)
@@ -577,8 +947,8 @@ func TestDetectProtocolAndModelsFallsBackToBearerWhenV1Missing(t *testing.T) {
 	if result.protocol != "openai" || result.models != "gpt-5" {
 		t.Fatalf("expected OpenAI bearer fallback, got proto=%q models=%q", result.protocol, result.models)
 	}
-	if result.baseURL != server.URL+"/api/v1" {
-		t.Fatalf("expected corrected base URL %q, got %q", server.URL+"/api/v1", result.baseURL)
+	if result.baseURL != server.URL+"/api" {
+		t.Fatalf("expected original base URL %q, got %q", server.URL+"/api", result.baseURL)
 	}
 	if got := atomic.LoadInt32(&xAPIKeyCalls); got != 0 {
 		t.Fatalf("expected bearer success to skip x-api-key fallback, got %d", got)
@@ -655,7 +1025,7 @@ func TestDetectProtocolAndModelsFailsAnthropicSuffixWithoutModelList(t *testing.
 
 func TestDetectProtocolAndModelsShapeProbeDetectsAnthropicShape(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
 			http.Error(w, "bearer unsupported", http.StatusUnauthorized)
 			return
@@ -695,7 +1065,7 @@ func TestDetectProtocolAndModelsShapeProbeDetectsAnthropicShape(t *testing.T) {
 func TestDetectProtocolAndModelsRequiresAnthropicPathSuffix(t *testing.T) {
 	var xAPIKeyCalls int32
 	mux := http.NewServeMux()
-	mux.HandleFunc("/anthropic/proxy/v1/models", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/anthropic/proxy/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "" {
 			atomic.AddInt32(&xAPIKeyCalls, 1)
 		}

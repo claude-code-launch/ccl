@@ -6,10 +6,14 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
 func providerAuthLabel(p provider.Provider) string {
+	if p.OAuthProvider != "" {
+		return "oauth/" + p.OAuthProvider
+	}
 	if provider.IsOpenAICompatibleType(p.Type) {
 		return "bearer"
 	}
@@ -29,6 +33,20 @@ func providerEffortSummary(p provider.Provider) string {
 	return p.EffortLevel
 }
 
+func subagentMappingDisplay(p provider.Provider) string {
+	if model := strings.TrimSpace(p.SubagentModel); model != "" {
+		return model
+	}
+	if model, ok := p.Env[claude.SubagentModelEnv]; ok && strings.TrimSpace(model) != "" {
+		return fmt.Sprintf("(env: %s)", strings.TrimSpace(model))
+	}
+	effective := strings.TrimSpace(claude.ResolveRuntimeSettings(p).SubagentModel)
+	if effective == "" {
+		return "(auto)"
+	}
+	return fmt.Sprintf("(auto: %s)", effective)
+}
+
 func providerOneMSummary(p provider.Provider) string {
 	var slots []string
 	for _, slot := range []struct {
@@ -39,6 +57,7 @@ func providerOneMSummary(p provider.Provider) string {
 		{"sonnet", p.SonnetModel},
 		{"haiku", p.HaikuModel},
 		{"custom", p.CustomModelID},
+		{"subagent", p.SubagentModel},
 	} {
 		if hasOneMSuffix(slot.model) {
 			slots = append(slots, slot.name)
@@ -70,7 +89,7 @@ func printProviderExperienceWarnings(p provider.Provider) {
 	if strings.TrimSpace(p.EffortLevel) != "" {
 		fmt.Println("  ! Effort is pinned by ccl; choose Default in ccl set if Claude /model effort changes should apply.")
 	}
-	if provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
+	if p.OAuthProvider == "" && provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
 		fmt.Println("  ! OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")
 	}
 }

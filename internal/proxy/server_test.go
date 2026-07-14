@@ -235,6 +235,74 @@ func TestProxyServerResponsesUnary(t *testing.T) {
 	}
 }
 
+func TestProxyServerOAuthResponsesOmitsMetadata(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		if _, ok := body["metadata"]; ok {
+			http.Error(w, "Unsupported parameter: metadata", http.StatusBadRequest)
+			return
+		}
+
+		resp := protocol.OpenAIResponsesResponse{
+			ID:     "resp_oauth_mock",
+			Model:  "gpt-5",
+			Status: "completed",
+			Output: []protocol.ResponsesOutputItem{{
+				Type: "message",
+				Content: []protocol.ResponsesOutputPart{
+					{Type: "output_text", Text: "OAuth Responses hello"},
+				},
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	upstreamAddr := startHTTPServer(t, mux)
+	p := provider.Provider{
+		Name:          "chatgpt",
+		Type:          "openai_responses",
+		Endpoint:      "http://" + upstreamAddr + "/v1",
+		APIKey:        "session-key",
+		Model:         "gpt-5",
+		OAuthProvider: "chatgpt",
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxyServer := proxy.NewServer("127.0.0.1:0", p, logger)
+	if err := proxyServer.Start(); err != nil {
+		t.Fatalf("Failed to start proxy: %v", err)
+	}
+	defer proxyServer.Stop()
+
+	antReq := protocol.AnthropicRequest{
+		Model: "claude-3-5-sonnet",
+		Messages: []protocol.AnthropicMessage{{
+			Role:    "user",
+			Content: "Hello",
+		}},
+		Metadata: map[string]any{"user_id": "claude-code"},
+	}
+	reqBody, err := json.Marshal(antReq)
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	resp, err := http.Post("http://"+proxyServer.Addr()+"/v1/messages", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("execute request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected OK, got %d. Body: %s", resp.StatusCode, string(body))
+	}
+}
+
 func TestProxyServerModelsUsesDiscoveredModels(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {

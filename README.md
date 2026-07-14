@@ -34,6 +34,12 @@
    - 支持添加、切换、列出、复制、重命名、删除以及管理多个独立网关。
    - 配置统一存储在 `~/.ccl/config.yaml`，方便备份与迁移。
 
+6. **订阅账号 OAuth 代理**
+   - 源码集成 CLIProxyAPI Go SDK，无需安装或管理第二个代理进程。
+   - 支持 `ccl auth chatgpt` 和 `ccl auth gemini`；ChatGPT 在底层使用 CLIProxyAPI 的 Codex OAuth backend。
+   - OAuth 凭据保存在 `~/.ccl/auth`，运行时仅绑定本机回环地址，并使用随机会话 key。
+   - ChatGPT 默认走 OpenAI Responses，Gemini 默认走 OpenAI Chat；两者都复用 ccl 的 Anthropic Messages 转换层。
+
 ---
 
 ## 🚀 安装与编译
@@ -75,6 +81,26 @@ go install github.com/claude-code-launch/ccl@latest
 ---
 
 ## 🛠️ 命令参考
+
+### `ccl auth` — 登录订阅账号
+
+```bash
+# ChatGPT OAuth，默认使用 OpenAI Responses
+ccl auth chatgpt
+
+# Google OAuth，默认通过 OpenAI Chat 使用 Gemini 模型
+ccl auth gemini
+
+# 不自动打开浏览器
+ccl auth chatgpt --no-browser
+
+# 覆盖回调端口或上游协议
+ccl auth chatgpt --callback-port 1455
+ccl auth chatgpt --protocol chat
+ccl auth gemini --protocol responses
+```
+
+登录成功后，ccl 会创建或更新同名 provider 并立即设为当前 provider。`chatgpt` 使用 CLIProxyAPI 的 Codex OAuth backend；`gemini` 使用 CLIProxyAPI v7 的 Google/Antigravity OAuth backend。旧版创建的 `oauthProvider: codex` 仍可运行，并会在下次执行 `ccl auth chatgpt` 时迁移为 `chatgpt`。启动 `ccl`、`ccl set <provider>`、`ccl models` 或 `ccl doctor` 时，内嵌代理按需启动，并在命令退出时关闭，不需要常驻服务。`ccl set` 会通过临时本地 endpoint 和会话 key 获取、测试模型，但不会把它们写回配置。多个 OAuth backend 可以同时登录，但每个 provider 只加载、刷新和调度自己的凭据与模型。
 
 ### `ccl set` — 添加/更新 Provider
 
@@ -218,6 +244,7 @@ ccl provider map auto
 ccl map --opus gpt-5.1 --sonnet gpt-5.1-codex-max
 ccl map --opus gpt-5.1 --sonnet gpt-5.1-mini --haiku gpt-4o-mini
 ccl map --custom gpt-5.1 my-provider
+ccl map --subagent gpt-5.4-mini my-provider
 ccl provider map --custom gpt-5.1 my-provider
 ```
 
@@ -300,12 +327,22 @@ providers:
     endpoint: https://token.sensenova.cn
     apikey: sk-xxx
     anthropicAuth: bearer
+  chatgpt:
+    name: chatgpt
+    type: openai_responses
+    endpoint: oauth://codex
+    oauthProvider: chatgpt
 ```
 
 配置字段说明：
 
-- `type: openai`：`ccl` 会启动本地代理，把 Claude Code 的 Anthropic Messages 请求转换为 OpenAI Chat Completions；`model` 是本地模型池，同时会作为本地代理的 `/v1/models` 返回给 Claude Code 做 gateway model discovery。
+- `type: openai`（显示为 `openai(chat)`）：`ccl` 会启动本地代理，把 Claude Code 的 Anthropic Messages 请求转换为 OpenAI **Chat Completions**；`model` 是本地模型池，同时会作为本地代理的 `/v1/models` 返回给 Claude Code 做 gateway model discovery。
+- `type: openai_responses`（显示为 `openai(responses)`）：同样走本地代理，但上游使用 OpenAI **Responses** API（`/v1/responses`）。手动 API provider 会先经过内嵌 CLIProxyAPI 的 Codex API-key adapter，由它补齐当前 Codex CLI 标识并规范化请求体；`ccl set` 获取模型后，可在核对页的 Protocol 行用 ←→ / Enter 在 `openai(chat)` 与 `openai(responses)` 之间切换。
+- Codex 专用路由应填写服务商给出的生成基址，例如 `https://example.com/codex`。ccl 获取模型时会请求 `https://example.com/codex/models`，不会把额外路径写回 endpoint；若填写成 `/codex/v1`，ccl 会提示正确地址并停止，而不是静默修改。Codex 路径在最终核对页默认选择 Responses，仍可手动切换为 Chat。
+- 以 `/claude` 或 `/anthropic` 结尾的网关基址按 Anthropic 处理，模型列表请求会自动使用 `<endpoint>/v1/models`；其他 OpenAI 基址使用 `<endpoint>/models`。
 - `type: anthropic`：Claude Code 直连该 endpoint，`ccl` 不在请求链路中做协议转换；`model` 只作为 `ccl` 的本地模型池，用于 TUI 列表、`map auto`、默认 slot 映射和可用性检测。Claude Code 访问 `/v1/models` 时看到的是 provider 自己返回的结果。
+- `oauthProvider`：启用源码内嵌的 CLIProxyAPI OAuth runtime。运行时 `endpoint` 和 API key 会替换为仅本次会话有效的本机地址与随机 key，不会写回配置文件。
+- Claude Code 运行时默认使用当前 Custom/Sonnet 映射作为子代理模型，将工具并发限制为 `3`，并设置 `ENABLE_TOOL_SEARCH=false`。这些值会在手动配置的 Review & Apply 页显示，也可通过 `ccl env` 覆盖。
 - Anthropic 直连时 `endpoint` 建议使用裸域名，例如 `https://token.sensenova.cn`；`ccl set` 会自动去掉常见的 `/v1`、`/v1/messages`、`/v1/models` 后缀，避免 Claude Code 运行时拼成 `/v1/v1/messages`。
 
 ## ✅ 本地验证清单
@@ -328,7 +365,7 @@ Anthropic 兼容网关（例如 `https://token.sensenova.cn`）应确认：
 - `endpoint` 保存为裸域名，不带 `/v1`。
 - Bearer 认证时 `preview` 里出现 `ANTHROPIC_AUTH_TOKEN`，不出现 `ANTHROPIC_API_KEY`。
 - Effort 选择 Default 时，`preview` 里不出现 `CLAUDE_CODE_EFFORT_LEVEL`。
-- `preview` 顶层不出现 `model` 字段，模型通过 slot/env 交给 Claude Code。
+- 配置了 Custom model 时，`preview` 顶层 `model` 与 `ANTHROPIC_CUSTOM_MODEL_OPTION` 保持一致。
 
 ---
 
@@ -350,6 +387,7 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 ```text
 ├── cmd/
 │   ├── advanced_config.go     # TUI 配置向导（5 页表单 + 协议探测）
+│   ├── auth.go                # Codex / ChatGPT / Gemini OAuth 登录
 │   ├── provider.go            # Provider 子命令入口（cp/ls/mv/rm/set/map/models/env/doctor/preview）
 │   ├── env.go                 # 环境变量管理（ls/rm/mv）
 │   ├── set.go                 # set 命令入口 + RunProviderSet 共享逻辑
@@ -369,6 +407,7 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 │   ├── claude/                # Claude Code 进程拉起 & 端口注入
 │   ├── config/                # yaml 配置文件读写
 │   ├── locale/                # 多语言支持（中文 / English）
+│   ├── oauthproxy/            # CLIProxyAPI SDK 登录与内嵌运行时
 │   ├── protocol/              # Anthropic ↔ OpenAI 协议转换
 │   ├── provider/              # Provider & Config 数据结构
 │   └── proxy/                 # 本地 TCP 代理服务
@@ -377,4 +416,4 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 
 ## 📄 开源许可
 
-MIT
+MIT。CLIProxyAPI SDK 的第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

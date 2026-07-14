@@ -28,6 +28,11 @@ func runModels(showAll bool) error {
 	if err != nil {
 		return err
 	}
+	p, cleanup, err := prepareProviderRuntime(p)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 
 	modelsStr := p.Model
 	source := "configured model pool"

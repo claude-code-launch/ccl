@@ -31,15 +31,17 @@ type chatToolState struct {
 }
 
 type ResponsesStreamTransformer struct {
-	sentMessageStart bool
-	currentBlockType string
-	currentBlockIdx  int
-	sentMessageStop  bool
-	messageID        string
-	model            string
-	hasToolUse       bool
-	usage            map[string]any
-	tools            map[int]*responsesToolState
+	sentMessageStart   bool
+	currentBlockType   string
+	currentBlockIdx    int
+	sentMessageStop    bool
+	messageID          string
+	model              string
+	hasToolUse         bool
+	usage              map[string]any
+	tools              map[int]*responsesToolState
+	textDeltaSeen      map[int]bool
+	reasoningDeltaSeen map[int]bool
 }
 
 type responsesToolState struct {
@@ -344,8 +346,23 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 	if st.tools == nil {
 		st.tools = make(map[int]*responsesToolState)
 	}
+	if st.textDeltaSeen == nil {
+		st.textDeltaSeen = make(map[int]bool)
+	}
+	if st.reasoningDeltaSeen == nil {
+		st.reasoningDeltaSeen = make(map[int]bool)
+	}
+
+	// Many OpenAI-compatible gateways omit the SSE "event:" line and only put
+	// the event name in JSON "type". Prefer the explicit event line when present.
+	if eventName == "" {
+		eventName = stringFromAny(payload["type"])
+	}
 
 	st.captureResponseMetadata(payload)
+	if response := mapFromAny(payload["response"]); len(response) > 0 {
+		st.captureResponseMetadata(response)
+	}
 
 	var events []string
 	switch eventName {
@@ -355,9 +372,17 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 	case "response.output_item.done":
 		item := mapFromAny(payload["item"])
 		events = append(events, st.handleResponsesOutputItem(payload, item, true)...)
-	case "response.output_text.delta":
+	case "response.output_text.delta", "response.content_part.delta":
+		outputIndex := intFromAny(payload["output_index"])
 		delta := stringFromAny(payload["delta"])
+		// content_part.delta may nest text under delta.text
+		if delta == "" {
+			if nested := mapFromAny(payload["delta"]); len(nested) > 0 {
+				delta = stringFromAny(nested["text"])
+			}
+		}
 		if delta != "" {
+			st.textDeltaSeen[outputIndex] = true
 			events = append(events, st.ensureResponsesTextBlock()...)
 			events = append(events, anthEvent("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
@@ -368,9 +393,18 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 				},
 			}))
 		}
-	case "response.reasoning_text.delta":
+	case "response.reasoning_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_part.delta":
+		outputIndex := intFromAny(payload["output_index"])
 		delta := stringFromAny(payload["delta"])
+		if delta == "" {
+			if nested := mapFromAny(payload["delta"]); len(nested) > 0 {
+				delta = stringFromAny(nested["text"])
+			}
+		}
 		if delta != "" {
+			st.reasoningDeltaSeen[outputIndex] = true
 			events = append(events, st.ensureResponsesThinkingBlock()...)
 			events = append(events, anthEvent("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
@@ -418,8 +452,22 @@ func (st *ResponsesStreamTransformer) TranslateBlock(block string) ([]string, er
 		stopReason := "end_turn"
 		if st.hasToolUse {
 			stopReason = "tool_use"
+		} else if status := stringFromAny(response["status"]); status == "incomplete" || status == "failed" {
+			stopReason = "max_tokens"
 		}
 		events = append(events, st.finish(stopReason)...)
+	case "response.incomplete":
+		response := mapFromAny(payload["response"])
+		st.captureUsage(response)
+		stopReason := "max_tokens"
+		if st.hasToolUse {
+			stopReason = "tool_use"
+		}
+		events = append(events, st.finish(stopReason)...)
+	case "response.failed", "error":
+		// Surface a finished Anthropic stream so Claude Code does not hang.
+		// Prefer max_tokens over end_turn for failed generation.
+		events = append(events, st.finish("max_tokens")...)
 	}
 
 	return events, nil
@@ -433,7 +481,51 @@ func (st *ResponsesStreamTransformer) handleResponsesOutputItem(payload, item ma
 
 	switch stringFromAny(item["type"]) {
 	case "message":
-		return st.ensureResponsesMessageStart()
+		events := st.ensureResponsesMessageStart()
+		// Some gateways only emit full text on output_item.done (no deltas).
+		outputIndex := intFromAny(payload["output_index"])
+		if done && !st.textDeltaSeen[outputIndex] {
+			for _, partAny := range sliceFromAny(item["content"]) {
+				part := mapFromAny(partAny)
+				text := stringFromAny(part["text"])
+				partType := stringFromAny(part["type"])
+				if text == "" {
+					continue
+				}
+				if partType == "output_text" || partType == "text" || partType == "refusal" || partType == "" {
+					events = append(events, st.ensureResponsesTextBlock()...)
+					events = append(events, anthEvent("content_block_delta", map[string]any{
+						"type":  "content_block_delta",
+						"index": st.currentBlockIdx,
+						"delta": map[string]any{
+							"type": "text_delta",
+							"text": text,
+						},
+					}))
+				}
+			}
+		}
+		return events
+	case "reasoning":
+		events := st.ensureResponsesMessageStart()
+		outputIndex := intFromAny(payload["output_index"])
+		if done && !st.reasoningDeltaSeen[outputIndex] {
+			for _, partAny := range sliceFromAny(item["summary"]) {
+				part := mapFromAny(partAny)
+				if text := stringFromAny(part["text"]); text != "" {
+					events = append(events, st.ensureResponsesThinkingBlock()...)
+					events = append(events, anthEvent("content_block_delta", map[string]any{
+						"type":  "content_block_delta",
+						"index": st.currentBlockIdx,
+						"delta": map[string]any{
+							"type":     "thinking_delta",
+							"thinking": text,
+						},
+					}))
+				}
+			}
+		}
+		return events
 	case "function_call":
 		outputIndex := intFromAny(payload["output_index"])
 		events := st.ensureResponsesToolBlock(outputIndex, item)
@@ -452,6 +544,13 @@ func (st *ResponsesStreamTransformer) handleResponsesOutputItem(payload, item ma
 			}
 		}
 		return events
+	}
+	return nil
+}
+
+func sliceFromAny(v any) []any {
+	if s, ok := v.([]any); ok {
+		return s
 	}
 	return nil
 }
@@ -517,11 +616,12 @@ func (st *ResponsesStreamTransformer) ensureResponsesThinkingBlock() []string {
 
 func (st *ResponsesStreamTransformer) ensureResponsesToolBlock(outputIndex int, item map[string]any) []string {
 	events := st.ensureResponsesMessageStart()
-	events = append(events, st.closeCurrentResponsesBlock()...)
 	st.hasToolUse = true
 
 	state := st.tools[outputIndex]
 	if state == nil {
+		// Close any open text/thinking block before allocating a tool index.
+		events = append(events, st.closeCurrentResponsesBlock()...)
 		state = &responsesToolState{
 			index: st.currentBlockIdx,
 			id:    fmt.Sprintf("call_%d", outputIndex),
@@ -529,9 +629,15 @@ func (st *ResponsesStreamTransformer) ensureResponsesToolBlock(outputIndex int, 
 		}
 		st.currentBlockIdx++
 		st.tools[outputIndex] = state
+	} else if !state.started {
+		events = append(events, st.closeCurrentResponsesBlock()...)
 	}
 	if item != nil {
+		// Prefer call_id (stable across turns); fall back to item id only while
+		// we still hold a synthetic call_* placeholder.
 		if id := stringFromAny(item["call_id"]); id != "" {
+			state.id = id
+		} else if id := stringFromAny(item["id"]); id != "" && strings.HasPrefix(state.id, "call_") {
 			state.id = id
 		}
 		if name := stringFromAny(item["name"]); name != "" {
@@ -573,21 +679,20 @@ func (st *ResponsesStreamTransformer) finish(stopReason string) []string {
 	}
 	events := st.ensureResponsesMessageStart()
 	events = append(events, st.closeCurrentResponsesBlock()...)
-	var toolIndexes []int
-	for _, state := range st.tools {
+	for _, state := range st.sortedResponsesTools() {
 		if state.started {
-			toolIndexes = append(toolIndexes, state.index)
+			events = append(events, anthEvent("content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": state.index,
+			}))
 		}
-	}
-	for _, index := range toolIndexes {
-		events = append(events, anthEvent("content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": index,
-		}))
 	}
 	usage := st.usage
 	if usage == nil {
 		usage = map[string]any{"input_tokens": 0, "output_tokens": 0}
+	}
+	if stopReason == "" {
+		stopReason = "end_turn"
 	}
 	events = append(events,
 		anthEvent("message_delta", map[string]any{
@@ -602,6 +707,22 @@ func (st *ResponsesStreamTransformer) finish(stopReason string) []string {
 	)
 	st.sentMessageStop = true
 	return events
+}
+
+func (st *ResponsesStreamTransformer) sortedResponsesTools() []*responsesToolState {
+	if len(st.tools) == 0 {
+		return nil
+	}
+	states := make([]*responsesToolState, 0, len(st.tools))
+	for _, state := range st.tools {
+		states = append(states, state)
+	}
+	for i := 1; i < len(states); i++ {
+		for j := i; j > 0 && states[j-1].index > states[j].index; j-- {
+			states[j-1], states[j] = states[j], states[j-1]
+		}
+	}
+	return states
 }
 
 func (st *ResponsesStreamTransformer) captureResponseMetadata(payload map[string]any) {

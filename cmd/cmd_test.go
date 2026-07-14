@@ -49,7 +49,7 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  ls", "  cp", "  mv", "  rm", "  preview", "  provider"} {
+	for _, want := range []string{"  auth", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
@@ -195,7 +195,7 @@ func TestCredentialPageMasksAPIKey(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	view := m.View().Content
 
-	for _, want := range []string{"Endpoint URL", "API Key", "Protocol: anthropic"} {
+	for _, want := range []string{"Endpoint URL", "API Key", "Protocol: Anthropic"} {
 		if !contains(view, want) {
 			t.Fatalf("expected credential page to contain %q, got: %s", want, view)
 		}
@@ -226,7 +226,7 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"Registered providers:", "NAME", "TYPE", "AUTH", "MODELS", "SLOTS", "beta", "openai(chat)", "bearer", "4", "2/4"} {
+	for _, want := range []string{"Registered providers:", "NAME", "TYPE", "AUTH", "MODELS", "SLOTS", "beta", "openai(chat)", "bearer", "4", "2/5"} {
 		if !contains(out, want) {
 			t.Fatalf("expected compact output to contain %q, got:\n%s", want, out)
 		}

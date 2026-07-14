@@ -84,6 +84,9 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 		fmt.Fprintf(out, "%s %s\n", mark, name)
 		fmt.Fprintf(out, "    Type     : %s\n", provider.ProtocolLabel(p.Type))
 		fmt.Fprintf(out, "    Auth     : %s\n", providerAuthLabel(p))
+		if p.OAuthProvider != "" {
+			fmt.Fprintf(out, "    OAuth    : %s\n", p.OAuthProvider)
+		}
 		fmt.Fprintf(out, "    Endpoint : %s\n", p.Endpoint)
 		fmt.Fprintf(out, "    Effort   : %s\n", providerEffortSummary(p))
 		fmt.Fprintf(out, "    1M       : %s\n", providerOneMSummary(p))
@@ -128,12 +131,12 @@ func formatSlotSummaryLong(p provider.Provider) string {
 
 func formatSlotCount(p provider.Provider) string {
 	configured := 0
-	for _, model := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.CustomModelID} {
+	for _, model := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.CustomModelID, p.SubagentModel} {
 		if stripOneMSuffix(model) != "" {
 			configured++
 		}
 	}
-	return fmt.Sprintf("%d/4", configured)
+	return fmt.Sprintf("%d/5", configured)
 }
 
 func compactSlotParts(p provider.Provider) []string {
@@ -145,6 +148,7 @@ func compactSlotParts(p provider.Provider) []string {
 		{"S", p.SonnetModel},
 		{"H", p.HaikuModel},
 		{"C", p.CustomModelID},
+		{"A", p.SubagentModel},
 	}
 
 	var parts []string
