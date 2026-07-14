@@ -1,0 +1,38 @@
+internal/provider/provider.go
+  s_2e7ca770783629::t_72186f666f308c 3-6,41-61
+  s_2e7ca770783629::t_846c0b6c362153 62-63
+internal/config/config_test.go
+  s_2e7ca770783629::t_72186f666f308c 90-140
+internal/provider/provider_test.go
+  s_2e7ca770783629::t_72186f666f308c 36-53,55-60
+  s_2e7ca770783629::t_3d75f8235b6de8 54
+cmd/advanced_config.go
+  s_2e7ca770783629::t_d34108d90e83ab 116,1203-1204
+cmd/set.go
+  s_2e7ca770783629::t_d34108d90e83ab 145-149
+cmd/set_test.go
+  s_2e7ca770783629::t_d34108d90e83ab 584-610
+internal/config/config.go
+  s_2e7ca770783629::t_72186f666f308c 85-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "b2c0588799796dc893459ea75b8be7c1deaef0ad",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_2e7ca770783629": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f40de-fae7-7d40-aea0-dcc2b5d82b31",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
