@@ -1,0 +1,69 @@
+cmd/provider_config_helpers_test.go
+  s_08ff20e1dec379::t_9f5ad110bab001 39,42-43
+  s_08ff20e1dec379::t_9ceb6d1989aa3f 113-159
+  s_08ff20e1dec379::t_238140ea9e1a89 44,50-112,160-184
+cmd/set.go
+  s_08ff20e1dec379::t_0aed75a667b89c 185
+  s_08ff20e1dec379::t_a6e42ed3e18b1d 177,179
+.claude/skills/verify/SKILL.md
+  s_08ff20e1dec379::t_235ce2826b3b9c 1-10
+cmd/provider_config_helpers.go
+  s_08ff20e1dec379::t_5d627d325e4e80 4,10-12,14-79,81-84,86-89,91-92,94-101,103-112,115-116,118-148,151-169
+cmd/list.go
+  s_08ff20e1dec379::t_19f70bcb9bfdc3 53
+  s_08ff20e1dec379::t_3e53bfe37a7734 92
+README.md
+  s_08ff20e1dec379::t_781f5404c075d9 129,131,133-149
+cmd/cmd_test.go
+  s_08ff20e1dec379::t_6f57c2b6767087 303
+  s_08ff20e1dec379::t_df44a62d3b774c 340-341
+  s_08ff20e1dec379::t_bcb0a01d039efe 346-347
+cmd/map.go
+  s_08ff20e1dec379::t_ae9918e2e01e1d 168
+  s_08ff20e1dec379::t_fc3c6436cb9178 177-178
+  s_08ff20e1dec379::t_5a7812facc973f 105
+  s_08ff20e1dec379::t_5fe553c76fbc72 171-176,179-181
+  s_08ff20e1dec379::t_d55c5d09af4e7c 269
+cmd/doctor.go
+  s_08ff20e1dec379::t_dccfadcd7784e8 88
+cmd/provider_display.go
+  s_08ff20e1dec379::t_f4c2154ff2341d 51-54,56-57,59-64
+cmd/advanced_config.go
+  s_08ff20e1dec379::t_9ae038bd9f4707 980
+  s_08ff20e1dec379::t_e9a3c8ff11857d 170,174-175
+  s_08ff20e1dec379::t_c1ab6924f72fa9 1594-1601
+  s_08ff20e1dec379::t_b6779f0358ffee 71-75
+  s_08ff20e1dec379::t_6ca10400f229df 737-741
+  s_08ff20e1dec379::t_0044f417c1c756 1652-1653
+  s_08ff20e1dec379::t_a8b7142e6717d0 486-488,490-494
+  s_08ff20e1dec379::t_d7bbb448666313 1544-1550
+  s_08ff20e1dec379::t_65f443d94cdf7c 495-503
+  s_08ff20e1dec379::t_c4194f94e06f4a 730-736,742-760
+  s_08ff20e1dec379::t_cf55fdff80f54a 63-64
+  s_08ff20e1dec379::t_476ce9161b51a3 1226,1232-1233,1236-1237
+cmd/set_test.go
+  s_08ff20e1dec379::t_68177d10f29b47 429-449,451-473
+  s_08ff20e1dec379::t_57e7f0cb17d441 450
+  s_08ff20e1dec379::t_146ea0fecb91ed 418-419,422
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "ae36047675c54a8b6c582c1a61b9affd83cc89bb",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_08ff20e1dec379": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cc5d4442-561a-4645-bdb2-5fd747124a26",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
