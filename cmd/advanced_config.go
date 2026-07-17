@@ -60,12 +60,23 @@ const (
 	slotTestCursor        = slotMappingCount
 	slotNextCursor        = slotTestCursor + 1
 	slotBackCursor        = slotNextCursor + 1
-	oneMPresetCursor      = slotMappingCount
-	oneMNextCursor        = oneMPresetCursor + 1
+	// Page 2: slots 0..4, compact radios 5..9, Next/Back after.
+	compactRadioCount     = 5
+	oneMCompactStart      = slotMappingCount
+	oneMNextCursor        = oneMCompactStart + compactRadioCount
 	oneMBackCursor        = oneMNextCursor + 1
 	slotTestConcurrency   = 50
 	lowCostProbeModel     = "gpt-5.4-mini"
 )
+
+// compactRadioOrder matches the product mockup Auto Compact radio list.
+var compactRadioOrder = []compactPreset{
+	compactPresetDefault,
+	compactPreset200K,
+	compactPreset500K,
+	compactPreset1M,
+	compactPresetPreserve, // Custom
+}
 
 type AdvancedConfigModel struct {
 	p             *provider.Provider
@@ -748,24 +759,44 @@ func (m *AdvancedConfigModel) workflowStep() int {
 	}
 }
 
-// cycleCompactPreset only changes the provider-wide compact budget.
-// Per-slot [1m] markers are independent and never cleared here.
-func (m *AdvancedConfigModel) cycleCompactPreset() {
-	switch m.compactPreset {
-	case compactPresetPreserve:
-		m.compactPreset = compactPresetDefault
-	case compactPresetDefault:
-		m.compactPreset = compactPreset200K
-	case compactPreset200K:
-		m.compactPreset = compactPreset500K
-	case compactPreset500K:
-		m.compactPreset = compactPreset1M
-	case compactPreset1M:
-		m.compactPreset = compactPresetPreserve
-	default:
-		m.compactPreset = compactPresetDefault
+// selectedCompactRadioIndex maps the current compact state onto the radio list.
+// Custom/legacy/unknown states land on the Custom radio.
+func (m *AdvancedConfigModel) selectedCompactRadioIndex() int {
+	preset := m.compactPreset
+	if m.compactState.custom || m.compactState.legacy {
+		preset = compactPresetPreserve
 	}
+	for i, p := range compactRadioOrder {
+		if p == preset {
+			return i
+		}
+	}
+	return len(compactRadioOrder) - 1
+}
+
+// selectCompactPreset sets the provider-wide compact budget from a radio index.
+// Per-slot [1m] markers are independent and never cleared here.
+func (m *AdvancedConfigModel) selectCompactPreset(radioIdx int) {
+	if radioIdx < 0 || radioIdx >= len(compactRadioOrder) {
+		return
+	}
+	m.compactPreset = compactRadioOrder[radioIdx]
 	m.compactState = compactConfigState{preset: m.compactPreset}
+}
+
+func compactRadioLabel(preset compactPreset) string {
+	switch preset {
+	case compactPresetDefault:
+		return "Claude default"
+	case compactPreset200K:
+		return "Switch-safe     200K / 70%"
+	case compactPreset500K:
+		return "Balanced        500K / 80%"
+	case compactPreset1M:
+		return "Maximum depth     1M / 90%"
+	default:
+		return "Custom"
+	}
 }
 
 // syncOneMForSameModels prompts-free: when a slot toggles [1m], apply the same
@@ -1031,7 +1062,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.page == 1 && (m.cursor == slotNextCursor || m.cursor == slotBackCursor) {
 					m.cursor = slotTestCursor
 				} else if m.page == 2 && (m.cursor == oneMNextCursor || m.cursor == oneMBackCursor) {
-					m.cursor = oneMPresetCursor
+					m.cursor = oneMCompactStart + compactRadioCount - 1
 				} else if m.page == 3 && (m.cursor == m.effortNextCursor() || m.cursor == m.effortBackCursor()) {
 					m.cursor = len(m.effortLevels) - 1
 				} else if m.page == 5 && m.cursor > 0 {
@@ -1245,7 +1276,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						)
 					} else if m.cursor == slotNextCursor {
 						m.page = 2
-						m.cursor = oneMNextCursor
+						m.cursor = 0
 						setDebugf("page1 next to page2 slots=%s", slotDebugSummary(*m.p))
 					} else if m.cursor >= 0 && m.cursor < slotTestCursor {
 						m.activeSlot = m.cursor
@@ -1286,8 +1317,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					synced := m.syncOneMForSameModels(slot, m.oneMSlots[slot])
 					setDebugf("page2 toggle one_m slot=%s enabled=%t synced=%d summary=%s", slot, m.oneMSlots[slot], synced, reviewOneMSummary(m.oneMSlots))
 					m.cursor++
-				} else if m.cursor == oneMPresetCursor {
-					m.cycleCompactPreset()
+				} else if m.cursor >= oneMCompactStart && m.cursor < oneMNextCursor {
+					m.selectCompactPreset(m.cursor - oneMCompactStart)
+					setDebugf("page2 select compact radio=%d preset=%v summary=%s", m.cursor-oneMCompactStart, m.compactPreset, m.compactSummary())
 				} else if m.cursor == oneMNextCursor {
 					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
 					m.page = 3
@@ -1595,85 +1627,77 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 2:
 		// ==================== PAGE 2: Extended Context + Auto Compact ====================
+		// Layout matches the product mockup: checkbox matrix + radio list.
 		body.WriteString(m.renderPageHeader(locale.T("上下文与自动压缩", "Context & Compact"), "Context"))
 		body.WriteString(grayText.Render(locale.T(
-			"[1m] 按槽位声明扩展上下文；压缩预算是 Provider 全局设置，二者互不影响",
-			"[1m] declares per-slot extended context; compact budget is provider-wide and independent",
-		)) + "\n")
-		if allConfiguredModelsRecommendOneM(*m.p) {
-			body.WriteString(availableStyle.Render(locale.T(
-				"推荐：已确认 1M 的模型可开 Extended Context，压缩用 Balanced 500K/80%",
-				"Recommended: enable Extended Context on confirmed 1M models; use Balanced 500K/80% compact",
-			)) + "\n")
-		}
-		body.WriteString(grayText.Render(locale.T(
-			"同名模型切换 [1m] 时会同步到其它槽位",
-			"Toggling [1m] syncs other slots that share the same model",
+			"[1m] 按槽位；压缩为 Provider 全局 · 同名模型切换会同步",
+			"[1m] per-slot; compact is provider-wide · same model syncs",
 		)) + "\n\n")
 
-		body.WriteString(titleStyle.Render(locale.T("扩展上下文 (Extended Context)", "Extended Context")) + "\n")
+		body.WriteString(titleStyle.Render("Extended Context") + "\n")
 
-		renderMultiRow := func(idx int, label, modelVal string) {
-			box := "[ ]"
+		renderContextRow := func(idx int, label, modelVal string) {
 			slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[idx]
+			box := "[ ]"
 			if m.oneMSlots[slotKey] {
 				box = "[x]"
 			}
 
-			var indicator string
+			prefix := "  "
+			labelStyle := grayText
 			if m.cursor == idx {
-				indicator = selectedStyle.Render("> " + box)
-			} else {
-				indicator = "  " + box
-			}
-
-			paddedLabel := fmt.Sprintf("%-14s", label)
-			itemText := grayText.Render(paddedLabel)
-			if m.cursor == idx {
-				itemText = titleStyle.Render(paddedLabel)
+				prefix = selectedStyle.Render("> ")
+				labelStyle = titleStyle
 			}
 
 			displayModel := stripOneMSuffix(modelVal)
-			modelStr := cyanText.Render(displayModel)
-			if displayModel == "" {
-				modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
+			if displayModel == "" && slotKey == "subagent" {
+				displayModel = subagentMappingDisplay(*m.p)
+			}
+			modelPart := cyanText.Render(displayModel)
+			if strings.TrimSpace(displayModel) == "" {
+				modelPart = grayText.Render(locale.T("(未设置)", "(unset)"))
 			}
 
-			capLabel := grayText.Render(locale.T("标准/未知", "Standard/unknown"))
+			capLabel := grayText.Render("Standard/unknown")
 			if m.oneMSlots[slotKey] {
 				capLabel = lightning
 			} else if recommendedOneMModel(modelVal) {
 				capLabel = availableStyle.Render(locale.T("建议 1M", "1M recommended"))
 			} else if window, ok := m.modelContextWindows[stripOneMSuffix(modelVal)]; ok && protocol.ContextWindowSuggests1M(window) {
-				// Catalog metadata is advisory only — never auto-enable [1m].
-				capLabel = availableStyle.Render(locale.T("目录报 1M", "1M reported"))
+				capLabel = availableStyle.Render("1M reported")
 			}
 
-			body.WriteString(fmt.Sprintf("%s  %s – %s  %s\n", indicator, itemText, modelStr, capLabel))
+			// Columns: [x] Label   model   capacity
+			body.WriteString(fmt.Sprintf("%s%s %-10s %-28s %s\n",
+				prefix, box, labelStyle.Render(label), modelPart, capLabel))
 		}
 
-		renderMultiRow(0, "Opus", m.p.OpusModel)
-		renderMultiRow(1, "Sonnet", m.p.SonnetModel)
-		renderMultiRow(2, "Haiku", m.p.HaikuModel)
-		renderMultiRow(3, "Custom", m.p.CustomModelID)
-		renderMultiRow(4, "Subagent", subagentMappingDisplay(*m.p))
+		renderContextRow(0, "Opus", m.p.OpusModel)
+		renderContextRow(1, "Sonnet", m.p.SonnetModel)
+		renderContextRow(2, "Haiku", m.p.HaikuModel)
+		renderContextRow(3, "Custom", m.p.CustomModelID)
+		renderContextRow(4, "Subagent", m.p.SubagentModel)
 
-		body.WriteString("\n" + titleStyle.Render(locale.T("自动压缩 (Auto Compact)", "Auto Compact")) + "\n")
-		body.WriteString(grayText.Render(locale.T(
-			"Claude default = 删除 ccl 覆盖，仍使用 Claude 内置自动压缩",
-			"Claude default = remove ccl overrides; Claude still auto-compacts near the window",
-		)) + "\n")
-
-		presetPrefix := "  "
-		presetLabel := purpleText.Render(m.compactSummary())
-		if m.cursor == oneMPresetCursor {
-			presetPrefix = selectedStyle.Render("> ")
-			presetLabel = selectedStyle.Render(m.compactSummary())
+		body.WriteString("\n" + titleStyle.Render("Auto Compact") + "\n")
+		selectedRadio := m.selectedCompactRadioIndex()
+		for i, preset := range compactRadioOrder {
+			cursorIdx := oneMCompactStart + i
+			radio := "( )"
+			if i == selectedRadio {
+				radio = purpleText.Render("(●)")
+			}
+			prefix := "  "
+			label := grayText.Render(compactRadioLabel(preset))
+			if m.cursor == cursorIdx {
+				prefix = selectedStyle.Render("> ")
+				label = titleStyle.Render(compactRadioLabel(preset))
+			}
+			body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radio, label))
 		}
-		body.WriteString(fmt.Sprintf("%s%-16s %s\n", presetPrefix, locale.T("压缩预设:", "Compact preset:"), presetLabel))
 
 		body.WriteString(renderBottomButtons(m.page, m.cursor, oneMNextCursor, oneMBackCursor))
-		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))
+		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 按钮", "enter toggle · ↑↓ move · ←→ buttons")))
 
 	case 3:
 		// ==================== PAGE 3: Reasoning Effort 思考流配置 ====================

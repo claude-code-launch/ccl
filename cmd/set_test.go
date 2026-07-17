@@ -439,8 +439,14 @@ func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
 	if !strings.Contains(view, "Extended Context") {
 		t.Fatalf("expected Extended Context section, got %q", view)
 	}
-	if !strings.Contains(view, "Balanced 500K") {
-		t.Fatalf("expected GPT-5.6 recommendation mentioning Balanced 500K, got %q", view)
+	if !strings.Contains(view, "Extended Context") || !strings.Contains(view, "Auto Compact") {
+		t.Fatalf("expected split Extended Context / Auto Compact sections, got %q", view)
+	}
+	if !strings.Contains(view, "Balanced") || !strings.Contains(view, "500K") {
+		t.Fatalf("expected Balanced 500K radio option, got %q", view)
+	}
+	if !strings.Contains(view, "1M recommended") {
+		t.Fatalf("expected per-slot 1M recommendation badges, got %q", view)
 	}
 
 	p.CustomModelID = "unknown-model"
@@ -450,19 +456,20 @@ func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
 	if allConfiguredModelsRecommendOneM(p) {
 		t.Fatal("mixed unknown models should not all-recommend 1M")
 	}
-	if !strings.Contains(view, "independent") && !strings.Contains(view, "互不影响") {
+	if !strings.Contains(view, "provider-wide") && !strings.Contains(view, "Provider 全局") {
 		t.Fatalf("expected independence note for context vs compact, got %q", view)
 	}
 }
 
-func TestCompactPresetCyclesFromPreserveToClaudeDefault(t *testing.T) {
+func TestCompactPresetRadioSelectsClaudeDefault(t *testing.T) {
 	p := provider.Provider{Env: map[string]string{
 		autoCompactWindowEnv: "750000",
 		autoCompactPctEnv:    "82",
 	}}
 	m := NewAdvancedConfigModel(&p)
 	m.page = 2
-	m.cursor = oneMPresetCursor
+	// Custom/preserve is radio index 4; Claude default is radio index 0.
+	m.cursor = oneMCompactStart + 0
 	m.oneMSlots["opus"] = true
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
@@ -471,10 +478,27 @@ func TestCompactPresetCyclesFromPreserveToClaudeDefault(t *testing.T) {
 		t.Fatalf("compact preset = %v, want Claude default", m.compactPreset)
 	}
 	if !m.oneMSlots["opus"] {
-		t.Fatal("cycling compact preset must not clear [1m] slots")
+		t.Fatal("selecting compact radio must not clear [1m] slots")
 	}
 	if got := m.compactSummary(); got != "Claude default" {
 		t.Fatalf("compact summary = %q", got)
+	}
+
+	// Selecting Balanced should keep 1M slots.
+	m.cursor = oneMCompactStart + 2
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.compactPreset != compactPreset500K {
+		t.Fatalf("compact preset = %v, want Balanced 500K", m.compactPreset)
+	}
+	if !m.oneMSlots["opus"] {
+		t.Fatal("selecting Balanced must not clear [1m] slots")
+	}
+	view := m.View().Content
+	for _, expected := range []string{"Extended Context", "Auto Compact", "Claude default", "Switch-safe", "Balanced", "Maximum depth", "Custom", "(●)"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("page2 view missing %q: %s", expected, view)
+		}
 	}
 }
 
@@ -517,11 +541,16 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	m.page = 2
 	m.cursor = 4
 	m.width = 110
-	m.height = 30
+	m.height = 34
 
 	view := m.View().Content
 	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "(auto: subagent-model)") {
 		t.Fatalf("1M page does not show Subagent: %q", view)
+	}
+	for _, expected := range []string{"Extended Context", "Auto Compact", "Claude default", "Balanced"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("1M page missing %q: %q", expected, view)
+		}
 	}
 	if height := lipgloss.Height(view); height > m.height {
 		t.Fatalf("1M page height = %d, terminal height = %d", height, m.height)
