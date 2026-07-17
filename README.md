@@ -94,7 +94,7 @@ ccl auth gemini
 # 不自动打开浏览器
 ccl auth chatgpt --no-browser
 
-# 覆盖回调端口或上游协议
+# 覆盖 OAuth 回调端口
 ccl auth chatgpt --callback-port 1455
 ```
 
