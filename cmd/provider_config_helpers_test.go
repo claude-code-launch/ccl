@@ -60,21 +60,36 @@ func TestCompactPresetRecommendationsAreExact(t *testing.T) {
 	}
 }
 
-func TestApplyCompactConfigConfirmed200K(t *testing.T) {
+func TestApplyCompactConfig200KKeepsOneMSuffix(t *testing.T) {
 	p := provider.Provider{
 		OpusModel: "gpt-5.5[1m]",
 		Env:       map[string]string{"KEEP_ME": "1"},
 	}
 	applyCompactConfig(&p, map[string]bool{"opus": true}, compactPreset200K)
 
-	if p.OpusModel != "gpt-5.5" {
-		t.Fatalf("expected 1M suffix removed, got %q", p.OpusModel)
+	if p.OpusModel != "gpt-5.5[1m]" {
+		t.Fatalf("expected 1M suffix kept with 200K compact, got %q", p.OpusModel)
 	}
 	if p.Env[autoCompactWindowEnv] != compactWindow200K || p.Env[autoCompactPctEnv] != compactPct200K {
 		t.Fatalf("expected 200K/70 preset, got %+v", p.Env)
 	}
 	if p.Env["KEEP_ME"] != "1" {
 		t.Fatalf("expected unrelated env preserved, got %+v", p.Env)
+	}
+}
+
+func TestApplyCompactConfig500K(t *testing.T) {
+	p := provider.Provider{
+		SonnetModel: "grok-4.5[1m]",
+		CustomModelID: "grok-4.5[1m]",
+	}
+	applyCompactConfig(&p, map[string]bool{"sonnet": true, "custom": true}, compactPreset500K)
+
+	if p.SonnetModel != "grok-4.5[1m]" || p.CustomModelID != "grok-4.5[1m]" {
+		t.Fatalf("expected 1M suffixes preserved, got sonnet=%q custom=%q", p.SonnetModel, p.CustomModelID)
+	}
+	if p.Env[autoCompactWindowEnv] != compactWindow500K || p.Env[autoCompactPctEnv] != compactPct500K {
+		t.Fatalf("expected 500K/80 preset, got %+v", p.Env)
 	}
 }
 
@@ -108,6 +123,18 @@ func TestCompactStateRecognizesLegacyAndCustom(t *testing.T) {
 	if !custom.custom || custom.preset != compactPresetPreserve {
 		t.Fatalf("expected custom preserve state, got %+v", custom)
 	}
+
+	// 200K compact with 1M slots is still the 200K preset (decoupled).
+	mixed := compactStateFromProvider(provider.Provider{
+		OpusModel: "gpt-5.5[1m]",
+		Env: map[string]string{
+			autoCompactWindowEnv: compactWindow200K,
+			autoCompactPctEnv:    compactPct200K,
+		},
+	})
+	if mixed.preset != compactPreset200K {
+		t.Fatalf("expected 200K preset with 1M slots, got %+v", mixed)
+	}
 }
 
 func TestCompactStateSummaries(t *testing.T) {
@@ -122,22 +149,38 @@ func TestCompactStateSummaries(t *testing.T) {
 				autoCompactWindowEnv: compactWindow1M,
 				autoCompactPctEnv:    compactPct1M,
 			}},
-			want: "1M/90 opus",
+			want: "1M/90 · opus",
 		},
 		{
 			name: "legacy",
 			p: provider.Provider{OpusModel: "gpt-5.6-sol[1m]", Env: map[string]string{
 				autoCompactWindowEnv: compactWindow1M,
 			}},
-			want: "legacy 1M",
+			want: "legacy 1M · opus",
 		},
 		{
-			name: "200k",
+			name: "200k with context",
+			p: provider.Provider{
+				OpusModel: "gpt-5.5[1m]",
+				Env: map[string]string{
+					autoCompactWindowEnv: compactWindow200K,
+					autoCompactPctEnv:    compactPct200K,
+				},
+			},
+			want: "200K/70 · opus",
+		},
+		{
+			name: "500k",
 			p: provider.Provider{Env: map[string]string{
-				autoCompactWindowEnv: compactWindow200K,
-				autoCompactPctEnv:    compactPct200K,
+				autoCompactWindowEnv: compactWindow500K,
+				autoCompactPctEnv:    compactPct500K,
 			}},
-			want: "200K/70",
+			want: "500K/80 · off",
+		},
+		{
+			name: "default",
+			p:    provider.Provider{},
+			want: "default · off",
 		},
 		{
 			name: "custom",
@@ -145,7 +188,7 @@ func TestCompactStateSummaries(t *testing.T) {
 				autoCompactWindowEnv: "750000",
 				autoCompactPctEnv:    "82",
 			}},
-			want: "custom",
+			want: "custom · off",
 		},
 	}
 	for _, tt := range tests {
@@ -157,7 +200,7 @@ func TestCompactStateSummaries(t *testing.T) {
 	}
 }
 
-func TestApplyCompactConfigOffRemovesOnlyManagedValues(t *testing.T) {
+func TestApplyCompactConfigDefaultRemovesOnlyManagedValues(t *testing.T) {
 	p := provider.Provider{
 		OpusModel: "gpt-5.6-sol[1m]",
 		Env: map[string]string{
@@ -166,10 +209,11 @@ func TestApplyCompactConfigOffRemovesOnlyManagedValues(t *testing.T) {
 			"KEEP_ME":            "1",
 		},
 	}
-	applyCompactConfig(&p, nil, compactPresetOff)
+	// Default removes compact env but keeps [1m] when the slot is still selected.
+	applyCompactConfig(&p, map[string]bool{"opus": true}, compactPresetDefault)
 
-	if p.OpusModel != "gpt-5.6-sol" {
-		t.Fatalf("expected suffix removed, got %q", p.OpusModel)
+	if p.OpusModel != "gpt-5.6-sol[1m]" {
+		t.Fatalf("expected suffix kept under Claude default, got %q", p.OpusModel)
 	}
 	if _, ok := p.Env[autoCompactWindowEnv]; ok {
 		t.Fatalf("expected compact window removed, got %+v", p.Env)
@@ -255,5 +299,17 @@ func TestOneMSlotsFromProviderDetectsOnlySuffixMarkers(t *testing.T) {
 	}
 	if slots["custom"] {
 		t.Fatalf("did not expect custom slot to be enabled")
+	}
+}
+
+func TestModelDisplayName(t *testing.T) {
+	if got := modelDisplayName("grok-4.5[1m]"); got != "grok-4.5 (1M)" {
+		t.Fatalf("display name = %q", got)
+	}
+	if got := modelDisplayName("grok-4.5"); got != "grok-4.5" {
+		t.Fatalf("plain display name = %q", got)
+	}
+	if got := modelDisplayName("x[1m][1m]"); got != "x (1M)" {
+		t.Fatalf("collapsed display name = %q", got)
 	}
 }

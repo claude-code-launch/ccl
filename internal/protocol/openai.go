@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// ModelInfo is one entry from an OpenAI-compatible /models response.
+// ContextWindow is advisory only — third-party catalogs are often wrong or
+// missing; callers must not treat a reported 1M window as a guarantee.
+type ModelInfo struct {
+	ID            string
+	ContextWindow int
+}
+
 // ModelResponse is the OpenAI-compatible /models list payload.
 type ModelResponse struct {
 	Data []struct {
@@ -55,36 +63,58 @@ type ModelResponse struct {
 // GetOpenAIModels fetches the comma-separated model IDs from an OpenAI-compatible
 // /models endpoint.
 func GetOpenAIModels(baseURL, apiKey string) (string, error) {
+	infos, err := GetOpenAIModelInfos(baseURL, apiKey)
+	if err != nil {
+		return "", err
+	}
+	ids := make([]string, 0, len(infos))
+	for _, info := range infos {
+		ids = append(ids, info.ID)
+	}
+	return strings.Join(ids, ","), nil
+}
+
+// GetOpenAIModelInfos fetches model IDs and optional context_window metadata.
+func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 	url := NormalizeOpenAIModelsURL(baseURL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", errors.New(resp.Status)
+		return nil, errors.New(resp.Status)
 	}
 
 	var result ModelResponse
 	err = json.NewDecoder(resp.Body).Decode(&result)
 	if err != nil {
-		return "", fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
-	models := make([]string, 0, len(result.Data))
+	models := make([]ModelInfo, 0, len(result.Data))
 	for _, m := range result.Data {
-		if m.Id != "" {
-			models = append(models, m.Id)
+		if m.Id == "" {
+			continue
 		}
+		models = append(models, ModelInfo{
+			ID:            m.Id,
+			ContextWindow: m.TokenLimits.ContextWindow,
+		})
 	}
+	return models, nil
+}
 
-	return strings.Join(models, ","), nil
+// ContextWindowSuggests1M reports whether a catalog context_window looks like a
+// 1M-class window. Values are advisory suggestions only.
+func ContextWindowSuggests1M(window int) bool {
+	return window >= 900_000
 }

@@ -133,20 +133,24 @@ ccl set my-provider
 | Step 1 | **凭据配置** — Endpoint URL + API Key | ↑↓ 切换输入框 · Enter 下一步 |
 | Step 2 | **配置模式** — Auto / Manual | ↑↓ 选择 · Enter 确认 |
 | Step 3 | **Slot 映射** — Opus / Sonnet / Haiku / Custom / Subagent | ↑↓ 选槽位 · Enter 进入模型列表 · 打字过滤 · Enter 锁定 |
-| Step 4 | **Context & Compact** — 上下文槽位与自动压缩预设 | Enter 切换槽位或轮换预设 |
+| Step 4 | **Context & Compact** — 扩展上下文槽位 + 自动压缩预设 | Enter 切换 `[1m]` 或轮换压缩预设 |
 | Step 5 | **Reasoning Effort** — Default + low ~ ultracode | ↑↓ 选择 · Enter 确认 |
 | Step 6 | **核对保存** — 确认配置并设为激活 | ←→ 切换是/否 · Enter 保存 |
 
-Context & Compact 提供以下 Provider 级预设：
+Context & Compact 把两个概念拆开：
 
-| 预设 | 上下文窗口 | 自动压缩 | 说明 |
-|------|-----------:|---------:|------|
-| Preserve | 保留现值 | 保留现值 | 默认保护自定义或旧配置，不做静默迁移 |
-| Confirmed 200K | 200,000 | 70%（约 140K） | 仅在你确认上游至少支持 200K 时选择 |
-| 1M | 1,000,000 | 90%（约 900K） | 为选中的槽位添加 `[1m]` |
-| Off | 未管理 | 未管理 | 明确移除 ccl 管理的 compact 设置 |
+1. **Extended Context `[1m]`**（按槽位）：声明该模型 ID 支持扩展上下文；同名模型切换时会同步到其它槽位。
+2. **Auto Compact**（Provider 全局）：只控制 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` / `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`，**不会**再顺带删除 `[1m]`。
 
-ccl 只对精确模型 ID `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 显示 1M / 90% 推荐；未知模型不会自动假定为 200K。Compact 环境变量作用于整个 Provider，而 `[1m]` 是每个槽位的标记，因此混合不同上下文能力的模型时应按最小已确认容量设置。旧的 `[1m] + CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000` 配置继续兼容，缺少百分比时显示为 legacy，不会在查看配置时自动改写。
+| 压缩预设 | 窗口 | 百分比 | 说明 |
+|---------|-----:|-------:|------|
+| Custom (preserve) | 保留现值 | 保留现值 | 保护自定义或旧配置 |
+| Claude default | 未管理 | 未管理 | 删除 ccl 覆盖；Claude Code 仍会在接近窗口时自动压缩 |
+| Switch-safe 200K / 70% | 200,000 | 70%（约 140K） | 适合常切换到标准上下文模型；可与 `[1m]` 并存 |
+| Balanced 500K / 80% | 500,000 | 80%（约 400K） | 已确认 1M 模型的推荐默认 |
+| Maximum 1M / 90% | 1,000,000 | 90%（约 900K） | 最大深度长会话 |
+
+ccl 只对精确模型 ID `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 显示 1M 推荐；上游 `/models` 若带 `context_window` 仅显示为「目录报 1M」建议，**不会**自动勾选。旧的 `[1m] + CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`（无百分比）继续兼容，显示为 legacy。`*_NAME` 显示名为 `model (1M)`，技术 ID 仍使用 `model[1m]`。
 
 页面间通过 `Tab` / `Shift+Tab` 或底部按钮 `[Next]` / `[Back]` 导航。
 

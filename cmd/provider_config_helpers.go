@@ -12,18 +12,30 @@ const (
 	autoCompactPctEnv    = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
 
 	compactWindow200K = "200000"
+	compactWindow500K = "500000"
 	compactWindow1M   = "1000000"
 	compactPct200K    = "70"
+	compactPct500K    = "80"
 	compactPct1M      = "90"
 )
 
+// compactPreset selects the provider-wide auto-compact budget.
+// It is independent of per-slot [1m] extended-context markers: a model may
+// support 1M context while compact still triggers earlier (e.g. 200K/70%).
 type compactPreset uint8
 
 const (
+	// compactPresetPreserve keeps existing compact env values as-is.
 	compactPresetPreserve compactPreset = iota
+	// compactPreset200K is switch-safe: compact near ~140K.
 	compactPreset200K
+	// compactPreset500K is balanced for confirmed 1M models: compact near ~400K.
+	compactPreset500K
+	// compactPreset1M maximizes depth: compact near ~900K.
 	compactPreset1M
-	compactPresetOff
+	// compactPresetDefault removes ccl-managed compact env so Claude Code uses
+	// its built-in default auto-compact behaviour (it does NOT disable compact).
+	compactPresetDefault
 )
 
 type compactConfigState struct {
@@ -40,17 +52,20 @@ func compactStateFromProvider(p provider.Provider) compactConfigState {
 		window = strings.TrimSpace(p.Env[autoCompactWindowEnv])
 		pct = strings.TrimSpace(p.Env[autoCompactPctEnv])
 	}
-	has1M := len(oneMSlotsFromProvider(p)) > 0
 
+	// Compact presets are detected only from env values, never from [1m] slots.
 	switch {
-	case has1M && window == compactWindow1M && pct == compactPct1M:
+	case window == compactWindow1M && pct == compactPct1M:
 		return compactConfigState{preset: compactPreset1M, window: window, pct: pct}
-	case has1M && window == compactWindow1M && pct == "":
+	case window == compactWindow1M && pct == "":
+		// Legacy: older ccl wrote window=1M without a percentage.
 		return compactConfigState{preset: compactPresetPreserve, legacy: true, window: window}
-	case !has1M && window == compactWindow200K && pct == compactPct200K:
+	case window == compactWindow500K && pct == compactPct500K:
+		return compactConfigState{preset: compactPreset500K, window: window, pct: pct}
+	case window == compactWindow200K && pct == compactPct200K:
 		return compactConfigState{preset: compactPreset200K, window: window, pct: pct}
-	case !has1M && window == "" && pct == "":
-		return compactConfigState{preset: compactPresetOff}
+	case window == "" && pct == "":
+		return compactConfigState{preset: compactPresetDefault}
 	default:
 		return compactConfigState{preset: compactPresetPreserve, custom: true, window: window, pct: pct}
 	}
@@ -59,19 +74,21 @@ func compactStateFromProvider(p provider.Provider) compactConfigState {
 func compactPresetLabel(preset compactPreset) string {
 	switch preset {
 	case compactPreset200K:
-		return "Confirmed 200K / 70%"
+		return "Switch-safe 200K / 70%"
+	case compactPreset500K:
+		return "Balanced 500K / 80%"
 	case compactPreset1M:
-		return "1M / 90%"
-	case compactPresetOff:
-		return "Off"
+		return "Maximum 1M / 90%"
+	case compactPresetDefault:
+		return "Claude default"
 	default:
-		return "Preserve existing/custom"
+		return "Custom (preserve)"
 	}
 }
 
 func compactStateSummary(state compactConfigState, oneMSlots map[string]bool) string {
 	if state.legacy {
-		return fmt.Sprintf("1M / pct unset (legacy; %s)", reviewOneMSummary(oneMSlots))
+		return fmt.Sprintf("1M / pct unset (legacy; context %s)", reviewOneMSummary(oneMSlots))
 	}
 	if state.custom {
 		window, pct := state.window, state.pct
@@ -84,9 +101,6 @@ func compactStateSummary(state compactConfigState, oneMSlots map[string]bool) st
 			pct += "%"
 		}
 		return fmt.Sprintf("custom %s / %s (preserved)", window, pct)
-	}
-	if state.preset == compactPreset1M {
-		return fmt.Sprintf("1M / 90%% (%s)", reviewOneMSummary(oneMSlots))
 	}
 	return compactPresetLabel(state.preset)
 }
@@ -115,34 +129,40 @@ func allConfiguredModelsRecommendOneM(p provider.Provider) bool {
 	return found
 }
 
-func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset compactPreset) {
-	applySuffixes := func(enabled bool) {
-		for _, slot := range advancedSlotRefs(p) {
-			*slot.ptr = stripOneMSuffix(*slot.ptr)
-			if enabled && *slot.ptr != "" && oneMSlots[slot.key] {
-				*slot.ptr += "[1m]"
-			}
+// applyOneMSuffixes writes or clears the [1m] marker on each configured slot.
+// Compact presets never call this with a forced false — only the user's
+// Extended Context checkboxes drive the markers.
+func applyOneMSuffixes(p *provider.Provider, oneMSlots map[string]bool) {
+	for _, slot := range advancedSlotRefs(p) {
+		*slot.ptr = stripOneMSuffix(*slot.ptr)
+		if *slot.ptr != "" && oneMSlots[slot.key] {
+			*slot.ptr += "[1m]"
 		}
 	}
+}
+
+// applyCompactConfig applies per-slot [1m] markers and the provider-wide
+// auto-compact budget independently.
+func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset compactPreset) {
+	applyOneMSuffixes(p, oneMSlots)
 
 	switch preset {
 	case compactPresetPreserve:
-		// Mapping commands use preserve mode so custom provider-level settings are
-		// never silently rewritten. Normalize only suffixes already selected.
-		applySuffixes(true)
+		// Keep existing compact env values; only suffixes were normalized.
 		return
 	case compactPreset1M:
-		applySuffixes(true)
 		ensureProviderEnv(p)
 		p.Env[autoCompactWindowEnv] = compactWindow1M
 		p.Env[autoCompactPctEnv] = compactPct1M
+	case compactPreset500K:
+		ensureProviderEnv(p)
+		p.Env[autoCompactWindowEnv] = compactWindow500K
+		p.Env[autoCompactPctEnv] = compactPct500K
 	case compactPreset200K:
-		applySuffixes(false)
 		ensureProviderEnv(p)
 		p.Env[autoCompactWindowEnv] = compactWindow200K
 		p.Env[autoCompactPctEnv] = compactPct200K
-	case compactPresetOff:
-		applySuffixes(false)
+	case compactPresetDefault:
 		if p.Env != nil {
 			delete(p.Env, autoCompactWindowEnv)
 			delete(p.Env, autoCompactPctEnv)
@@ -160,10 +180,11 @@ func ensureProviderEnv(p *provider.Provider) {
 }
 
 // applyOneMConfig preserves the legacy helper contract for callers that make an
-// explicit on/off choice. New UI paths should call applyCompactConfig directly.
+// explicit on/off choice for 1M context. Compact budget is only set to 1M/90
+// when at least one slot enables extended context; otherwise Claude default.
 func applyOneMConfig(p *provider.Provider, oneMSlots map[string]bool) {
 	if len(oneMSlots) == 0 {
-		applyCompactConfig(p, oneMSlots, compactPresetOff)
+		applyCompactConfig(p, oneMSlots, compactPresetDefault)
 		return
 	}
 	applyCompactConfig(p, oneMSlots, compactPreset1M)
@@ -198,4 +219,17 @@ func stripOneMSuffix(model string) string {
 
 func hasOneMSuffix(model string) bool {
 	return strings.HasSuffix(strings.TrimSpace(model), "[1m]")
+}
+
+// modelDisplayName is the human-facing label for Claude Code *_NAME env vars.
+// The technical model ID may keep the [1m] suffix; the display name uses (1M).
+func modelDisplayName(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if hasOneMSuffix(model) {
+		return stripOneMSuffix(model) + " (1M)"
+	}
+	return model
 }

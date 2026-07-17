@@ -215,3 +215,26 @@ func TestDedicatedCodexEndpointClassification(t *testing.T) {
 		t.Fatal("ordinary OpenAI /v1 endpoint was incorrectly rejected")
 	}
 }
+
+
+func TestGetOpenAIModelInfosIncludesContextWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"big-model","token_limits":{"context_window":1000000}},{"id":"small-model","token_limits":{"context_window":128000}}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	infos, err := protocol.GetOpenAIModelInfos(server.URL, "key")
+	if err != nil {
+		t.Fatalf("GetOpenAIModelInfos: %v", err)
+	}
+	byID := map[string]int{}
+	for _, info := range infos {
+		byID[info.ID] = info.ContextWindow
+	}
+	if byID["big-model"] != 1000000 || byID["small-model"] != 128000 {
+		t.Fatalf("context windows = %#v", byID)
+	}
+	if !protocol.ContextWindowSuggests1M(1000000) || protocol.ContextWindowSuggests1M(128000) {
+		t.Fatal("ContextWindowSuggests1M thresholds unexpected")
+	}
+}

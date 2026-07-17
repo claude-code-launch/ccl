@@ -125,24 +125,25 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	}
 
 	// 1. Custom model option shown as the persistent "Custom model" row in /model.
+	// Technical IDs may keep the [1m] suffix; *_NAME is display-only.
 	if p.CustomModelID != "" {
 		env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = p.CustomModelID
-		env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = p.CustomModelID
+		env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = modelDisplayName(p.CustomModelID)
 		env["CLAUDE_CODE_MODEL_ID"] = p.CustomModelID
 	}
 
 	// 2. Explicit tier model overrides (user-specified)
 	if p.OpusModel != "" {
 		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = p.OpusModel
-		env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] = p.OpusModel
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] = modelDisplayName(p.OpusModel)
 	}
 	if p.SonnetModel != "" {
 		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = p.SonnetModel
-		env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"] = p.SonnetModel
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"] = modelDisplayName(p.SonnetModel)
 	}
 	if p.HaikuModel != "" {
 		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = p.HaikuModel
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = p.HaikuModel
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = modelDisplayName(p.HaikuModel)
 	}
 
 	// 3. Effort level; empty means ccl leaves Claude's own setting in control.
@@ -252,11 +253,11 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 	if !strings.Contains(modelSpec, ",") {
 		model := strings.TrimSpace(modelSpec)
 		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL", model)
-		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", modelDisplayName(model))
 		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL", model)
-		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", modelDisplayName(model))
 		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
-		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", model)
+		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", modelDisplayName(model))
 		setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 		return
 	}
@@ -271,11 +272,11 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 
 	for _, kv := range []struct{ k, v string }{
 		{"ANTHROPIC_DEFAULT_OPUS_MODEL", opus},
-		{"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", opus},
+		{"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", modelDisplayName(opus)},
 		{"ANTHROPIC_DEFAULT_SONNET_MODEL", sonnet},
-		{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", sonnet},
+		{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", modelDisplayName(sonnet)},
 		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku},
-		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", haiku},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", modelDisplayName(haiku)},
 	} {
 		setIfEmpty(kv.k, kv.v)
 	}
@@ -456,4 +457,21 @@ func Run(p provider.Provider, args []string) error {
 	cmd.Env = buildProcessEnv(os.Environ(), sessionSettings, ctx.useProxy)
 
 	return cmd.Run()
+}
+
+// modelDisplayName is the human-facing label for Claude Code *_NAME env vars.
+// Technical model IDs may keep the [1m] suffix; display names use " (1M)".
+func modelDisplayName(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	base := model
+	for strings.HasSuffix(base, "[1m]") {
+		base = strings.TrimSpace(strings.TrimSuffix(base, "[1m]"))
+	}
+	if base != model {
+		return base + " (1M)"
+	}
+	return model
 }

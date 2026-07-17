@@ -50,19 +50,24 @@ func subagentMappingDisplay(p provider.Provider) string {
 func providerOneMSummary(p provider.Provider) string {
 	state := compactStateFromProvider(p)
 	slots := oneMSlotsFromProvider(p)
+	contextPart := reviewOneMSummary(slots)
 	if state.legacy {
-		return "legacy 1M"
+		return "legacy 1M · " + contextPart
 	}
 	if state.custom {
-		return "custom"
+		return "custom · " + contextPart
 	}
 	switch state.preset {
 	case compactPreset1M:
-		return "1M/90 " + reviewOneMSummary(slots)
+		return "1M/90 · " + contextPart
+	case compactPreset500K:
+		return "500K/80 · " + contextPart
 	case compactPreset200K:
-		return "200K/70"
+		return "200K/70 · " + contextPart
+	case compactPresetDefault:
+		return "default · " + contextPart
 	default:
-		return "off"
+		return "custom · " + contextPart
 	}
 }
 

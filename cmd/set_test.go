@@ -419,7 +419,7 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	m.compactState = compactConfigState{preset: compactPreset1M}
 
 	view := m.View().Content
-	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "⚡1M", "1M / 90%"} {
+	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "⚡1M", "Maximum 1M / 90%"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
 		}
@@ -436,23 +436,26 @@ func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	m.page = 2
 	view := m.View().Content
-	if !strings.Contains(view, "Recommended: GPT-5.6 uses 1M / 90%") {
-		t.Fatalf("expected GPT-5.6 recommendation, got %q", view)
+	if !strings.Contains(view, "Extended Context") {
+		t.Fatalf("expected Extended Context section, got %q", view)
+	}
+	if !strings.Contains(view, "Balanced 500K") {
+		t.Fatalf("expected GPT-5.6 recommendation mentioning Balanced 500K, got %q", view)
 	}
 
 	p.CustomModelID = "unknown-model"
 	m = NewAdvancedConfigModel(&p)
 	m.page = 2
 	view = m.View().Content
-	if strings.Contains(view, "Recommended: GPT-5.6 uses 1M / 90%") {
-		t.Fatalf("did not expect recommendation for mixed unknown models, got %q", view)
+	if allConfiguredModelsRecommendOneM(p) {
+		t.Fatal("mixed unknown models should not all-recommend 1M")
 	}
-	if !strings.Contains(view, "never assumed to be 200K") {
-		t.Fatalf("expected unknown-model safety note, got %q", view)
+	if !strings.Contains(view, "independent") && !strings.Contains(view, "互不影响") {
+		t.Fatalf("expected independence note for context vs compact, got %q", view)
 	}
 }
 
-func TestCompactPresetCyclesFromPreserveToConfirmed200K(t *testing.T) {
+func TestCompactPresetCyclesFromPreserveToClaudeDefault(t *testing.T) {
 	p := provider.Provider{Env: map[string]string{
 		autoCompactWindowEnv: "750000",
 		autoCompactPctEnv:    "82",
@@ -460,13 +463,17 @@ func TestCompactPresetCyclesFromPreserveToConfirmed200K(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	m.page = 2
 	m.cursor = oneMPresetCursor
+	m.oneMSlots["opus"] = true
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
-	if m.compactPreset != compactPreset200K {
-		t.Fatalf("compact preset = %v, want confirmed 200K", m.compactPreset)
+	if m.compactPreset != compactPresetDefault {
+		t.Fatalf("compact preset = %v, want Claude default", m.compactPreset)
 	}
-	if got := m.compactSummary(); got != "Confirmed 200K / 70%" {
+	if !m.oneMSlots["opus"] {
+		t.Fatal("cycling compact preset must not clear [1m] slots")
+	}
+	if got := m.compactSummary(); got != "Claude default" {
 		t.Fatalf("compact summary = %q", got)
 	}
 }

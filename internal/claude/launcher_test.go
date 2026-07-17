@@ -694,3 +694,32 @@ func TestLauncherCustomEnv(t *testing.T) {
 		t.Errorf("Expected CLAUDE_CODE_DISABLE_1M_CONTEXT to be 1, got: %q", env["CLAUDE_CODE_DISABLE_1M_CONTEXT"])
 	}
 }
+
+
+func TestPreviewSettingsUsesDisplayNameWithoutTechnicalSuffix(t *testing.T) {
+	result := claude.PreviewSettings(provider.Provider{
+		Type:          "anthropic",
+		Endpoint:      "https://example.test",
+		APIKey:        "k",
+		OpusModel:     "gpt-5.5[1m]",
+		SonnetModel:   "grok-4.5[1m]",
+		HaikuModel:    "mini",
+		CustomModelID: "custom[1m]",
+	})
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(result), &settings); err != nil {
+		t.Fatalf("PreviewSettings() returned invalid JSON: %v; result=%s", err, result)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "gpt-5.5[1m]" {
+		t.Fatalf("opus technical id = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] != "gpt-5.5 (1M)" {
+		t.Fatalf("opus display = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"])
+	}
+	if settings.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "custom[1m]" {
+		t.Fatalf("custom technical id = %q", settings.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"])
+	}
+	if settings.Env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] != "custom (1M)" {
+		t.Fatalf("custom display = %q", settings.Env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"])
+	}
+}

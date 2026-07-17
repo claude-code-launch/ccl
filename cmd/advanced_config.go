@@ -70,9 +70,13 @@ const (
 type AdvancedConfigModel struct {
 	p             *provider.Provider
 	modelPool     []string
-	oneMSlots     map[string]bool
-	compactPreset compactPreset
-	compactState  compactConfigState
+	// modelContextWindows stores advisory context_window values from /models
+	// catalogs (keyed by model id). Zero/missing means unknown — never treat as
+	// a hard guarantee of 1M support.
+	modelContextWindows map[string]int
+	oneMSlots           map[string]bool
+	compactPreset       compactPreset
+	compactState        compactConfigState
 
 	probeEndpoint string
 	probeAPIKey   string
@@ -145,6 +149,7 @@ type modelFetchDoneMsg struct {
 	detectedEndpoint    string
 	anthropicAuth       string
 	discoveredModelsRaw string
+	contextWindows      map[string]int
 	err                 error
 }
 
@@ -169,22 +174,23 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 
 	compactState := compactStateFromProvider(*p)
 	m := &AdvancedConfigModel{
-		p:                 p,
-		oneMSlots:         make(map[string]bool),
-		compactPreset:     compactState.preset,
-		compactState:      compactState,
-		probeEndpoint:     p.Endpoint,
-		probeAPIKey:       p.APIKey,
-		page:              0,
-		cursor:            0,
-		urlInput:          ui,
-		keyInput:          ki,
-		filterInput:       fi,
-		effortLevels:      []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
-		effortCursor:      0,
-		IsActiveChosen:    true,
-		clearStaleSlots:   true,
-		modelAvailability: make(map[string]modelAvailability),
+		p:                   p,
+		oneMSlots:           make(map[string]bool),
+		modelContextWindows: make(map[string]int),
+		compactPreset:       compactState.preset,
+		compactState:        compactState,
+		probeEndpoint:       p.Endpoint,
+		probeAPIKey:         p.APIKey,
+		page:                0,
+		cursor:              0,
+		urlInput:            ui,
+		keyInput:            ki,
+		filterInput:         fi,
+		effortLevels:        []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
+		effortCursor:        0,
+		IsActiveChosen:      true,
+		clearStaleSlots:     true,
+		modelAvailability:   make(map[string]modelAvailability),
 	}
 
 	// 从已有配置中读取 EffortLevel 的默认值
@@ -275,6 +281,18 @@ func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 			countCSV(result.models),
 			result.err,
 		)
+		// Best-effort: pull context_window metadata for OpenAI-family catalogs.
+		// Failures are ignored — IDs still come from detection.
+		windows := map[string]int{}
+		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) {
+			if infos, err := protocol.GetOpenAIModelInfos(result.baseURL, apiKey); err == nil {
+				for _, info := range infos {
+					if info.ContextWindow > 0 {
+						windows[info.ID] = info.ContextWindow
+					}
+				}
+			}
+		}
 		return modelFetchDoneMsg{
 			endpoint:            endpoint,
 			apiKey:              apiKey,
@@ -282,6 +300,7 @@ func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 			detectedEndpoint:    result.baseURL,
 			anthropicAuth:       result.anthropicAuth,
 			discoveredModelsRaw: result.models,
+			contextWindows:      windows,
 			err:                 result.err,
 		}
 	}
@@ -489,8 +508,8 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 	m.oneMSlots = make(map[string]bool)
 	m.compactPreset = m.compactState.preset
 	if hadOneMSlots {
-		m.compactPreset = compactPresetOff
-		m.compactState = compactConfigState{preset: compactPresetOff}
+		m.compactPreset = compactPresetDefault
+		m.compactState = compactConfigState{preset: compactPresetDefault}
 	}
 	if allConfiguredModelsRecommendOneM(*m.p) {
 		for _, slot := range advancedSlotRefs(m.p) {
@@ -498,8 +517,10 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 				m.oneMSlots[slot.key] = true
 			}
 		}
-		m.compactPreset = compactPreset1M
-		m.compactState = compactConfigState{preset: compactPreset1M, window: compactWindow1M, pct: compactPct1M}
+		// Confirmed 1M models: enable Extended Context and Balanced compact
+		// (500K/80%). Users can deepen to Maximum 1M/90% manually.
+		m.compactPreset = compactPreset500K
+		m.compactState = compactConfigState{preset: compactPreset500K, window: compactWindow500K, pct: compactPct500K}
 	}
 	// Default: do not override Claude's own effort setting.
 	m.p.EffortLevel = ""
@@ -727,25 +748,55 @@ func (m *AdvancedConfigModel) workflowStep() int {
 	}
 }
 
+// cycleCompactPreset only changes the provider-wide compact budget.
+// Per-slot [1m] markers are independent and never cleared here.
 func (m *AdvancedConfigModel) cycleCompactPreset() {
 	switch m.compactPreset {
 	case compactPresetPreserve:
+		m.compactPreset = compactPresetDefault
+	case compactPresetDefault:
 		m.compactPreset = compactPreset200K
-		m.oneMSlots = make(map[string]bool)
 	case compactPreset200K:
+		m.compactPreset = compactPreset500K
+	case compactPreset500K:
 		m.compactPreset = compactPreset1M
-		for _, slot := range advancedSlotRefs(m.p) {
-			if strings.TrimSpace(*slot.ptr) != "" && recommendedOneMModel(*slot.ptr) {
-				m.oneMSlots[slot.key] = true
-			}
-		}
 	case compactPreset1M:
-		m.compactPreset = compactPresetOff
-		m.oneMSlots = make(map[string]bool)
-	default:
 		m.compactPreset = compactPresetPreserve
+	default:
+		m.compactPreset = compactPresetDefault
 	}
 	m.compactState = compactConfigState{preset: m.compactPreset}
+}
+
+// syncOneMForSameModels prompts-free: when a slot toggles [1m], apply the same
+// marker to every other configured slot that maps to the identical base model.
+// Claude Code reads [1m] per model env var, so Sonnet does not inherit from Custom.
+func (m *AdvancedConfigModel) syncOneMForSameModels(sourceSlot string, enabled bool) int {
+	var sourceModel string
+	for _, slot := range advancedSlotRefs(m.p) {
+		if slot.key == sourceSlot {
+			sourceModel = strings.ToLower(stripOneMSuffix(*slot.ptr))
+			break
+		}
+	}
+	if sourceModel == "" {
+		return 0
+	}
+	synced := 0
+	for _, slot := range advancedSlotRefs(m.p) {
+		if slot.key == sourceSlot {
+			continue
+		}
+		base := strings.ToLower(stripOneMSuffix(*slot.ptr))
+		if base == "" || base != sourceModel {
+			continue
+		}
+		if m.oneMSlots[slot.key] != enabled {
+			m.oneMSlots[slot.key] = enabled
+			synced++
+		}
+	}
+	return synced
 }
 
 func (m *AdvancedConfigModel) compactSummary() string {
@@ -900,6 +951,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			countCSV(msg.discoveredModelsRaw),
 			msg.err,
 		)
+		if msg.contextWindows != nil {
+			m.modelContextWindows = msg.contextWindows
+		}
 		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.detectedEndpoint, msg.err)
 
 	case modelAvailabilityDoneMsg:
@@ -1223,15 +1277,14 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case 2:
 				if m.cursor < slotMappingCount {
-					// Slot toggles imply the explicit 1M / 90% preset.
+					// Extended context only — compact preset is independent.
 					slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.cursor]
 					if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
 						return m, nil
 					}
 					m.oneMSlots[slot] = !m.oneMSlots[slot]
-					m.compactPreset = compactPreset1M
-					m.compactState = compactConfigState{preset: compactPreset1M}
-					setDebugf("page2 toggle one_m slot=%s enabled=%t summary=%s", slot, m.oneMSlots[slot], reviewOneMSummary(m.oneMSlots))
+					synced := m.syncOneMForSameModels(slot, m.oneMSlots[slot])
+					setDebugf("page2 toggle one_m slot=%s enabled=%t synced=%d summary=%s", slot, m.oneMSlots[slot], synced, reviewOneMSummary(m.oneMSlots))
 					m.cursor++
 				} else if m.cursor == oneMPresetCursor {
 					m.cycleCompactPreset()
@@ -1239,7 +1292,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
 					m.page = 3
 					m.cursor = m.effortNextCursor() // default to Next button
-					setDebugf("page2 next to page3 one_m=%s", reviewOneMSummary(m.oneMSlots))
+					setDebugf("page2 next to page3 one_m=%s compact=%s", reviewOneMSummary(m.oneMSlots), m.compactSummary())
 				}
 			case 3:
 				if m.cursor < len(m.effortLevels) {
@@ -1541,13 +1594,24 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 
 	case 2:
-		// ==================== PAGE 2: Context & Compact ====================
-		body.WriteString(m.renderPageHeader(locale.T("上下文与自动压缩", "Context & Compact"), "Preset"))
-		body.WriteString(grayText.Render(locale.T("压缩窗口是 Provider 全局设置；未知模型不会自动假定为 200K", "Compact settings apply to the whole provider; unknown models are never assumed to be 200K")) + "\n")
+		// ==================== PAGE 2: Extended Context + Auto Compact ====================
+		body.WriteString(m.renderPageHeader(locale.T("上下文与自动压缩", "Context & Compact"), "Context"))
+		body.WriteString(grayText.Render(locale.T(
+			"[1m] 按槽位声明扩展上下文；压缩预算是 Provider 全局设置，二者互不影响",
+			"[1m] declares per-slot extended context; compact budget is provider-wide and independent",
+		)) + "\n")
 		if allConfiguredModelsRecommendOneM(*m.p) {
-			body.WriteString(availableStyle.Render(locale.T("推荐：GPT-5.6 使用 1M / 90%", "Recommended: GPT-5.6 uses 1M / 90%")) + "\n")
+			body.WriteString(availableStyle.Render(locale.T(
+				"推荐：已确认 1M 的模型可开 Extended Context，压缩用 Balanced 500K/80%",
+				"Recommended: enable Extended Context on confirmed 1M models; use Balanced 500K/80% compact",
+			)) + "\n")
 		}
-		body.WriteString(grayText.Render(locale.T("enter 切换槽位或预设", "enter toggles a slot or cycles the preset")) + "\n\n")
+		body.WriteString(grayText.Render(locale.T(
+			"同名模型切换 [1m] 时会同步到其它槽位",
+			"Toggling [1m] syncs other slots that share the same model",
+		)) + "\n\n")
+
+		body.WriteString(titleStyle.Render(locale.T("扩展上下文 (Extended Context)", "Extended Context")) + "\n")
 
 		renderMultiRow := func(idx int, label, modelVal string) {
 			box := "[ ]"
@@ -1556,7 +1620,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 				box = "[x]"
 			}
 
-			// ✅ 修复：统一包装前缀，确保选中与未选中时完美对齐
 			var indicator string
 			if m.cursor == idx {
 				indicator = selectedStyle.Render("> " + box)
@@ -1564,32 +1627,42 @@ func (m *AdvancedConfigModel) View() tea.View {
 				indicator = "  " + box
 			}
 
-			// ✅ 核心修复：先对纯文本进行 14 位填充对齐，然后再渲染样式！
 			paddedLabel := fmt.Sprintf("%-14s", label)
 			itemText := grayText.Render(paddedLabel)
 			if m.cursor == idx {
 				itemText = titleStyle.Render(paddedLabel)
 			}
 
-			modelStr := cyanText.Render(modelVal)
-			if modelVal == "" {
+			displayModel := stripOneMSuffix(modelVal)
+			modelStr := cyanText.Render(displayModel)
+			if displayModel == "" {
 				modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
 			}
 
-			suffix := ""
+			capLabel := grayText.Render(locale.T("标准/未知", "Standard/unknown"))
 			if m.oneMSlots[slotKey] {
-				suffix = " " + lightning
+				capLabel = lightning
+			} else if recommendedOneMModel(modelVal) {
+				capLabel = availableStyle.Render(locale.T("建议 1M", "1M recommended"))
+			} else if window, ok := m.modelContextWindows[stripOneMSuffix(modelVal)]; ok && protocol.ContextWindowSuggests1M(window) {
+				// Catalog metadata is advisory only — never auto-enable [1m].
+				capLabel = availableStyle.Render(locale.T("目录报 1M", "1M reported"))
 			}
 
-			// ✅ 修复：这里直接拼接 %s，不再使用破绽百出的 %-14s
-			body.WriteString(fmt.Sprintf("%s  %s – %s%s\n", indicator, itemText, modelStr, suffix))
+			body.WriteString(fmt.Sprintf("%s  %s – %s  %s\n", indicator, itemText, modelStr, capLabel))
 		}
 
-		renderMultiRow(0, "Opus Config", m.p.OpusModel)
-		renderMultiRow(1, "Sonnet Config", m.p.SonnetModel)
-		renderMultiRow(2, "Haiku Config", m.p.HaikuModel)
-		renderMultiRow(3, "Custom Config", m.p.CustomModelID)
+		renderMultiRow(0, "Opus", m.p.OpusModel)
+		renderMultiRow(1, "Sonnet", m.p.SonnetModel)
+		renderMultiRow(2, "Haiku", m.p.HaikuModel)
+		renderMultiRow(3, "Custom", m.p.CustomModelID)
 		renderMultiRow(4, "Subagent", subagentMappingDisplay(*m.p))
+
+		body.WriteString("\n" + titleStyle.Render(locale.T("自动压缩 (Auto Compact)", "Auto Compact")) + "\n")
+		body.WriteString(grayText.Render(locale.T(
+			"Claude default = 删除 ccl 覆盖，仍使用 Claude 内置自动压缩",
+			"Claude default = remove ccl overrides; Claude still auto-compacts near the window",
+		)) + "\n")
 
 		presetPrefix := "  "
 		presetLabel := purpleText.Render(m.compactSummary())
@@ -1597,7 +1670,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 			presetPrefix = selectedStyle.Render("> ")
 			presetLabel = selectedStyle.Render(m.compactSummary())
 		}
-		body.WriteString(fmt.Sprintf("\n%s%-16s %s\n", presetPrefix, locale.T("压缩预设:", "Compact preset:"), presetLabel))
+		body.WriteString(fmt.Sprintf("%s%-16s %s\n", presetPrefix, locale.T("压缩预设:", "Compact preset:"), presetLabel))
 
 		body.WriteString(renderBottomButtons(m.page, m.cursor, oneMNextCursor, oneMBackCursor))
 		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 切换按钮", "enter Toggle · ↑↓ Move · ←→ Toggle Buttons")))

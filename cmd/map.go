@@ -176,7 +176,7 @@ func runMapAuto(args []string) error {
 	preset := compactStateFromProvider(p).preset
 	if hadOneMSlots && !allConfiguredModelsRecommendOneM(p) {
 		oneMSlots = make(map[string]bool)
-		preset = compactPresetOff
+		preset = compactPresetDefault
 	}
 	applyCompactConfig(&p, oneMSlots, preset)
 
