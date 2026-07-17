@@ -1829,18 +1829,22 @@ func (m *AdvancedConfigModel) View() tea.View {
 				box = "[x]"
 			}
 
+			// Editable slot control: purple label/checkbox when idle, blue when focused.
 			prefix := "  "
-			labelStyle := grayText
+			boxStyled := purpleText.Render(box)
+			labelStyled := purpleText.Render(fmt.Sprintf("%-10s", label))
 			if m.cursor == idx {
 				prefix = selectedStyle.Render("> ")
-				labelStyle = titleStyle
+				boxStyled = selectedStyle.Render(box)
+				labelStyled = titleStyle.Render(fmt.Sprintf("%-10s", label))
 			}
 
 			displayModel := stripOneMSuffix(modelVal)
 			if displayModel == "" && slotKey == "subagent" {
 				displayModel = subagentMappingDisplay(*m.p)
 			}
-			modelPart := cyanText.Render(displayModel)
+			// Model IDs are facts for this page (chosen earlier) — keep cyan/read-only.
+			modelPart := availableStyle.Render(displayModel)
 			if strings.TrimSpace(displayModel) == "" {
 				modelPart = grayText.Render(locale.T("(未设置)", "(unset)"))
 			}
@@ -1855,8 +1859,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 			}
 
 			// Columns: [x] Label   model   capacity
-			body.WriteString(fmt.Sprintf("%s%s %-10s %-28s %s\n",
-				prefix, box, labelStyle.Render(label), modelPart, capLabel))
+			body.WriteString(fmt.Sprintf("%s%s %s %-28s %s\n",
+				prefix, boxStyled, labelStyled, modelPart, capLabel))
 		}
 
 		renderContextRow(0, "Opus", m.p.OpusModel)
@@ -1871,15 +1875,18 @@ func (m *AdvancedConfigModel) View() tea.View {
 			cursorIdx := oneMCompactStart + i
 			radio := "( )"
 			if i == selectedRadio {
-				radio = purpleText.Render("(●)")
+				radio = "(●)"
 			}
+			// Editable radio options: purple when idle, blue when focused.
 			prefix := "  "
-			label := grayText.Render(compactRadioLabel(preset))
+			radioStyled := purpleText.Render(radio)
+			label := purpleText.Render(compactRadioLabel(preset))
 			if m.cursor == cursorIdx {
 				prefix = selectedStyle.Render("> ")
+				radioStyled = selectedStyle.Render(radio)
 				label = titleStyle.Render(compactRadioLabel(preset))
 			}
-			body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radio, label))
+			body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radioStyled, label))
 		}
 
 		body.WriteString(renderBottomButtons(m.page, m.cursor, oneMNextCursor, oneMBackCursor))
