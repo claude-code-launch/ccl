@@ -1,0 +1,60 @@
+cmd/map.go
+  s_e8414fd901ae33::t_d882d1e1c9820c 179
+cmd/provider_config_helpers_test.go
+  s_e8414fd901ae33::t_bae718fb3ae9b0 63,70-71,81-95,126-137,152,159,162-173,175-176,178-183,191,203,212-213,215-216,304-314
+  s_e8414fd901ae33::t_4161940ea86a1e 315
+internal/protocol/openai.go
+  s_e8414fd901ae33::t_26e5814f07187c 13-20,66-78,85,91,95,101,103,105-106,108-111,113-114,116-119
+cmd/advanced_config.go
+  s_e8414fd901ae33::t_568524b4a430f9 1280,1286-1287,1295
+  s_e8414fd901ae33::t_4ff311a49bbb4a 511-512
+  s_e8414fd901ae33::t_3e1215df94cee2 520-523
+  s_e8414fd901ae33::t_1e7a00ac8e078b 751-752,756-757,760-761,765-766,771-799
+  s_e8414fd901ae33::t_583d7315f73d6f 177-193
+  s_e8414fd901ae33::t_0c78908eabc649 954-956
+  s_e8414fd901ae33::t_95986383b4fe2c 152
+  s_e8414fd901ae33::t_010761f0b988da 1597-1602,1604-1607,1609-1614,1636-1638,1642,1644-1646,1652,1655-1658,1661-1666,1673
+  s_e8414fd901ae33::t_f7b42e5b5faef9 73-79
+  s_e8414fd901ae33::t_7f05053cbc4c0f 284-295,303
+  s_e8414fd901ae33::t_d4efbda26e8b23 1647-1649
+  s_e8414fd901ae33::t_64e5932f959660 800-801
+internal/protocol/models_test.go
+  s_e8414fd901ae33::t_fed5646643a777 218-240
+cmd/provider_display.go
+  s_e8414fd901ae33::t_33eff1548655bc 53,55,58,62-64,66-68,70
+internal/claude/launcher_test.go
+  s_e8414fd901ae33::t_fed5646643a777 697-698,701-707,712,724-725
+  s_e8414fd901ae33::t_236c528c431432 699,709,713-723
+  s_e8414fd901ae33::t_718c85f254b098 700,708,710-711
+cmd/provider_config_helpers.go
+  s_e8414fd901ae33::t_458ded03637fe9 15,18,22-24,28,30,32-34,36-38,56,58,60-61,63-65,67-68,77-79,81-83,85,91,132-139,142-147,151,157-160,165,183-184,187,223-235
+cmd/set_test.go
+  s_e8414fd901ae33::t_3ff0412ef40ca2 422,439-443,450-451,453-454,458,466,470-474,476
+internal/claude/launcher.go
+  s_e8414fd901ae33::t_03e58d588c19a3 256,258,260,275,277,279
+  s_e8414fd901ae33::t_b3afae954b0cf9 461-477
+  s_e8414fd901ae33::t_e7440324e18331 128,131,138,142,146
+README.md
+  s_e8414fd901ae33::t_0b2ec6b5102a21 136,140,142-143,145-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4252dd4ef9c5ea52acdc29972db24d598c21d750",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
