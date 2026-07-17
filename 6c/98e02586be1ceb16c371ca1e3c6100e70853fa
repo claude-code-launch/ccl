@@ -1,0 +1,50 @@
+internal/oauthproxy/auth_test.go
+  s_e8414fd901ae33::t_6daff2654291d3 39,48-49
+cmd/set.go
+  s_e8414fd901ae33::t_4ee2b9ad07902d 249
+  s_e8414fd901ae33::t_66089c6816e2b8 19
+internal/provider/provider.go
+  s_e8414fd901ae33::t_248e7ba2f861d1 16-19
+  s_e8414fd901ae33::t_6ef4d86d588866 105
+  s_e8414fd901ae33::t_2d3d91f485f551 7-8
+internal/oauthproxy/doc.go
+  s_e8414fd901ae33::t_44e798bfc94feb 56-59
+internal/protocol/openai.go
+  s_e8414fd901ae33::t_ab947f87c51ee4 13,55-56
+internal/locale/locale_test.go
+  s_e8414fd901ae33::t_1f83752eb67268 1-12,24-63,65-69,71-72,75-76
+  s_e8414fd901ae33::t_23a4149a59752e 13-23,64,70,73-74
+package.json
+  s_e8414fd901ae33::t_baf7bf2baf938c 4
+internal/protocol/anthropic.go
+  s_e8414fd901ae33::t_fb228268813eb0 13
+internal/oauthproxy/runtime.go
+  s_e8414fd901ae33::t_470024af2b2f54 923-926,934-935
+  s_e8414fd901ae33::t_b685b22eb4b688 293
+  s_e8414fd901ae33::t_1909f9d4c0dd63 483
+  s_e8414fd901ae33::t_9a26117fd2e707 362
+  s_e8414fd901ae33::t_5f0a51fd55b961 24
+README.md
+  s_e8414fd901ae33::t_eabe2aee75d2a3 424
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6c98e02586be1ceb16c371ca1e3c6100e70853fa",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
