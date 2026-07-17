@@ -755,7 +755,7 @@ func TestStartOpenAIResponsesAPIDoesNotInjectCodexIdentity(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
@@ -890,7 +890,7 @@ func TestStartOpenAIResponsesAPIToolCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
@@ -946,7 +946,7 @@ func TestStartCodexAPIClaudeMessagesMissingCreatedBeforeDelta(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}

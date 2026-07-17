@@ -1,6 +1,7 @@
 package oauthproxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -142,7 +143,7 @@ func TestPlainResponsesProxyStripsCodexResidue(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	compat, err := startResponsesCompatibilityProxy(upstream.URL, nil)
+	compat, err := startResponsesCompatibilityProxy(upstream.URL, nil, 0)
 	if err != nil {
 		t.Fatalf("startResponsesCompatibilityProxy: %v", err)
 	}
@@ -183,5 +184,46 @@ func TestPlainResponsesProxyStripsCodexResidue(t *testing.T) {
 	}
 	if userAgent != plainResponsesUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", userAgent, plainResponsesUserAgent)
+	}
+}
+
+
+func TestPlainResponsesProxyInjectsMaxOutputTokens(t *testing.T) {
+	t.Parallel()
+
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp","object":"response","status":"completed","output":[]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	compat, err := startResponsesCompatibilityProxy(upstream.URL, nil, 64000)
+	if err != nil {
+		t.Fatalf("startResponsesCompatibilityProxy: %v", err)
+	}
+	t.Cleanup(compat.Stop)
+
+	req, err := http.NewRequest(http.MethodPost, compat.endpoint+"/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	if got == nil {
+		t.Fatal("upstream received no body")
+	}
+	if v, ok := got["max_output_tokens"].(float64); !ok || int(v) != 64000 {
+		t.Fatalf("max_output_tokens = %v, want 64000", got["max_output_tokens"])
+	}
+	if _, ok := got["client_metadata"]; ok {
+		t.Fatalf("client_metadata should be stripped: %+v", got)
 	}
 }

@@ -19,6 +19,8 @@ type ModelInfo struct {
 }
 
 // ModelResponse is the OpenAI-compatible /models list payload.
+// Context windows appear either nested under token_limits (some gateways) or
+// as a top-level context_window (CLIProxyAPI / OpenAI-style catalogs).
 type ModelResponse struct {
 	Data []struct {
 		Created  int    `json:"created"`
@@ -40,12 +42,13 @@ type ModelResponse struct {
 				SessionCache bool `json:"session_cache"`
 			} `json:"cache,omitempty"`
 		} `json:"features"`
-		Id         string `json:"id"`
-		Name       string `json:"name"`
-		Object     string `json:"object"`
-		Status     string `json:"status,omitempty"`
-		Version    string `json:"version"`
-		Modalities struct {
+		Id            string `json:"id"`
+		Name          string `json:"name"`
+		Object        string `json:"object"`
+		Status        string `json:"status,omitempty"`
+		Version       string `json:"version"`
+		ContextWindow int    `json:"context_window,omitempty"`
+		Modalities    struct {
 			InputModalities  []string `json:"input_modalities,omitempty"`
 			OutputModalities []string `json:"output_modalities,omitempty"`
 		} `json:"modalities,omitempty"`
@@ -105,9 +108,14 @@ func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 		if m.Id == "" {
 			continue
 		}
+		// Prefer nested token_limits when present; otherwise accept top-level.
+		window := m.TokenLimits.ContextWindow
+		if window == 0 {
+			window = m.ContextWindow
+		}
 		models = append(models, ModelInfo{
 			ID:            m.Id,
-			ContextWindow: m.TokenLimits.ContextWindow,
+			ContextWindow: window,
 		})
 	}
 	return models, nil

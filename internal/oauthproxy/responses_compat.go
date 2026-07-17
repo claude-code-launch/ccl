@@ -26,9 +26,10 @@ const plainResponsesUserAgent = "ccl-openai-responses/1.0"
 // event, and some omit or delay response.created. Drop this once the SDK
 // handles both cases natively.
 type responsesCompatibilityProxy struct {
-	endpoint string
-	server   *http.Server
-	done     chan struct{}
+	endpoint        string
+	server          *http.Server
+	done            chan struct{}
+	maxOutputTokens int // plain Responses only; 0 leaves body unchanged
 }
 
 type responsesEvent struct {
@@ -59,7 +60,12 @@ type responsesContentPart struct {
 // When identity is nil, residual Codex headers/body fields that CLIProxyAPI's
 // codex-api-key executor always injects are stripped so plain OpenAI Responses
 // gateways are not forced into Codex-only parameters.
-func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequestIdentity) (*responsesCompatibilityProxy, error) {
+//
+// maxOutputTokens is applied only in plain mode (identity == nil). CLIProxyAPI's
+// Claude→Codex translator currently drops max_output_tokens; we re-inject it
+// here so Review "Max Output" reaches plain Responses upstreams. Codex mode
+// must leave the field unset.
+func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequestIdentity, maxOutputTokens int) (*responsesCompatibilityProxy, error) {
 	target, err := url.Parse(strings.TrimRight(strings.TrimSpace(targetEndpoint), "/"))
 	if err != nil || target.Scheme == "" || target.Host == "" {
 		return nil, fmt.Errorf("invalid Responses endpoint %q", targetEndpoint)
@@ -75,7 +81,7 @@ func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequ
 			if identity != nil {
 				_ = normalizeCodexRequestIdentity(request.Out, *identity)
 			} else {
-				_ = sanitizePlainResponsesRequest(request.Out)
+				_ = sanitizePlainResponsesRequest(request.Out, maxOutputTokens)
 			}
 			request.SetURL(target)
 			request.Out.Host = target.Host
@@ -85,9 +91,10 @@ func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequ
 	}
 	server := &http.Server{Handler: proxy}
 	compat := &responsesCompatibilityProxy{
-		endpoint: "http://" + listener.Addr().String(),
-		server:   server,
-		done:     make(chan struct{}),
+		endpoint:        "http://" + listener.Addr().String(),
+		server:          server,
+		done:            make(chan struct{}),
+		maxOutputTokens: maxOutputTokens,
 	}
 	go func() {
 		_ = server.Serve(listener)
@@ -169,7 +176,9 @@ func normalizeCodexRequestIdentity(request *http.Request, identity codexRequestI
 // sanitizePlainResponsesRequest removes Codex-only headers and body fields that
 // CLIProxyAPI's codex-api-key executor injects even for API-key credentials.
 // Plain OpenAI Responses gateways commonly reject those as unsupported.
-func sanitizePlainResponsesRequest(request *http.Request) error {
+// When maxOutputTokens > 0, max_output_tokens is forced onto the body so Claude
+// Code's CLAUDE_CODE_MAX_OUTPUT_TOKENS reaches the upstream after SDK translation.
+func sanitizePlainResponsesRequest(request *http.Request, maxOutputTokens int) error {
 	if request == nil {
 		return nil
 	}
@@ -204,6 +213,9 @@ func sanitizePlainResponsesRequest(request *http.Request) error {
 	// prompt_cache_key is valid OpenAI Responses, but when it was only injected
 	// as a Codex session key it is safer to leave user-supplied values alone.
 	// Do not invent one for plain mode.
+	if maxOutputTokens > 0 {
+		payload["max_output_tokens"] = maxOutputTokens
+	}
 
 	body, err = json.Marshal(payload)
 	if err != nil {

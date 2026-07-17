@@ -238,3 +238,25 @@ func TestGetOpenAIModelInfosIncludesContextWindow(t *testing.T) {
 		t.Fatal("ContextWindowSuggests1M thresholds unexpected")
 	}
 }
+
+
+func TestGetOpenAIModelInfosAcceptsTopLevelContextWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"sdk-model","context_window":1000000},{"id":"nested","token_limits":{"context_window":200000}}]}`))
+	}))
+	t.Cleanup(server.Close)
+	infos, err := protocol.GetOpenAIModelInfos(server.URL, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]int{}
+	for _, info := range infos {
+		byID[info.ID] = info.ContextWindow
+	}
+	if byID["sdk-model"] != 1000000 {
+		t.Fatalf("top-level context_window not parsed: %#v", byID)
+	}
+	if byID["nested"] != 200000 {
+		t.Fatalf("nested context_window not parsed: %#v", byID)
+	}
+}

@@ -165,17 +165,27 @@ func runMapAuto(args []string) error {
 	fmt.Printf("Found %d available model(s) out of %d total.\n", len(available), len(models))
 
 	oneMSlots := oneMSlotsFromProvider(p)
-	hadOneMSlots := len(oneMSlots) > 0
 	slots := sequentialSlotPointers(&p)
 	assigned := applySequentialSlotMapping(slots, available)
+	// Drop [1m] only for slots that no longer map to a recommended model.
+	// Compact stays independent except for pure legacy 1M window with no pct
+	// once every [1m] slot has been cleared (old coupling residue).
 	for _, slot := range advancedSlotRefs(&p) {
 		if oneMSlots[slot.key] && !recommendedOneMModel(*slot.ptr) {
 			delete(oneMSlots, slot.key)
 		}
 	}
-	preset := compactStateFromProvider(p).preset
-	if hadOneMSlots && !allConfiguredModelsRecommendOneM(p) {
-		oneMSlots = make(map[string]bool)
+	state := compactStateFromProvider(p)
+	preset := state.preset
+	if allConfiguredModelsRecommendOneM(p) {
+		for _, slot := range advancedSlotRefs(&p) {
+			if strings.TrimSpace(*slot.ptr) != "" {
+				oneMSlots[slot.key] = true
+			}
+		}
+		preset = compactPreset500K
+	} else if len(oneMSlots) == 0 && (state.legacy || preset == compactPreset1M) {
+		// Stale 1M compact env left over from the old coupled UI.
 		preset = compactPresetDefault
 	}
 	applyCompactConfig(&p, oneMSlots, preset)

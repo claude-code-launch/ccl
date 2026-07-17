@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -1558,11 +1559,14 @@ func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 	m.page = 4
 	m.cursor = m.page4MaxOutCursor()
 
-	// Cycle Max Output away from default.
+	// Cycle Max Output away from default -> 16K.
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
 	m = next.(*AdvancedConfigModel)
-	if m.reviewMaxOutValue() == "" {
-		// first right from default should become 16K
+	if got := m.reviewMaxOutValue(); got != "16000" {
+		t.Fatalf("max output after right = %q, want 16000", got)
+	}
+	if m.p.Env == nil || m.p.Env[claude.MaxOutputTokensEnv] != "16000" {
+		t.Fatalf("provider env max output = %v, want 16000", m.p.Env)
 	}
 	view := m.View().Content
 	if !strings.Contains(view, "‹ ") || !strings.Contains(view, " ›") {

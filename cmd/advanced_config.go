@@ -500,15 +500,11 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 		}
 	}
 	m.p.SubagentModel = ""
-	// Auto mode recommends 1M only for the strict allowlist. Otherwise it
-	// preserves custom/200K settings, but clears stale per-slot 1M state.
-	hadOneMSlots := len(m.oneMSlots) > 0
+	// Auto mode only rewrites [1m] slot markers. Compact is independent: keep the
+	// user's existing provider-wide compact preset unless every mapped model is
+	// a confirmed 1M allowlist entry (then suggest Balanced 500K/80%).
 	m.oneMSlots = make(map[string]bool)
 	m.compactPreset = m.compactState.preset
-	if hadOneMSlots {
-		m.compactPreset = compactPresetDefault
-		m.compactState = compactConfigState{preset: compactPresetDefault}
-	}
 	if allConfiguredModelsRecommendOneM(*m.p) {
 		for _, slot := range advancedSlotRefs(m.p) {
 			if strings.TrimSpace(*slot.ptr) != "" {
@@ -1663,25 +1659,60 @@ func renderReviewModelMapping(label, model string, oneM bool) string {
 		// Keep auto subagent labels intact.
 		display = strings.TrimSpace(model)
 	}
-	value := availableStyle.Render(truncateMiddle(display, 36))
+	plain := truncateMiddle(display, 36)
+	if strings.TrimSpace(plain) == "" {
+		plain = locale.T("(未设置)", "(unset)")
+	}
+	padded := padDisplay(plain, 36)
+	value := availableStyle.Render(padded)
 	if strings.TrimSpace(display) == "" {
-		value = grayText.Render(locale.T("(未设置)", "(unset)"))
+		value = grayText.Render(padded)
 	}
 	badge := "    "
 	if oneM {
 		badge = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("[1M]")
 	}
-	return fmt.Sprintf("  %-10s %-36s %s\n", label, value, badge)
+	return fmt.Sprintf("  %-10s %s %s\n", label, value, badge)
 }
 
 // truncateMiddle keeps endpoint/model names on one line for the review page.
+// Width is measured in terminal cells via lipgloss (ANSI-aware, Unicode-aware).
 func truncateMiddle(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if max < 8 || len(s) <= max {
+	if max < 8 || lipgloss.Width(s) <= max {
 		return s
 	}
-	keep := (max - 1) / 2
-	return s[:keep] + "…" + s[len(s)-(max-keep-1):]
+	// Binary-search prefix/suffix rune counts for display width.
+	runes := []rune(s)
+	left, right := 1, len(runes)-2
+	best := "…"
+	for left <= right {
+		// Keep roughly equal visual weight on both sides.
+		keepL := left
+		keepR := max - 1 - keepL
+		if keepR < 1 {
+			break
+		}
+		if keepR > len(runes)-keepL {
+			keepR = len(runes) - keepL
+		}
+		cand := string(runes[:keepL]) + "…" + string(runes[len(runes)-keepR:])
+		if lipgloss.Width(cand) <= max {
+			best = cand
+			left++
+			continue
+		}
+		break
+	}
+	return best
+}
+
+func padDisplay(s string, width int) string {
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-w)
 }
 
 func (m *AdvancedConfigModel) View() tea.View {
@@ -1903,6 +1934,11 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 4:
 		// ==================== PAGE 4: editable configuration summary ====================
+		compactHeight := m.height > 0 && m.height < 26
+		sectionGap := "\n"
+		if compactHeight {
+			sectionGap = ""
+		}
 		body.WriteString(m.renderPageHeader(locale.T("核对并应用", "Review & Apply"), "Confirm"))
 
 		// Connection
@@ -1926,7 +1962,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 
 		// Model Mapping (read-only, cyan + [1M] badge)
-		body.WriteString("\n" + titleStyle.Render("Model Mapping") + "\n")
+		body.WriteString(sectionGap + titleStyle.Render("Model Mapping") + "\n")
 		body.WriteString(renderReviewModelMapping("Opus", m.p.OpusModel, m.oneMSlots["opus"]))
 		body.WriteString(renderReviewModelMapping("Sonnet", m.p.SonnetModel, m.oneMSlots["sonnet"]))
 		body.WriteString(renderReviewModelMapping("Haiku", m.p.HaikuModel, m.oneMSlots["haiku"]))
@@ -1934,7 +1970,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(renderReviewModelMapping("Subagent", subagentMappingDisplay(*m.p), m.oneMSlots["subagent"]))
 
 		// Runtime (editable with ‹ ›)
-		body.WriteString("\n" + titleStyle.Render("Runtime") + "\n")
+		body.WriteString(sectionGap + titleStyle.Render("Runtime") + "\n")
 		renderEditable := func(cursor int, label, value string) {
 			prefix := "  "
 			val := purpleText.Render(value)
@@ -1950,7 +1986,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 		renderEditable(m.page4SearchCursor(), "Tool Search", formatSearchLabel(m.reviewSearchValue()))
 
 		// Active checkbox
-		body.WriteString("\n")
+		body.WriteString(sectionGap)
 		activePrefix := "  "
 		activeBox := "[ ]"
 		if m.IsActiveChosen {
@@ -1978,11 +2014,14 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.cursor == m.page4BackCursor() {
 			backStr = selectedStyle.Render("> " + backLabel)
 		}
-		body.WriteString("\n" + applyStr + "             " + backStr + "\n\n")
-		body.WriteString(grayText.Render(locale.T(
-			"紫色可修改 · 绿色只读 · ↑↓ 选择 · ←→ 调整 · enter 确认",
-			"purple editable · green read-only · ↑↓ select · ←→ adjust · enter confirm",
-		)))
+		body.WriteString("\n" + applyStr + "             " + backStr + "\n")
+		if !compactHeight {
+			body.WriteString("\n")
+			body.WriteString(grayText.Render(locale.T(
+				"紫色可修改 · 绿色只读 · ↑↓ 选择 · ←→ 调整 · enter 确认",
+				"purple editable · green read-only · ↑↓ select · ←→ adjust · enter confirm",
+			)))
+		}
 
 	case 5:
 		// ==================== PAGE 5: 配置模式选择 ====================

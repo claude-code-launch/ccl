@@ -32,12 +32,28 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), err
 	if provider.IsOpenAIResponsesType(p.Type) {
 		upstreamProtocol = oauthproxy.ProtocolOpenAIResponses
 	}
+	maxOut := 0
+	if provider.IsOpenAIResponsesType(p.Type) {
+		// Import cycle-safe: resolve via env directly rather than claude package.
+		if p.Env != nil {
+			if v := strings.TrimSpace(p.Env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]); v != "" {
+				var n int
+				if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+					maxOut = n
+				}
+			}
+		}
+		if maxOut == 0 {
+			maxOut = 32000
+		}
+	}
 	runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
-		Protocol:      upstreamProtocol,
-		Endpoint:      p.Endpoint,
-		APIKey:        p.APIKey,
-		ModelSpec:     provider.RuntimeModelSpec(p),
-		OAuthProvider: p.OAuthProvider,
+		Protocol:        upstreamProtocol,
+		Endpoint:        p.Endpoint,
+		APIKey:          p.APIKey,
+		ModelSpec:       provider.RuntimeModelSpec(p),
+		OAuthProvider:   p.OAuthProvider,
+		MaxOutputTokens: maxOut,
 	})
 	if err != nil {
 		return provider.Provider{}, nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)

@@ -67,11 +67,12 @@ const (
 )
 
 type StartOptions struct {
-	Protocol      UpstreamProtocol
-	Endpoint      string
-	APIKey        string
-	ModelSpec     string
-	OAuthProvider string
+	Protocol        UpstreamProtocol
+	Endpoint        string
+	APIKey          string
+	ModelSpec       string
+	OAuthProvider   string
+	MaxOutputTokens int // plain Responses only; 0 leaves SDK/default behavior
 }
 
 type runtimeModelRoute struct {
@@ -226,7 +227,7 @@ func StartProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		if protocol.IsCodexBaseEndpoint(options.Endpoint) {
 			return StartCodexAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 		}
-		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
+		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec, options.MaxOutputTokens)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -341,8 +342,10 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 // so the config still uses that slot. Unlike StartCodexAPI, no Codex Originator /
 // User-Agent / client_metadata / session headers are injected — plain gateways
 // often reject those as unsupported parameters.
-func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false)
+// maxOutputTokens is re-injected by the plain Responses compatibility proxy
+// because CLIProxyAPI currently drops Claude max_tokens on the Codex path.
+func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, maxOutputTokens int) (*Runtime, error) {
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false, maxOutputTokens)
 }
 
 // StartCodexAPI starts an embedded CLIProxyAPI runtime for a dedicated Codex
@@ -352,10 +355,10 @@ func StartCodexAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec s
 	if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint); invalid {
 		return nil, fmt.Errorf("invalid Codex endpoint %q: use %q without /v1; ccl requests /models separately", endpoint, suggestion)
 	}
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true)
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true, 0)
 }
 
-func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexIdentity bool) (*Runtime, error) {
+func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexIdentity bool, maxOutputTokens int) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -389,7 +392,10 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 	if err != nil {
 		return nil, err
 	}
-	compat, err := startResponsesCompatibilityProxy(endpoint, identity)
+	if codexIdentity {
+		maxOutputTokens = 0
+	}
+	compat, err := startResponsesCompatibilityProxy(endpoint, identity, maxOutputTokens)
 	if err != nil {
 		_ = os.RemoveAll(runtimeDir)
 		return nil, err
