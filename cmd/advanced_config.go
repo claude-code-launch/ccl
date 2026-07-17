@@ -1950,12 +1950,15 @@ func (m *AdvancedConfigModel) View() tea.View {
 			activeBox = "[x]"
 		}
 		activeLabel := locale.T("设为当前激活 Provider", "Set as active provider")
+		// Editable control: purple like other mutable review fields.
+		boxStyled := purpleText.Render(activeBox)
+		labelStyled := purpleText.Render(activeLabel)
 		if m.cursor == m.page4ActiveCursor() {
 			activePrefix = selectedStyle.Render("> ")
-			body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, selectedStyle.Render(activeBox), titleStyle.Render(activeLabel)))
-		} else {
-			body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, activeBox, grayText.Render(activeLabel)))
+			boxStyled = selectedStyle.Render(activeBox)
+			labelStyled = titleStyle.Render(activeLabel)
 		}
+		body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, boxStyled, labelStyled))
 
 		// Actions
 		applyLabel := locale.T("应用并完成", "Apply & Finish")
