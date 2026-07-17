@@ -1,0 +1,28 @@
+cmd/advanced_config_layout_test.go
+  s_e8414fd901ae33::t_dcf24c2edd4f9a 7,52-54,58-67,95-111,116,121,123-131
+cmd/advanced_config.go
+  s_e8414fd901ae33::t_2b562d38913188 1312-1314
+  s_e8414fd901ae33::t_473ab586cd493f 621-624,626-629,639-641,644,704-713,716,718,720,1351
+  s_e8414fd901ae33::t_dcf24c2edd4f9a 1419-1421,1446-1448
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "02feb6dba8b9e057f2a656726326f385328e8666",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
