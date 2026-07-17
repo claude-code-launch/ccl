@@ -1,0 +1,28 @@
+cmd/advanced_config.go
+  s_e8414fd901ae33::t_51e6553d8f5eee 643-658,666-699,703-709,713-716,718-719,722-735,738-908,1324,1342,1504-1507,1510,1512-1515,1517
+  s_e8414fd901ae33::t_d95b5fa343a04c 1666,1898,1903,1906-1910,1913,1915,1917,1919,1921,1929,1931-1936,1938,1940-1943,1954,1972-1975
+cmd/set_test.go
+  s_e8414fd901ae33::t_845dea3df3be45 590-593,596,635-638,1551,1553-1555,1559-1566,1568-1572,1574-1576
+  s_e8414fd901ae33::t_b5fed69e1391cb 654,659-661,675-677
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "621795a9d9e00295334e8e1583847348b5a10f19",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
