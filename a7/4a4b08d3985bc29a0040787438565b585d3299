@@ -1,0 +1,30 @@
+cmd/advanced_config.go
+  s_e8414fd901ae33::t_8cb694a12e5605 1493-1499,1502,1504,1506-1516,1744-1749,1751-1756,1758,1760,1762,1764,1766-1769,1775-1788,1791-1803,1806-1812,1814,1816-1818,1820,1823-1827,1829-1832,1834,1836,1838
+  s_e8414fd901ae33::t_3bb5330d981b9b 1135,1161,1342-1346
+  s_e8414fd901ae33::t_2508cdd3033323 657-661,669,676,683,691
+cmd/set_test.go
+  s_e8414fd901ae33::t_78125951695f0d 591,593-594,650
+  s_e8414fd901ae33::t_6d15d21af3752a 590,592
+  s_e8414fd901ae33::t_e5772e37226e6f 422,588,622,665-670
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "a74a4b08d3985bc29a0040787438565b585d3299",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
