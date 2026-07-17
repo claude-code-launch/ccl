@@ -16,6 +16,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/config"
 	// 🔥 引入 ccl 统一的国际化组件
 	"github.com/claude-code-launch/ccl/internal/locale"
+	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
@@ -245,13 +246,7 @@ func setDebugf(format string, args ...any) {
 }
 
 func countCSV(csv string) int {
-	count := 0
-	for _, item := range strings.Split(csv, ",") {
-		if strings.TrimSpace(item) != "" {
-			count++
-		}
-	}
-	return count
+	return len(modelrouting.SplitCSV(csv))
 }
 
 func slotDebugSummary(p provider.Provider) string {

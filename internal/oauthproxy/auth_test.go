@@ -36,7 +36,7 @@ func TestBackendProviderAliases(t *testing.T) {
 	}
 }
 
-func TestCodexBaseURLDoesNotRewriteUserBasePath(t *testing.T) {
+func TestNormalizeOpenAIBaseURLDoesNotRewriteUserBasePath(t *testing.T) {
 	tests := map[string]string{
 		"https://new.sharedchat.cc/codex":              "https://new.sharedchat.cc/codex",
 		"https://new.sharedchat.cc/codex/v1":           "https://new.sharedchat.cc/codex/v1",
@@ -45,8 +45,8 @@ func TestCodexBaseURLDoesNotRewriteUserBasePath(t *testing.T) {
 		"https://example.com/api/v1/responses":         "https://example.com/api/v1",
 	}
 	for input, want := range tests {
-		if got := codexBaseURL(input); got != want {
-			t.Errorf("codexBaseURL(%q) = %q; want %q", input, got, want)
+		if got := normalizeOpenAIBaseURL(input); got != want {
+			t.Errorf("normalizeOpenAIBaseURL(%q) = %q; want %q", input, got, want)
 		}
 	}
 }

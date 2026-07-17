@@ -53,4 +53,8 @@
 //
 // and manually exercise ccl auth chatgpt, an openai_responses API-key
 // provider, and a plain openai(chat) provider with streaming + tool calls.
+//
+// Note: dedicated Codex bases still set Originator to embeddedCodexOriginator
+// ("codex_cli_rs") for custom API-key Codex endpoints. That is independent of
+// CLIProxyAPI's default codex-tui User-Agent for OAuth/SDK-managed requests.
 package oauthproxy

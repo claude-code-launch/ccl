@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/google/uuid"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -289,7 +290,7 @@ func StartOAuth(parent context.Context, providerName, modelSpec string) (*Runtim
 // StartOpenAIChatAPI starts CLIProxyAPI with an OpenAI-compatible Chat
 // Completions upstream. CLIProxyAPI owns both request and response translation.
 func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
-	endpoint = codexBaseURL(endpoint)
+	endpoint = normalizeOpenAIBaseURL(endpoint)
 	if endpoint == "" || strings.TrimSpace(upstreamAPIKey) == "" {
 		return nil, fmt.Errorf("OpenAI Chat runtime requires endpoint and API key")
 	}
@@ -358,7 +359,7 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 	if parent == nil {
 		parent = context.Background()
 	}
-	endpoint = codexBaseURL(endpoint)
+	endpoint = normalizeOpenAIBaseURL(endpoint)
 	if endpoint == "" || strings.TrimSpace(upstreamAPIKey) == "" {
 		return nil, fmt.Errorf("OpenAI Responses runtime requires endpoint and API key")
 	}
@@ -479,11 +480,7 @@ func runtimeModelRoutes(modelSpec string) []runtimeModelRoute {
 		seen[key] = true
 		routes = append(routes, runtimeModelRoute{Name: name, Alias: alias})
 	}
-	for _, configured := range strings.Split(modelSpec, ",") {
-		configured = strings.TrimSpace(configured)
-		if configured == "" {
-			continue
-		}
+	for _, configured := range modelrouting.SplitCSV(modelSpec) {
 		upstream := stripContextModelSuffix(configured)
 		add(upstream, upstream)
 		if !strings.EqualFold(upstream, configured) {
@@ -923,7 +920,10 @@ func writeRuntimeConfigData(data []byte) (string, error) {
 	return path, nil
 }
 
-func codexBaseURL(endpoint string) string {
+// normalizeOpenAIBaseURL strips trailing generation paths (/responses,
+// /chat/completions, /models) so CLIProxyAPI config receives an API root.
+// Used for both plain OpenAI Chat/Responses and dedicated Codex bases.
+func normalizeOpenAIBaseURL(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -931,8 +931,8 @@ func codexBaseURL(endpoint string) string {
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	for _, suffix := range []string{"/responses", "/chat/completions", "/models"} {
-		if strings.HasSuffix(parsed.Path, suffix) {
-			parsed.Path = strings.TrimSuffix(parsed.Path, suffix)
+		if rest, ok := strings.CutSuffix(parsed.Path, suffix); ok {
+			parsed.Path = rest
 			break
 		}
 	}

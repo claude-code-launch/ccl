@@ -421,7 +421,7 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 │   ├── locale/                # 多语言支持（中文 / English）
 │   ├── modelrouting/          # Claude 档位 → 上游模型启发式映射
 │   ├── oauthproxy/            # CLIProxyAPI SDK 登录与内嵌运行时（OpenAI 族唯一路径）
-│   ├── protocol/              # Endpoint、模型发现与协议辅助逻辑
+│   ├── protocol/              # Endpoint 规范化、模型列表拉取与 Responses 探测
 │   └── provider/              # Provider & Config 数据结构
 └── main.go
 ```

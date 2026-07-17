@@ -1,7 +1,7 @@
 {
   "name": "@claudecodelaunch/ccl",
   "version": "1.0.0",
-  "description": "Launcher and proxy wrapper for Claude Code CLI",
+  "description": "Launcher and proxy wrapper for Claude Code CLI. Source version is a placeholder; release workflow rewrites it from the git tag before npm publish.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/claude-code-launch/ccl.git"

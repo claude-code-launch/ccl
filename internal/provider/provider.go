@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/claude-code-launch/ccl/internal/modelrouting"
 )
 
 type Provider struct {
@@ -11,9 +13,10 @@ type Provider struct {
 	Type     string `yaml:"type" mapstructure:"type"`
 	Endpoint string `yaml:"endpoint" mapstructure:"endpoint"`
 	APIKey   string `yaml:"apikey" mapstructure:"apikey"`
-	// Model is ccl's local model pool. In OpenAI-compatible proxy mode it is
-	// also used to serve /v1/models from the local proxy; direct Anthropic
-	// providers must expose their own /v1/models to Claude Code.
+	// Model is ccl's local model pool used for TUI mapping, slot defaults, and
+	// availability checks. For OpenAI-family providers it is also registered as
+	// CLIProxyAPI model routes/aliases; direct Anthropic providers must expose
+	// their own /v1/models to Claude Code.
 	Model string            `yaml:"model" mapstructure:"model"`
 	Env   map[string]string `yaml:"env,omitempty" mapstructure:"env,omitempty"`
 	// AnthropicAuth controls how Claude Code authenticates direct Anthropic-compatible providers.
@@ -99,7 +102,7 @@ func RuntimeModelSpec(p Provider) string {
 		seen[key] = true
 		models = append(models, model)
 	}
-	for _, model := range strings.Split(p.Model, ",") {
+	for _, model := range modelrouting.SplitCSV(p.Model) {
 		add(model)
 	}
 	for _, model := range []string{
