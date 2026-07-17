@@ -19,7 +19,7 @@
 
 3. **交互式 TUI 配置向导**
    - 全新的 bubbletea 驱动的全屏 TUI：多页表单，键盘导航（方向键 / Tab / Enter / Esc），实时协议探测与模型拉取。
-   - 支持 Default + 6 档 Reasoning Effort（`low` ~ `ultracode`）：Default 不注入 `CLAUDE_CODE_EFFORT_LEVEL`，允许 Claude 内部设置生效。
+   - Reasoning Effort 由 Claude Code 原生管理（`/effort`、`--effort`、settings）；`ccl set` 不再写入 `CLAUDE_CODE_EFFORT_LEVEL`。
    - 自动识别 Anthropic 兼容网关的认证方式：官方 `x-api-key` 或 Bearer token（`ANTHROPIC_AUTH_TOKEN`）。
    - **多语言支持**：中文 / English，运行时通过 `ccl lang` 随时切换。
 
@@ -133,9 +133,8 @@ ccl set my-provider
 | Step 1 | **凭据配置** — Endpoint URL + API Key | ↑↓ 切换输入框 · Enter 下一步 |
 | Step 2 | **配置模式** — Auto / Manual | ↑↓ 选择 · Enter 确认 |
 | Step 3 | **Slot 映射** — Opus / Sonnet / Haiku / Custom / Subagent | ↑↓ 选槽位 · Enter 进入模型列表 · 打字过滤 · Enter 锁定 |
-| Step 4 | **Context & Compact** — 扩展上下文槽位 + 自动压缩预设 | Enter 切换 `[1m]` 或轮换压缩预设 |
-| Step 5 | **Reasoning Effort** — Default + low ~ ultracode | ↑↓ 选择 · Enter 确认 |
-| Step 6 | **核对保存** — 确认配置并设为激活 | ←→ 切换是/否 · Enter 保存 |
+| Step 4 | **Context & Compact** — 扩展上下文槽位 + 自动压缩预设 | Enter 切换 `[1m]` / 选择压缩档 |
+| Step 5 | **核对保存** — Connection / Mapping / Runtime 摘要 | Enter 应用并完成 |
 
 Context & Compact 把两个概念拆开：
 
@@ -277,7 +276,7 @@ ccl preview
 ccl provider preview
 ```
 
-输出当前激活 Provider 会生成的 settings JSON，适合检查 `ANTHROPIC_BASE_URL`、认证变量、slot 模型和 effort 注入结果。
+输出当前激活 Provider 会生成的 settings JSON，适合检查 `ANTHROPIC_BASE_URL`、认证变量与 slot 模型映射。
 
 ### `ccl update` — 升级
 
@@ -336,7 +335,6 @@ providers:
     model: deepseek-chat,deepseek-reasoner
     opusModel: deepseek-reasoner
     sonnetModel: deepseek-chat
-    effortLevel: max
   sensenova:
     name: sensenova
     type: anthropic
@@ -380,7 +378,7 @@ Anthropic 兼容网关（例如 `https://token.sensenova.cn`）应确认：
 
 - `endpoint` 保存为裸域名，不带 `/v1`。
 - Bearer 认证时 `preview` 里出现 `ANTHROPIC_AUTH_TOKEN`，不出现 `ANTHROPIC_API_KEY`。
-- Effort 选择 Default 时，`preview` 里不出现 `CLAUDE_CODE_EFFORT_LEVEL`。
+- `ccl set` 不再写入 `effortLevel` / `CLAUDE_CODE_EFFORT_LEVEL`；旧配置中的 effortLevel 会在下次保存时清除。
 - 配置了 Custom model 时，`preview` 顶层 `model` 与 `ANTHROPIC_CUSTOM_MODEL_OPTION` 保持一致。
 
 ---

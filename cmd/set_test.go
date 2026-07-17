@@ -377,10 +377,10 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 func TestAdvancedConfigViewUsesCompactHeaderAndLanguageTip(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 3
+	m.page = 2
 
 	view := m.View().Content
-	if !strings.Contains(view, "Reasoning Effort") || !strings.Contains(view, "Step 5/6") {
+	if !strings.Contains(view, "Context & Compact") || !strings.Contains(view, "Step 4/5") {
 		t.Fatalf("expected compact page header, got %q", view)
 	}
 	if !strings.Contains(view, "Protocol: OpenAI") || strings.Contains(view, "Protocol: openai(chat)") {
@@ -397,7 +397,7 @@ func TestConfigModeIsSecondWorkflowStep(t *testing.T) {
 	m.page = 5
 
 	view := m.View().Content
-	if !strings.Contains(view, "Config Mode") || !strings.Contains(view, "Step 2/6") {
+	if !strings.Contains(view, "Config Mode") || !strings.Contains(view, "Step 2/5") {
 		t.Fatalf("expected config-mode page to be step 2, got %q", view)
 	}
 }
@@ -657,8 +657,8 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 func TestOpenAIReviewStartsOnProtocolSelection(t *testing.T) {
 	p := provider.Provider{Type: "openai_responses", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 3
-	m.cursor = m.effortNextCursor()
+	m.page = 2
+	m.cursor = oneMNextCursor
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
@@ -1537,5 +1537,23 @@ func TestParseModelListForDetectionInfersResponseShapes(t *testing.T) {
 				t.Fatalf("shape = %q, want %q", got.shape, tc.wantShape)
 			}
 		})
+	}
+}
+
+
+func TestReviewShowsEffortManagedByClaudeCode(t *testing.T) {
+	p := provider.Provider{
+		Type:        "openai",
+		Endpoint:    "https://example.test/v1",
+		EffortLevel: "max",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 4
+	view := m.View().Content
+	if !strings.Contains(view, "Claude Code managed") {
+		t.Fatalf("expected Claude Code managed effort, got %q", view)
+	}
+	if !strings.Contains(view, "effortLevel=max") {
+		t.Fatalf("expected legacy effortLevel warning, got %q", view)
 	}
 }

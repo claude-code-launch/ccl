@@ -125,8 +125,6 @@ type AdvancedConfigModel struct {
 	modelTestCanceled bool
 
 	// Page 3
-	effortLevels []string
-	effortCursor int
 
 	// Page 4
 	IsActiveChosen bool
@@ -197,22 +195,11 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		urlInput:            ui,
 		keyInput:            ki,
 		filterInput:         fi,
-		effortLevels:        []string{"", "low", "medium", "high", "xhigh", "max", "ultracode"},
-		effortCursor:        0,
 		IsActiveChosen:      true,
 		clearStaleSlots:     true,
 		modelAvailability:   make(map[string]modelAvailability),
 	}
 
-	// 从已有配置中读取 EffortLevel 的默认值
-	if p.EffortLevel != "" {
-		for i, level := range m.effortLevels {
-			if level == p.EffortLevel {
-				m.effortCursor = i
-				break
-			}
-		}
-	}
 
 	cleanAndPopulate := func(modelStr *string, slotKey string) {
 		if hasOneMSuffix(*modelStr) {
@@ -535,7 +522,6 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 	}
 	// Default: do not override Claude's own effort setting.
 	m.p.EffortLevel = ""
-	m.effortCursor = 0
 	setDebugf("doAutoConfig model_pool_count=%d slots=%s effort=%q one_m=%s", len(m.modelPool), slotDebugSummary(*m.p), m.p.EffortLevel, reviewOneMSummary(m.oneMSlots))
 }
 
@@ -707,6 +693,10 @@ func (m *AdvancedConfigModel) goBack() {
 		// Go back from choice to credentials
 		m.page = 0
 		m.cursor = m.page0NextCursor()
+	} else if m.page == 4 {
+		// Skip removed Effort page; return to Context & Compact.
+		m.page = 2
+		m.cursor = oneMNextCursor
 	} else if m.page > 0 {
 		m.page--
 		if m.page == 0 {
@@ -718,30 +708,15 @@ func (m *AdvancedConfigModel) goBack() {
 		if m.page == 2 {
 			m.cursor = oneMNextCursor
 		}
-		if m.page == 3 {
-			m.cursor = m.effortNextCursor()
-		}
 	}
 	setDebugf("goBack old_page=%d old_cursor=%d new_page=%d new_cursor=%d", oldPage, oldCursor, m.page, m.cursor)
 }
 
-func (m *AdvancedConfigModel) effortNextCursor() int {
-	return len(m.effortLevels)
-}
-
-func (m *AdvancedConfigModel) effortBackCursor() int {
-	return len(m.effortLevels) + 1
-}
-
-func (m *AdvancedConfigModel) effortLabel(level string) string {
-	if level == "" {
-		return locale.T("默认（跟随 Claude 设置）", "Default (follow Claude setting)")
-	}
-	return level
-}
 
 // workflowStep keeps the visible flow independent from the internal page IDs.
 // Page 5 is the config-mode choice shown immediately after credentials.
+// Reasoning Effort (old page 3) is no longer part of ccl set — Claude Code
+// manages effort natively via /effort, --effort, and settings.
 func (m *AdvancedConfigModel) workflowStep() int {
 	switch m.page {
 	case 0:
@@ -752,10 +727,8 @@ func (m *AdvancedConfigModel) workflowStep() int {
 		return 3
 	case 2:
 		return 4
-	case 3:
-		return 5
 	case 4:
-		return 6
+		return 5
 	default:
 		return 1
 	}
@@ -1065,8 +1038,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = slotTestCursor
 				} else if m.page == 2 && (m.cursor == oneMNextCursor || m.cursor == oneMBackCursor) {
 					m.cursor = oneMCompactStart + compactRadioCount - 1
-				} else if m.page == 3 && (m.cursor == m.effortNextCursor() || m.cursor == m.effortBackCursor()) {
-					m.cursor = len(m.effortLevels) - 1
 				} else if m.page == 5 && m.cursor > 0 {
 					m.cursor--
 				} else if m.cursor > 0 {
@@ -1102,10 +1073,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < oneMNextCursor {
 					m.cursor++
 				}
-			} else if m.page == 3 {
-				if m.cursor < m.effortBackCursor() {
-					m.cursor++
-				}
 			} else if m.page == 4 {
 				if m.cursor < m.page4MaxCursor() {
 					m.cursor++
@@ -1125,9 +1092,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.page == 2 && m.cursor == oneMBackCursor {
 				m.cursor = oneMNextCursor
-			}
-			if m.page == 3 && m.cursor == m.effortBackCursor() {
-				m.cursor = m.effortNextCursor()
 			}
 			if m.page == 4 {
 				if m.cursor == m.page4ProtocolCursor() {
@@ -1151,9 +1115,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.page == 2 && m.cursor == oneMNextCursor {
 				m.cursor = oneMBackCursor
-			}
-			if m.page == 3 && m.cursor == m.effortNextCursor() {
-				m.cursor = m.effortBackCursor()
 			}
 			if m.page == 4 {
 				if m.cursor == m.page4ProtocolCursor() {
@@ -1187,8 +1148,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			} else if m.page == 2 && m.cursor > oneMBackCursor {
 				m.cursor = 0
-			} else if m.page == 3 && m.cursor > m.effortBackCursor() {
-				m.cursor = 0
 			} else if m.page == 4 && m.cursor > m.page4MaxCursor() {
 				m.cursor = 0
 			} else if m.page == 5 && m.cursor > m.page5MaxCursor() {
@@ -1212,8 +1171,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = slotBackCursor
 				} else if m.page == 2 {
 					m.cursor = oneMBackCursor
-				} else if m.page == 3 {
-					m.cursor = m.effortBackCursor()
 				} else if m.page == 4 {
 					m.cursor = m.page4MaxCursor()
 				} else if m.page == 5 {
@@ -1223,7 +1180,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			// 如果点击了底部的“上一步”按钮，直接返回
-			if (m.page == 0 && m.cursor == m.page0BackCursor()) || (m.page == 1 && m.cursor == slotBackCursor) || (m.page == 2 && m.cursor == oneMBackCursor) || (m.page == 3 && m.cursor == m.effortBackCursor()) {
+			if (m.page == 0 && m.cursor == m.page0BackCursor()) || (m.page == 1 && m.cursor == slotBackCursor) || (m.page == 2 && m.cursor == oneMBackCursor) {
 				m.goBack()
 				return m, nil
 			}
@@ -1321,20 +1278,10 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectCompactPreset(m.cursor - oneMCompactStart)
 					setDebugf("page2 select compact radio=%d preset=%v summary=%s", m.cursor-oneMCompactStart, m.compactPreset, m.compactSummary())
 				} else if m.cursor == oneMNextCursor {
-					// 当光标在“下一步”按钮上时，按 enter 前进到 Page 3
-					m.page = 3
-					m.cursor = m.effortNextCursor() // default to Next button
-					setDebugf("page2 next to page3 one_m=%s compact=%s", reviewOneMSummary(m.oneMSlots), m.compactSummary())
-				}
-			case 3:
-				if m.cursor < len(m.effortLevels) {
-					m.effortCursor = m.cursor
-					setDebugf("page3 effort selected cursor=%d level=%q label=%q", m.cursor, m.effortLevels[m.effortCursor], m.effortLabel(m.effortLevels[m.effortCursor]))
-				} else {
-					m.p.EffortLevel = m.effortLevels[m.effortCursor]
+					// Context page is the last configuration step before review.
 					m.page = 4
 					m.cursor = m.page4InitialCursor()
-					setDebugf("page3 next to review effort=%q label=%q", m.p.EffortLevel, m.effortLabel(m.p.EffortLevel))
+					setDebugf("page2 next to review one_m=%s compact=%s", reviewOneMSummary(m.oneMSlots), m.compactSummary())
 				}
 			case 4:
 				if m.cursor == m.page4ProtocolCursor() {
@@ -1470,14 +1417,14 @@ func (m *AdvancedConfigModel) renderPageHeader(title, badge string) string {
 	if m.page != 4 {
 		line += protoBadgeStyle.Render("Protocol: " + m.getProtocolFamily())
 	}
-	step := fmt.Sprintf(locale.T("步骤 %d/6", "Step %d/6"), m.workflowStep())
+	step := fmt.Sprintf(locale.T("步骤 %d/5", "Step %d/5"), m.workflowStep())
 	line += stepStyle.Render(step)
 	dividerWidth := max(m.panelWidth()-6, 16)
 	return line + "\n" + dividerStyle.Render(strings.Repeat("─", dividerWidth)) + "\n\n"
 }
 
 func (m *AdvancedConfigModel) renderStepProgress() string {
-	const totalSteps = 6
+	const totalSteps = 5
 	dots := make([]string, 0, totalSteps)
 	for step := 1; step <= totalSteps; step++ {
 		if step == m.workflowStep() {
@@ -1718,27 +1665,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 按钮", "enter toggle · ↑↓ move · ←→ buttons")))
 
 	case 3:
-		// ==================== PAGE 3: Reasoning Effort 思考流配置 ====================
-		body.WriteString(m.renderPageHeader(locale.T("Reasoning Effort 思考流配置", "Reasoning Effort"), "Effort"))
-		for i, level := range m.effortLevels {
-			label := m.effortLabel(level)
-			prefix := "  "
-			if m.cursor == i {
-				prefix = selectedStyle.Render("> ")
-			}
-			radio := "( )"
-			if m.effortCursor == i {
-				radio = purpleText.Render("(●)")
-			}
-			itemText := grayText.Render(label)
-			if m.cursor == i {
-				itemText = titleStyle.Render(label)
-			}
-			body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radio, itemText))
-		}
-
-		body.WriteString(renderBottomButtons(m.page, m.cursor, m.effortNextCursor(), m.effortBackCursor()))
-		body.WriteString(grayText.Render(locale.T("↑↓ 移动选择级别 · ←→ 切换按钮 · enter 前进/后退", "↑↓ Move · ←→ Toggle Buttons · enter next/back")))
+		// Effort configuration was removed from ccl set. Jump to review if reached.
+		m.page = 4
+		m.cursor = m.page4InitialCursor()
+		body.WriteString(grayText.Render(locale.T(
+			"Reasoning Effort 已改由 Claude Code 管理（/effort、--effort）…",
+			"Reasoning Effort is managed by Claude Code (/effort, --effort)…",
+		)) + "\n")
 
 	case 4:
 		// ==================== PAGE 4: compact configuration summary ====================
@@ -1775,7 +1708,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 		// Runtime
 		body.WriteString("\n" + titleStyle.Render("Runtime") + "\n")
-		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Effort", purpleText.Render(m.effortLabel(m.effortLevels[m.effortCursor]))))
+		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Effort", purpleText.Render(locale.T("由 Claude Code 管理", "Claude Code managed"))))
+		if strings.TrimSpace(m.p.EffortLevel) != "" {
+			body.WriteString(grayText.Render(fmt.Sprintf(
+				locale.T("  提示：配置中仍有 effortLevel=%s，会覆盖 Claude Code；保存后将清除", "  note: saved effortLevel=%s overrides Claude Code; cleared on save"),
+				m.p.EffortLevel,
+			)) + "\n")
+		}
 		compactHint := ""
 		switch m.compactPreset {
 		case compactPreset200K:
@@ -1849,7 +1788,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 		autoPrefix := "  "
 		autoLabel := grayText.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
-		autoDesc := grayText.Render("    " + locale.T("自动填入前 4 个可用模型，Effort = Default，跳过 1M 配置", "Auto-fill first 4 models, Effort=Default, skip 1M"))
+		autoDesc := grayText.Render("    " + locale.T("自动填入前 4 个可用模型，跳过手动 1M 配置", "Auto-fill first 4 models; skip manual 1M config"))
 		if m.cursor == 0 {
 			autoPrefix = selectedStyle.Render("> ")
 			autoLabel = selectedStyle.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
@@ -1859,7 +1798,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 		manualPrefix := "  "
 		manualLabel := grayText.Render(locale.T("🛠 手动配置", "🛠 Manual Config"))
-		manualDesc := grayText.Render("    " + locale.T("手动选择每个槽位的模型、1M 上下文开关、推理力度", "Manually set slot models, 1M context, effort level"))
+		manualDesc := grayText.Render("    " + locale.T("手动选择每个槽位的模型与 1M 上下文开关", "Manually set slot models and 1M context"))
 		if m.cursor == 1 {
 			manualPrefix = selectedStyle.Render("> ")
 			manualLabel = selectedStyle.Render(locale.T("🛠 手动配置", "🛠 Manual Config"))
