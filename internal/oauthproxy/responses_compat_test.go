@@ -187,7 +187,6 @@ func TestPlainResponsesProxyStripsCodexResidue(t *testing.T) {
 	}
 }
 
-
 func TestPlainResponsesProxyInjectsMaxOutputTokens(t *testing.T) {
 	t.Parallel()
 

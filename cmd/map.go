@@ -176,6 +176,10 @@ func runMapAuto(args []string) error {
 		}
 	}
 	state := compactStateFromProvider(p)
+	// Compact is fully independent of [1m] slot cleanup.
+	// Only migrate pure legacy residue (window=1M without percentage) after
+	// every [1m] marker has been removed. Modern presets — including explicit
+	// Maximum 1M/90% — are preserved as-is.
 	preset := state.preset
 	if allConfiguredModelsRecommendOneM(p) {
 		for _, slot := range advancedSlotRefs(&p) {
@@ -183,9 +187,8 @@ func runMapAuto(args []string) error {
 				oneMSlots[slot.key] = true
 			}
 		}
-		preset = compactPreset500K
-	} else if len(oneMSlots) == 0 && (state.legacy || preset == compactPreset1M) {
-		// Stale 1M compact env left over from the old coupled UI.
+		// Do not force Balanced 500K here; leave the user's compact budget alone.
+	} else if len(oneMSlots) == 0 && state.legacy {
 		preset = compactPresetDefault
 	}
 	applyCompactConfig(&p, oneMSlots, preset)

@@ -216,7 +216,6 @@ func TestDedicatedCodexEndpointClassification(t *testing.T) {
 	}
 }
 
-
 func TestGetOpenAIModelInfosIncludesContextWindow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"big-model","token_limits":{"context_window":1000000}},{"id":"small-model","token_limits":{"context_window":128000}}]}`))
@@ -238,7 +237,6 @@ func TestGetOpenAIModelInfosIncludesContextWindow(t *testing.T) {
 		t.Fatal("ContextWindowSuggests1M thresholds unexpected")
 	}
 }
-
 
 func TestGetOpenAIModelInfosAcceptsTopLevelContextWindow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

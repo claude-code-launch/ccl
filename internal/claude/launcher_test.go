@@ -695,7 +695,6 @@ func TestLauncherCustomEnv(t *testing.T) {
 	}
 }
 
-
 func TestPreviewSettingsUsesDisplayNameWithoutTechnicalSuffix(t *testing.T) {
 	result := claude.PreviewSettings(provider.Provider{
 		Type:          "anthropic",

@@ -80,7 +80,7 @@ func TestApplyCompactConfig200KKeepsOneMSuffix(t *testing.T) {
 
 func TestApplyCompactConfig500K(t *testing.T) {
 	p := provider.Provider{
-		SonnetModel: "grok-4.5[1m]",
+		SonnetModel:   "grok-4.5[1m]",
 		CustomModelID: "grok-4.5[1m]",
 	}
 	applyCompactConfig(&p, map[string]bool{"sonnet": true, "custom": true}, compactPreset500K)

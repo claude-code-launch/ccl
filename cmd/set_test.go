@@ -1548,7 +1548,6 @@ func TestParseModelListForDetectionInfersResponseShapes(t *testing.T) {
 	}
 }
 
-
 func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 	p := provider.Provider{
 		Type:     "openai",

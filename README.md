@@ -356,7 +356,7 @@ providers:
 - 以 `/claude` 或 `/anthropic` 结尾的网关基址按 Anthropic 处理，模型列表请求会自动使用 `<endpoint>/v1/models`；其他 OpenAI 基址使用 `<endpoint>/models`。
 - `type: anthropic`：Claude Code 直连该 endpoint，`ccl` 不在请求链路中做协议转换；`model` 只作为 `ccl` 的本地模型池，用于 TUI 列表、`map auto`、默认 slot 映射和可用性检测。Claude Code 访问 `/v1/models` 时看到的是 provider 自己返回的结果。
 - `oauthProvider`：让相同的 CLIProxyAPI runtime 使用已保存的 OAuth 凭据。运行时 `endpoint` 和上游凭据会替换为仅本次会话有效的本机地址与随机 Bearer token，不会写回配置文件；OpenAI Chat/Responses provider 也使用相同的会话认证方式，避免 Claude Code 把代理 token 当作新的 Anthropic API key 反复确认。
-- Claude Code 运行时默认使用当前 Custom/Sonnet 映射作为子代理模型，将工具并发限制为 `3`，设置 `ENABLE_TOOL_SEARCH=false`，并将 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` 固定为 Claude Code 默认值 `32000`。输出上限与 200K/1M 上下文窗口是两个独立概念；可通过 `ccl env` 覆盖输出上限，但必须位于 `1..128000`。这些值会在手动配置的 Review & Apply 页显示。
+- Claude Code 运行时默认使用当前 Custom/Sonnet 映射作为子代理模型，工具并发默认 `3`，`ENABLE_TOOL_SEARCH=false`，`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认 `32000`。输出上限与 200K/1M 上下文窗口是两个独立概念。这些值可在 **Review & Apply** 页用 `‹ ›` 就地修改（选择 Default 会删除对应 env）；也可用 `ccl env` 覆盖。Max Output 仅对 **plain OpenAI Responses** 保证传到上游；ChatGPT OAuth 与专用 `/codex` 路径显示为 Upstream managed。
 - Anthropic 直连时 `endpoint` 建议使用裸域名，例如 `https://token.sensenova.cn`；`ccl set` 会自动去掉常见的 `/v1`、`/v1/messages`、`/v1/models` 后缀，避免 Claude Code 运行时拼成 `/v1/v1/messages`。
 
 ## ✅ 本地验证清单

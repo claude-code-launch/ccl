@@ -356,3 +356,40 @@ func testProviderWithOldMappings() provider.Provider {
 		CustomModelID: "old-custom",
 	}
 }
+
+func TestMapAutoPreservesModernOneMCompactPreset(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
+
+	cfg := &provider.Config{
+		ActiveProvider: "mock",
+		Providers: map[string]provider.Provider{
+			"mock": {
+				Name:      "mock",
+				Type:      "openai",
+				Endpoint:  server.URL + "/v1",
+				APIKey:    "test-key",
+				OpusModel: "old-opus[1m]",
+				Env: map[string]string{
+					autoCompactWindowEnv: compactWindow1M,
+					autoCompactPctEnv:    compactPct1M,
+				},
+			},
+		},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMapAuto([]string{"mock"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := updated.Providers["mock"]
+	// Modern Maximum 1M/90% must survive even when [1m] slots are cleaned for unknown models.
+	if p.Env[autoCompactWindowEnv] != compactWindow1M || p.Env[autoCompactPctEnv] != compactPct1M {
+		t.Fatalf("modern 1M/90 compact was rewritten: %+v", p.Env)
+	}
+}

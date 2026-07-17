@@ -61,12 +61,12 @@ const (
 	slotNextCursor        = slotTestCursor + 1
 	slotBackCursor        = slotNextCursor + 1
 	// Page 2: slots 0..4, compact radios 5..9, Next/Back after.
-	compactRadioCount     = 5
-	oneMCompactStart      = slotMappingCount
-	oneMNextCursor        = oneMCompactStart + compactRadioCount
-	oneMBackCursor        = oneMNextCursor + 1
-	slotTestConcurrency   = 50
-	lowCostProbeModel     = "gpt-5.4-mini"
+	compactRadioCount   = 5
+	oneMCompactStart    = slotMappingCount
+	oneMNextCursor      = oneMCompactStart + compactRadioCount
+	oneMBackCursor      = oneMNextCursor + 1
+	slotTestConcurrency = 50
+	lowCostProbeModel   = "gpt-5.4-mini"
 )
 
 // compactRadioOrder matches the product mockup Auto Compact radio list.
@@ -79,8 +79,8 @@ var compactRadioOrder = []compactPreset{
 }
 
 type AdvancedConfigModel struct {
-	p             *provider.Provider
-	modelPool     []string
+	p         *provider.Provider
+	modelPool []string
 	// modelContextWindows stores advisory context_window values from /models
 	// catalogs (keyed by model id). Zero/missing means unknown — never treat as
 	// a hard guarantee of 1M support.
@@ -199,7 +199,6 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		clearStaleSlots:     true,
 		modelAvailability:   make(map[string]modelAvailability),
 	}
-
 
 	cleanAndPopulate := func(modelStr *string, slotKey string) {
 		if hasOneMSuffix(*modelStr) {
@@ -511,10 +510,11 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 				m.oneMSlots[slot.key] = true
 			}
 		}
-		// Confirmed 1M models: enable Extended Context and Balanced compact
-		// (500K/80%). Users can deepen to Maximum 1M/90% manually.
-		m.compactPreset = compactPreset500K
-		m.compactState = compactConfigState{preset: compactPreset500K, window: compactWindow500K, pct: compactPct500K}
+		// Enable Extended Context only. Compact budget stays whatever the user
+		// already had (or Claude default for fresh configs).
+	} else if m.compactState.legacy && len(m.oneMSlots) == 0 {
+		m.compactPreset = compactPresetDefault
+		m.compactState = compactConfigState{preset: compactPresetDefault}
 	}
 	// Default: do not override Claude's own effort setting.
 	m.p.EffortLevel = ""
@@ -624,6 +624,23 @@ func (m *AdvancedConfigModel) canToggleOpenAIProtocol() bool {
 	return m.p != nil && provider.IsOpenAICompatibleType(m.p.Type)
 }
 
+// maxOutputUpstreamManaged is true when Claude Code's max-output setting cannot
+// be forwarded by the current upstream path (Codex OAuth / dedicated /codex).
+// Plain openai_responses re-injects max_output_tokens in the compat proxy.
+func (m *AdvancedConfigModel) maxOutputUpstreamManaged() bool {
+	if m.p == nil {
+		return false
+	}
+	if strings.TrimSpace(m.p.OAuthProvider) != "" {
+		// ChatGPT/Gemini OAuth go through SDK backends that ignore MaxOutputTokens.
+		return true
+	}
+	if provider.IsOpenAIResponsesType(m.p.Type) && protocol.IsCodexBaseEndpoint(m.p.Endpoint) {
+		return true
+	}
+	return false
+}
+
 func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 	if m.p == nil || !m.canToggleOpenAIProtocol() {
 		return
@@ -641,10 +658,11 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 // active checkbox, Apply, Back.
 //
 // Color + control language on this page:
-//   cyan/green  = read-only facts (endpoint, auth, model mapping)
-//   purple      = editable values, always wrapped as ‹ value ›
-//   blue        = current focus / primary action
-//   yellow      = [1M] badges
+//
+//	cyan/green  = read-only facts (endpoint, auth, model mapping)
+//	purple      = editable values, always wrapped as ‹ value ›
+//	blue        = current focus / primary action
+//	yellow      = [1M] badges
 func (m *AdvancedConfigModel) page4Base() int {
 	if m.canToggleOpenAIProtocol() {
 		return 1
@@ -659,13 +677,13 @@ func (m *AdvancedConfigModel) page4ProtocolCursor() int {
 	return -1
 }
 
-func (m *AdvancedConfigModel) page4CompactCursor() int  { return m.page4Base() + 0 }
-func (m *AdvancedConfigModel) page4MaxOutCursor() int   { return m.page4Base() + 1 }
-func (m *AdvancedConfigModel) page4ToolsCursor() int    { return m.page4Base() + 2 }
-func (m *AdvancedConfigModel) page4SearchCursor() int   { return m.page4Base() + 3 }
-func (m *AdvancedConfigModel) page4ActiveCursor() int   { return m.page4Base() + 4 }
-func (m *AdvancedConfigModel) page4SaveCursor() int     { return m.page4Base() + 5 }
-func (m *AdvancedConfigModel) page4BackCursor() int     { return m.page4Base() + 6 }
+func (m *AdvancedConfigModel) page4CompactCursor() int { return m.page4Base() + 0 }
+func (m *AdvancedConfigModel) page4MaxOutCursor() int  { return m.page4Base() + 1 }
+func (m *AdvancedConfigModel) page4ToolsCursor() int   { return m.page4Base() + 2 }
+func (m *AdvancedConfigModel) page4SearchCursor() int  { return m.page4Base() + 3 }
+func (m *AdvancedConfigModel) page4ActiveCursor() int  { return m.page4Base() + 4 }
+func (m *AdvancedConfigModel) page4SaveCursor() int    { return m.page4Base() + 5 }
+func (m *AdvancedConfigModel) page4BackCursor() int    { return m.page4Base() + 6 }
 
 func (m *AdvancedConfigModel) page4MaxCursor() int {
 	return m.page4BackCursor()
@@ -674,6 +692,16 @@ func (m *AdvancedConfigModel) page4MaxCursor() int {
 func (m *AdvancedConfigModel) page4InitialCursor() int {
 	// Prefer first editable runtime field for discoverability.
 	return m.page4CompactCursor()
+}
+
+func (m *AdvancedConfigModel) normalizePage4Cursor() {
+	if m.page != 4 || !m.maxOutputUpstreamManaged() {
+		return
+	}
+	if m.cursor == m.page4MaxOutCursor() {
+		// Prefer moving to Tools when landing on a disabled Max Output row.
+		m.cursor = m.page4ToolsCursor()
+	}
 }
 
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
@@ -853,6 +881,9 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		m.compactPreset = cycleCompactOption(m.compactPreset, delta)
 		m.compactState = compactConfigState{preset: m.compactPreset}
 	case m.page4MaxOutCursor():
+		if m.maxOutputUpstreamManaged() {
+			return
+		}
 		cur := m.reviewMaxOutValue()
 		// Snap unknown custom values into the cycle at Default.
 		known := false
@@ -934,7 +965,6 @@ func (m *AdvancedConfigModel) goBack() {
 	}
 	setDebugf("goBack old_page=%d old_cursor=%d new_page=%d new_cursor=%d", oldPage, oldCursor, m.page, m.cursor)
 }
-
 
 // workflowStep keeps the visible flow independent from the internal page IDs.
 // Page 5 is the config-mode choice shown immediately after credentials.
@@ -1299,6 +1329,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.page == 4 {
 				if m.cursor < m.page4MaxCursor() {
 					m.cursor++
+					if m.maxOutputUpstreamManaged() && m.cursor == m.page4MaxOutCursor() {
+						m.cursor++
+					}
 				}
 			} else if m.page == 5 {
 				if m.cursor < m.page5MaxCursor() {
@@ -1682,29 +1715,32 @@ func truncateMiddle(s string, max int) string {
 	if max < 8 || lipgloss.Width(s) <= max {
 		return s
 	}
-	// Binary-search prefix/suffix rune counts for display width.
-	runes := []rune(s)
-	left, right := 1, len(runes)-2
-	best := "…"
-	for left <= right {
-		// Keep roughly equal visual weight on both sides.
-		keepL := left
-		keepR := max - 1 - keepL
-		if keepR < 1 {
+	runess := []rune(s)
+	ellipsis := "…"
+	budget := max - lipgloss.Width(ellipsis)
+	if budget < 2 {
+		return ellipsis
+	}
+	leftBudget := budget / 2
+	rightBudget := budget - leftBudget
+
+	var left string
+	for _, r := range runess {
+		cand := left + string(r)
+		if lipgloss.Width(cand) > leftBudget {
 			break
 		}
-		if keepR > len(runes)-keepL {
-			keepR = len(runes) - keepL
-		}
-		cand := string(runes[:keepL]) + "…" + string(runes[len(runes)-keepR:])
-		if lipgloss.Width(cand) <= max {
-			best = cand
-			left++
-			continue
-		}
-		break
+		left = cand
 	}
-	return best
+	var right string
+	for i := len(runess) - 1; i >= 0; i-- {
+		cand := string(runess[i]) + right
+		if lipgloss.Width(cand) > rightBudget {
+			break
+		}
+		right = cand
+	}
+	return left + ellipsis + right
 }
 
 func padDisplay(s string, width int) string {
@@ -1934,7 +1970,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 4:
 		// ==================== PAGE 4: editable configuration summary ====================
-		compactHeight := m.height > 0 && m.height < 26
+		m.normalizePage4Cursor()
+		// Compact when the terminal cannot fit the full review (header+border ~28 lines).
+		// Use full content probe when height is known.
+		compactHeight := m.height > 0 && m.height < 28
 		sectionGap := "\n"
 		if compactHeight {
 			sectionGap = ""
@@ -1981,7 +2020,12 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, label, val))
 		}
 		renderEditable(m.page4CompactCursor(), "Compact", formatCompactLabel(m.compactPreset))
-		renderEditable(m.page4MaxOutCursor(), "Max Output", formatMaxOutLabel(m.reviewMaxOutValue()))
+		if m.maxOutputUpstreamManaged() {
+			// Read-only green: upstream path cannot honor CLAUDE_CODE_MAX_OUTPUT_TOKENS.
+			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Max Output", availableStyle.Render(locale.T("上游管理", "Upstream managed"))))
+		} else {
+			renderEditable(m.page4MaxOutCursor(), "Max Output", formatMaxOutLabel(m.reviewMaxOutValue()))
+		}
 		renderEditable(m.page4ToolsCursor(), "Tools", formatToolsLabel(m.reviewToolsValue()))
 		renderEditable(m.page4SearchCursor(), "Tool Search", formatSearchLabel(m.reviewSearchValue()))
 
