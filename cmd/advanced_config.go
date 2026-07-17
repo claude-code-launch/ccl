@@ -618,10 +618,15 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 	return "OpenAI"
 }
 
-// canToggleOpenAIProtocol is true when the provider is OpenAI-compatible, so the
-// review page can switch between Chat Completions and Responses.
+// canToggleOpenAIProtocol is true when the provider is a manual OpenAI-compatible
+// API-key endpoint. OAuth backends ignore options.Protocol in StartProvider and
+// always use their fixed Chat/Responses path, so the review page must not offer
+// a toggle that only changes a label.
 func (m *AdvancedConfigModel) canToggleOpenAIProtocol() bool {
-	return m.p != nil && provider.IsOpenAICompatibleType(m.p.Type)
+	if m.p == nil || !provider.IsOpenAICompatibleType(m.p.Type) {
+		return false
+	}
+	return strings.TrimSpace(m.p.OAuthProvider) == ""
 }
 
 // maxOutputUpstreamManaged is true when Claude Code's max-output setting cannot
@@ -631,10 +636,12 @@ func (m *AdvancedConfigModel) maxOutputUpstreamManaged() bool {
 	if m.p == nil {
 		return false
 	}
-	if strings.TrimSpace(m.p.OAuthProvider) != "" {
-		// ChatGPT/Gemini OAuth go through SDK backends that ignore MaxOutputTokens.
+	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
+	case "chatgpt", "codex":
+		// ChatGPT/Codex OAuth ignore MaxOutputTokens in StartProvider.
 		return true
 	}
+	// Gemini OAuth (antigravity) maps Claude max_tokens → generationConfig.maxOutputTokens.
 	if provider.IsOpenAIResponsesType(m.p.Type) && protocol.IsCodexBaseEndpoint(m.p.Endpoint) {
 		return true
 	}
@@ -694,14 +701,23 @@ func (m *AdvancedConfigModel) page4InitialCursor() int {
 	return m.page4CompactCursor()
 }
 
-func (m *AdvancedConfigModel) normalizePage4Cursor() {
-	if m.page != 4 || !m.maxOutputUpstreamManaged() {
+// skipDisabledPage4Cursor moves past rows that are not interactive.
+// direction: +1 when moving down/tab, -1 when moving up/shift-tab.
+func (m *AdvancedConfigModel) skipDisabledPage4Cursor(direction int) {
+	if m.page != 4 || direction == 0 {
 		return
 	}
-	if m.cursor == m.page4MaxOutCursor() {
-		// Prefer moving to Tools when landing on a disabled Max Output row.
-		m.cursor = m.page4ToolsCursor()
+	if !m.maxOutputUpstreamManaged() {
+		return
 	}
+	if m.cursor != m.page4MaxOutCursor() {
+		return
+	}
+	if direction > 0 {
+		m.cursor = m.page4ToolsCursor()
+		return
+	}
+	m.cursor = m.page4CompactCursor()
 }
 
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
@@ -1293,6 +1309,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = oneMCompactStart + compactRadioCount - 1
 				} else if m.page == 5 && m.cursor > 0 {
 					m.cursor--
+				} else if m.page == 4 && m.cursor > 0 {
+					m.cursor--
+					m.skipDisabledPage4Cursor(-1)
 				} else if m.cursor > 0 {
 					m.cursor--
 				}
@@ -1329,9 +1348,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.page == 4 {
 				if m.cursor < m.page4MaxCursor() {
 					m.cursor++
-					if m.maxOutputUpstreamManaged() && m.cursor == m.page4MaxOutCursor() {
-						m.cursor++
-					}
+					m.skipDisabledPage4Cursor(+1)
 				}
 			} else if m.page == 5 {
 				if m.cursor < m.page5MaxCursor() {
@@ -1399,6 +1416,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.page == 5 && m.cursor > m.page5MaxCursor() {
 				m.cursor = 0
 			}
+			if m.page == 4 {
+				m.skipDisabledPage4Cursor(+1)
+			}
 
 		// case "space":
 		// 	// 空格键：Page 2 切换槽位的 1M 上下文开关
@@ -1422,6 +1442,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.page == 5 {
 					m.cursor = m.page5MaxCursor()
 				}
+			}
+			if m.page == 4 {
+				m.skipDisabledPage4Cursor(-1)
 			}
 
 		case "enter":
@@ -1970,7 +1993,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 4:
 		// ==================== PAGE 4: editable configuration summary ====================
-		m.normalizePage4Cursor()
 		// Compact when the terminal cannot fit the full review (header+border ~28 lines).
 		// Use full content probe when height is known.
 		compactHeight := m.height > 0 && m.height < 28

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -48,11 +49,21 @@ func TestTruncateMiddleEmoji(t *testing.T) {
 }
 
 func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
-	oauth := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
-	oauth.OAuthProvider = "chatgpt"
-	m := NewAdvancedConfigModel(&oauth)
+	chatgpt := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
+	chatgpt.OAuthProvider = "chatgpt"
+	m := NewAdvancedConfigModel(&chatgpt)
 	if !m.maxOutputUpstreamManaged() {
 		t.Fatal("ChatGPT OAuth should treat max output as upstream-managed")
+	}
+	if m.canToggleOpenAIProtocol() {
+		t.Fatal("OAuth protocol must be read-only on review")
+	}
+
+	gemini := providerFrom("gemini", "oauth://gemini", "openai")
+	gemini.OAuthProvider = "gemini"
+	m = NewAdvancedConfigModel(&gemini)
+	if m.maxOutputUpstreamManaged() {
+		t.Fatal("Gemini OAuth should allow max output editing")
 	}
 
 	codex := providerFrom("codex", "https://example.com/codex", "openai_responses")
@@ -70,7 +81,6 @@ func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
 	m.page = 4
 	view := m.View().Content
 	if strings.Contains(view, "Upstream managed") {
-		// plain should show editable control
 		t.Fatalf("plain responses unexpectedly shows Upstream managed: %q", view)
 	}
 
@@ -82,27 +92,43 @@ func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
 	}
 }
 
+func TestPage4UpFromToolsSkipsDisabledMaxOutput(t *testing.T) {
+	codex := providerFrom("codex", "https://example.com/codex", "openai_responses")
+	m := NewAdvancedConfigModel(&codex)
+	m.page = 4
+	m.cursor = m.page4ToolsCursor()
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
+	m = next.(*AdvancedConfigModel)
+	if m.cursor != m.page4CompactCursor() {
+		t.Fatalf("up from Tools landed on cursor %d, want Compact %d (skip Max Output)", m.cursor, m.page4CompactCursor())
+	}
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	m = next.(*AdvancedConfigModel)
+	if m.cursor != m.page4ToolsCursor() {
+		t.Fatalf("down from Compact landed on cursor %d, want Tools %d", m.cursor, m.page4ToolsCursor())
+	}
+}
+
 func providerFrom(name, endpoint, typ string) provider.Provider {
 	return provider.Provider{Name: name, Endpoint: endpoint, Type: typ, APIKey: "k", Model: "m"}
 }
 
-func TestReviewCompactsBelow28Lines(t *testing.T) {
+func TestReviewFitsCommonTerminalHeights(t *testing.T) {
 	p := providerFrom("p", "https://example.com/v1", "openai")
 	m := NewAdvancedConfigModel(&p)
 	m.page = 4
 	m.width = 100
+	m.manualConfig = true
 
-	m.height = 24
-	h24 := lipgloss.Height(m.View().Content)
-	m.height = 30
-	h30 := lipgloss.Height(m.View().Content)
-	if h24 > 24 {
-		// Allow slight overshoot from outer chrome; must still be tighter than full.
-		if h24 >= h30 {
-			t.Fatalf("expected compact 24-row view shorter than 30-row: h24=%d h30=%d", h24, h30)
+	for _, h := range []int{24, 26, 27, 28, 30} {
+		m.height = h
+		view := m.View().Content
+		got := lipgloss.Height(view)
+		if got > h {
+			t.Fatalf("terminal height %d rendered %d lines (overflow)\n%s", h, got, view)
 		}
-	}
-	if h30 < h24 {
-		t.Fatalf("unexpected heights h24=%d h30=%d", h24, h30)
+		if !strings.Contains(view, "Apply & Finish") {
+			t.Fatalf("Apply not visible at height %d", h)
+		}
 	}
 }
