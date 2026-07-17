@@ -640,11 +640,22 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 	setDebugf("page4 protocol toggled type=%q label=%q", m.p.Type, provider.ProtocolLabel(m.p.Type))
 }
 
-// Page 4 cursor model (compact review):
-//   0 protocol (only when OpenAI-compatible)
-//   active toggle
-//   apply
-//   back
+// Page 4 cursor model (editable summary):
+// optional protocol, then Compact / MaxOutput / Tools / ToolSearch,
+// active checkbox, Apply, Back.
+//
+// Color + control language on this page:
+//   cyan/green  = read-only facts (endpoint, auth, model mapping)
+//   purple      = editable values, always wrapped as ‹ value ›
+//   blue        = current focus / primary action
+//   yellow      = [1M] badges
+func (m *AdvancedConfigModel) page4Base() int {
+	if m.canToggleOpenAIProtocol() {
+		return 1
+	}
+	return 0
+}
+
 func (m *AdvancedConfigModel) page4ProtocolCursor() int {
 	if m.canToggleOpenAIProtocol() {
 		return 0
@@ -652,33 +663,249 @@ func (m *AdvancedConfigModel) page4ProtocolCursor() int {
 	return -1
 }
 
-func (m *AdvancedConfigModel) page4ActiveCursor() int {
-	if m.canToggleOpenAIProtocol() {
-		return 1
-	}
-	return 0
-}
-
-func (m *AdvancedConfigModel) page4SaveCursor() int {
-	if m.canToggleOpenAIProtocol() {
-		return 2
-	}
-	return 1
-}
-
-func (m *AdvancedConfigModel) page4BackCursor() int {
-	if m.canToggleOpenAIProtocol() {
-		return 3
-	}
-	return 2
-}
+func (m *AdvancedConfigModel) page4CompactCursor() int  { return m.page4Base() + 0 }
+func (m *AdvancedConfigModel) page4MaxOutCursor() int   { return m.page4Base() + 1 }
+func (m *AdvancedConfigModel) page4ToolsCursor() int    { return m.page4Base() + 2 }
+func (m *AdvancedConfigModel) page4SearchCursor() int   { return m.page4Base() + 3 }
+func (m *AdvancedConfigModel) page4ActiveCursor() int   { return m.page4Base() + 4 }
+func (m *AdvancedConfigModel) page4SaveCursor() int     { return m.page4Base() + 5 }
+func (m *AdvancedConfigModel) page4BackCursor() int     { return m.page4Base() + 6 }
 
 func (m *AdvancedConfigModel) page4MaxCursor() int {
 	return m.page4BackCursor()
 }
 
 func (m *AdvancedConfigModel) page4InitialCursor() int {
-	return m.page4SaveCursor()
+	// Prefer first editable runtime field for discoverability.
+	return m.page4CompactCursor()
+}
+
+// Runtime option cycles. Index 0 is always "Default" (delete managed env).
+var (
+	reviewMaxOutOptions  = []string{"", "16000", "32000", "64000", "128000"}
+	reviewToolsOptions   = []string{"", "1", "2", "3", "4", "6", "8"}
+	reviewSearchOptions  = []string{"", "true", "false"} // Default / On / Off
+	reviewCompactOptions = []compactPreset{
+		compactPresetDefault,
+		compactPreset200K,
+		compactPreset500K,
+		compactPreset1M,
+		compactPresetPreserve,
+	}
+)
+
+func ensureProviderEnvMap(p *provider.Provider) {
+	if p.Env == nil {
+		p.Env = make(map[string]string)
+	}
+}
+
+func deleteProviderEnvKey(p *provider.Provider, key string) {
+	if p.Env == nil {
+		return
+	}
+	delete(p.Env, key)
+	if len(p.Env) == 0 {
+		p.Env = nil
+	}
+}
+
+func setProviderEnvValue(p *provider.Provider, key, value string) {
+	if value == "" {
+		deleteProviderEnvKey(p, key)
+		return
+	}
+	ensureProviderEnvMap(p)
+	p.Env[key] = value
+}
+
+func cycleStringOption(current string, options []string, delta int) string {
+	idx := 0
+	for i, opt := range options {
+		if opt == current {
+			idx = i
+			break
+		}
+	}
+	n := len(options)
+	idx = (idx + delta) % n
+	if idx < 0 {
+		idx += n
+	}
+	return options[idx]
+}
+
+func cycleCompactOption(current compactPreset, delta int) compactPreset {
+	idx := 0
+	for i, opt := range reviewCompactOptions {
+		if opt == current {
+			idx = i
+			break
+		}
+	}
+	n := len(reviewCompactOptions)
+	idx = (idx + delta) % n
+	if idx < 0 {
+		idx += n
+	}
+	return reviewCompactOptions[idx]
+}
+
+func (m *AdvancedConfigModel) reviewMaxOutValue() string {
+	if m.p.Env == nil {
+		return ""
+	}
+	if v, err := claude.NormalizeMaxOutputTokens(m.p.Env[claude.MaxOutputTokensEnv]); err == nil {
+		// Only treat known cycle values as selected; custom stays as-is via display.
+		for _, opt := range reviewMaxOutOptions {
+			if opt == v {
+				return v
+			}
+		}
+		return v
+	}
+	return ""
+}
+
+func (m *AdvancedConfigModel) reviewToolsValue() string {
+	if m.p.Env == nil {
+		return ""
+	}
+	v := strings.TrimSpace(m.p.Env[claude.ToolUseConcurrencyEnv])
+	return v
+}
+
+func (m *AdvancedConfigModel) reviewSearchValue() string {
+	if m.p.Env == nil {
+		return ""
+	}
+	v := strings.ToLower(strings.TrimSpace(m.p.Env[claude.ToolSearchEnv]))
+	switch v {
+	case "true", "1", "on", "yes":
+		return "true"
+	case "false", "0", "off", "no":
+		return "false"
+	default:
+		return v
+	}
+}
+
+func formatEditableValue(label string, isDefault bool) string {
+	if isDefault {
+		return "‹ Default · " + label + " ›"
+	}
+	return "‹ " + label + " ›"
+}
+
+func formatMaxOutLabel(value string) string {
+	switch value {
+	case "":
+		return formatEditableValue("32K", true)
+	case "16000":
+		return formatEditableValue("16K", false)
+	case "32000":
+		return formatEditableValue("32K", false)
+	case "64000":
+		return formatEditableValue("64K", false)
+	case "128000":
+		return formatEditableValue("128K", false)
+	default:
+		return formatEditableValue(value, false)
+	}
+}
+
+func formatToolsLabel(value string) string {
+	if value == "" {
+		return formatEditableValue("3", true)
+	}
+	return formatEditableValue(value, false)
+}
+
+func formatSearchLabel(value string) string {
+	switch value {
+	case "":
+		return formatEditableValue("Off", true)
+	case "true":
+		return formatEditableValue("On", false)
+	case "false":
+		return formatEditableValue("Off", false)
+	default:
+		return formatEditableValue(value, false)
+	}
+}
+
+func formatCompactLabel(preset compactPreset) string {
+	switch preset {
+	case compactPresetDefault:
+		return formatEditableValue("Claude default", false)
+	case compactPreset200K:
+		return formatEditableValue("Switch-safe 200K / 70%", false)
+	case compactPreset500K:
+		return formatEditableValue("Balanced 500K / 80%", false)
+	case compactPreset1M:
+		return formatEditableValue("Maximum 1M / 90%", false)
+	default:
+		return formatEditableValue("Custom", false)
+	}
+}
+
+func (m *AdvancedConfigModel) adjustReviewField(delta int) {
+	switch m.cursor {
+	case m.page4ProtocolCursor():
+		m.toggleOpenAIProtocol()
+	case m.page4CompactCursor():
+		m.compactPreset = cycleCompactOption(m.compactPreset, delta)
+		m.compactState = compactConfigState{preset: m.compactPreset}
+	case m.page4MaxOutCursor():
+		cur := m.reviewMaxOutValue()
+		// Snap unknown custom values into the cycle at Default.
+		known := false
+		for _, opt := range reviewMaxOutOptions {
+			if opt == cur {
+				known = true
+				break
+			}
+		}
+		if !known {
+			cur = ""
+		}
+		next := cycleStringOption(cur, reviewMaxOutOptions, delta)
+		setProviderEnvValue(m.p, claude.MaxOutputTokensEnv, next)
+	case m.page4ToolsCursor():
+		cur := m.reviewToolsValue()
+		known := false
+		for _, opt := range reviewToolsOptions {
+			if opt == cur {
+				known = true
+				break
+			}
+		}
+		if !known {
+			cur = ""
+		}
+		next := cycleStringOption(cur, reviewToolsOptions, delta)
+		setProviderEnvValue(m.p, claude.ToolUseConcurrencyEnv, next)
+	case m.page4SearchCursor():
+		cur := m.reviewSearchValue()
+		known := false
+		for _, opt := range reviewSearchOptions {
+			if opt == cur {
+				known = true
+				break
+			}
+		}
+		if !known {
+			cur = ""
+		}
+		next := cycleStringOption(cur, reviewSearchOptions, delta)
+		setProviderEnvValue(m.p, claude.ToolSearchEnv, next)
+	case m.page4ActiveCursor():
+		if delta < 0 {
+			m.IsActiveChosen = true
+		} else {
+			m.IsActiveChosen = false
+		}
+	}
 }
 
 func (m *AdvancedConfigModel) goBack() {
@@ -1094,12 +1321,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = oneMNextCursor
 			}
 			if m.page == 4 {
-				if m.cursor == m.page4ProtocolCursor() {
-					m.toggleOpenAIProtocol()
-				} else if m.cursor == m.page4ActiveCursor() {
-					m.IsActiveChosen = true
-					setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
-				}
+				m.adjustReviewField(-1)
 			}
 			if m.page == 5 && m.cursor == 2 && m.showStaleSlotToggle() {
 				m.clearStaleSlots = true
@@ -1117,12 +1339,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = oneMBackCursor
 			}
 			if m.page == 4 {
-				if m.cursor == m.page4ProtocolCursor() {
-					m.toggleOpenAIProtocol()
-				} else if m.cursor == m.page4ActiveCursor() {
-					m.IsActiveChosen = false
-					setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
-				}
+				m.adjustReviewField(1)
 			}
 			if m.page == 5 && m.cursor == 2 && m.showStaleSlotToggle() {
 				m.clearStaleSlots = false
@@ -1284,16 +1501,20 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					setDebugf("page2 next to review one_m=%s compact=%s", reviewOneMSummary(m.oneMSlots), m.compactSummary())
 				}
 			case 4:
-				if m.cursor == m.page4ProtocolCursor() {
-					m.toggleOpenAIProtocol()
-				} else if m.cursor == m.page4ActiveCursor() {
+				switch m.cursor {
+				case m.page4ProtocolCursor(), m.page4CompactCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
+					m.adjustReviewField(1)
+				case m.page4ActiveCursor():
 					m.IsActiveChosen = !m.IsActiveChosen
 					setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
-				} else if m.cursor == m.page4BackCursor() {
+				case m.page4BackCursor():
 					m.goBack()
-				} else if m.cursor == m.page4SaveCursor() {
+				case m.page4SaveCursor():
+					// Persist compact choice selected on review before save.
+					// applyCompactConfig is also called by RunProviderSet; set preset only.
+					m.compactState = compactConfigState{preset: m.compactPreset}
 					m.saveConfirmed = true
-					setDebugf("page4 save requested provider=%q type=%q effort=%q model_count=%d slots=%s one_m=%s active_chosen=%t", m.p.Name, m.p.Type, m.p.EffortLevel, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.IsActiveChosen)
+					setDebugf("page4 save requested provider=%q type=%q model_count=%d slots=%s one_m=%s compact=%s active_chosen=%t", m.p.Name, m.p.Type, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.compactSummary(), m.IsActiveChosen)
 					return m, tea.Quit
 				}
 			case 5:
@@ -1442,7 +1663,7 @@ func renderReviewModelMapping(label, model string, oneM bool) string {
 		// Keep auto subagent labels intact.
 		display = strings.TrimSpace(model)
 	}
-	value := cyanText.Render(truncateMiddle(display, 36))
+	value := availableStyle.Render(truncateMiddle(display, 36))
 	if strings.TrimSpace(display) == "" {
 		value = grayText.Render(locale.T("(未设置)", "(unset)"))
 	}
@@ -1674,31 +1895,30 @@ func (m *AdvancedConfigModel) View() tea.View {
 		)) + "\n")
 
 	case 4:
-		// ==================== PAGE 4: compact configuration summary ====================
+		// ==================== PAGE 4: editable configuration summary ====================
 		body.WriteString(m.renderPageHeader(locale.T("核对并应用", "Review & Apply"), "Confirm"))
 
 		// Connection
 		body.WriteString(titleStyle.Render("Connection") + "\n")
-		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Endpoint", cyanText.Render(truncateMiddle(m.p.Endpoint, 52))))
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Endpoint", availableStyle.Render(truncateMiddle(m.p.Endpoint, 52))))
 		if m.canToggleOpenAIProtocol() {
 			prefix := "  "
+			value := "Chat"
+			if provider.IsOpenAIResponsesType(m.p.Type) {
+				value = "Responses"
+			}
+			editable := purpleText.Render("‹ " + value + " ›")
 			if m.cursor == m.page4ProtocolCursor() {
 				prefix = selectedStyle.Render("> ")
+				editable = selectedStyle.Render("‹ " + value + " ›")
 			}
-			chat := "( ) Chat"
-			responses := "( ) Responses"
-			if provider.IsOpenAIResponsesType(m.p.Type) {
-				responses = purpleText.Render("(●) Responses")
-			} else {
-				chat = purpleText.Render("(●) Chat")
-			}
-			body.WriteString(fmt.Sprintf("%s%-11s %s   %s\n", prefix, "Protocol", chat, responses))
+			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, "Protocol", editable))
 		} else {
-			body.WriteString(fmt.Sprintf("  %-11s %s\n", "Protocol", purpleText.Render(m.getProtocol())))
+			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
 		}
-		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 
-		// Model Mapping (includes [1M] badges; no separate Context line)
+		// Model Mapping (read-only, cyan + [1M] badge)
 		body.WriteString("\n" + titleStyle.Render("Model Mapping") + "\n")
 		body.WriteString(renderReviewModelMapping("Opus", m.p.OpusModel, m.oneMSlots["opus"]))
 		body.WriteString(renderReviewModelMapping("Sonnet", m.p.SonnetModel, m.oneMSlots["sonnet"]))
@@ -1706,54 +1926,32 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(renderReviewModelMapping("Custom", m.p.CustomModelID, m.oneMSlots["custom"]))
 		body.WriteString(renderReviewModelMapping("Subagent", subagentMappingDisplay(*m.p), m.oneMSlots["subagent"]))
 
-		// Runtime
+		// Runtime (editable with ‹ ›)
 		body.WriteString("\n" + titleStyle.Render("Runtime") + "\n")
-		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Effort", purpleText.Render(locale.T("由 Claude Code 管理", "Claude Code managed"))))
-		if strings.TrimSpace(m.p.EffortLevel) != "" {
-			body.WriteString(grayText.Render(fmt.Sprintf(
-				locale.T("  提示：配置中仍有 effortLevel=%s，会覆盖 Claude Code；保存后将清除", "  note: saved effortLevel=%s overrides Claude Code; cleared on save"),
-				m.p.EffortLevel,
-			)) + "\n")
-		}
-		compactHint := ""
-		switch m.compactPreset {
-		case compactPreset200K:
-			compactHint = "  ~140K"
-		case compactPreset500K:
-			compactHint = "  ~400K"
-		case compactPreset1M:
-			compactHint = "  ~900K"
-		}
-		body.WriteString(fmt.Sprintf("  %-11s %s%s\n", "Compact", purpleText.Render(m.compactSummary()), grayText.Render(compactHint)))
-		if m.manualConfig {
-			runtimeSettings := claude.ResolveRuntimeSettings(*m.p)
-			maxOut := runtimeSettings.MaxOutputTokens
-			if maxOut == "32000" {
-				maxOut = "32K"
+		renderEditable := func(cursor int, label, value string) {
+			prefix := "  "
+			val := purpleText.Render(value)
+			if m.cursor == cursor {
+				prefix = selectedStyle.Render("> ")
+				val = selectedStyle.Render(value)
 			}
-			body.WriteString(fmt.Sprintf("  %-11s %s\n", "Max Output", purpleText.Render(maxOut)))
-			body.WriteString(fmt.Sprintf("  %-11s %s concurrent\n", "Tools", purpleText.Render(runtimeSettings.ToolUseConcurrency)))
-			toolSearch := runtimeSettings.ToolSearch
-			if toolSearch == "false" {
-				toolSearch = "Off"
-			} else if toolSearch == "true" {
-				toolSearch = "On"
-			}
-			body.WriteString(fmt.Sprintf("  %-11s %s\n", "Tool Search", purpleText.Render(toolSearch)))
+			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, label, val))
 		}
+		renderEditable(m.page4CompactCursor(), "Compact", formatCompactLabel(m.compactPreset))
+		renderEditable(m.page4MaxOutCursor(), "Max Output", formatMaxOutLabel(m.reviewMaxOutValue()))
+		renderEditable(m.page4ToolsCursor(), "Tools", formatToolsLabel(m.reviewToolsValue()))
+		renderEditable(m.page4SearchCursor(), "Tool Search", formatSearchLabel(m.reviewSearchValue()))
 
 		// Active checkbox
 		body.WriteString("\n")
 		activePrefix := "  "
-		if m.cursor == m.page4ActiveCursor() {
-			activePrefix = selectedStyle.Render("> ")
-		}
 		activeBox := "[ ]"
 		if m.IsActiveChosen {
 			activeBox = "[x]"
 		}
 		activeLabel := locale.T("设为当前激活 Provider", "Set as active provider")
 		if m.cursor == m.page4ActiveCursor() {
+			activePrefix = selectedStyle.Render("> ")
 			body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, selectedStyle.Render(activeBox), titleStyle.Render(activeLabel)))
 		} else {
 			body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, activeBox, grayText.Render(activeLabel)))
@@ -1771,11 +1969,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 			backStr = selectedStyle.Render("> " + backLabel)
 		}
 		body.WriteString("\n" + applyStr + "             " + backStr + "\n\n")
-		if m.canToggleOpenAIProtocol() {
-			body.WriteString(grayText.Render(locale.T("↑↓ 移动 · ←→ 改协议 · enter 选择/应用", "↑↓ Move · ←→ Change protocol · enter Select/Apply")))
-		} else {
-			body.WriteString(grayText.Render(locale.T("↑↓ 移动 · enter 选择/应用", "↑↓ Move · enter Select/Apply")))
-		}
+		body.WriteString(grayText.Render(locale.T(
+			"紫色可修改 · 绿色只读 · ↑↓ 选择 · ←→ 调整 · enter 确认",
+			"purple editable · green read-only · ↑↓ select · ←→ adjust · enter confirm",
+		)))
 
 	case 5:
 		// ==================== PAGE 5: 配置模式选择 ====================

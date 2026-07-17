@@ -587,11 +587,13 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 	for _, expected := range []string{
 		"Runtime",
 		"Subagent", "gpt-5.6-sol",
-		"Tools", "3",
-		"Tool Search", "Off",
-		"Max Output", "32K",
+		"Tools", "‹ Default · 3 ›",
+		"Tool Search", "‹ Default · Off ›",
+		"Max Output", "‹ Default · 32K ›",
+		"Compact",
 		"Set as active provider",
 		"Apply & Finish",
+		"purple editable",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected manual review to contain %q, got %q", expected, view)
@@ -630,8 +632,10 @@ func TestAutoReviewPageOmitsRuntimeDefaults(t *testing.T) {
 	m.page = 4
 	m.manualConfig = false
 
-	if view := m.View().Content; strings.Contains(view, "Claude Code Runtime Defaults") {
-		t.Fatalf("auto review should omit manual runtime summary, got %q", view)
+	view := m.View().Content
+	// Runtime editors are always available on review (compact defaults).
+	if !strings.Contains(view, "Runtime") || !strings.Contains(view, "Max Output") {
+		t.Fatalf("review should show runtime editors, got %q", view)
 	}
 }
 
@@ -647,10 +651,13 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 		t.Fatalf("protocol toggle stored %q, want openai_responses", p.Type)
 	}
 	view := m.View().Content
-	for _, want := range []string{"( ) Chat", "(●) Responses", "Change protocol"} {
+	for _, want := range []string{"‹ Responses ›", "purple editable", "Max Output", "Tools"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("Responses review should contain %q, got %q", want, view)
 		}
+	}
+	if strings.Contains(view, "‹ Chat ›") {
+		t.Fatalf("protocol should be Responses after toggle, got %q", view)
 	}
 }
 
@@ -665,9 +672,9 @@ func TestOpenAIReviewStartsOnProtocolSelection(t *testing.T) {
 	if m.page != 4 {
 		t.Fatalf("review opened at page=%d, want 4", m.page)
 	}
-	// Landing on Apply keeps the summary compact; protocol remains reachable.
-	if m.cursor != m.page4SaveCursor() && m.cursor != m.page4ProtocolCursor() {
-		t.Fatalf("review cursor=%d, want apply(%d) or protocol(%d)", m.cursor, m.page4SaveCursor(), m.page4ProtocolCursor())
+	// Land on first editable runtime field for discoverability.
+	if m.cursor != m.page4CompactCursor() {
+		t.Fatalf("review cursor=%d, want compact editor %d", m.cursor, m.page4CompactCursor())
 	}
 }
 
@@ -1541,19 +1548,31 @@ func TestParseModelListForDetectionInfersResponseShapes(t *testing.T) {
 }
 
 
-func TestReviewShowsEffortManagedByClaudeCode(t *testing.T) {
+func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 	p := provider.Provider{
-		Type:        "openai",
-		Endpoint:    "https://example.test/v1",
-		EffortLevel: "max",
+		Type:     "openai",
+		Endpoint: "https://example.test/v1",
+		Model:    "gpt-test",
 	}
 	m := NewAdvancedConfigModel(&p)
 	m.page = 4
-	view := m.View().Content
-	if !strings.Contains(view, "Claude Code managed") {
-		t.Fatalf("expected Claude Code managed effort, got %q", view)
+	m.cursor = m.page4MaxOutCursor()
+
+	// Cycle Max Output away from default.
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
+	m = next.(*AdvancedConfigModel)
+	if m.reviewMaxOutValue() == "" {
+		// first right from default should become 16K
 	}
-	if !strings.Contains(view, "effortLevel=max") {
-		t.Fatalf("expected legacy effortLevel warning, got %q", view)
+	view := m.View().Content
+	if !strings.Contains(view, "‹ ") || !strings.Contains(view, " ›") {
+		t.Fatalf("expected editable ‹ › markers, got %q", view)
+	}
+	if !strings.Contains(view, "Max Output") || !strings.Contains(view, "Tools") || !strings.Contains(view, "Tool Search") {
+		t.Fatalf("expected runtime editors, got %q", view)
+	}
+	// Effort row must be gone.
+	if strings.Contains(view, "Claude Code managed") || strings.Contains(view, "Effort") {
+		t.Fatalf("effort row should be removed from review, got %q", view)
 	}
 }
