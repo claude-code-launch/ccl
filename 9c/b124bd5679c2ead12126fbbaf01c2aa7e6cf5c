@@ -1,0 +1,24 @@
+cmd/advanced_config.go
+  s_e8414fd901ae33::t_bc2104d20dc8e1 1953-1955,1958-1959,1961
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "9cb124bd5679c2ead12126fbbaf01c2aa7e6cf5c",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
