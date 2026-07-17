@@ -15,7 +15,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func TestAuthProtocolTypeDefaults(t *testing.T) {
+func TestFixedOAuthProtocolDefaults(t *testing.T) {
 	tests := []struct {
 		provider string
 		want     string
@@ -24,10 +24,37 @@ func TestAuthProtocolTypeDefaults(t *testing.T) {
 		{oauthproxy.ProviderGemini, "openai"},
 	}
 	for _, test := range tests {
-		got, err := authProtocolType(test.provider, "")
-		if err != nil || got != test.want {
-			t.Fatalf("authProtocolType(%q) = %q, %v; want %q", test.provider, got, err, test.want)
+		got := fixedOAuthProtocol(test.provider)
+		if got != test.want {
+			t.Fatalf("fixedOAuthProtocol(%q) = %q; want %q", test.provider, got, test.want)
 		}
+	}
+}
+
+func TestRunAuthIgnoresLegacyProtocolOverrideInConfigMigration(t *testing.T) {
+	// Covered by config.Load migration; ensure re-auth always rewrites fixed type.
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "c.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	cfg := &provider.Config{Providers: map[string]provider.Provider{
+		"chatgpt": {Name: "chatgpt", Type: "openai", OAuthProvider: "chatgpt", Endpoint: "oauth://codex"},
+	}}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := runAuth(context.Background(), &bytes.Buffer{}, "chatgpt", authOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Providers["chatgpt"].Type != "openai_responses" {
+		t.Fatalf("expected fixed responses type, got %+v", loaded.Providers["chatgpt"])
 	}
 }
 

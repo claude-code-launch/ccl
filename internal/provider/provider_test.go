@@ -113,3 +113,17 @@ func TestIsAnthropicType(t *testing.T) {
 		}
 	}
 }
+
+func TestFixedOAuthProtocol(t *testing.T) {
+	got, ok := provider.FixedOAuthProtocol("chatgpt")
+	if !ok || got != "openai_responses" {
+		t.Fatalf("chatgpt = %q %v", got, ok)
+	}
+	got, ok = provider.FixedOAuthProtocol("gemini")
+	if !ok || got != "openai" {
+		t.Fatalf("gemini = %q %v", got, ok)
+	}
+	if _, ok := provider.FixedOAuthProtocol(""); ok {
+		t.Fatal("empty should not fix")
+	}
+}

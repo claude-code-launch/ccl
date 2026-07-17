@@ -15,7 +15,6 @@ import (
 type authOptions struct {
 	noBrowser    bool
 	callbackPort int
-	protocol     string
 }
 
 var oauthLogin = oauthproxy.Login
@@ -34,7 +33,6 @@ func newAuthCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
 	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port")
-	cmd.Flags().StringVar(&opts.protocol, "protocol", "", "Upstream protocol: chat or responses")
 	return cmd
 }
 
@@ -43,10 +41,9 @@ func runAuth(ctx context.Context, out io.Writer, providerName string, opts authO
 	if err != nil {
 		return err
 	}
-	protocolType, err := authProtocolType(target, opts.protocol)
-	if err != nil {
-		return err
-	}
+	// OAuth backends have a fixed runtime protocol. StartProvider ignores any
+	// Type override when OAuthProvider is set, so always persist the real path.
+	protocolType := fixedOAuthProtocol(target)
 
 	fmt.Fprintf(out, "Authenticating %s...\n", target)
 	result, err := oauthLogin(ctx, target, oauthproxy.LoginOptions{
@@ -84,26 +81,17 @@ func runAuth(ctx context.Context, out io.Writer, providerName string, opts authO
 
 	fmt.Fprintf(out, "Authenticated %s and switched active provider.\n", target)
 	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
-	fmt.Fprintf(out, "Protocol: %s\n", provider.ProtocolLabel(protocolType))
+	fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
 	return nil
 }
 
-func authProtocolType(providerName, requested string) (string, error) {
-	requested = strings.ToLower(strings.TrimSpace(requested))
-	if requested == "" {
-		if providerName == oauthproxy.ProviderGemini {
-			return "openai", nil
-		}
-		return "openai_responses", nil
+// fixedOAuthProtocol is the only protocol each subscription backend actually uses.
+// ChatGPT/Codex → Responses; Gemini/Antigravity → Chat Completions.
+func fixedOAuthProtocol(providerName string) string {
+	if providerName == oauthproxy.ProviderGemini {
+		return "openai"
 	}
-	switch requested {
-	case "chat", "openai", "openai(chat)":
-		return "openai", nil
-	case "responses", "response", "agent", "openai(responses)", "openai(agent)":
-		return "openai_responses", nil
-	default:
-		return "", fmt.Errorf("unsupported protocol %q (use chat or responses)", requested)
-	}
+	return "openai_responses"
 }
 
 func init() {

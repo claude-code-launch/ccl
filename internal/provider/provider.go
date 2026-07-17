@@ -42,6 +42,20 @@ type Config struct {
 	Providers      map[string]Provider `yaml:"providers" mapstructure:"providers"`
 }
 
+// FixedOAuthProtocol returns the only protocol an OAuth backend actually uses.
+// ChatGPT/Codex → openai_responses; Gemini → openai (chat). ok is false when
+// oauthProvider is empty or unknown.
+func FixedOAuthProtocol(oauthProvider string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
+	case "chatgpt", "codex":
+		return "openai_responses", true
+	case "gemini":
+		return "openai", true
+	default:
+		return "", false
+	}
+}
+
 // InferOAuthProvider restores the public OAuth provider name for configs
 // written before oauthProvider was persisted. The oauth:// endpoint is an
 // internal backend marker, so ordinary HTTP providers are never inferred.

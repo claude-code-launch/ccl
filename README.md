@@ -96,11 +96,9 @@ ccl auth chatgpt --no-browser
 
 # 覆盖回调端口或上游协议
 ccl auth chatgpt --callback-port 1455
-ccl auth chatgpt --protocol chat
-ccl auth gemini --protocol responses
 ```
 
-登录成功后，ccl 会创建或更新同名 provider 并立即设为当前 provider。`chatgpt` 使用 CLIProxyAPI 的 Codex OAuth backend；`gemini` 使用 CLIProxyAPI v7 的 Google/Antigravity OAuth backend。旧版创建的 `oauthProvider: codex` 仍可运行，并会在下次执行 `ccl auth chatgpt` 时迁移为 `chatgpt`。启动 `ccl`、`ccl set <provider>`、`ccl models` 或 `ccl doctor` 时，内嵌代理按需启动，并在命令退出时关闭，不需要常驻服务。`ccl set` 会通过临时本地 endpoint 和会话 key 获取、测试模型，但不会把它们写回配置。多个 OAuth backend 可以同时登录，但每个 provider 只加载、刷新和调度自己的凭据与模型。
+登录成功后，ccl 会创建或更新同名 provider 并立即设为当前 provider。`chatgpt` 使用 CLIProxyAPI 的 Codex OAuth backend，协议固定为 `openai(responses)`；`gemini` 使用 CLIProxyAPI v7 的 Google/Antigravity OAuth backend，协议固定为 `openai(chat)`。不再提供 `--protocol` 覆盖（运行时会忽略）。旧版创建的 `oauthProvider: codex` 仍可运行，并会在下次执行 `ccl auth chatgpt` 时迁移为 `chatgpt`。启动 `ccl`、`ccl set <provider>`、`ccl models` 或 `ccl doctor` 时，内嵌代理按需启动，并在命令退出时关闭，不需要常驻服务。`ccl set` 会通过临时本地 endpoint 和会话 key 获取、测试模型，但不会把它们写回配置。多个 OAuth backend 可以同时登录，但每个 provider 只加载、刷新和调度自己的凭据与模型。
 
 ### `ccl set` — 添加/更新 Provider
 

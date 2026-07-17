@@ -138,3 +138,35 @@ func TestLoadInfersOAuthProviderForLegacyAuthEndpoints(t *testing.T) {
 		t.Fatalf("ordinary provider inferred as OAuth: %q", got)
 	}
 }
+
+func TestLoadMigratesMismatchedOAuthProtocol(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	cfg := &provider.Config{
+		Providers: map[string]provider.Provider{
+			"chatgpt": {Name: "chatgpt", Type: "openai", OAuthProvider: "chatgpt", Endpoint: "oauth://codex"},
+			"gemini":  {Name: "gemini", Type: "openai_responses", OAuthProvider: "gemini", Endpoint: "oauth://antigravity"},
+		},
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Providers["chatgpt"].Type != "openai_responses" {
+		t.Fatalf("chatgpt type = %q", loaded.Providers["chatgpt"].Type)
+	}
+	if loaded.Providers["gemini"].Type != "openai" {
+		t.Fatalf("gemini type = %q", loaded.Providers["gemini"].Type)
+	}
+	// Second load should be stable.
+	loaded2, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded2.Providers["chatgpt"].Type != "openai_responses" {
+		t.Fatalf("chatgpt type unstable: %q", loaded2.Providers["chatgpt"].Type)
+	}
+}

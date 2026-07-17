@@ -82,11 +82,29 @@ func Load() (*provider.Config, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]provider.Provider)
 	}
+	dirty := false
 	for name, p := range cfg.Providers {
+		changed := false
 		if p.OAuthProvider == "" {
-			p.OAuthProvider = provider.InferOAuthProvider(name, p.Endpoint)
-			cfg.Providers[name] = p
+			if inferred := provider.InferOAuthProvider(name, p.Endpoint); inferred != "" {
+				p.OAuthProvider = inferred
+				changed = true
+			}
 		}
+		// OAuth backends have a fixed runtime protocol. Older configs may still
+		// carry a mismatched type from the removed `ccl auth --protocol` flag.
+		if fixed, ok := provider.FixedOAuthProtocol(p.OAuthProvider); ok && p.Type != fixed {
+			p.Type = fixed
+			changed = true
+		}
+		if changed {
+			cfg.Providers[name] = p
+			dirty = true
+		}
+	}
+	if dirty {
+		// Best-effort rewrite so doctor/set/ls show the real protocol.
+		_ = Save(cfg)
 	}
 	return cfg, nil
 }
