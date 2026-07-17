@@ -1,0 +1,63 @@
+internal/oauthproxy/responses_compat_test.go
+  s_e8414fd901ae33::t_142c32b62c0c93 1-37,71,84-113,115-118,122-128,139-150,166-170,172,174-175,186-187
+  s_e8414fd901ae33::t_770c3c7811ce54 68-70,72-74,76-79
+  s_e8414fd901ae33::t_11d989bed0a873 38-67,75,80-83,114,119-121,129-138,151-165,171,173,176-185
+internal/oauthproxy/auth_test.go
+  s_e8414fd901ae33::t_8184752daabc72 707,747,791,842,879,967-974,976-1042
+  s_e8414fd901ae33::t_82a547c128e7ce 975
+  s_e8414fd901ae33::t_e06d813151cf95 704-706
+  s_e8414fd901ae33::t_371143c2e9ae9e 708-710,744-746
+  s_e8414fd901ae33::t_0cfc3af32d12a9 748-750,788-790
+  s_e8414fd901ae33::t_db2a1c6ebfb574 792-794,839-841
+  s_e8414fd901ae33::t_a1daff5c12f7a1 843-845,876-878
+  s_e8414fd901ae33::t_76063163ea216e 880-882,964-966
+  s_e8414fd901ae33::t_5cf3667e6e9414 1043-1045
+  s_e8414fd901ae33::t_229c0e9de73256 699-703,711-743,751-787,795-838,846-875,883-963,1046-1059
+internal/modelrouting/routing_test.go
+  s_e8414fd901ae33::t_9ffdff97505c82 1-122
+internal/oauthproxy/doc.go
+  s_e8414fd901ae33::t_2c903a4708ce47 18-26
+  s_e8414fd901ae33::t_3e05bdda8cbd1f 15-17
+  s_e8414fd901ae33::t_bb1fbb4039808e 1-14,27-56
+internal/modelrouting/routing.go
+  s_e8414fd901ae33::t_b54d711beba0ae 13
+  s_e8414fd901ae33::t_06bb5559c0e20a 22-31,61
+internal/oauthproxy/runtime.go
+  s_e8414fd901ae33::t_001147af1bfb0a 371
+  s_e8414fd901ae33::t_58e031055bf236 719-728,730-732,736-750
+  s_e8414fd901ae33::t_c58948b13d9a91 207-210,225-228
+  s_e8414fd901ae33::t_b0425ae88133c7 791-796,811
+  s_e8414fd901ae33::t_46530438b25fcc 211-213,222-224
+  s_e8414fd901ae33::t_f98d36611825a9 336-349,354-360,363,367,369-370,372-384,391,411,417
+  s_e8414fd901ae33::t_9e26a4868b127e 81-90
+README.md
+  s_e8414fd901ae33::t_44dd7e38d18623 422-423,425
+internal/oauthproxy/responses_compat.go
+  s_e8414fd901ae33::t_6dabca8d2fa8c4 309-310
+  s_e8414fd901ae33::t_ec96d26a736159 19-20,24,26-27,59-61,77-78,169-217,232,258,265-288,315,322-333,346-354,402-412,417-419
+  s_e8414fd901ae33::t_ea909beab21128 260-264,289-308,311-314,316-317,334-335,338-343,356-359,363-367,372-374,390-396,398,420
+  s_e8414fd901ae33::t_4df5af597c510c 21-23,25
+  s_e8414fd901ae33::t_382c38b1f42c8a 57-58,62,75-76,79
+  s_e8414fd901ae33::t_7efa7db5b045f2 397
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "40f1026bc6a72029d64b3ef29982ccac3793265b",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
