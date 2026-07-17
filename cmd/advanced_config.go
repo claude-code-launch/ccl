@@ -654,6 +654,11 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 	setDebugf("page4 protocol toggled type=%q label=%q", m.p.Type, provider.ProtocolLabel(m.p.Type))
 }
 
+// Page 4 cursor model (compact review):
+//   0 protocol (only when OpenAI-compatible)
+//   active toggle
+//   apply
+//   back
 func (m *AdvancedConfigModel) page4ProtocolCursor() int {
 	if m.canToggleOpenAIProtocol() {
 		return 0
@@ -661,21 +666,21 @@ func (m *AdvancedConfigModel) page4ProtocolCursor() int {
 	return -1
 }
 
-func (m *AdvancedConfigModel) page4ActiveYesCursor() int {
+func (m *AdvancedConfigModel) page4ActiveCursor() int {
 	if m.canToggleOpenAIProtocol() {
 		return 1
 	}
 	return 0
 }
 
-func (m *AdvancedConfigModel) page4ActiveNoCursor() int {
+func (m *AdvancedConfigModel) page4SaveCursor() int {
 	if m.canToggleOpenAIProtocol() {
 		return 2
 	}
 	return 1
 }
 
-func (m *AdvancedConfigModel) page4SaveCursor() int {
+func (m *AdvancedConfigModel) page4BackCursor() int {
 	if m.canToggleOpenAIProtocol() {
 		return 3
 	}
@@ -683,13 +688,10 @@ func (m *AdvancedConfigModel) page4SaveCursor() int {
 }
 
 func (m *AdvancedConfigModel) page4MaxCursor() int {
-	return m.page4SaveCursor()
+	return m.page4BackCursor()
 }
 
 func (m *AdvancedConfigModel) page4InitialCursor() int {
-	if m.canToggleOpenAIProtocol() {
-		return m.page4ProtocolCursor()
-	}
 	return m.page4SaveCursor()
 }
 
@@ -1130,9 +1132,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 4 {
 				if m.cursor == m.page4ProtocolCursor() {
 					m.toggleOpenAIProtocol()
-				} else if m.cursor == m.page4ActiveYesCursor() || m.cursor == m.page4ActiveNoCursor() {
+				} else if m.cursor == m.page4ActiveCursor() {
 					m.IsActiveChosen = true
-					m.cursor = m.page4ActiveYesCursor()
 					setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
 				}
 			}
@@ -1157,9 +1158,8 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.page == 4 {
 				if m.cursor == m.page4ProtocolCursor() {
 					m.toggleOpenAIProtocol()
-				} else if m.cursor == m.page4ActiveYesCursor() || m.cursor == m.page4ActiveNoCursor() {
+				} else if m.cursor == m.page4ActiveCursor() {
 					m.IsActiveChosen = false
-					m.cursor = m.page4ActiveNoCursor()
 					setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
 				}
 			}
@@ -1339,9 +1339,11 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case 4:
 				if m.cursor == m.page4ProtocolCursor() {
 					m.toggleOpenAIProtocol()
-				} else if m.cursor == m.page4ActiveYesCursor() || m.cursor == m.page4ActiveNoCursor() {
-					m.cursor = m.page4SaveCursor()
-					setDebugf("page4 active choice confirmed active_chosen=%t cursor=%d", m.IsActiveChosen, m.cursor)
+				} else if m.cursor == m.page4ActiveCursor() {
+					m.IsActiveChosen = !m.IsActiveChosen
+					setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
+				} else if m.cursor == m.page4BackCursor() {
+					m.goBack()
 				} else if m.cursor == m.page4SaveCursor() {
 					m.saveConfirmed = true
 					setDebugf("page4 save requested provider=%q type=%q effort=%q model_count=%d slots=%s one_m=%s active_chosen=%t", m.p.Name, m.p.Type, m.p.EffortLevel, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.IsActiveChosen)
@@ -1488,14 +1490,30 @@ func (m *AdvancedConfigModel) renderStepProgress() string {
 }
 
 func renderReviewModelMapping(label, model string, oneM bool) string {
-	value := cyanText.Render(model)
-	if strings.TrimSpace(model) == "" {
+	display := stripOneMSuffix(model)
+	if strings.TrimSpace(display) == "" {
+		// Keep auto subagent labels intact.
+		display = strings.TrimSpace(model)
+	}
+	value := cyanText.Render(truncateMiddle(display, 36))
+	if strings.TrimSpace(display) == "" {
 		value = grayText.Render(locale.T("(未设置)", "(unset)"))
 	}
+	badge := "    "
 	if oneM {
-		value += " " + lightning
+		badge = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("[1M]")
 	}
-	return fmt.Sprintf("    %-9s -> %s\n", label, value)
+	return fmt.Sprintf("  %-10s %-36s %s\n", label, value, badge)
+}
+
+// truncateMiddle keeps endpoint/model names on one line for the review page.
+func truncateMiddle(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max < 8 || len(s) <= max {
+		return s
+	}
+	keep := (max - 1) / 2
+	return s[:keep] + "…" + s[len(s)-(max-keep-1):]
 }
 
 func (m *AdvancedConfigModel) View() tea.View {
@@ -1723,79 +1741,101 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(grayText.Render(locale.T("↑↓ 移动选择级别 · ←→ 切换按钮 · enter 前进/后退", "↑↓ Move · ←→ Toggle Buttons · enter next/back")))
 
 	case 4:
-		// ==================== PAGE 4: 核对并应用此配置 ====================
-		body.WriteString(m.renderPageHeader(locale.T("核对并应用此 Provider 配置", "Review & Apply"), "Confirm"))
-		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Endpoint", cyanText.Render(m.p.Endpoint)))
-		protoLabel := m.getProtocol()
+		// ==================== PAGE 4: compact configuration summary ====================
+		body.WriteString(m.renderPageHeader(locale.T("核对并应用", "Review & Apply"), "Confirm"))
+
+		// Connection
+		body.WriteString(titleStyle.Render("Connection") + "\n")
+		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Endpoint", cyanText.Render(truncateMiddle(m.p.Endpoint, 52))))
 		if m.canToggleOpenAIProtocol() {
-			protoPrefix := "  "
-			chatOption := "( ) openai(chat)"
-			responsesOption := "( ) openai(responses)"
-			if provider.IsOpenAIResponsesType(m.p.Type) {
-				responsesOption = purpleText.Render("(●) openai(responses)")
-			} else {
-				chatOption = purpleText.Render("(●) openai(chat)")
-			}
+			prefix := "  "
 			if m.cursor == m.page4ProtocolCursor() {
-				protoPrefix = selectedStyle.Render("> ")
+				prefix = selectedStyle.Render("> ")
 			}
-			hint := grayText.Render(locale.T("  ←→/enter 选择", "  ←→/enter select"))
-			body.WriteString(fmt.Sprintf("%s• %-12s: %s   %s%s\n", protoPrefix, "Protocol", chatOption, responsesOption, hint))
+			chat := "( ) Chat"
+			responses := "( ) Responses"
+			if provider.IsOpenAIResponsesType(m.p.Type) {
+				responses = purpleText.Render("(●) Responses")
+			} else {
+				chat = purpleText.Render("(●) Chat")
+			}
+			body.WriteString(fmt.Sprintf("%s%-11s %s   %s\n", prefix, "Protocol", chat, responses))
 		} else {
-			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Protocol", purpleText.Render(protoLabel)))
+			body.WriteString(fmt.Sprintf("  %-11s %s\n", "Protocol", purpleText.Render(m.getProtocol())))
 		}
-		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
-		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Effort Level", purpleText.Render(m.effortLabel(m.effortLevels[m.effortCursor]))))
-		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Context", purpleText.Render(reviewOneMSummary(m.oneMSlots))))
-		body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Compact", purpleText.Render(m.compactSummary())))
-		body.WriteString("\n  " + grayText.Render(locale.T("模型映射", "Model Mapping")) + "\n")
+		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
+
+		// Model Mapping (includes [1M] badges; no separate Context line)
+		body.WriteString("\n" + titleStyle.Render("Model Mapping") + "\n")
 		body.WriteString(renderReviewModelMapping("Opus", m.p.OpusModel, m.oneMSlots["opus"]))
 		body.WriteString(renderReviewModelMapping("Sonnet", m.p.SonnetModel, m.oneMSlots["sonnet"]))
 		body.WriteString(renderReviewModelMapping("Haiku", m.p.HaikuModel, m.oneMSlots["haiku"]))
 		body.WriteString(renderReviewModelMapping("Custom", m.p.CustomModelID, m.oneMSlots["custom"]))
 		body.WriteString(renderReviewModelMapping("Subagent", subagentMappingDisplay(*m.p), m.oneMSlots["subagent"]))
+
+		// Runtime
+		body.WriteString("\n" + titleStyle.Render("Runtime") + "\n")
+		body.WriteString(fmt.Sprintf("  %-11s %s\n", "Effort", purpleText.Render(m.effortLabel(m.effortLevels[m.effortCursor]))))
+		compactHint := ""
+		switch m.compactPreset {
+		case compactPreset200K:
+			compactHint = "  ~140K"
+		case compactPreset500K:
+			compactHint = "  ~400K"
+		case compactPreset1M:
+			compactHint = "  ~900K"
+		}
+		body.WriteString(fmt.Sprintf("  %-11s %s%s\n", "Compact", purpleText.Render(m.compactSummary()), grayText.Render(compactHint)))
 		if m.manualConfig {
 			runtimeSettings := claude.ResolveRuntimeSettings(*m.p)
-			body.WriteString("\n  " + grayText.Render(locale.T("运行默认值", "Runtime Defaults")) + ": ")
-			body.WriteString(fmt.Sprintf(
-				"%s %s · %s %s\n",
-				locale.T("工具并发", "Concurrency"),
-				purpleText.Render(runtimeSettings.ToolUseConcurrency),
-				locale.T("工具搜索", "Tool Search"),
-				purpleText.Render(runtimeSettings.ToolSearch),
-			))
-			body.WriteString(fmt.Sprintf("  %s %s\n",
-				locale.T("最大输出", "Max Output"),
-				purpleText.Render(runtimeSettings.MaxOutputTokens),
-			))
+			maxOut := runtimeSettings.MaxOutputTokens
+			if maxOut == "32000" {
+				maxOut = "32K"
+			}
+			body.WriteString(fmt.Sprintf("  %-11s %s\n", "Max Output", purpleText.Render(maxOut)))
+			body.WriteString(fmt.Sprintf("  %-11s %s concurrent\n", "Tools", purpleText.Render(runtimeSettings.ToolUseConcurrency)))
+			toolSearch := runtimeSettings.ToolSearch
+			if toolSearch == "false" {
+				toolSearch = "Off"
+			} else if toolSearch == "true" {
+				toolSearch = "On"
+			}
+			body.WriteString(fmt.Sprintf("  %-11s %s\n", "Tool Search", purpleText.Render(toolSearch)))
 		}
 
-		body.WriteString("\n  " + locale.T("是否将该 Provider 设为当前激活配置？", "Set as active provider right now?") + "\n\n")
-
-		yesStr, noStr := " "+locale.T("是", "Yes")+" ", " "+locale.T("否", "No")+" "
+		// Active checkbox
+		body.WriteString("\n")
+		activePrefix := "  "
+		if m.cursor == m.page4ActiveCursor() {
+			activePrefix = selectedStyle.Render("> ")
+		}
+		activeBox := "[ ]"
 		if m.IsActiveChosen {
-			yesStr = selectedStyle.Render(" > " + locale.T("是", "Yes") + " <")
-			noStr = grayText.Render("  " + locale.T("否", "No") + " ")
-		} else {
-			yesStr = grayText.Render("  " + locale.T("是", "Yes") + " ")
-			noStr = selectedStyle.Render(" > " + locale.T("否", "No") + " <")
+			activeBox = "[x]"
 		}
-		activeFocused := m.cursor == m.page4ActiveYesCursor() || m.cursor == m.page4ActiveNoCursor()
-		if activeFocused {
-			body.WriteString("  " + yesStr + "  " + noStr + "\n")
+		activeLabel := locale.T("设为当前激活 Provider", "Set as active provider")
+		if m.cursor == m.page4ActiveCursor() {
+			body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, selectedStyle.Render(activeBox), titleStyle.Render(activeLabel)))
 		} else {
-			body.WriteString("    " + strings.TrimSpace(yesStr) + "    " + strings.TrimSpace(noStr) + "\n")
+			body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, activeBox, grayText.Render(activeLabel)))
 		}
 
-		saveStr := "  " + locale.T("完成并保存", "Save & Finish")
+		// Actions
+		applyLabel := locale.T("应用并完成", "Apply & Finish")
+		backLabel := locale.T("返回", "Back")
+		applyStr := "  " + applyLabel
+		backStr := "  " + backLabel
 		if m.cursor == m.page4SaveCursor() {
-			saveStr = selectedStyle.Render("> " + locale.T("完成并保存", "Save & Finish"))
+			applyStr = selectedStyle.Render("> " + applyLabel)
 		}
-		body.WriteString("\n" + saveStr + "\n\n")
+		if m.cursor == m.page4BackCursor() {
+			backStr = selectedStyle.Render("> " + backLabel)
+		}
+		body.WriteString("\n" + applyStr + "             " + backStr + "\n\n")
 		if m.canToggleOpenAIProtocol() {
-			body.WriteString(grayText.Render(locale.T("↑↓ 移动 · ←→ 切换协议/激活 · enter 确认/保存", "↑↓ Move · ←→ Toggle protocol/active · enter confirm/save")))
+			body.WriteString(grayText.Render(locale.T("↑↓ 移动 · ←→ 改协议 · enter 选择/应用", "↑↓ Move · ←→ Change protocol · enter Select/Apply")))
 		} else {
-			body.WriteString(grayText.Render(locale.T("←→ 切换激活选项 · ↑↓ 移动 · enter 保存", "←→ Toggle · ↑↓ Move · enter save")))
+			body.WriteString(grayText.Render(locale.T("↑↓ 移动 · enter 选择/应用", "↑↓ Move · enter Select/Apply")))
 		}
 
 	case 5:

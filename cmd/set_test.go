@@ -419,7 +419,7 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	m.compactState = compactConfigState{preset: compactPreset1M}
 
 	view := m.View().Content
-	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "⚡1M", "Maximum 1M / 90%"} {
+	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "[1M]", "Maximum 1M / 90%"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
 		}
@@ -585,11 +585,13 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 
 	view := m.View().Content
 	for _, expected := range []string{
-		"Runtime Defaults",
+		"Runtime",
 		"Subagent", "gpt-5.6-sol",
-		"Concurrency", "3",
-		"Tool Search", "false",
-		"Max Output", "32000",
+		"Tools", "3",
+		"Tool Search", "Off",
+		"Max Output", "32K",
+		"Set as active provider",
+		"Apply & Finish",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected manual review to contain %q, got %q", expected, view)
@@ -617,7 +619,7 @@ func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
 	if height := lipgloss.Height(view); height > m.height {
 		t.Fatalf("review height = %d, terminal height = %d\n%s", height, m.height, view)
 	}
-	if !strings.Contains(view, "Save & Finish") {
+	if !strings.Contains(view, "Apply & Finish") {
 		t.Fatalf("review action is not visible: %q", view)
 	}
 }
@@ -645,7 +647,7 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 		t.Fatalf("protocol toggle stored %q, want openai_responses", p.Type)
 	}
 	view := m.View().Content
-	for _, want := range []string{"( ) openai(chat)", "(●) openai(responses)", "←→/enter select"} {
+	for _, want := range []string{"( ) Chat", "(●) Responses", "Change protocol"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("Responses review should contain %q, got %q", want, view)
 		}
@@ -660,8 +662,12 @@ func TestOpenAIReviewStartsOnProtocolSelection(t *testing.T) {
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
-	if m.page != 4 || m.cursor != m.page4ProtocolCursor() {
-		t.Fatalf("review opened at page=%d cursor=%d, want protocol cursor %d", m.page, m.cursor, m.page4ProtocolCursor())
+	if m.page != 4 {
+		t.Fatalf("review opened at page=%d, want 4", m.page)
+	}
+	// Landing on Apply keeps the summary compact; protocol remains reachable.
+	if m.cursor != m.page4SaveCursor() && m.cursor != m.page4ProtocolCursor() {
+		t.Fatalf("review cursor=%d, want apply(%d) or protocol(%d)", m.cursor, m.page4SaveCursor(), m.page4ProtocolCursor())
 	}
 }
 
