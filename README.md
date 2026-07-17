@@ -419,10 +419,10 @@ GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + n
 │   ├── claude/                # Claude Code 进程拉起 & 端口注入
 │   ├── config/                # yaml 配置文件读写
 │   ├── locale/                # 多语言支持（中文 / English）
-│   ├── oauthproxy/            # CLIProxyAPI SDK 登录与内嵌运行时
+│   ├── modelrouting/          # Claude 档位 → 上游模型启发式映射
+│   ├── oauthproxy/            # CLIProxyAPI SDK 登录与内嵌运行时（OpenAI 族唯一路径）
 │   ├── protocol/              # Endpoint、模型发现与协议辅助逻辑
-│   ├── provider/              # Provider & Config 数据结构
-│   └── proxy/                 # 本地 TCP 代理服务
+│   └── provider/              # Provider & Config 数据结构
 └── main.go
 ```
 

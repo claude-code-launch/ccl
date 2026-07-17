@@ -10,7 +10,7 @@ const (
 
 func SplitCSV(models string) []string {
 	var out []string
-	for _, model := range strings.Split(models, ",") {
+	for model := range strings.SplitSeq(models, ",") {
 		model = strings.TrimSpace(model)
 		if model != "" {
 			out = append(out, model)
@@ -19,6 +19,16 @@ func SplitCSV(models string) []string {
 	return out
 }
 
+// MapModel picks a concrete upstream model for a Claude-style request.
+//
+// Precedence:
+//  1. A single configuredModel overrides mapping entirely.
+//  2. A comma-separated configuredModel is treated as the exclusive candidate pool.
+//  3. Otherwise availableModels is the candidate pool.
+//
+// Matching order within the pool: exact (case-insensitive) name, then tier
+// heuristics, then the first pool entry. An empty pool returns "" — callers must
+// not invent a vendor-specific default such as deepseek-chat.
 func MapModel(requestedModel string, configuredModel string, availableModels []string) string {
 	if configuredModel != "" && !strings.Contains(configuredModel, ",") {
 		return configuredModel
@@ -48,7 +58,7 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 	if len(modelPool) > 0 {
 		return modelPool[0]
 	}
-	return "deepseek-chat"
+	return ""
 }
 
 func requestedTier(model string) string {

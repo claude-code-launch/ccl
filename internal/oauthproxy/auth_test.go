@@ -696,3 +696,364 @@ func TestStartRequiresMatchingCredential(t *testing.T) {
 		t.Fatal("Start() should fail without Gemini credentials")
 	}
 }
+
+func TestSilenceStdoutNestedReferenceCount(t *testing.T) {
+	original := os.Stdout
+	t.Cleanup(func() {
+		os.Stdout = original
+		stdoutState.Lock()
+		if stdoutState.sink != nil {
+			_ = stdoutState.sink.Close()
+		}
+		stdoutState.users = 0
+		stdoutState.original = nil
+		stdoutState.sink = nil
+		stdoutState.Unlock()
+	})
+
+	restoreOuter := silenceStdout()
+	if os.Stdout == original {
+		t.Fatal("outer silenceStdout should redirect os.Stdout")
+	}
+	redirected := os.Stdout
+
+	restoreInner := silenceStdout()
+	if os.Stdout != redirected {
+		t.Fatal("nested silenceStdout should reuse the same sink")
+	}
+
+	restoreInner()
+	if os.Stdout != redirected {
+		t.Fatal("inner restore must keep stdout silenced while outer is active")
+	}
+
+	restoreOuter()
+	if os.Stdout != original {
+		t.Fatal("outer restore should put back the original stdout")
+	}
+}
+
+func TestStartOpenAIResponsesAPIDoesNotInjectCodexIdentity(t *testing.T) {
+	type capture struct {
+		header http.Header
+		body   map[string]any
+	}
+	captured := make(chan capture, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- capture{header: r.Header.Clone(), body: body}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"plain ok\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"plain ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	if err != nil {
+		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
+	}
+	defer proxyRuntime.Stop()
+
+	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
+	if !strings.Contains(responseBody, "plain ok") {
+		t.Fatalf("plain Responses runtime did not return Claude SSE: %s", responseBody)
+	}
+
+	got := <-captured
+	if got.header.Get("Originator") != "" {
+		t.Fatalf("plain Responses must not send Originator, got %q", got.header.Get("Originator"))
+	}
+	if got.header.Get("X-Codex-Beta-Features") != "" {
+		t.Fatalf("plain Responses must not send X-Codex-Beta-Features, got %q", got.header.Get("X-Codex-Beta-Features"))
+	}
+	if _, ok := got.body["client_metadata"]; ok {
+		t.Fatalf("plain Responses must not inject client_metadata: %+v", got.body)
+	}
+	ua := got.header.Get("User-Agent")
+	if strings.Contains(strings.ToLower(ua), "codex") {
+		t.Fatalf("plain Responses must not use Codex User-Agent, got %q", ua)
+	}
+	if ua != plainResponsesUserAgent {
+		t.Fatalf("plain Responses User-Agent = %q, want %q", ua, plainResponsesUserAgent)
+	}
+	for key := range got.header {
+		normalized := strings.ReplaceAll(strings.ToLower(key), "_", "-")
+		switch normalized {
+		case "session-id", "thread-id", "x-codex-window-id", "originator", "x-codex-beta-features":
+			t.Fatalf("plain Responses retained Codex header %q: %+v", key, got.header)
+		}
+	}
+}
+
+func TestStartProviderRoutesPlainResponsesAwayFromCodexIdentity(t *testing.T) {
+	type capture struct {
+		header http.Header
+		body   map[string]any
+	}
+	captured := make(chan capture, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- capture{header: r.Header.Clone(), body: body}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"routed ok\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"routed ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	proxyRuntime, err := StartProvider(ctx, StartOptions{
+		Protocol:  ProtocolOpenAIResponses,
+		Endpoint:  upstream.URL + "/v1",
+		APIKey:    "upstream-key",
+		ModelSpec: "gpt-test",
+	})
+	if err != nil {
+		t.Fatalf("StartProvider(plain responses) error: %v", err)
+	}
+	defer proxyRuntime.Stop()
+
+	_ = postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
+	got := <-captured
+	if got.header.Get("Originator") != "" || got.body["client_metadata"] != nil {
+		t.Fatalf("StartProvider plain responses still used Codex identity: headers=%v body=%v", got.header, got.body)
+	}
+}
+
+func TestStartOpenAIChatAPIToolCall(t *testing.T) {
+	type capture struct {
+		body map[string]any
+	}
+	captured := make(chan capture, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- capture{body: body}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"weather\\\"}\"}}]},\"finish_reason\":null}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	proxyRuntime, err := StartOpenAIChatAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	if err != nil {
+		t.Fatalf("StartOpenAIChatAPI() error: %v", err)
+	}
+	defer proxyRuntime.Stop()
+
+	responseBody := postClaudeMessageWithTools(t, ctx, proxyRuntime, "gpt-test")
+	assertClaudeToolUse(t, responseBody, "lookup", "weather")
+	got := <-captured
+	tools, _ := got.body["tools"].([]any)
+	if len(tools) == 0 {
+		t.Fatalf("upstream chat request missing tools: %+v", got.body)
+	}
+}
+
+func TestStartOpenAIResponsesAPIToolCall(t *testing.T) {
+	type capture struct {
+		path string
+		body map[string]any
+	}
+	captured := make(chan capture, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- capture{path: r.URL.Path, body: body}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"status\":\"in_progress\",\"arguments\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"q\\\":\\\"weather\\\"}\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"arguments\":\"{\\\"q\\\":\\\"weather\\\"}\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"weather\\\"}\",\"status\":\"completed\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"weather\\\"}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	if err != nil {
+		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
+	}
+	defer proxyRuntime.Stop()
+
+	responseBody := postClaudeMessageWithTools(t, ctx, proxyRuntime, "gpt-test")
+	assertClaudeToolUse(t, responseBody, "lookup", "weather")
+	got := <-captured
+	if got.path != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses", got.path)
+	}
+}
+
+func postClaudeMessageWithTools(t *testing.T, ctx context.Context, proxyRuntime *Runtime, model string) string {
+	t.Helper()
+	payload := []byte(fmt.Sprintf(`{
+		"model":%q,
+		"max_tokens":64,
+		"stream":true,
+		"tools":[{"name":"lookup","description":"look something up","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],
+		"messages":[{"role":"user","content":"use lookup"}]
+	}`, model))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/messages", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("create Claude tool request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+proxyRuntime.APIKey())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Claude tool request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read Claude tool response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Claude tool response status = %d: %s", resp.StatusCode, body)
+	}
+	return string(body)
+}
+
+func TestStartCodexAPIClaudeMessagesMissingCreatedBeforeDelta(t *testing.T) {
+	// Upstream emits a content delta before any response.created; the compat
+	// proxy must synthesize created first so CLIProxyAPI gets a sane order.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"order ok\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_order\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"order ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	if err != nil {
+		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
+	}
+	defer proxyRuntime.Stop()
+
+	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
+	if !strings.Contains(responseBody, "order ok") {
+		t.Fatalf("missing content when created was delayed: %s", responseBody)
+	}
+	// Claude stream should still produce a normal message lifecycle.
+	if !strings.Contains(responseBody, `"type":"message_start"`) || !strings.Contains(responseBody, `"type":"message_stop"`) {
+		t.Fatalf("Claude lifecycle incomplete without upstream created: %s", responseBody)
+	}
+}
+
+func assertClaudeToolUse(t *testing.T, responseBody, toolName, argSnippet string) {
+	t.Helper()
+
+	var (
+		sawToolUseType bool
+		sawToolName    bool
+		sawArgSnippet  bool
+		stopReason     string
+	)
+
+	for line := range strings.SplitSeq(responseBody, "\n") {
+		line = strings.TrimSpace(line)
+		payload, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			continue
+		}
+		eventType, _ := event["type"].(string)
+		switch eventType {
+		case "content_block_start":
+			block, _ := event["content_block"].(map[string]any)
+			if block == nil {
+				continue
+			}
+			if blockType, _ := block["type"].(string); blockType == "tool_use" {
+				sawToolUseType = true
+			}
+			if name, _ := block["name"].(string); name == toolName {
+				sawToolName = true
+			}
+		case "content_block_delta":
+			delta, _ := event["delta"].(map[string]any)
+			if delta == nil {
+				continue
+			}
+			if partial, _ := delta["partial_json"].(string); argSnippet != "" && strings.Contains(partial, argSnippet) {
+				sawArgSnippet = true
+			}
+		case "message_delta":
+			delta, _ := event["delta"].(map[string]any)
+			if delta == nil {
+				continue
+			}
+			if reason, _ := delta["stop_reason"].(string); reason != "" {
+				stopReason = reason
+			}
+		case "message_start":
+			message, _ := event["message"].(map[string]any)
+			if message == nil {
+				continue
+			}
+			if reason, _ := message["stop_reason"].(string); reason != "" {
+				stopReason = reason
+			}
+		}
+	}
+
+	if !sawToolUseType {
+		t.Fatalf("missing content_block_start tool_use: %s", responseBody)
+	}
+	if !sawToolName {
+		t.Fatalf("missing tool name %q in content_block_start: %s", toolName, responseBody)
+	}
+	if argSnippet != "" && !sawArgSnippet {
+		// Some translators emit the full JSON only in content_block_start.input.
+		if !strings.Contains(responseBody, argSnippet) {
+			t.Fatalf("missing tool arg %q: %s", argSnippet, responseBody)
+		}
+	}
+	if stopReason != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use: %s", stopReason, responseBody)
+	}
+}
+
+func TestStartProviderRejectsCodexV1Endpoint(t *testing.T) {
+	_, err := StartProvider(context.Background(), StartOptions{
+		Protocol:  ProtocolOpenAIResponses,
+		Endpoint:  "https://new.sharedchat.cc/codex/v1",
+		APIKey:    "test-key",
+		ModelSpec: "gpt-5.4-mini",
+	})
+	if err == nil {
+		t.Fatal("StartProvider() should reject /codex/v1 endpoints")
+	}
+	if !strings.Contains(err.Error(), "https://new.sharedchat.cc/codex") {
+		t.Fatalf("error = %v, want suggestion for /codex without /v1", err)
+	}
+}

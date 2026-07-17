@@ -16,10 +16,15 @@ import (
 	"time"
 )
 
-// responsesCompatibilityProxy leaves Responses traffic untouched except for a
-// CLIProxyAPI edge case: some upstreams emit the full answer only in the final
-// response.completed event. CLIProxyAPI's streaming Claude translator currently
-// ignores that text, so expose it as a standard output_text delta first.
+const plainResponsesUserAgent = "ccl-openai-responses/1.0"
+
+// responsesCompatibilityProxy is a loopback reverse proxy placed in front of
+// the real Responses/Codex upstream (see package doc, item 1).
+//
+// It leaves Responses traffic mostly untouched except for CLIProxyAPI edge cases:
+// some upstreams emit the full answer only in the final response.completed
+// event, and some omit or delay response.created. Drop this once the SDK
+// handles both cases natively.
 type responsesCompatibilityProxy struct {
 	endpoint string
 	server   *http.Server
@@ -49,7 +54,12 @@ type responsesContentPart struct {
 	Text string `json:"text"`
 }
 
-func startResponsesCompatibilityProxy(targetEndpoint string, identity codexRequestIdentity) (*responsesCompatibilityProxy, error) {
+// startResponsesCompatibilityProxy fronts a Responses upstream.
+// When identity is non-nil, Codex client identity is injected into each request.
+// When identity is nil, residual Codex headers/body fields that CLIProxyAPI's
+// codex-api-key executor always injects are stripped so plain OpenAI Responses
+// gateways are not forced into Codex-only parameters.
+func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequestIdentity) (*responsesCompatibilityProxy, error) {
 	target, err := url.Parse(strings.TrimRight(strings.TrimSpace(targetEndpoint), "/"))
 	if err != nil || target.Scheme == "" || target.Host == "" {
 		return nil, fmt.Errorf("invalid Responses endpoint %q", targetEndpoint)
@@ -62,7 +72,11 @@ func startResponsesCompatibilityProxy(targetEndpoint string, identity codexReque
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
-			_ = normalizeCodexRequestIdentity(request.Out, identity)
+			if identity != nil {
+				_ = normalizeCodexRequestIdentity(request.Out, *identity)
+			} else {
+				_ = sanitizePlainResponsesRequest(request.Out)
+			}
 			request.SetURL(target)
 			request.Out.Host = target.Host
 		},
@@ -152,6 +166,55 @@ func normalizeCodexRequestIdentity(request *http.Request, identity codexRequestI
 	return nil
 }
 
+// sanitizePlainResponsesRequest removes Codex-only headers and body fields that
+// CLIProxyAPI's codex-api-key executor injects even for API-key credentials.
+// Plain OpenAI Responses gateways commonly reject those as unsupported.
+func sanitizePlainResponsesRequest(request *http.Request) error {
+	if request == nil {
+		return nil
+	}
+
+	deleteCodexIdentityHeaders(request.Header)
+	for key := range request.Header {
+		normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "_", "-")
+		switch normalized {
+		case "originator", "x-codex-beta-features", "chatgpt-account-id", "version":
+			delete(request.Header, key)
+		}
+	}
+	// CLIProxyAPI defaults User-Agent to codex-tui/... (Mac OS ...); that also
+	// triggers Session_id injection. Always replace with a neutral UA.
+	request.Header.Set("User-Agent", plainResponsesUserAgent)
+
+	if request.Body == nil || request.Method != http.MethodPost ||
+		!strings.Contains(strings.ToLower(request.URL.Path), "responses") {
+		return nil
+	}
+
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		return err
+	}
+	var payload map[string]any
+	if err = json.Unmarshal(body, &payload); err != nil {
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		return err
+	}
+	delete(payload, "client_metadata")
+	// prompt_cache_key is valid OpenAI Responses, but when it was only injected
+	// as a Codex session key it is safer to leave user-supplied values alone.
+	// Do not invent one for plain mode.
+
+	body, err = json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	request.ContentLength = int64(len(body))
+	request.Header.Del("Content-Length")
+	return nil
+}
+
 func codexSessionHeader(headers http.Header) string {
 	for key, values := range headers {
 		normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "_", "-")
@@ -166,7 +229,7 @@ func deleteCodexIdentityHeaders(headers http.Header) {
 	for key := range headers {
 		normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "_", "-")
 		switch normalized {
-		case "session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-turn-metadata":
+		case "session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-turn-metadata", "conversation-id":
 			delete(headers, key)
 		}
 	}
@@ -192,40 +255,123 @@ func recoverCompletedOnlyText(source io.ReadCloser, destination *io.PipeWriter) 
 	scanner := bufio.NewScanner(source)
 	scanner.Buffer(nil, 52_428_800)
 	seenCreated := false
+	syntheticCreated := false
 	seenText := false
+	// responseID/model accumulate from any event that carries them so a
+	// synthetic response.created can be emitted before the first content
+	// event when upstreams skip the normal created frame.
+	responseID := ""
+	responseModel := ""
+	var pendingEventLine []byte
+
+	writeLine := func(line []byte) error {
+		if _, err := destination.Write(append(append([]byte(nil), line...), '\n')); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	flushPendingEvent := func() error {
+		if pendingEventLine == nil {
+			return nil
+		}
+		if err := writeLine(pendingEventLine); err != nil {
+			return err
+		}
+		pendingEventLine = nil
+		return nil
+	}
+
+	dropPendingEvent := func() {
+		pendingEventLine = nil
+	}
+
+	ensureCreated := func(id, model string) error {
+		if seenCreated {
+			return nil
+		}
+		if id == "" {
+			id = responseID
+		}
+		if model == "" {
+			model = responseModel
+		}
+		if id == "" {
+			id = "resp_synthetic"
+		}
+		created, _ := json.Marshal(map[string]any{
+			"type": "response.created",
+			"response": map[string]any{
+				"id":    id,
+				"model": model,
+			},
+		})
+		// Emit created before any held event: line for the content frame so
+		// CLIProxyAPI sees message_start before content_block events.
+		if _, err := fmt.Fprintf(destination, "data: %s\n\n", created); err != nil {
+			return err
+		}
+		seenCreated = true
+		syntheticCreated = true
+		return nil
+	}
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		trimmed := strings.TrimSpace(string(line))
-		if strings.HasPrefix(trimmed, "data:") {
-			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+
+		// Hold event: lines until we know whether the following data: is dropped.
+		if strings.HasPrefix(trimmed, "event:") {
+			if err := flushPendingEvent(); err != nil {
+				_ = destination.CloseWithError(err)
+				return
+			}
+			pendingEventLine = append([]byte(nil), line...)
+			continue
+		}
+
+		dropData := false
+		if payload, ok := strings.CutPrefix(trimmed, "data:"); ok {
+			payload = strings.TrimSpace(payload)
 			var event responsesEvent
 			if json.Unmarshal([]byte(payload), &event) == nil {
+				if event.Response.ID != "" {
+					responseID = event.Response.ID
+				}
+				if event.Response.Model != "" {
+					responseModel = event.Response.Model
+				}
 				switch event.Type {
 				case "response.created":
-					seenCreated = true
+					if seenCreated {
+						// Already emitted synthetic (or real) created — drop
+						// a late real created so CLIProxyAPI does not emit a
+						// second message_start.
+						dropData = true
+					} else {
+						seenCreated = true
+						syntheticCreated = false
+					}
 				case "response.output_text.delta":
+					if err := ensureCreated(responseID, responseModel); err != nil {
+						_ = destination.CloseWithError(err)
+						return
+					}
 					if event.Delta != "" {
 						seenText = true
 					}
-				case "response.output_item.done":
+				case "response.output_item.done", "response.output_item.added":
+					if err := ensureCreated(responseID, responseModel); err != nil {
+						_ = destination.CloseWithError(err)
+						return
+					}
 					if outputItemText(event.Item) != "" {
 						seenText = true
 					}
 				case "response.completed", "response.incomplete":
-					if !seenCreated {
-						created, _ := json.Marshal(map[string]any{
-							"type": "response.created",
-							"response": map[string]any{
-								"id":    event.Response.ID,
-								"model": event.Response.Model,
-							},
-						})
-						if _, err := fmt.Fprintf(destination, "data: %s\n\n", created); err != nil {
-							_ = destination.CloseWithError(err)
-							return
-						}
-						seenCreated = true
+					if err := ensureCreated(event.Response.ID, event.Response.Model); err != nil {
+						_ = destination.CloseWithError(err)
+						return
 					}
 					if !seenText {
 						text := outputItemsText(event.Response.Output)
@@ -241,13 +387,36 @@ func recoverCompletedOnlyText(source io.ReadCloser, destination *io.PipeWriter) 
 							seenText = true
 						}
 					}
+				default:
+					// Other events (e.g. function_call deltas) also need a
+					// preceding created frame for CLIProxyAPI's translator.
+					if !seenCreated && event.Type != "" {
+						if err := ensureCreated(responseID, responseModel); err != nil {
+							_ = destination.CloseWithError(err)
+							return
+						}
+					}
 				}
 			}
 		}
-		if _, err := destination.Write(append(append([]byte(nil), line...), '\n')); err != nil {
+
+		if dropData {
+			dropPendingEvent()
+			_ = syntheticCreated // retained for tests / future diagnostics
+			continue
+		}
+		if err := flushPendingEvent(); err != nil {
 			_ = destination.CloseWithError(err)
 			return
 		}
+		if err := writeLine(line); err != nil {
+			_ = destination.CloseWithError(err)
+			return
+		}
+	}
+	if err := flushPendingEvent(); err != nil {
+		_ = destination.CloseWithError(err)
+		return
 	}
 	if err := scanner.Err(); err != nil {
 		_ = destination.CloseWithError(err)

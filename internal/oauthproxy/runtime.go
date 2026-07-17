@@ -78,7 +78,16 @@ type runtimeModelRoute struct {
 	Alias string
 }
 
-var stdoutMu sync.Mutex
+// stdoutState reference-counts temporary redirection of os.Stdout to
+// os.DevNull while embedded CLIProxyAPI services become ready. Nested
+// startRuntime calls must share one sink instead of stacking file
+// descriptors or restoring a mid-stack original too early.
+var stdoutState struct {
+	sync.Mutex
+	users    int
+	original *os.File
+	sink     *os.File
+}
 
 var sdkLogState struct {
 	sync.Mutex
@@ -195,6 +204,13 @@ func Start(parent context.Context, providerName string) (*Runtime, error) {
 
 // StartProvider starts the embedded CLIProxyAPI adapter for every OpenAI-family
 // provider. Claude Code connects directly to the runtime's /v1/messages route.
+//
+// openai_responses is split:
+//   - dedicated Codex bases (…/codex) → StartCodexAPI with Codex client identity
+//   - plain Responses gateways → StartOpenAIResponsesAPI without Codex headers/body
+//
+// Invalid Codex paths such as …/codex/v1 are rejected before routing so they
+// cannot fall through to the plain Responses path and hit …/codex/v1/responses.
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	if strings.TrimSpace(options.OAuthProvider) != "" {
 		return StartOAuth(parent, options.OAuthProvider, options.ModelSpec)
@@ -203,7 +219,13 @@ func StartProvider(parent context.Context, options StartOptions) (*Runtime, erro
 	case ProtocolOpenAIChat:
 		return StartOpenAIChatAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	case ProtocolOpenAIResponses:
-		return StartCodexAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
+		if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(options.Endpoint); invalid {
+			return nil, fmt.Errorf("invalid Codex endpoint %q: use %q without /v1; ccl requests /models separately", options.Endpoint, suggestion)
+		}
+		if protocol.IsCodexBaseEndpoint(options.Endpoint) {
+			return StartCodexAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
+		}
+		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -311,36 +333,62 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 	return startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
 }
 
-// StartCodexAPI starts an embedded CLIProxyAPI runtime configured with a
-// Responses/Codex API-key endpoint. CLIProxyAPI exposes Anthropic Messages and
-// owns the full Claude-to-Responses translation in both directions.
+// StartOpenAIResponsesAPI starts an embedded CLIProxyAPI runtime against a plain
+// OpenAI Responses upstream (not a dedicated Codex base).
+//
+// CLIProxyAPI only exposes a Responses upstream executor through codex-api-key,
+// so the config still uses that slot. Unlike StartCodexAPI, no Codex Originator /
+// User-Agent / client_metadata / session headers are injected — plain gateways
+// often reject those as unsupported parameters.
+func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false)
+}
+
+// StartCodexAPI starts an embedded CLIProxyAPI runtime for a dedicated Codex
+// Responses endpoint (…/codex). It injects Codex client identity headers and
+// body metadata required by Codex-compatible upstreams.
 func StartCodexAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
-	if parent == nil {
-		parent = context.Background()
-	}
 	if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint); invalid {
 		return nil, fmt.Errorf("invalid Codex endpoint %q: use %q without /v1; ccl requests /models separately", endpoint, suggestion)
 	}
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true)
+}
+
+func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexIdentity bool) (*Runtime, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	endpoint = codexBaseURL(endpoint)
 	if endpoint == "" || strings.TrimSpace(upstreamAPIKey) == "" {
-		return nil, fmt.Errorf("Codex Responses runtime requires endpoint and API key")
+		return nil, fmt.Errorf("OpenAI Responses runtime requires endpoint and API key")
 	}
 	routes := runtimeModelRoutes(modelSpec)
 	if len(routes) == 0 {
-		return nil, fmt.Errorf("Codex Responses runtime requires at least one model")
+		return nil, fmt.Errorf("OpenAI Responses runtime requires at least one model")
 	}
-	codexVersion := detectCodexClientVersion()
-	codexUserAgent := buildCodexUserAgent(codexVersion)
-	codexIdentity, err := newCodexRequestIdentity()
-	if err != nil {
-		return nil, err
+
+	var identity *codexRequestIdentity
+	var headers map[string]string
+	if codexIdentity {
+		codexVersion := detectCodexClientVersion()
+		codexUserAgent := buildCodexUserAgent(codexVersion)
+		id, err := newCodexRequestIdentity()
+		if err != nil {
+			return nil, err
+		}
+		identity = &id
+		headers = map[string]string{
+			"User-Agent":            codexUserAgent,
+			"Originator":            embeddedCodexOriginator,
+			"X-Codex-Beta-Features": "remote_compaction_v2",
+		}
 	}
 
 	runtimeDir, port, apiKey, err := prepareAPIKeyRuntime()
 	if err != nil {
 		return nil, err
 	}
-	compat, err := startResponsesCompatibilityProxy(endpoint, codexIdentity)
+	compat, err := startResponsesCompatibilityProxy(endpoint, identity)
 	if err != nil {
 		_ = os.RemoveAll(runtimeDir)
 		return nil, err
@@ -360,17 +408,13 @@ func StartCodexAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec s
 			APIKey:  upstreamAPIKey,
 			BaseURL: compat.endpoint,
 			Models:  models,
-			Headers: map[string]string{
-				"User-Agent":            codexUserAgent,
-				"Originator":            embeddedCodexOriginator,
-				"X-Codex-Beta-Features": "remote_compaction_v2",
-			},
+			Headers: headers,
 		}},
 	})
 	if err != nil {
 		compat.Stop()
 		_ = os.RemoveAll(runtimeDir)
-		return nil, fmt.Errorf("encode Codex runtime config: %w", err)
+		return nil, fmt.Errorf("encode OpenAI Responses runtime config: %w", err)
 	}
 	proxyRuntime, err := startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
 	if err != nil {
@@ -672,20 +716,38 @@ func silenceSDKLogs() func() {
 }
 
 func silenceStdout() func() {
-	stdoutMu.Lock()
-	original := os.Stdout
-	sink, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		stdoutMu.Unlock()
-		return func() {}
+	stdoutState.Lock()
+	if stdoutState.users == 0 {
+		sink, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			stdoutState.Unlock()
+			return func() {}
+		}
+		stdoutState.original = os.Stdout
+		stdoutState.sink = sink
+		os.Stdout = sink
 	}
-	os.Stdout = sink
+	stdoutState.users++
+	stdoutState.Unlock()
+
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			os.Stdout = original
-			_ = sink.Close()
-			stdoutMu.Unlock()
+			stdoutState.Lock()
+			defer stdoutState.Unlock()
+			if stdoutState.users == 0 {
+				return
+			}
+			stdoutState.users--
+			if stdoutState.users > 0 {
+				return
+			}
+			os.Stdout = stdoutState.original
+			if stdoutState.sink != nil {
+				_ = stdoutState.sink.Close()
+			}
+			stdoutState.original = nil
+			stdoutState.sink = nil
 		})
 	}
 }
@@ -726,6 +788,12 @@ func (r *Runtime) ClaudeBaseURL() string {
 
 func (r *Runtime) APIKey() string { return r.apiKey }
 
+// Stop tears down the embedded CLIProxyAPI service.
+//
+// Teardown order is part of the CLIProxyAPI compatibility boundary (see
+// package doc): cancel the run context, wait for Service.Run to exit on its
+// own, and only force Service.Shutdown if that wait times out. Concurrent
+// Shutdown during Run's deferred cleanup races inside the SDK.
 func (r *Runtime) Stop() {
 	if r == nil {
 		return
@@ -740,9 +808,7 @@ func (r *Runtime) Stop() {
 			stopped = true
 		case <-time.After(5 * time.Second):
 		}
-		// Service.Run performs its own deferred Shutdown after the run context is
-		// canceled. Calling Shutdown concurrently with its final initialization
-		// races inside CLIProxyAPI, so force it only if Run failed to stop in time.
+		// Force Shutdown only when Run did not exit cleanly in time.
 		if !stopped && r.service != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_ = r.service.Shutdown(ctx)
