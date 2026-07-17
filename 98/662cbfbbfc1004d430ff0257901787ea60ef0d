@@ -1,0 +1,32 @@
+cmd/set_test.go
+  s_e8414fd901ae33::t_2033f3da9bb30e 544,550-553
+  s_e8414fd901ae33::t_b428e199749333 442-449
+  s_e8414fd901ae33::t_4c975b140e888f 464,471-472,481,486-502,554
+  s_e8414fd901ae33::t_eeb1fd57aeb382 459
+cmd/advanced_config.go
+  s_e8414fd901ae33::t_cefd143fb9a047 63-66,72-80,1065,1320-1322,1630,1637,1639,1641,1646-1647,1649-1650,1654-1659,1662,1668,1671-1673,1676-1696
+  s_e8414fd901ae33::t_b428e199749333 1279
+  s_e8414fd901ae33::t_9e92353dec9f1c 762-777,779-788,790,792,794,796,798
+  s_e8414fd901ae33::t_2033f3da9bb30e 1633-1634,1700
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "98662cbfbbfc1004d430ff0257901787ea60ef0d",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_e8414fd901ae33": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7142cb1-7c26-4e6b-970d-8f105dd6fc7a",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
