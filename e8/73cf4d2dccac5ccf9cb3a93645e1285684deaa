@@ -1,0 +1,32 @@
+cmd/advanced_config.go
+  s_edce7043b8653d::t_504571e2d7138c 75,504,730,881-882,884,886,1035-1036,1038,1040
+cmd/cmd_test.go
+  s_edce7043b8653d::t_2934efdc0b53a8 374,391-396
+cmd/map.go
+  s_edce7043b8653d::t_6a88aaedcc8bbc 182
+cmd/provider_config_helpers_test.go
+  s_edce7043b8653d::t_cf8b7c63a9efd2 42-46,66,71,74,76-80,97-101,123,136,140-141,144-153,166,169,174,179,183-184,187,192,195,224,226,239-241
+cmd/provider_display.go
+  s_edce7043b8653d::t_ff0a9d42787bc8 62,64-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "e873cf4d2dccac5ccf9cb3a93645e1285684deaa",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_edce7043b8653d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7f20-1b84-7561-8964-12646b8e9156",
+        "model": "unknown"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
