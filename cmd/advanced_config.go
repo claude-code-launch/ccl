@@ -72,7 +72,7 @@ const (
 // compactRadioOrder matches the product mockup Auto Compact radio list.
 var compactRadioOrder = []compactPreset{
 	compactPresetDefault,
-	compactPreset200K,
+	compactPreset300K,
 	compactPreset500K,
 	compactPreset1M,
 	compactPresetPreserve, // Custom
@@ -501,7 +501,7 @@ func (m *AdvancedConfigModel) doAutoConfig() {
 	m.p.SubagentModel = ""
 	// Auto mode only rewrites [1m] slot markers. Compact is independent: keep the
 	// user's existing provider-wide compact preset unless every mapped model is
-	// a confirmed 1M allowlist entry (then suggest Balanced 500K/80%).
+	// a confirmed 1M allowlist entry.
 	m.oneMSlots = make(map[string]bool)
 	m.compactPreset = m.compactState.preset
 	if allConfiguredModelsRecommendOneM(*m.p) {
@@ -727,7 +727,7 @@ var (
 	reviewSearchOptions  = []string{"", "true", "false"} // Default / On / Off
 	reviewCompactOptions = []compactPreset{
 		compactPresetDefault,
-		compactPreset200K,
+		compactPreset300K,
 		compactPreset500K,
 		compactPreset1M,
 		compactPresetPreserve,
@@ -878,12 +878,12 @@ func formatCompactLabel(preset compactPreset) string {
 	switch preset {
 	case compactPresetDefault:
 		return formatEditableValue("Claude default", false)
-	case compactPreset200K:
-		return formatEditableValue("Switch-safe 200K / 70%", false)
+	case compactPreset300K:
+		return formatEditableValue("Switch-safe 300K / 200K", false)
 	case compactPreset500K:
-		return formatEditableValue("Balanced 500K / 80%", false)
+		return formatEditableValue("Balanced 500K / 400K", false)
 	case compactPreset1M:
-		return formatEditableValue("Maximum 1M / 90%", false)
+		return formatEditableValue("Maximum 1M / 900K", false)
 	default:
 		return formatEditableValue("Custom", false)
 	}
@@ -1032,12 +1032,12 @@ func compactRadioLabel(preset compactPreset) string {
 	switch preset {
 	case compactPresetDefault:
 		return "Claude default"
-	case compactPreset200K:
-		return "Switch-safe     200K / 70%"
+	case compactPreset300K:
+		return "Switch-safe     300K / 200K"
 	case compactPreset500K:
-		return "Balanced        500K / 80%"
+		return "Balanced        500K / 400K"
 	case compactPreset1M:
-		return "Maximum depth     1M / 90%"
+		return "Maximum depth     1M / 900K"
 	default:
 		return "Custom"
 	}

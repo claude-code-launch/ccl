@@ -39,8 +39,11 @@ func TestApplyOneMConfigAppliesSuffixAndEnvOnce(t *testing.T) {
 	if p.Env[autoCompactWindowEnv] != compactWindow1M {
 		t.Fatalf("expected %s to be set, got %q", autoCompactWindowEnv, p.Env[autoCompactWindowEnv])
 	}
-	if p.Env[autoCompactPctEnv] != compactPct1M {
-		t.Fatalf("expected %s to be set, got %q", autoCompactPctEnv, p.Env[autoCompactPctEnv])
+	if p.Env[maxContextTokensEnv] != maxContext1M {
+		t.Fatalf("expected %s to be set, got %q", maxContextTokensEnv, p.Env[maxContextTokensEnv])
+	}
+	if _, ok := p.Env[autoCompactPctEnv]; ok {
+		t.Fatalf("expected legacy percentage override removed, got %+v", p.Env)
 	}
 	if p.Env["KEEP_ME"] != "1" {
 		t.Fatalf("expected unrelated env to be preserved, got %+v", p.Env)
@@ -60,18 +63,21 @@ func TestCompactPresetRecommendationsAreExact(t *testing.T) {
 	}
 }
 
-func TestApplyCompactConfig200KKeepsOneMSuffix(t *testing.T) {
+func TestApplyCompactConfig300KKeepsOneMSuffix(t *testing.T) {
 	p := provider.Provider{
 		OpusModel: "gpt-5.5[1m]",
 		Env:       map[string]string{"KEEP_ME": "1"},
 	}
-	applyCompactConfig(&p, map[string]bool{"opus": true}, compactPreset200K)
+	applyCompactConfig(&p, map[string]bool{"opus": true}, compactPreset300K)
 
 	if p.OpusModel != "gpt-5.5[1m]" {
-		t.Fatalf("expected 1M suffix kept with 200K compact, got %q", p.OpusModel)
+		t.Fatalf("expected 1M suffix kept with 300K preset, got %q", p.OpusModel)
 	}
-	if p.Env[autoCompactWindowEnv] != compactWindow200K || p.Env[autoCompactPctEnv] != compactPct200K {
-		t.Fatalf("expected 200K/70 preset, got %+v", p.Env)
+	if p.Env[maxContextTokensEnv] != maxContext300K || p.Env[autoCompactWindowEnv] != compactWindow300K {
+		t.Fatalf("expected 300K/200K preset, got %+v", p.Env)
+	}
+	if _, ok := p.Env[autoCompactPctEnv]; ok {
+		t.Fatalf("expected legacy percentage override removed, got %+v", p.Env)
 	}
 	if p.Env["KEEP_ME"] != "1" {
 		t.Fatalf("expected unrelated env preserved, got %+v", p.Env)
@@ -88,8 +94,11 @@ func TestApplyCompactConfig500K(t *testing.T) {
 	if p.SonnetModel != "grok-4.5[1m]" || p.CustomModelID != "grok-4.5[1m]" {
 		t.Fatalf("expected 1M suffixes preserved, got sonnet=%q custom=%q", p.SonnetModel, p.CustomModelID)
 	}
-	if p.Env[autoCompactWindowEnv] != compactWindow500K || p.Env[autoCompactPctEnv] != compactPct500K {
-		t.Fatalf("expected 500K/80 preset, got %+v", p.Env)
+	if p.Env[maxContextTokensEnv] != maxContext500K || p.Env[autoCompactWindowEnv] != compactWindow500K {
+		t.Fatalf("expected 500K/400K preset, got %+v", p.Env)
+	}
+	if _, ok := p.Env[autoCompactPctEnv]; ok {
+		t.Fatalf("expected legacy percentage override removed, got %+v", p.Env)
 	}
 }
 
@@ -111,7 +120,7 @@ func TestApplyCompactConfigPreservesCustomEnv(t *testing.T) {
 func TestCompactStateRecognizesLegacyAndCustom(t *testing.T) {
 	legacy := compactStateFromProvider(provider.Provider{
 		OpusModel: "gpt-5.6-sol[1m]",
-		Env:       map[string]string{autoCompactWindowEnv: compactWindow1M},
+		Env:       map[string]string{autoCompactWindowEnv: legacyCompactWindow1M},
 	})
 	if !legacy.legacy || legacy.custom {
 		t.Fatalf("expected legacy 1M state, got %+v", legacy)
@@ -124,16 +133,24 @@ func TestCompactStateRecognizesLegacyAndCustom(t *testing.T) {
 		t.Fatalf("expected custom preserve state, got %+v", custom)
 	}
 
-	// 200K compact with 1M slots is still the 200K preset (decoupled).
+	// The new 300K/200K pair stays independent from 1M slot markers.
 	mixed := compactStateFromProvider(provider.Provider{
 		OpusModel: "gpt-5.5[1m]",
 		Env: map[string]string{
-			autoCompactWindowEnv: compactWindow200K,
-			autoCompactPctEnv:    compactPct200K,
+			maxContextTokensEnv:  maxContext300K,
+			autoCompactWindowEnv: compactWindow300K,
 		},
 	})
-	if mixed.preset != compactPreset200K {
-		t.Fatalf("expected 200K preset with 1M slots, got %+v", mixed)
+	if mixed.preset != compactPreset300K {
+		t.Fatalf("expected 300K/200K preset with 1M slots, got %+v", mixed)
+	}
+
+	oldBalanced := compactStateFromProvider(provider.Provider{Env: map[string]string{
+		autoCompactWindowEnv: legacyCompactWindow500K,
+		autoCompactPctEnv:    legacyCompactPct500K,
+	}})
+	if oldBalanced.preset != compactPreset500K || oldBalanced.custom || oldBalanced.legacy {
+		t.Fatalf("expected old 500K/80%% config to map to Balanced for migration, got %+v", oldBalanced)
 	}
 }
 
@@ -146,36 +163,36 @@ func TestCompactStateSummaries(t *testing.T) {
 		{
 			name: "one m",
 			p: provider.Provider{OpusModel: "gpt-5.6-sol[1m]", Env: map[string]string{
+				maxContextTokensEnv:  maxContext1M,
 				autoCompactWindowEnv: compactWindow1M,
-				autoCompactPctEnv:    compactPct1M,
 			}},
-			want: "1M/90 · opus",
+			want: "1M/900K · opus",
 		},
 		{
 			name: "legacy",
 			p: provider.Provider{OpusModel: "gpt-5.6-sol[1m]", Env: map[string]string{
-				autoCompactWindowEnv: compactWindow1M,
+				autoCompactWindowEnv: legacyCompactWindow1M,
 			}},
 			want: "legacy 1M · opus",
 		},
 		{
-			name: "200k with context",
+			name: "300k with context",
 			p: provider.Provider{
 				OpusModel: "gpt-5.5[1m]",
 				Env: map[string]string{
-					autoCompactWindowEnv: compactWindow200K,
-					autoCompactPctEnv:    compactPct200K,
+					maxContextTokensEnv:  maxContext300K,
+					autoCompactWindowEnv: compactWindow300K,
 				},
 			},
-			want: "200K/70 · opus",
+			want: "300K/200K · opus",
 		},
 		{
 			name: "500k",
 			p: provider.Provider{Env: map[string]string{
+				maxContextTokensEnv:  maxContext500K,
 				autoCompactWindowEnv: compactWindow500K,
-				autoCompactPctEnv:    compactPct500K,
 			}},
-			want: "500K/80 · off",
+			want: "500K/400K · off",
 		},
 		{
 			name: "default",
@@ -204,8 +221,9 @@ func TestApplyCompactConfigDefaultRemovesOnlyManagedValues(t *testing.T) {
 	p := provider.Provider{
 		OpusModel: "gpt-5.6-sol[1m]",
 		Env: map[string]string{
+			maxContextTokensEnv:  maxContext1M,
 			autoCompactWindowEnv: compactWindow1M,
-			autoCompactPctEnv:    compactPct1M,
+			autoCompactPctEnv:    legacyCompactPct1M,
 			"KEEP_ME":            "1",
 		},
 	}
@@ -217,6 +235,9 @@ func TestApplyCompactConfigDefaultRemovesOnlyManagedValues(t *testing.T) {
 	}
 	if _, ok := p.Env[autoCompactWindowEnv]; ok {
 		t.Fatalf("expected compact window removed, got %+v", p.Env)
+	}
+	if _, ok := p.Env[maxContextTokensEnv]; ok {
+		t.Fatalf("expected fallback context removed, got %+v", p.Env)
 	}
 	if _, ok := p.Env[autoCompactPctEnv]; ok {
 		t.Fatalf("expected compact percentage removed, got %+v", p.Env)

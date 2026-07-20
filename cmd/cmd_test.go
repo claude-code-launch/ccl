@@ -371,8 +371,8 @@ func TestMapAutoPreservesModernOneMCompactPreset(t *testing.T) {
 				APIKey:    "test-key",
 				OpusModel: "old-opus[1m]",
 				Env: map[string]string{
+					maxContextTokensEnv:  maxContext1M,
 					autoCompactWindowEnv: compactWindow1M,
-					autoCompactPctEnv:    compactPct1M,
 				},
 			},
 		},
@@ -388,8 +388,11 @@ func TestMapAutoPreservesModernOneMCompactPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := updated.Providers["mock"]
-	// Modern Maximum 1M/90% must survive even when [1m] slots are cleaned for unknown models.
-	if p.Env[autoCompactWindowEnv] != compactWindow1M || p.Env[autoCompactPctEnv] != compactPct1M {
-		t.Fatalf("modern 1M/90 compact was rewritten: %+v", p.Env)
+	// Modern Maximum 1M/900K must survive even when [1m] slots are cleaned for unknown models.
+	if p.Env[maxContextTokensEnv] != maxContext1M || p.Env[autoCompactWindowEnv] != compactWindow1M {
+		t.Fatalf("modern 1M/900K preset was rewritten: %+v", p.Env)
+	}
+	if _, ok := p.Env[autoCompactPctEnv]; ok {
+		t.Fatalf("unexpected legacy percentage override: %+v", p.Env)
 	}
 }

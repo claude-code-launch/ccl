@@ -137,17 +137,17 @@ ccl set my-provider
 Context & Compact 把两个概念拆开：
 
 1. **Extended Context `[1m]`**（按槽位）：声明该模型 ID 支持扩展上下文；同名模型切换时会同步到其它槽位。
-2. **Auto Compact**（Provider 全局）：只控制 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` / `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`，**不会**再顺带删除 `[1m]`。
+2. **Auto Compact**（Provider 全局）：`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 设置 Claude 对不识别模型采用的默认上下文大小，`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 设置绝对压缩窗口；**不会**再顺带删除 `[1m]`。
 
-| 压缩预设 | 窗口 | 百分比 | 说明 |
-|---------|-----:|-------:|------|
+| 压缩预设 | 默认上下文 | 自动压缩窗口 | 说明 |
+|---------|-----------:|---------------:|------|
 | Custom (preserve) | 保留现值 | 保留现值 | 保护自定义或旧配置 |
-| Claude default | 未管理 | 未管理 | 删除 ccl 覆盖；Claude Code 仍会在接近窗口时自动压缩 |
-| Switch-safe 200K / 70% | 200,000 | 70%（约 140K） | 适合常切换到标准上下文模型；可与 `[1m]` 并存 |
-| Balanced 500K / 80% | 500,000 | 80%（约 400K） | 已确认 1M 模型的推荐默认 |
-| Maximum 1M / 90% | 1,000,000 | 90%（约 900K） | 最大深度长会话 |
+| Claude default | 未管理 | 未管理 | 删除 ccl 覆盖；Claude Code 仍会按内置默认值自动压缩 |
+| Switch-safe 300K / 200K | 300,000 | 200,000 | 适合常切换到标准上下文模型；可与 `[1m]` 并存 |
+| Balanced 500K / 400K | 500,000 | 400,000 | 平衡上下文容量与压缩余量 |
+| Maximum 1M / 900K | 1,000,000 | 900,000 | 最大深度长会话 |
 
-ccl 只对精确模型 ID `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 显示 1M 推荐；上游 `/models` 若带 `context_window` 仅显示为「目录报 1M」建议，**不会**自动勾选。旧的 `[1m] + CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`（无百分比）继续兼容，显示为 legacy。`*_NAME` 显示名为 `model (1M)`，技术 ID 仍使用 `model[1m]`。
+ccl 只对精确模型 ID `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 显示 1M 推荐；上游 `/models` 若带 `context_window` 仅显示为「目录报 1M」建议，**不会**自动勾选。旧的百分比预设会在下次保存时迁移为对应的绝对窗口；`[1m] + CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000` 旧配置继续兼容并显示为 legacy。`*_NAME` 显示名为 `model (1M)`，技术 ID 仍使用 `model[1m]`。
 
 页面间通过 `Tab` / `Shift+Tab` 或底部按钮 `[Next]` / `[Back]` 导航。
 

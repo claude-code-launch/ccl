@@ -59,11 +59,11 @@ func providerOneMSummary(p provider.Provider) string {
 	}
 	switch state.preset {
 	case compactPreset1M:
-		return "1M/90 · " + contextPart
+		return "1M/900K · " + contextPart
 	case compactPreset500K:
-		return "500K/80 · " + contextPart
-	case compactPreset200K:
-		return "200K/70 · " + contextPart
+		return "500K/400K · " + contextPart
+	case compactPreset300K:
+		return "300K/200K · " + contextPart
 	case compactPresetDefault:
 		return "default · " + contextPart
 	default:

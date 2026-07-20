@@ -420,7 +420,7 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	m.compactState = compactConfigState{preset: compactPreset1M}
 
 	view := m.View().Content
-	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "[1M]", "Maximum 1M / 90%"} {
+	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "[1M]", "Maximum 1M / 900K"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
 		}
@@ -496,10 +496,18 @@ func TestCompactPresetRadioSelectsClaudeDefault(t *testing.T) {
 		t.Fatal("selecting Balanced must not clear [1m] slots")
 	}
 	view := m.View().Content
-	for _, expected := range []string{"Extended Context", "Auto Compact", "Claude default", "Switch-safe", "Balanced", "Maximum depth", "Custom", "(●)"} {
+	for _, expected := range []string{
+		"Extended Context", "Auto Compact", "Claude default", "Custom", "(●)",
+		"Switch-safe", "300K / 200K",
+		"Balanced", "500K / 400K",
+		"Maximum depth", "1M / 900K",
+	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("page2 view missing %q: %s", expected, view)
 		}
+	}
+	if strings.Contains(view, "%") {
+		t.Fatalf("page2 compact presets must use absolute windows, got %q", view)
 	}
 }
 
@@ -569,7 +577,10 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	if p.SubagentModel != "subagent-model[1m]" {
 		t.Fatalf("subagent model = %q, want 1M suffix", p.SubagentModel)
 	}
-	if p.Env[autoCompactWindowEnv] != "1000000" {
+	if p.Env[maxContextTokensEnv] != "1000000" {
+		t.Fatalf("max context tokens = %q", p.Env[maxContextTokensEnv])
+	}
+	if p.Env[autoCompactWindowEnv] != "900000" {
 		t.Fatalf("auto compact window = %q", p.Env[autoCompactWindowEnv])
 	}
 }

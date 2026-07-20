@@ -179,7 +179,7 @@ func runMapAuto(args []string) error {
 	// Compact is fully independent of [1m] slot cleanup.
 	// Only migrate pure legacy residue (window=1M without percentage) after
 	// every [1m] marker has been removed. Modern presets — including explicit
-	// Maximum 1M/90% — are preserved as-is.
+	// Maximum 1M/900K — are preserved as-is.
 	preset := state.preset
 	if allConfiguredModelsRecommendOneM(p) {
 		for _, slot := range advancedSlotRefs(&p) {
