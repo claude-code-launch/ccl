@@ -21,6 +21,7 @@ type settingsJSON struct {
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"`
+	FastMode               bool              `json:"fastMode"`
 }
 
 func TestPreviewSettingsFeatures(t *testing.T) {
@@ -303,6 +304,43 @@ func TestPreviewSettingsWithEmbeddedCodexOAuth(t *testing.T) {
 	}
 	if key := settings.Env["ANTHROPIC_API_KEY"]; key != "" {
 		t.Fatalf("OAuth proxy should not set ANTHROPIC_API_KEY: %q", key)
+	}
+	if settings.FastMode {
+		t.Fatal("FastMode should default off")
+	}
+	// false must still be present so Claude Code does not keep a prior /fast on.
+	if !strings.Contains(result, `"fastMode": false`) && !strings.Contains(result, `"fastMode":false`) {
+		t.Fatalf("settings JSON should always include fastMode=false when off: %s", result)
+	}
+}
+
+func TestPreviewSettingsPinsFastMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	credential := []byte(`{"type":"codex","access_token":"test-token","refresh_token":"test-refresh","email":"test@example.com"}`)
+	if err := os.WriteFile(filepath.Join(authDir, "codex-fast.json"), credential, 0o600); err != nil {
+		t.Fatalf("write credential: %v", err)
+	}
+
+	result := claude.PreviewSettings(provider.Provider{
+		Name:          "chatgpt-fast",
+		Type:          "openai_responses",
+		Endpoint:      "oauth://codex",
+		OAuthProvider: "chatgpt",
+		Model:         "gpt-test",
+		CustomModelID: "gpt-test",
+		FastMode:      true,
+	})
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(result), &settings); err != nil {
+		t.Fatalf("PreviewSettings() returned invalid JSON: %v; result=%s", err, result)
+	}
+	if !settings.FastMode {
+		t.Fatalf("FastMode = false, want true; settings=%+v", settings)
 	}
 }
 

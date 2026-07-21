@@ -21,9 +21,12 @@ import (
 
 func TestBackendProviderAliases(t *testing.T) {
 	tests := map[string]string{
-		"codex":   "codex",
-		"chatgpt": "codex",
-		"gemini":  "antigravity",
+		"codex":    "codex",
+		"chatgpt":  "codex",
+		"copilot":  "codex",
+		"gemini":   "antigravity",
+		"grok":     "xai",
+		"xai":      "xai",
 	}
 	for input, want := range tests {
 		got, err := BackendProvider(input)
@@ -33,6 +36,19 @@ func TestBackendProviderAliases(t *testing.T) {
 	}
 	if _, err := BackendProvider("unknown"); err == nil {
 		t.Fatal("BackendProvider(unknown) should fail")
+	}
+}
+
+func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot} {
+		if _, err := ValidateLoginProvider(name); err != nil {
+			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
+		}
+	}
+	for _, name := range []string{ProviderCodex, "antigravity", "xai", ""} {
+		if _, err := ValidateLoginProvider(name); err == nil {
+			t.Fatalf("ValidateLoginProvider(%q) should fail", name)
+		}
 	}
 }
 
@@ -143,13 +159,50 @@ func TestProviderTokenStoreFiltersOtherBackends(t *testing.T) {
 		}
 	}
 
-	store := newProviderTokenStore(authDir, ProviderCodex)
+	store := newProviderTokenStore(authDir, ProviderCodex, "")
 	auths, err := store.List(context.Background())
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
 	if len(auths) != 1 || auths[0].Provider != ProviderCodex {
 		t.Fatalf("filtered auths = %+v, want one Codex auth", auths)
+	}
+}
+
+func TestProviderTokenStoreFiltersByCredentialFile(t *testing.T) {
+	authDir := t.TempDir()
+	credentials := map[string][]byte{
+		"codex-alice@example.com.json": []byte(`{"type":"codex","access_token":"alice","email":"alice@example.com"}`),
+		"codex-bob@example.com.json":   []byte(`{"type":"codex","access_token":"bob","email":"bob@example.com"}`),
+		"xai-ada@example.com.json":     []byte(`{"type":"xai","access_token":"ada","email":"ada@example.com"}`),
+	}
+	for name, data := range credentials {
+		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	// No credential file: all backend accounts load (multi-account round-robin pool).
+	store := newProviderTokenStore(authDir, ProviderCodex, "")
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("unfiltered codex auths = %d, want 2", len(auths))
+	}
+
+	// Bound to one credential file: only that account loads.
+	store = newProviderTokenStore(authDir, ProviderCodex, "codex-bob@example.com.json")
+	auths, err = store.List(context.Background())
+	if err != nil {
+		t.Fatalf("filtered List() error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("credential-bound auths = %d, want 1", len(auths))
+	}
+	if got := filepath.Base(auths[0].FileName); got != "codex-bob@example.com.json" {
+		t.Fatalf("selected file = %q, want codex-bob@example.com.json", got)
 	}
 }
 

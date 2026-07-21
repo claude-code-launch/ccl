@@ -36,9 +36,9 @@
 
 6. **统一 CLIProxyAPI 运行时与 OAuth**
    - 源码集成 CLIProxyAPI Go SDK，无需安装或管理第二个代理进程。
-   - 支持 `ccl auth chatgpt` 和 `ccl auth gemini`；ChatGPT 在底层使用 CLIProxyAPI 的 Codex OAuth backend。
-   - OAuth 凭据保存在 `~/.ccl/auth`，运行时仅绑定本机回环地址，并使用随机会话 key。
-   - ChatGPT 默认走 OpenAI Responses，Gemini 默认走 OpenAI Chat；手动 API key provider 与 OAuth provider 共用同一套 SDK 运行时。
+   - 支持 `ccl auth chatgpt` / `gemini` / `grok` / `copilot`，且每个 provider 可通过别名挂载同一 backend 的多个账号；ChatGPT/Copilot 在底层使用 CLIProxyAPI 的 Codex OAuth backend，Gemini 使用 Antigravity，Grok 使用 xAI backend。
+   - OAuth 凭据保存在 `~/.ccl/auth`（每个账号一个 JSON），运行时仅绑定本机回环地址，并使用随机会话 key；每条 provider 通过 `oauthAccountCredential` 绑定到具体账号文件，不会串到同 backend 的其它账号。
+   - ChatGPT/Copilot 默认走 OpenAI Responses，Gemini/Grok 默认走 OpenAI Chat；手动 API key provider 与 OAuth provider 共用同一套 SDK 运行时。
 
 ---
 
@@ -91,14 +91,47 @@ ccl auth chatgpt
 # Google OAuth，默认通过 OpenAI Chat 使用 Gemini 模型
 ccl auth gemini
 
+# xAI/Grok OAuth（device-code flow），通过 OpenAI Chat 使用 Grok 模型
+ccl auth grok
+
+# GitHub Copilot OAuth（device-code flow），共用 Codex backend，走 OpenAI Responses
+ccl auth copilot
+
+# 多账号：给每个账号起一个别名，独立 provider 与凭据互不覆盖
+ccl auth chatgpt a1
+ccl auth chatgpt a2
+ccl auth gemini work
+ccl auth grok personal
+ccl auth copilot gh
+
 # 不自动打开浏览器
 ccl auth chatgpt --no-browser
 
-# 覆盖 OAuth 回调端口
+# 覆盖 OAuth 回调端口（仅 Codex/ChatGPT 回调 flow 有效）
 ccl auth chatgpt --callback-port 1455
+
+# Claude Code fastMode（仅当前 active 的 chatgpt/copilot；≈1.5x 速度、更高用量）
+# 等价于 /fast，与 auth 分离
+ccl fast on
+ccl fast off
+ccl provider fast on
 ```
 
-登录成功后，ccl 会创建或更新同名 provider 并立即设为当前 provider。`chatgpt` 使用 CLIProxyAPI 的 Codex OAuth backend，协议固定为 `openai(responses)`；`gemini` 使用 CLIProxyAPI v7 的 Google/Antigravity OAuth backend，协议固定为 `openai(chat)`。不再提供 `--protocol` 覆盖（运行时会忽略）。旧版创建的 `oauthProvider: codex` 仍可运行，并会在下次执行 `ccl auth chatgpt` 时迁移为 `chatgpt`。启动 `ccl`、`ccl set <provider>`、`ccl models` 或 `ccl doctor` 时，内嵌代理按需启动，并在命令退出时关闭，不需要常驻服务。`ccl set` 会通过临时本地 endpoint 和会话 key 获取、测试模型，但不会把它们写回配置。多个 OAuth backend 可以同时登录，但每个 provider 只加载、刷新和调度自己的凭据与模型。
+登录成功后，ccl 会创建一个 provider 并立即设为当前 provider。每次登录都会产出一条独立的 provider 条目：
+
+- 带别名时（`ccl auth chatgpt a1`）别名即 provider 名；不带别名时 ccl 从凭据文件名自动派生一个别名（如 `chatgpt-alice@example.com`），所以同一 backend 的多个账号互不覆盖。
+- 每条 provider 绑定到对应账号的凭据文件（`oauthAccountCredential`），运行时只加载、刷新和调度该账号的凭据与模型，不会串到同 backend 的其它账号。
+
+支持的 provider 与固定协议：
+
+| provider | backend | 协议 | 登录方式 |
+| --- | --- | --- | --- |
+| `chatgpt` | codex | `openai(responses)` | OpenAI OAuth 回调 |
+| `copilot` | codex | `openai(responses)` | GitHub device-code |
+| `gemini` | antigravity | `openai(chat)` | Google/Antigravity OAuth |
+| `grok` | xai | `openai(chat)` | xAI device-code |
+
+不再提供 `--protocol` 覆盖（运行时会忽略）。旧版创建的 `oauthProvider: codex` 仍可运行，并会在下次执行 `ccl auth chatgpt`（无别名）时迁移为 `chatgpt`。启动 `ccl`、`ccl set <provider>`、`ccl models` 或 `ccl doctor` 时，内嵌代理按需启动，并在命令退出时关闭，不需要常驻服务。`ccl set` 会通过临时本地 endpoint 和会话 key 获取、测试模型，但不会把它们写回配置。
 
 ### `ccl set` — 添加/更新 Provider
 

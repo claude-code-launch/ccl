@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/config"
@@ -24,26 +25,65 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "auth <chatgpt|gemini>",
+		Use:   "auth <chatgpt|gemini|grok|copilot> [alias]",
 		Short: "Authenticate a subscription-backed provider",
-		Args:  cobra.ExactArgs(1),
+		Long: `Authenticate a subscription-backed provider.
+
+Without an alias, ccl derives a unique provider name from the credential
+file (e.g. "chatgpt-alice@example.com") so multiple accounts never overwrite
+each other. With an alias, that name is used as the provider key:
+
+  ccl auth chatgpt
+  ccl auth chatgpt work
+  ccl auth gemini personal
+  ccl auth grok
+  ccl auth copilot
+
+Fast mode is not controlled here. Use:
+
+  ccl fast on
+  ccl provider fast on
+`,
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuth(cmd.Context(), cmd.OutOrStdout(), args[0], opts)
+			return runAuth(cmd.Context(), cmd.OutOrStdout(), args, opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (Codex/ChatGPT only)")
 	return cmd
 }
 
-func runAuth(ctx context.Context, out io.Writer, providerName string, opts authOptions) error {
-	target, err := oauthproxy.ValidateLoginProvider(providerName)
+// supportsFastMode reports whether the provider's OAuth backend honours the
+// Claude Code fastMode toggle (Codex Responses backends only).
+func supportsFastMode(providerName string) bool {
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderCopilot:
+		return true
+	default:
+		return false
+	}
+}
+
+func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions) error {
+	target, err := oauthproxy.ValidateLoginProvider(args[0])
 	if err != nil {
 		return err
 	}
 	// OAuth backends have a fixed runtime protocol. StartProvider ignores any
 	// Type override when OAuthProvider is set, so always persist the real path.
 	protocolType := fixedOAuthProtocol(target)
+
+	var alias string
+	if len(args) > 1 {
+		alias = strings.TrimSpace(args[1])
+		if isReservedProviderName(alias) {
+			return fmt.Errorf("alias %q collides with a reserved provider name; choose a different alias", alias)
+		}
+		if alias == "" {
+			return fmt.Errorf("alias cannot be empty")
+		}
+	}
 
 	fmt.Fprintf(out, "Authenticating %s...\n", target)
 	result, err := oauthLogin(ctx, target, oauthproxy.LoginOptions{
@@ -54,12 +94,24 @@ func runAuth(ctx context.Context, out io.Writer, providerName string, opts authO
 		return fmt.Errorf("authenticate %s: %w", target, err)
 	}
 
+	// Every login produces an independent provider entry. With an explicit
+	// alias it becomes the provider key; without one we derive one from the
+	// credential file so multiple accounts on the same backend never overwrite
+	// each other.
+	providerName := alias
+	if providerName == "" {
+		providerName = derivedProviderName(target, result.Path)
+	}
+	credentialFile := filepath.Base(result.Path)
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load ccl config: %w", err)
 	}
-	p, targetExists := cfg.Providers[target]
-	if target == oauthproxy.ProviderChatGPT {
+	p, targetExists := cfg.Providers[providerName]
+	// ChatGPT and Copilot share the Codex backend; only ChatGPT migrates the
+	// legacy "codex" OAuth provider alias when no explicit alias is used.
+	if target == oauthproxy.ProviderChatGPT && alias == "" {
 		if legacy, exists := cfg.Providers[oauthproxy.ProviderCodex]; exists && strings.EqualFold(strings.TrimSpace(legacy.OAuthProvider), oauthproxy.ProviderCodex) {
 			if !targetExists {
 				p = legacy
@@ -67,31 +119,71 @@ func runAuth(ctx context.Context, out io.Writer, providerName string, opts authO
 			delete(cfg.Providers, oauthproxy.ProviderCodex)
 		}
 	}
-	p.Name = target
+	p.Name = providerName
 	p.Type = protocolType
 	p.Endpoint = "oauth://" + result.Backend
 	p.APIKey = ""
 	p.AnthropicAuth = ""
 	p.OAuthProvider = target
-	cfg.Providers[target] = p
-	cfg.ActiveProvider = target
+	p.OAuthAccountCredential = credentialFile
+	// FastMode is managed only by `ccl fast` / `ccl provider fast`. Re-auth
+	// preserves an existing pin; non-Codex backends never keep it.
+	if !supportsFastMode(target) {
+		p.FastMode = false
+	}
+	cfg.Providers[providerName] = p
+	cfg.ActiveProvider = providerName
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("save OAuth provider: %w", err)
 	}
 
-	fmt.Fprintf(out, "Authenticated %s and switched active provider.\n", target)
+	fmt.Fprintf(out, "Authenticated %s as provider %q and switched active provider.\n", target, providerName)
 	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
 	fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
+	if supportsFastMode(target) {
+		fmt.Fprintf(out, "Fast: %s (toggle with `ccl fast on|off`)\n", providerFastSummary(p))
+	}
 	return nil
 }
 
 // fixedOAuthProtocol is the only protocol each subscription backend actually uses.
-// ChatGPT/Codex → Responses; Gemini/Antigravity → Chat Completions.
+// ChatGPT/Codex/Copilot → Responses; Gemini and Grok → Chat Completions.
 func fixedOAuthProtocol(providerName string) string {
-	if providerName == oauthproxy.ProviderGemini {
+	if providerName == oauthproxy.ProviderGemini || providerName == oauthproxy.ProviderGrok {
 		return "openai"
 	}
 	return "openai_responses"
+}
+
+// isReservedProviderName blocks aliases that would collide with canonical
+// provider names or SDK backend keys.
+func isReservedProviderName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderCodex,
+		oauthproxy.ProviderGemini, "antigravity",
+		oauthproxy.ProviderGrok, "xai",
+		oauthproxy.ProviderCopilot:
+		return true
+	default:
+		return false
+	}
+}
+
+// derivedProviderName builds an implicit alias from the credential filename so a
+// bare `ccl auth chatgpt` still creates a distinct provider per account: e.g.
+// `codex-alice@example.com.json` → `chatgpt-alice@example.com`; if the basename
+// offers no usable fragment we fall back to `<target>-<basename>`.
+func derivedProviderName(target, credentialPath string) string {
+	base := filepath.Base(credentialPath)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	fragments := strings.SplitN(base, "-", 2)
+	if len(fragments) == 2 && strings.TrimSpace(fragments[1]) != "" {
+		return target + "-" + fragments[1]
+	}
+	if strings.TrimSpace(base) != "" && base != target {
+		return target + "-" + base
+	}
+	return target
 }
 
 func init() {

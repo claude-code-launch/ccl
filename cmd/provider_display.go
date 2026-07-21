@@ -33,6 +33,16 @@ func providerEffortSummary(p provider.Provider) string {
 	return p.EffortLevel
 }
 
+// providerFastSummary reports the Codex fastMode state for display. Only Codex
+// Responses OAuth backends (chatgpt/copilot) honour it; other providers show
+// "off" regardless of the stored flag.
+func providerFastSummary(p provider.Provider) string {
+	if p.FastMode && (strings.EqualFold(p.OAuthProvider, "chatgpt") || strings.EqualFold(p.OAuthProvider, "copilot")) {
+		return "on"
+	}
+	return "off"
+}
+
 func subagentMappingDisplay(p provider.Provider) string {
 	if model := strings.TrimSpace(p.SubagentModel); model != "" {
 		return model
@@ -87,6 +97,9 @@ func setProviderAuthHeaders(req *http.Request, p provider.Provider) {
 func printProviderExperienceWarnings(p provider.Provider) {
 	if strings.TrimSpace(p.EffortLevel) != "" {
 		fmt.Println("  ! Effort is pinned by ccl; choose Default in ccl set if Claude /model effort changes should apply.")
+	}
+	if p.FastMode {
+		fmt.Println("  ! FastMode is on: Codex faster responses at higher usage; toggle with `ccl fast off` (or /fast in Claude Code).")
 	}
 	if p.OAuthProvider == "" && provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
 		fmt.Println("  ! OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")

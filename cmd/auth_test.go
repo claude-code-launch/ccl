@@ -36,25 +36,23 @@ func TestRunAuthIgnoresLegacyProtocolOverrideInConfigMigration(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
 	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "c.json"}, nil
+		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-alice@example.com.json"}, nil
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	cfg := &provider.Config{Providers: map[string]provider.Provider{
-		"chatgpt": {Name: "chatgpt", Type: "openai", OAuthProvider: "chatgpt", Endpoint: "oauth://codex"},
-	}}
-	if err := config.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-	if err := runAuth(context.Background(), &bytes.Buffer{}, "chatgpt", authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"chatgpt"}, authOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Providers["chatgpt"].Type != "openai_responses" {
-		t.Fatalf("expected fixed responses type, got %+v", loaded.Providers["chatgpt"])
+	p, ok := loaded.Providers["chatgpt-alice@example.com"]
+	if !ok {
+		t.Fatalf("expected derived provider chatgpt-alice@example.com, got %+v", loaded.Providers)
+	}
+	if p.Type != "openai_responses" {
+		t.Fatalf("expected fixed responses type, got %+v", p)
 	}
 }
 
@@ -81,15 +79,15 @@ func TestRunAuthCreatesChatGPTProviderAndMigratesLegacyCodex(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runAuth(context.Background(), &out, "chatgpt", authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &out, []string{"chatgpt"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	p := cfg.Providers["chatgpt"]
-	if cfg.ActiveProvider != "chatgpt" {
+	p := cfg.Providers["chatgpt-test"]
+	if cfg.ActiveProvider != "chatgpt-test" {
 		t.Fatalf("active provider = %q", cfg.ActiveProvider)
 	}
 	if _, exists := cfg.Providers["codex"]; exists {
@@ -97,6 +95,9 @@ func TestRunAuthCreatesChatGPTProviderAndMigratesLegacyCodex(t *testing.T) {
 	}
 	if p.Type != "openai_responses" || p.Endpoint != "oauth://codex" || p.OAuthProvider != "chatgpt" {
 		t.Fatalf("OAuth provider = %+v", p)
+	}
+	if p.OAuthAccountCredential != "codex-test.json" {
+		t.Fatalf("credential binding = %q, want codex-test.json", p.OAuthAccountCredential)
 	}
 	if p.EffortLevel != "high" || p.CustomModelID != "gpt-test" {
 		t.Fatalf("existing provider settings were not preserved: %+v", p)
@@ -112,7 +113,7 @@ func TestRunAuthRejectsPublicCodexAlias(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	err := runAuth(context.Background(), &bytes.Buffer{}, "codex", authOptions{})
+	err := runAuth(context.Background(), &bytes.Buffer{}, []string{"codex"}, authOptions{})
 	if err == nil {
 		t.Fatal("runAuth(codex) should fail")
 	}
@@ -125,20 +126,165 @@ func TestRunAuthGeminiUsesChatAndAntigravityBackend(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
 	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{Provider: target, Backend: "antigravity", Path: "credential.json"}, nil
+		return oauthproxy.LoginResult{Provider: target, Backend: "antigravity", Path: "antigravity-credential.json"}, nil
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, "gemini", authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gemini"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	p := cfg.Providers["gemini"]
+	p, ok := cfg.Providers["gemini-credential"]
+	if !ok {
+		t.Fatalf("no derived gemini-credential provider: %+v", cfg.Providers)
+	}
 	if p.Type != "openai" || p.Endpoint != "oauth://antigravity" || p.OAuthProvider != "gemini" {
 		t.Fatalf("Gemini provider = %+v", p)
+	}
+}
+
+func TestRunAuthAliasBindsToCredentialAndSetsActive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-work@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"chatgpt", "work"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	p, ok := cfg.Providers["work"]
+	if !ok {
+		t.Fatalf("no aliased provider work: %+v", cfg.Providers)
+	}
+	if cfg.ActiveProvider != "work" {
+		t.Fatalf("active provider = %q", cfg.ActiveProvider)
+	}
+	if p.OAuthAccountCredential != "codex-work@example.com.json" {
+		t.Fatalf("credential = %q", p.OAuthAccountCredential)
+	}
+}
+
+func TestRunAuthGrokUsesXaiBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "xai", Path: "xai-bob@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"grok", "personal"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	p, ok := cfg.Providers["personal"]
+	if !ok {
+		t.Fatalf("no grok provider personal: %+v", cfg.Providers)
+	}
+	if p.Type != "openai" || p.Endpoint != "oauth://xai" || p.OAuthProvider != "grok" {
+		t.Fatalf("Grok provider = %+v", p)
+	}
+	if p.OAuthAccountCredential != "xai-bob@example.com.json" {
+		t.Fatalf("credential = %q", p.OAuthAccountCredential)
+	}
+}
+
+func TestRunAuthCopilotUsesCodexResponsesBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		if target != oauthproxy.ProviderCopilot {
+			t.Fatalf("login target = %q, want copilot", target)
+		}
+		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-copilot@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"copilot", "gh"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	p, ok := cfg.Providers["gh"]
+	if !ok {
+		t.Fatalf("no copilot provider gh: %+v", cfg.Providers)
+	}
+	if p.Type != "openai_responses" || p.Endpoint != "oauth://codex" || p.OAuthProvider != "copilot" {
+		t.Fatalf("Copilot provider = %+v", p)
+	}
+}
+
+func TestRunAuthRejectsReservedAlias(t *testing.T) {
+	originalLogin := oauthLogin
+	oauthLogin = func(context.Context, string, oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"chatgpt", "grok"}, authOptions{}); err == nil {
+		t.Fatal("runAuth(chatgpt grok) should reject reserved alias")
+	}
+}
+
+func TestRunAuthPreservesFastModeOnReauth(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-work@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := config.Save(&provider.Config{
+		Providers: map[string]provider.Provider{
+			"work": {
+				Name:          "work",
+				OAuthProvider: "chatgpt",
+				Endpoint:      "oauth://codex",
+				FastMode:      true,
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-auth never rewrites FastMode; only `ccl fast` does.
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"chatgpt", "work"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Providers["work"].FastMode {
+		t.Fatalf("FastMode cleared on re-auth: %+v", cfg.Providers["work"])
+	}
+}
+
+func TestProviderFastSummary(t *testing.T) {
+	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "chatgpt"}); got != "on" {
+		t.Fatalf("chatgpt fast = %q, want on", got)
+	}
+	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "copilot"}); got != "on" {
+		t.Fatalf("copilot fast = %q, want on", got)
+	}
+	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "gemini"}); got != "off" {
+		t.Fatalf("gemini fast = %q, want off", got)
+	}
+	if got := providerFastSummary(provider.Provider{FastMode: false, OAuthProvider: "chatgpt"}); got != "off" {
+		t.Fatalf("chatgpt off = %q, want off", got)
 	}
 }
 

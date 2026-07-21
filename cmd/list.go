@@ -89,6 +89,7 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 		}
 		fmt.Fprintf(out, "    Endpoint : %s\n", p.Endpoint)
 		fmt.Fprintf(out, "    Effort   : %s\n", providerEffortSummary(p))
+		fmt.Fprintf(out, "    Fast     : %s\n", providerFastSummary(p))
 		fmt.Fprintf(out, "    Context  : %s\n", providerOneMSummary(p))
 		fmt.Fprintf(out, "    Models   : %s\n", formatModelCount(p.Model))
 		fmt.Fprintf(out, "    Slots    : %s\n", formatSlotSummaryLong(p))

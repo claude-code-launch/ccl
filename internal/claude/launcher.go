@@ -26,6 +26,9 @@ type settingsJSON struct {
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
+	// FastMode is always serialized (no omitempty) so `ccl fast off` can clear a
+	// previously enabled pin instead of leaving Claude Code's last /fast state.
+	FastMode bool `json:"fastMode"`
 }
 
 const (
@@ -352,12 +355,13 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 			}
 		}
 		runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
-			Protocol:        upstreamProtocol,
-			Endpoint:        providerCopy.Endpoint,
-			APIKey:          providerCopy.APIKey,
-			ModelSpec:       provider.RuntimeModelSpec(providerCopy),
-			OAuthProvider:   providerCopy.OAuthProvider,
-			MaxOutputTokens: maxOut,
+			Protocol:               upstreamProtocol,
+			Endpoint:               providerCopy.Endpoint,
+			APIKey:                 providerCopy.APIKey,
+			ModelSpec:              provider.RuntimeModelSpec(providerCopy),
+			OAuthProvider:          providerCopy.OAuthProvider,
+			OAuthAccountCredential: providerCopy.OAuthAccountCredential,
+			MaxOutputTokens:        maxOut,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
@@ -406,6 +410,7 @@ func (c *providerContext) settings() settingsJSON {
 		HasCompletedOnboarding: true,
 		Model:                  c.provider.CustomModelID,
 		ModelOverrides:         c.provider.ModelOverrides,
+		FastMode:               c.provider.FastMode,
 	}
 }
 

@@ -375,7 +375,7 @@ func (m *AdvancedConfigModel) availabilitySmokeTestModel() string {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "chatgpt", "codex":
+	case "chatgpt", "codex", "copilot":
 		return lowCostProbeModel
 	default:
 		return ""
@@ -637,8 +637,8 @@ func (m *AdvancedConfigModel) maxOutputUpstreamManaged() bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "chatgpt", "codex":
-		// ChatGPT/Codex OAuth ignore MaxOutputTokens in StartProvider.
+	case "chatgpt", "codex", "copilot":
+		// Codex-family OAuth (ChatGPT/Copilot) ignore MaxOutputTokens in StartProvider.
 		return true
 	}
 	// Gemini OAuth (antigravity) maps Claude max_tokens → generationConfig.maxOutputTokens.
@@ -1783,6 +1783,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.usesOAuth() {
 			body.WriteString(m.renderPageHeader(locale.T("OAuth 认证配置", "OAuth Credentials"), "OAuth"))
 			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Provider", cyanText.Render(m.p.OAuthProvider)))
+			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Fast", cyanText.Render(providerFastSummary(*m.p))))
 			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
 			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
 			body.WriteString("\n" + grayText.Render(locale.T(
@@ -1993,9 +1994,9 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 	case 4:
 		// ==================== PAGE 4: editable configuration summary ====================
-		// Compact when the terminal cannot fit the full review (header+border ~28 lines).
+		// Compact when the terminal cannot fit the full review (header+border ~29 lines with Fast).
 		// Use full content probe when height is known.
-		compactHeight := m.height > 0 && m.height < 28
+		compactHeight := m.height > 0 && m.height < 29
 		sectionGap := "\n"
 		if compactHeight {
 			sectionGap = ""
@@ -2021,6 +2022,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
 		}
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
+		// FastMode is managed outside ccl set (ccl fast on|off); show current pin.
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", availableStyle.Render(providerFastSummary(*m.p))))
 
 		// Model Mapping (read-only, cyan + [1M] badge)
 		body.WriteString(sectionGap + titleStyle.Render("Model Mapping") + "\n")
@@ -2080,8 +2083,12 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.cursor == m.page4BackCursor() {
 			backStr = selectedStyle.Render("> " + backLabel)
 		}
-		body.WriteString("\n" + applyStr + "             " + backStr + "\n")
-		if !compactHeight {
+		// Compact terminals already lost one line to the Fast status row; skip
+		// the blank line above actions so height 24 still fits.
+		if compactHeight {
+			body.WriteString(applyStr + "             " + backStr + "\n")
+		} else {
+			body.WriteString("\n" + applyStr + "             " + backStr + "\n")
 			body.WriteString("\n")
 			body.WriteString(grayText.Render(locale.T(
 				"紫色可修改 · 绿色只读 · ↑↓ 选择 · ←→ 调整 · enter 确认",

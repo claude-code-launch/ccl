@@ -72,6 +72,9 @@ type StartOptions struct {
 	APIKey          string
 	ModelSpec       string
 	OAuthProvider   string
+	// OAuthAccountCredential optionally restricts the runtime to a single
+	// credential file (basename under the OAuth auth dir) for this backend.
+	OAuthAccountCredential string
 	MaxOutputTokens int // plain Responses only; 0 leaves SDK/default behavior
 }
 
@@ -165,14 +168,15 @@ type runtimeCodexModel struct {
 }
 
 type providerTokenStore struct {
-	backend string
-	store   coreauth.Store
+	backend        string
+	credentialFile string
+	store          coreauth.Store
 }
 
-func newProviderTokenStore(authDir, backend string) *providerTokenStore {
+func newProviderTokenStore(authDir, backend, credentialFile string) *providerTokenStore {
 	store := sdkauth.NewFileTokenStore()
 	store.SetBaseDir(authDir)
-	return &providerTokenStore{backend: backend, store: store}
+	return &providerTokenStore{backend: backend, credentialFile: strings.TrimSpace(credentialFile), store: store}
 }
 
 func (s *providerTokenStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
@@ -182,9 +186,13 @@ func (s *providerTokenStore) List(ctx context.Context) ([]*coreauth.Auth, error)
 	}
 	filtered := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
-		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), s.backend) {
-			filtered = append(filtered, auth)
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), s.backend) {
+			continue
 		}
+		if s.credentialFile != "" && !strings.EqualFold(filepath.Base(auth.FileName), s.credentialFile) {
+			continue
+		}
+		filtered = append(filtered, auth)
 	}
 	return filtered, nil
 }
@@ -201,7 +209,7 @@ func (s *providerTokenStore) Delete(ctx context.Context, id string) error {
 }
 
 func Start(parent context.Context, providerName string) (*Runtime, error) {
-	return StartOAuth(parent, providerName, "")
+	return StartOAuth(parent, providerName, "", "")
 }
 
 // StartProvider starts the embedded CLIProxyAPI adapter for every OpenAI-family
@@ -215,7 +223,7 @@ func Start(parent context.Context, providerName string) (*Runtime, error) {
 // cannot fall through to the plain Responses path and hit …/codex/v1/responses.
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	if strings.TrimSpace(options.OAuthProvider) != "" {
-		return StartOAuth(parent, options.OAuthProvider, options.ModelSpec)
+		return StartOAuth(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredential)
 	}
 	switch options.Protocol {
 	case ProtocolOpenAIChat:
@@ -233,7 +241,7 @@ func StartProvider(parent context.Context, options StartOptions) (*Runtime, erro
 	}
 }
 
-func StartOAuth(parent context.Context, providerName, modelSpec string) (*Runtime, error) {
+func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -245,7 +253,8 @@ func StartOAuth(parent context.Context, providerName, modelSpec string) (*Runtim
 	if err != nil {
 		return nil, err
 	}
-	found, err := hasCredential(authDir, backend)
+	credentialFile = strings.TrimSpace(credentialFile)
+	found, err := hasCredential(authDir, backend, credentialFile)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +293,7 @@ func StartOAuth(parent context.Context, providerName, modelSpec string) (*Runtim
 	if err != nil {
 		return nil, err
 	}
-	store := newProviderTokenStore(authDir, backend)
+	store := newProviderTokenStore(authDir, backend, credentialFile)
 	return startRuntime(parent, cfg, configPath, apiKey, store, "")
 }
 
@@ -755,13 +764,17 @@ func silenceStdout() func() {
 	}
 }
 
-func hasCredential(authDir, backend string) (bool, error) {
+func hasCredential(authDir, backend, credentialFile string) (bool, error) {
+	credentialFile = strings.TrimSpace(credentialFile)
 	entries, err := os.ReadDir(authDir)
 	if err != nil {
 		return false, fmt.Errorf("read auth directory: %w", err)
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		if credentialFile != "" && !strings.EqualFold(entry.Name(), credentialFile) {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(authDir, entry.Name()))

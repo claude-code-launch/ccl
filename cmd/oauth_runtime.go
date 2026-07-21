@@ -48,12 +48,13 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), err
 		}
 	}
 	runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
-		Protocol:        upstreamProtocol,
-		Endpoint:        p.Endpoint,
-		APIKey:          p.APIKey,
-		ModelSpec:       provider.RuntimeModelSpec(p),
-		OAuthProvider:   p.OAuthProvider,
-		MaxOutputTokens: maxOut,
+		Protocol:               upstreamProtocol,
+		Endpoint:               p.Endpoint,
+		APIKey:                 p.APIKey,
+		ModelSpec:              provider.RuntimeModelSpec(p),
+		OAuthProvider:          p.OAuthProvider,
+		OAuthAccountCredential: p.OAuthAccountCredential,
+		MaxOutputTokens:        maxOut,
 	})
 	if err != nil {
 		return provider.Provider{}, nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)

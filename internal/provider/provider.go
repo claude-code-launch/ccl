@@ -23,8 +23,12 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded CLIProxyAPI OAuth backend. Supported
-	// values are chatgpt and gemini. The legacy codex value remains readable.
+	// values are chatgpt, gemini, and grok. The legacy codex value remains readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
+	// OAuthAccountCredential binds this provider to a single credential file
+	// (basename of the JSON under ~/.ccl/auth). The OAuth runtime loads only
+	// that account when set; empty falls back to all backend credentials.
+	OAuthAccountCredential string `yaml:"oauthAccountCredential,omitempty" mapstructure:"oauthAccountCredential,omitempty"`
 
 	// Custom model configuration (Claude Code native features)
 	CustomModelID  string            `yaml:"customModelId,omitempty" mapstructure:"customModelId,omitempty"`   // ANTHROPIC_CUSTOM_MODEL_OPTION
@@ -34,6 +38,12 @@ type Provider struct {
 	SubagentModel  string            `yaml:"subagentModel,omitempty" mapstructure:"subagentModel,omitempty"`   // CLAUDE_CODE_SUBAGENT_MODEL
 	ModelOverrides map[string]string `yaml:"modelOverrides,omitempty" mapstructure:"modelOverrides,omitempty"` // modelOverrides in settings.json
 	EffortLevel    string            `yaml:"effortLevel,omitempty" mapstructure:"effortLevel,omitempty"`       // CLAUDE_CODE_EFFORT_LEVEL; empty means Default/follow Claude
+	// FastMode mirrors the Claude Code settings.json fastMode flag, the same
+	// toggle flipped by the `/fast` slash command. It routes ChatGPT/Codex
+	// subscription accounts through Codex's faster responses (≈1.5x speed) at
+	// the cost of higher usage; only meaningful for OpenAI Responses OAuth
+	// backends (chatgpt/copilot). Empty/zero leaves Claude Code's own setting.
+	FastMode bool `yaml:"fastMode,omitempty" mapstructure:"fastMode,omitempty"`
 }
 
 type Config struct {
@@ -43,13 +53,13 @@ type Config struct {
 }
 
 // FixedOAuthProtocol returns the only protocol an OAuth backend actually uses.
-// ChatGPT/Codex → openai_responses; Gemini → openai (chat). ok is false when
-// oauthProvider is empty or unknown.
+// ChatGPT/Codex/Copilot → openai_responses; Gemini and Grok → openai (chat).
+// ok is false when oauthProvider is empty or unknown.
 func FixedOAuthProtocol(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
-	case "chatgpt", "codex":
+	case "chatgpt", "codex", "copilot":
 		return "openai_responses", true
-	case "gemini":
+	case "gemini", "grok":
 		return "openai", true
 	default:
 		return "", false
@@ -74,6 +84,8 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "chatgpt"
 	case "antigravity", "gemini":
 		return "gemini"
+	case "xai", "grok":
+		return "grok"
 	default:
 		return ""
 	}

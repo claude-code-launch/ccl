@@ -48,6 +48,33 @@ func TestTruncateMiddleEmoji(t *testing.T) {
 	}
 }
 
+func TestReviewShowsFastStatus(t *testing.T) {
+	chatgpt := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
+	chatgpt.OAuthProvider = "chatgpt"
+	chatgpt.FastMode = true
+	m := NewAdvancedConfigModel(&chatgpt)
+	m.page = 4
+	view := m.View().Content
+	if !strings.Contains(view, "Fast") || !strings.Contains(view, "on") {
+		t.Fatalf("review page missing Fast=on: %q", view)
+	}
+
+	// Page 0 OAuth credentials also surfaces the pin.
+	m.page = 0
+	view = m.View().Content
+	if !strings.Contains(view, "Fast") || !strings.Contains(view, "on") {
+		t.Fatalf("oauth credentials page missing Fast=on: %q", view)
+	}
+
+	off := providerFrom("plain", "https://example.com/v1", "openai")
+	m = NewAdvancedConfigModel(&off)
+	m.page = 4
+	view = m.View().Content
+	if !strings.Contains(view, "Fast") || !strings.Contains(view, "off") {
+		t.Fatalf("review page missing Fast=off: %q", view)
+	}
+}
+
 func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
 	chatgpt := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
 	chatgpt.OAuthProvider = "chatgpt"
@@ -57,6 +84,16 @@ func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
 	}
 	if m.canToggleOpenAIProtocol() {
 		t.Fatal("OAuth protocol must be read-only on review")
+	}
+
+	copilot := providerFrom("copilot", "oauth://codex", "openai_responses")
+	copilot.OAuthProvider = "copilot"
+	m = NewAdvancedConfigModel(&copilot)
+	if !m.maxOutputUpstreamManaged() {
+		t.Fatal("Copilot OAuth should treat max output as upstream-managed")
+	}
+	if m.availabilitySmokeTestModel() != lowCostProbeModel {
+		t.Fatalf("Copilot smoke model = %q, want %q", m.availabilitySmokeTestModel(), lowCostProbeModel)
 	}
 
 	gemini := providerFrom("gemini", "oauth://gemini", "openai")

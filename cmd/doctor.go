@@ -85,6 +85,7 @@ func runDoctor() error {
 	fmt.Printf("  Endpoint: %s\n", p.Endpoint)
 	fmt.Printf("  Model pool: %d configured\n", len(parseModelList(p.Model)))
 	fmt.Printf("  Effort: %s\n", providerEffortSummary(p))
+	fmt.Printf("  Fast: %s\n", providerFastSummary(p))
 	fmt.Printf("  Context/Compact: %s\n", providerOneMSummary(p))
 	printProviderModelMappings(p)
 	printProviderExperienceWarnings(p)

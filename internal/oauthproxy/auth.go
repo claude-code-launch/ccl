@@ -16,6 +16,13 @@ const (
 	ProviderCodex   = "codex"
 	ProviderGemini  = "gemini"
 	ProviderChatGPT = "chatgpt"
+	ProviderGrok    = "grok"
+	ProviderCopilot = "copilot"
+	// backendXAI is the CLIProxyAPI authenticator provider key for xAI/Grok.
+	backendXAI = "xai"
+	// codexLoginModeMetadata mirrors CLIProxyAPI's sdk/auth LoginOptions key.
+	codexLoginModeMetadataKey = "codex_login_mode"
+	codexLoginModeDevice      = "device"
 )
 
 type LoginOptions struct {
@@ -75,11 +82,22 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 	manager := sdkauth.NewManager(store, authenticator)
 	cfg := &sdkconfig.Config{AuthDir: authDir}
 
-	record, path, err := manager.Login(ctx, backend, cfg, &sdkauth.LoginOptions{
+	sdkOpts := &sdkauth.LoginOptions{
 		NoBrowser:    opts.NoBrowser,
 		CallbackPort: opts.CallbackPort,
 		Prompt:       promptLine,
-	})
+	}
+	// GitHub Copilot logins through ChatGPT share the Codex backend but use the
+	// OpenAI device-code flow (GitHub-backed) instead of the OAuth redirect flow.
+	if target == ProviderCopilot {
+		if sdkOpts.Metadata == nil {
+			sdkOpts.Metadata = map[string]string{}
+		}
+		sdkOpts.Metadata[codexLoginModeMetadataKey] = codexLoginModeDevice
+		sdkOpts.CallbackPort = 0 // device flow has no local callback
+	}
+
+	record, path, err := manager.Login(ctx, backend, cfg, sdkOpts)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -93,22 +111,26 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 // ValidateLoginProvider returns the canonical public OAuth provider name.
 // Codex remains an internal backend and a legacy runtime value, but new logins
 // use the ChatGPT name because both routes authenticate the same account.
+// Copilot reuses the Codex backend but logs in through the GitHub-backed device
+// flow, so it is exposed as its own public provider.
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use chatgpt or gemini)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use chatgpt, gemini, grok, or copilot)", providerName)
 	}
 }
 
 func BackendProvider(providerName string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case ProviderCodex, ProviderChatGPT:
+	case ProviderCodex, ProviderChatGPT, ProviderCopilot:
 		return ProviderCodex, nil
 	case ProviderGemini:
 		return "antigravity", nil
+	case ProviderGrok, backendXAI:
+		return backendXAI, nil
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}
@@ -126,6 +148,10 @@ func authenticatorFor(providerName string) (string, sdkauth.Authenticator, error
 		// CLIProxyAPI exposes Gemini subscription models through its Google
 		// Antigravity OAuth backend.
 		return "antigravity", sdkauth.NewAntigravityAuthenticator(), nil
+	case backendXAI:
+		// CLIProxyAPI exposes xAI/Grok subscription models through its xAI
+		// OAuth device-code backend.
+		return backendXAI, sdkauth.NewXAIAuthenticator(), nil
 	}
 	return "", nil, fmt.Errorf("unsupported auth backend %q", backend)
 }
