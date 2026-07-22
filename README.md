@@ -110,11 +110,9 @@ ccl auth chatgpt --no-browser
 # 覆盖 OAuth 回调端口（仅 Codex/ChatGPT 回调 flow 有效）
 ccl auth chatgpt --callback-port 1455
 
-# Claude Code fastMode（仅当前 active 的 chatgpt/copilot；≈1.5x 速度、更高用量）
-# 等价于 /fast，与 auth 分离
-ccl fast on
-ccl fast off
-ccl provider fast on
+# Claude Code fastMode（仅 chatgpt/copilot；≈1.5x 速度、更高用量）
+# 与 Claude Code 的 /fast 相同；在 ccl set 的「核对并应用 / Review & Apply」页可编辑
+# 也可在 Claude Code 会话内用 /fast 开关
 ```
 
 登录成功后，ccl 会创建一个 provider 并立即设为当前 provider。每次登录都会产出一条独立的 provider 条目：

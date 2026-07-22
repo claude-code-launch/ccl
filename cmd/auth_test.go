@@ -260,7 +260,8 @@ func TestRunAuthPreservesFastModeOnReauth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Re-auth never rewrites FastMode; only `ccl fast` does.
+	// Re-auth never rewrites FastMode; only the Claude Code /fast toggle
+	// or ccl set Review & Apply does.
 	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"chatgpt", "work"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}

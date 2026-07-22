@@ -39,10 +39,8 @@ each other. With an alias, that name is used as the provider key:
   ccl auth grok
   ccl auth copilot
 
-Fast mode is not controlled here. Use:
-
-  ccl fast on
-  ccl provider fast on
+Fast mode is not controlled here. Toggle it in Claude Code with /fast,
+or on the Review & Apply page of ccl set (ChatGPT/Copilot only).
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -126,8 +124,8 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	p.AnthropicAuth = ""
 	p.OAuthProvider = target
 	p.OAuthAccountCredential = credentialFile
-	// FastMode is managed only by `ccl fast` / `ccl provider fast`. Re-auth
-	// preserves an existing pin; non-Codex backends never keep it.
+	// FastMode is managed by Claude Code /fast or ccl set Review & Apply.
+	// Re-auth preserves an existing pin; non-Codex backends never keep it.
 	if !supportsFastMode(target) {
 		p.FastMode = false
 	}
@@ -141,7 +139,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
 	fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
 	if supportsFastMode(target) {
-		fmt.Fprintf(out, "Fast: %s (toggle with `ccl fast on|off`)\n", providerFastSummary(p))
+		fmt.Fprintf(out, "Fast: %s (toggle with /fast or ccl set Review & Apply)\n", providerFastSummary(p))
 	}
 	return nil
 }

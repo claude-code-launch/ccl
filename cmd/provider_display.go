@@ -99,7 +99,7 @@ func printProviderExperienceWarnings(p provider.Provider) {
 		fmt.Println("  ! Effort is pinned by ccl; choose Default in ccl set if Claude /model effort changes should apply.")
 	}
 	if p.FastMode {
-		fmt.Println("  ! FastMode is on: Codex faster responses at higher usage; toggle with `ccl fast off` (or /fast in Claude Code).")
+		fmt.Println("  ! FastMode is on: Codex faster responses at higher usage; toggle with /fast in Claude Code or ccl set Review & Apply.")
 	}
 	if p.OAuthProvider == "" && provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
 		fmt.Println("  ! OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")

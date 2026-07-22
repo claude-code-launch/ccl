@@ -661,7 +661,7 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 }
 
 // Page 4 cursor model (editable summary):
-// optional protocol, then Compact / MaxOutput / Tools / ToolSearch,
+// optional protocol, optional Fast, then Compact / MaxOutput / Tools / ToolSearch,
 // active checkbox, Apply, Back.
 //
 // Color + control language on this page:
@@ -670,11 +670,26 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 //	purple      = editable values, always wrapped as ‹ value ›
 //	blue        = current focus / primary action
 //	yellow      = [1M] badges
-func (m *AdvancedConfigModel) page4Base() int {
+func (m *AdvancedConfigModel) canEditFastMode() bool {
+	return m.p != nil && supportsFastMode(m.p.OAuthProvider)
+}
+
+func (m *AdvancedConfigModel) page4ProtocolOffset() int {
 	if m.canToggleOpenAIProtocol() {
 		return 1
 	}
 	return 0
+}
+
+func (m *AdvancedConfigModel) page4FastOffset() int {
+	if m.canEditFastMode() {
+		return 1
+	}
+	return 0
+}
+
+func (m *AdvancedConfigModel) page4Base() int {
+	return m.page4ProtocolOffset() + m.page4FastOffset()
 }
 
 func (m *AdvancedConfigModel) page4ProtocolCursor() int {
@@ -682,6 +697,13 @@ func (m *AdvancedConfigModel) page4ProtocolCursor() int {
 		return 0
 	}
 	return -1
+}
+
+func (m *AdvancedConfigModel) page4FastCursor() int {
+	if !m.canEditFastMode() {
+		return -1
+	}
+	return m.page4ProtocolOffset()
 }
 
 func (m *AdvancedConfigModel) page4CompactCursor() int { return m.page4Base() + 0 }
@@ -889,10 +911,24 @@ func formatCompactLabel(preset compactPreset) string {
 	}
 }
 
+func formatFastLabel(on bool) string {
+	if on {
+		return formatEditableValue("On", false)
+	}
+	return formatEditableValue("Off", false)
+}
+
 func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 	switch m.cursor {
 	case m.page4ProtocolCursor():
 		m.toggleOpenAIProtocol()
+	case m.page4FastCursor():
+		if !m.canEditFastMode() {
+			return
+		}
+		// Toggle like Protocol; left/right/enter all flip the pin.
+		m.p.FastMode = !m.p.FastMode
+		setDebugf("page4 fast toggled fast_mode=%t", m.p.FastMode)
 	case m.page4CompactCursor():
 		m.compactPreset = cycleCompactOption(m.compactPreset, delta)
 		m.compactState = compactConfigState{preset: m.compactPreset}
@@ -1554,7 +1590,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case 4:
 				switch m.cursor {
-				case m.page4ProtocolCursor(), m.page4CompactCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
+				case m.page4ProtocolCursor(), m.page4FastCursor(), m.page4CompactCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
 					m.adjustReviewField(1)
 				case m.page4ActiveCursor():
 					m.IsActiveChosen = !m.IsActiveChosen
@@ -1566,7 +1602,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// applyCompactConfig is also called by RunProviderSet; set preset only.
 					m.compactState = compactConfigState{preset: m.compactPreset}
 					m.saveConfirmed = true
-					setDebugf("page4 save requested provider=%q type=%q model_count=%d slots=%s one_m=%s compact=%s active_chosen=%t", m.p.Name, m.p.Type, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.compactSummary(), m.IsActiveChosen)
+					setDebugf("page4 save requested provider=%q type=%q model_count=%d slots=%s one_m=%s compact=%s active_chosen=%t fast_mode=%t", m.p.Name, m.p.Type, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.compactSummary(), m.IsActiveChosen, m.p.FastMode)
 					return m, tea.Quit
 				}
 			case 5:
@@ -2022,8 +2058,19 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
 		}
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
-		// FastMode is managed outside ccl set (ccl fast on|off); show current pin.
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", availableStyle.Render(providerFastSummary(*m.p))))
+		// FastMode (Claude Code /fast) for ChatGPT/Copilot OAuth; editable on review.
+		if m.canEditFastMode() {
+			prefix := "  "
+			value := formatFastLabel(m.p.FastMode)
+			val := purpleText.Render(value)
+			if m.cursor == m.page4FastCursor() {
+				prefix = selectedStyle.Render("> ")
+				val = selectedStyle.Render(value)
+			}
+			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, "Fast", val))
+		} else {
+			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", availableStyle.Render(providerFastSummary(*m.p))))
+		}
 
 		// Model Mapping (read-only, cyan + [1M] badge)
 		body.WriteString(sectionGap + titleStyle.Render("Model Mapping") + "\n")

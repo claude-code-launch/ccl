@@ -26,8 +26,8 @@ type settingsJSON struct {
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
-	// FastMode is always serialized (no omitempty) so `ccl fast off` can clear a
-	// previously enabled pin instead of leaving Claude Code's last /fast state.
+	// FastMode is always serialized (no omitempty) so turning it off in ccl set
+	// (or Claude Code /fast) can clear a previously enabled pin.
 	FastMode bool `json:"fastMode"`
 }
 

@@ -14,7 +14,7 @@ import (
 var providerCmd = &cobra.Command{
 	Use:   "provider",
 	Short: "Manage providers",
-	Long:  "Manage providers: set, ls, use, cp, mv, rm, map, models, env, doctor, fast, or preview injected settings.",
+	Long:  "Manage providers: set, ls, use, cp, mv, rm, map, models, env, doctor, or preview injected settings.",
 }
 
 var cpCmd = newProviderCopyCommand("cp <source> <target>")
@@ -270,7 +270,6 @@ func init() {
 		newModelsCommand("models"),
 		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
 		newDoctorCommand("doctor"),
-		newFastCommand("fast [on|off]"),
 	)
 	rootCmd.AddCommand(providerCmd, cpCmd, mvCmd, rmCmd)
 }
