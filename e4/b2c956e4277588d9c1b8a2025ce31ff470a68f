@@ -1,0 +1,41 @@
+README.md
+  s_11f7a66d89fc17::t_dcf8a1fafe9e45 113-115
+cmd/advanced_config.go
+  s_11f7a66d89fc17::t_c9ee5ed13e67d2 707,914-920,925-931
+  s_11f7a66d89fc17::t_1c3662d652f051 664,673-677,684-694,702-706
+  s_11f7a66d89fc17::t_481a688518e1c7 1593,2061-2073
+  s_11f7a66d89fc17::t_189987f60bb317 1605
+  s_11f7a66d89fc17::t_3decfb1633be26 708
+cmd/provider.go
+  s_11f7a66d89fc17::t_42fbba1fe18a5d 17
+cmd/provider_display.go
+  s_11f7a66d89fc17::t_78c9b70350c3ca 102
+internal/claude/launcher.go
+  s_11f7a66d89fc17::t_b582c794ebee8d 29-30
+cmd/auth.go
+  s_11f7a66d89fc17::t_62194c2ea5f873 42-43
+  s_11f7a66d89fc17::t_cb52375b365c7e 127-128,142
+cmd/auth_test.go
+  s_11f7a66d89fc17::t_2beb49a37e128e 263-264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "e4b2c956e4277588d9c1b8a2025ce31ff470a68f",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_11f7a66d89fc17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "497a4340-d276-42b3-9b3a-7245bae18b5d",
+        "model": "grok-4.5-build-free"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
