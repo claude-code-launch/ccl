@@ -25,7 +25,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "auth <chatgpt|gemini|grok|copilot> [alias]",
+		Use:   "auth <chatgpt|gemini|grok|copilot|kimi|claude> [alias]",
 		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate a subscription-backed provider.
 
@@ -38,6 +38,8 @@ each other. With an alias, that name is used as the provider key:
   ccl auth gemini personal
   ccl auth grok
   ccl auth copilot
+  ccl auth kimi
+  ccl auth claude
 
 Fast mode is not controlled here. Toggle it in Claude Code with /fast,
 or on the Review & Apply page of ccl set (ChatGPT/Copilot only).
@@ -48,7 +50,7 @@ or on the Review & Apply page of ccl set (ChatGPT/Copilot only).
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (Codex/ChatGPT only)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Claude only)")
 	return cmd
 }
 
@@ -144,13 +146,17 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	return nil
 }
 
-// fixedOAuthProtocol is the only protocol each subscription backend actually uses.
-// ChatGPT/Codex/Copilot → Responses; Gemini and Grok → Chat Completions.
+// fixedOAuthProtocol is the protocol label persisted for each subscription backend.
+// ChatGPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → Chat; Claude → Anthropic.
 func fixedOAuthProtocol(providerName string) string {
-	if providerName == oauthproxy.ProviderGemini || providerName == oauthproxy.ProviderGrok {
+	switch providerName {
+	case oauthproxy.ProviderGemini, oauthproxy.ProviderGrok, oauthproxy.ProviderKimi:
 		return "openai"
+	case oauthproxy.ProviderClaude:
+		return "anthropic"
+	default:
+		return "openai_responses"
 	}
-	return "openai_responses"
 }
 
 // isReservedProviderName blocks aliases that would collide with canonical
@@ -160,7 +166,9 @@ func isReservedProviderName(name string) bool {
 	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderCodex,
 		oauthproxy.ProviderGemini, "antigravity",
 		oauthproxy.ProviderGrok, "xai",
-		oauthproxy.ProviderCopilot:
+		oauthproxy.ProviderCopilot,
+		oauthproxy.ProviderKimi,
+		oauthproxy.ProviderClaude:
 		return true
 	default:
 		return false

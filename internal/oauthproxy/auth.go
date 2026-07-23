@@ -18,6 +18,8 @@ const (
 	ProviderChatGPT = "chatgpt"
 	ProviderGrok    = "grok"
 	ProviderCopilot = "copilot"
+	ProviderKimi    = "kimi"
+	ProviderClaude  = "claude"
 	// backendXAI is the CLIProxyAPI authenticator provider key for xAI/Grok.
 	backendXAI = "xai"
 	// codexLoginModeMetadata mirrors CLIProxyAPI's sdk/auth LoginOptions key.
@@ -116,10 +118,10 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderClaude:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use chatgpt, gemini, grok, or copilot)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use chatgpt, gemini, grok, copilot, kimi, or claude)", providerName)
 	}
 }
 
@@ -131,6 +133,10 @@ func BackendProvider(providerName string) (string, error) {
 		return "antigravity", nil
 	case ProviderGrok, backendXAI:
 		return backendXAI, nil
+	case ProviderKimi:
+		return ProviderKimi, nil
+	case ProviderClaude:
+		return ProviderClaude, nil
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}
@@ -152,6 +158,10 @@ func authenticatorFor(providerName string) (string, sdkauth.Authenticator, error
 		// CLIProxyAPI exposes xAI/Grok subscription models through its xAI
 		// OAuth device-code backend.
 		return backendXAI, sdkauth.NewXAIAuthenticator(), nil
+	case ProviderKimi:
+		return ProviderKimi, sdkauth.NewKimiAuthenticator(), nil
+	case ProviderClaude:
+		return ProviderClaude, sdkauth.NewClaudeAuthenticator(), nil
 	}
 	return "", nil, fmt.Errorf("unsupported auth backend %q", backend)
 }

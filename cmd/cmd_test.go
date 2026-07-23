@@ -49,7 +49,7 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  auth", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider"} {
+	for _, want := range []string{"  auth", "  bypass", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}

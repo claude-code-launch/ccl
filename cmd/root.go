@@ -82,8 +82,12 @@ func runClaude(args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load ccl config for launcher options: %w", err)
+	}
 
-	return claude.Run(p, args)
+	return claude.Run(p, applyBypassMode(args, cfg.BypassMode))
 }
 
 // resolveProvider determines the active provider.

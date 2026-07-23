@@ -23,7 +23,8 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded CLIProxyAPI OAuth backend. Supported
-	// values are chatgpt, gemini, and grok. The legacy codex value remains readable.
+	// values are chatgpt, gemini, grok, copilot, kimi, and claude. The legacy
+	// codex value remains readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
 	// (basename of the JSON under ~/.ccl/auth). The OAuth runtime loads only
@@ -49,18 +50,23 @@ type Provider struct {
 type Config struct {
 	ActiveProvider string              `yaml:"active_provider" mapstructure:"active_provider"`
 	Lang           string              `yaml:"lang,omitempty" mapstructure:"lang,omitempty"`
-	Providers      map[string]Provider `yaml:"providers" mapstructure:"providers"`
+	// BypassMode automatically passes --dangerously-skip-permissions to Claude
+	// Code for every ccl-launched session. It is a global launcher setting.
+	BypassMode bool                `yaml:"bypass_mode,omitempty" mapstructure:"bypass_mode,omitempty"`
+	Providers  map[string]Provider `yaml:"providers" mapstructure:"providers"`
 }
 
-// FixedOAuthProtocol returns the only protocol an OAuth backend actually uses.
-// ChatGPT/Codex/Copilot → openai_responses; Gemini and Grok → openai (chat).
-// ok is false when oauthProvider is empty or unknown.
+// FixedOAuthProtocol returns the public protocol label ccl persists for an
+// OAuth backend. ChatGPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → OpenAI
+// Chat; Claude → Anthropic. ok is false when oauthProvider is empty or unknown.
 func FixedOAuthProtocol(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
 	case "chatgpt", "codex", "copilot":
 		return "openai_responses", true
-	case "gemini", "grok":
+	case "gemini", "grok", "kimi":
 		return "openai", true
+	case "claude":
+		return "anthropic", true
 	default:
 		return "", false
 	}
@@ -86,6 +92,10 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "gemini"
 	case "xai", "grok":
 		return "grok"
+	case "kimi":
+		return "kimi"
+	case "claude":
+		return "claude"
 	default:
 		return ""
 	}

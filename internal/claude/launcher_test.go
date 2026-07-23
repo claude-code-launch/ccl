@@ -444,14 +444,44 @@ exit 2
 	}
 }
 
-func TestPreviewSettingsRejectsAnthropicOAuthProvider(t *testing.T) {
+func TestPreviewSettingsWithClaudeOAuth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	credential := []byte(`{"type":"claude","access_token":"test-token","refresh_token":"test-refresh","email":"test@example.com"}`)
+	if err := os.WriteFile(filepath.Join(authDir, "claude-test.json"), credential, 0o600); err != nil {
+		t.Fatalf("write credential: %v", err)
+	}
+
 	result := claude.PreviewSettings(provider.Provider{
-		Name:          "codex",
-		Type:          "anthropic",
-		OAuthProvider: "codex",
+		Name:                   "claude-oauth",
+		Type:                   "anthropic",
+		Endpoint:               "oauth://claude",
+		OAuthProvider:          "claude",
+		OAuthAccountCredential: "claude-test.json",
+		Model:                  "claude-sonnet-4",
+		CustomModelID:          "claude-sonnet-4",
 	})
-	if !strings.Contains(result, "requires the OpenAI Chat or Responses protocol") {
-		t.Fatalf("PreviewSettings() = %q, want OAuth protocol validation error", result)
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(result), &settings); err != nil {
+		t.Fatalf("PreviewSettings() returned invalid JSON: %v; result=%s", err, result)
+	}
+	baseURL := settings.Env["ANTHROPIC_BASE_URL"]
+	if baseURL == "" || baseURL == "oauth://claude" {
+		t.Fatalf("Claude OAuth provider did not use ccl local proxy: %q", baseURL)
+	}
+	if strings.HasSuffix(baseURL, "/v1") {
+		t.Fatalf("Claude OAuth base URL would produce /v1/v1/messages: %q", baseURL)
+	}
+	if token := settings.Env["ANTHROPIC_AUTH_TOKEN"]; !strings.HasPrefix(token, "ccl-") {
+		t.Fatalf("Claude OAuth proxy auth token = %q, want isolated ccl session token", token)
+	}
+	// fastMode is always serialized (no omitempty), even when false.
+	if !strings.Contains(result, `"fastMode":`) {
+		t.Fatal("fastMode missing from settings JSON")
 	}
 }
 

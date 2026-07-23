@@ -48,6 +48,8 @@ func TestInferOAuthProvider(t *testing.T) {
 		{name: "Grok xAI backend", providerName: "grok", endpoint: "oauth://xai", want: "grok"},
 		{name: "Grok renamed provider", providerName: "my-account", endpoint: "oauth://xai", want: "grok"},
 		{name: "Copilot shares codex backend", providerName: "copilot", endpoint: "oauth://codex", want: "chatgpt"},
+		{name: "Kimi backend", providerName: "kimi", endpoint: "oauth://kimi", want: "kimi"},
+		{name: "Claude backend", providerName: "claude", endpoint: "oauth://claude", want: "claude"},
 		{name: "ordinary HTTP provider", providerName: "chatgpt", endpoint: "https://example.test/v1", want: ""},
 		{name: "unknown OAuth backend", providerName: "other", endpoint: "oauth://other", want: ""},
 	}
@@ -133,6 +135,14 @@ func TestFixedOAuthProtocol(t *testing.T) {
 	got, ok = provider.FixedOAuthProtocol("grok")
 	if !ok || got != "openai" {
 		t.Fatalf("grok = %q %v", got, ok)
+	}
+	got, ok = provider.FixedOAuthProtocol("kimi")
+	if !ok || got != "openai" {
+		t.Fatalf("kimi = %q %v", got, ok)
+	}
+	got, ok = provider.FixedOAuthProtocol("claude")
+	if !ok || got != "anthropic" {
+		t.Fatalf("claude = %q %v", got, ok)
 	}
 	if _, ok := provider.FixedOAuthProtocol(""); ok {
 		t.Fatal("empty should not fix")

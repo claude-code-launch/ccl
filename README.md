@@ -38,6 +38,7 @@
    - 源码集成 CLIProxyAPI Go SDK，无需安装或管理第二个代理进程。
    - 支持 `ccl auth chatgpt` / `gemini` / `grok` / `copilot`，且每个 provider 可通过别名挂载同一 backend 的多个账号；ChatGPT/Copilot 在底层使用 CLIProxyAPI 的 Codex OAuth backend，Gemini 使用 Antigravity，Grok 使用 xAI backend。
    - OAuth 凭据保存在 `~/.ccl/auth`（每个账号一个 JSON），运行时仅绑定本机回环地址，并使用随机会话 key；每条 provider 通过 `oauthAccountCredential` 绑定到具体账号文件，不会串到同 backend 的其它账号。
+   - CLIProxyAPI 会在服务运行期间提前刷新即将过期的 OAuth token，收到 401 时也会尝试即时刷新并重试；刷新结果持久化回对应凭据 JSON。
    - ChatGPT/Copilot 默认走 OpenAI Responses，Gemini/Grok 默认走 OpenAI Chat；手动 API key provider 与 OAuth provider 共用同一套 SDK 运行时。
 
 ---
@@ -81,6 +82,22 @@ go install github.com/claude-code-launch/ccl@latest
 ---
 
 ## 🛠️ 命令参考
+
+### `ccl auto` — 自动跳过权限确认
+
+```bash
+# 查看状态
+ccl auto
+
+# 启用：后续每次由 ccl 启动 Claude Code 时自动传入
+# --dangerously-skip-permissions
+ccl auto on
+
+# 关闭
+ccl auto off
+```
+
+`auto` 是全局开关，保存在 `~/.ccl/config.yaml` 的 `auto_mode`。开启后对所有 provider 生效，不需要每次手动输入 `--dangerously-skip-permissions`。该模式会跳过 Claude Code 的交互式权限确认，只应在可信环境中开启。
 
 ### `ccl auth` — 登录订阅账号
 
@@ -128,6 +145,8 @@ ccl auth chatgpt --callback-port 1455
 | `copilot` | codex | `openai(responses)` | GitHub device-code |
 | `gemini` | antigravity | `openai(chat)` | Google/Antigravity OAuth |
 | `grok` | xai | `openai(chat)` | xAI device-code |
+| `kimi` | kimi | `openai(chat)` | Kimi/Moonshot AI device-code |
+| `claude` | claude | `anthropic` | Anthropic OAuth 回调 |
 
 不再提供 `--protocol` 覆盖（运行时会忽略）。旧版创建的 `oauthProvider: codex` 仍可运行，并会在下次执行 `ccl auth chatgpt`（无别名）时迁移为 `chatgpt`。启动 `ccl`、`ccl set <provider>`、`ccl models` 或 `ccl doctor` 时，内嵌代理按需启动，并在命令退出时关闭，不需要常驻服务。`ccl set` 会通过临时本地 endpoint 和会话 key 获取、测试模型，但不会把它们写回配置。
 

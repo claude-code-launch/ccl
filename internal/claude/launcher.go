@@ -329,13 +329,11 @@ type providerContext struct {
 func setupProvider(p provider.Provider) (*providerContext, error) {
 	// Make a COPY to avoid mutating the original provider (fixes mutation bug)
 	providerCopy := p
-	ctx := &providerContext{provider: providerCopy, useProxy: provider.IsOpenAICompatibleType(p.Type)}
-	if providerCopy.OAuthProvider != "" && !ctx.useProxy {
-		return nil, fmt.Errorf(
-			"OAuth provider %q requires the OpenAI Chat or Responses protocol",
-			providerCopy.OAuthProvider,
-		)
-	}
+	// OpenAI-family providers and all OAuth backends (including Claude OAuth)
+	// go through the embedded CPA runtime so Claude Code always hits a local
+	// /v1/messages endpoint with a session token.
+	useProxy := provider.IsOpenAICompatibleType(p.Type) || strings.TrimSpace(p.OAuthProvider) != ""
+	ctx := &providerContext{provider: providerCopy, useProxy: useProxy}
 	if ctx.useProxy {
 		if providerCopy.OAuthProvider == "" && strings.TrimSpace(providerCopy.Model) == "" {
 			models, err := protocol.GetOpenAIModels(providerCopy.Endpoint, providerCopy.APIKey)

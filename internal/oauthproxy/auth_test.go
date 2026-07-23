@@ -21,12 +21,14 @@ import (
 
 func TestBackendProviderAliases(t *testing.T) {
 	tests := map[string]string{
-		"codex":    "codex",
-		"chatgpt":  "codex",
-		"copilot":  "codex",
-		"gemini":   "antigravity",
-		"grok":     "xai",
-		"xai":      "xai",
+		"codex":   "codex",
+		"chatgpt": "codex",
+		"copilot": "codex",
+		"gemini":  "antigravity",
+		"grok":    "xai",
+		"xai":     "xai",
+		"kimi":    "kimi",
+		"claude":  "claude",
 	}
 	for input, want := range tests {
 		got, err := BackendProvider(input)
@@ -40,7 +42,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderClaude} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}

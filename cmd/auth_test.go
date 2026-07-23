@@ -22,6 +22,10 @@ func TestFixedOAuthProtocolDefaults(t *testing.T) {
 	}{
 		{oauthproxy.ProviderChatGPT, "openai_responses"},
 		{oauthproxy.ProviderGemini, "openai"},
+		{oauthproxy.ProviderGrok, "openai"},
+		{oauthproxy.ProviderKimi, "openai"},
+		{oauthproxy.ProviderClaude, "anthropic"},
+		{oauthproxy.ProviderCopilot, "openai_responses"},
 	}
 	for _, test := range tests {
 		got := fixedOAuthProtocol(test.provider)
@@ -239,6 +243,60 @@ func TestRunAuthRejectsReservedAlias(t *testing.T) {
 	}
 }
 
+func TestRunAuthKimiUsesOpenAIChatBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "kimi", Path: "kimi-123.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"kimi", "moon"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	p, ok := cfg.Providers["moon"]
+	if !ok {
+		t.Fatalf("no kimi provider moon: %+v", cfg.Providers)
+	}
+	if p.Type != "openai" || p.Endpoint != "oauth://kimi" || p.OAuthProvider != "kimi" {
+		t.Fatalf("Kimi provider = %+v", p)
+	}
+	if p.OAuthAccountCredential != "kimi-123.json" {
+		t.Fatalf("credential = %q", p.OAuthAccountCredential)
+	}
+}
+
+func TestRunAuthClaudeUsesAnthropicBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "claude", Path: "claude-alice@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"claude", "anthropic-acct"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	p, ok := cfg.Providers["anthropic-acct"]
+	if !ok {
+		t.Fatalf("no claude provider anthropic-acct: %+v", cfg.Providers)
+	}
+	if p.Type != "anthropic" || p.Endpoint != "oauth://claude" || p.OAuthProvider != "claude" {
+		t.Fatalf("Claude provider = %+v", p)
+	}
+	if p.OAuthAccountCredential != "claude-alice@example.com.json" {
+		t.Fatalf("credential = %q", p.OAuthAccountCredential)
+	}
+}
+
 func TestRunAuthPreservesFastModeOnReauth(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
@@ -289,17 +347,36 @@ func TestProviderFastSummary(t *testing.T) {
 	}
 }
 
-func TestPrepareProviderRuntimeRejectsAnthropicOAuthProvider(t *testing.T) {
-	_, cleanup, err := prepareProviderRuntime(provider.Provider{
-		Name:          "chatgpt",
-		Type:          "anthropic",
-		OAuthProvider: "chatgpt",
+func TestPrepareProviderRuntimeStartsClaudeOAuth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("mkdir auth: %v", err)
+	}
+	// Minimal Claude OAuth credential so the embedded runtime can start.
+	cred := []byte(`{"type":"claude","access_token":"test-token","refresh_token":"test-refresh","email":"alice@example.com"}`)
+	if err := os.WriteFile(filepath.Join(authDir, "claude-alice@example.com.json"), cred, 0o600); err != nil {
+		t.Fatalf("write credential: %v", err)
+	}
+
+	runtimeProvider, cleanup, err := prepareProviderRuntime(provider.Provider{
+		Name:                   "anthropic-acct",
+		Type:                   "anthropic",
+		OAuthProvider:          "claude",
+		OAuthAccountCredential: "claude-alice@example.com.json",
+		Endpoint:               "oauth://claude",
 	})
-	if err == nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		t.Fatal("prepareProviderRuntime() should reject Anthropic OAuth providers")
+	if err != nil {
+		t.Fatalf("prepareProviderRuntime() error: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	if !strings.HasPrefix(runtimeProvider.Endpoint, "http://127.0.0.1:") {
+		t.Fatalf("runtime endpoint = %q", runtimeProvider.Endpoint)
+	}
+	if runtimeProvider.APIKey == "" {
+		t.Fatal("runtime API key empty")
 	}
 }
 
