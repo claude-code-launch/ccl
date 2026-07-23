@@ -231,6 +231,56 @@ func TestRunAuthCopilotUsesCodexResponsesBackend(t *testing.T) {
 	}
 }
 
+func TestRunAuthGrokWithoutAliasDerivesName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "xai", Path: "xai-work@x.ai.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"grok"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	derived := "grok-work@x.ai"
+	p, ok := cfg.Providers[derived]
+	if !ok {
+		t.Fatalf("no derived grok provider %q: %+v", derived, cfg.Providers)
+	}
+	if p.OAuthProvider != "grok" {
+		t.Fatalf("Grok provider = %+v", p)
+	}
+}
+
+func TestRunAuthCopilotWithoutAliasDerivesName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-copilot@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"copilot"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	derived := "copilot-copilot@example.com"
+	p, ok := cfg.Providers[derived]
+	if !ok {
+		t.Fatalf("no derived copilot provider %q: %+v", derived, cfg.Providers)
+	}
+	if p.OAuthProvider != "copilot" {
+		t.Fatalf("Copilot provider = %+v", p)
+	}
+}
+
 func TestRunAuthRejectsReservedAlias(t *testing.T) {
 	originalLogin := oauthLogin
 	oauthLogin = func(context.Context, string, oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
@@ -270,6 +320,30 @@ func TestRunAuthKimiUsesOpenAIChatBackend(t *testing.T) {
 	}
 }
 
+func TestRunAuthKimiWithoutAliasDerivesName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "kimi", Path: "kimi-1712345678.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"kimi"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	p, ok := cfg.Providers["kimi-1712345678"]
+	if !ok {
+		t.Fatalf("no derived kimi provider: %+v", cfg.Providers)
+	}
+	if p.OAuthProvider != "kimi" {
+		t.Fatalf("Kimi provider = %+v", p)
+	}
+}
+
 func TestRunAuthClaudeUsesAnthropicBackend(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
@@ -294,6 +368,31 @@ func TestRunAuthClaudeUsesAnthropicBackend(t *testing.T) {
 	}
 	if p.OAuthAccountCredential != "claude-alice@example.com.json" {
 		t.Fatalf("credential = %q", p.OAuthAccountCredential)
+	}
+}
+
+func TestRunAuthClaudeWithoutAliasDerivesName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "claude", Path: "claude-alice@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"claude"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	derived := "claude-alice@example.com"
+	p, ok := cfg.Providers[derived]
+	if !ok {
+		t.Fatalf("no derived claude provider %q: %+v", derived, cfg.Providers)
+	}
+	if p.OAuthProvider != "claude" || p.Type != "anthropic" {
+		t.Fatalf("Claude provider = %+v", p)
 	}
 }
 
