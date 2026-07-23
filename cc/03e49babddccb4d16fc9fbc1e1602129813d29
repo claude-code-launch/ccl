@@ -1,0 +1,71 @@
+internal/oauthproxy/auth.go
+  s_1449d0559569fa::t_8570063231a37f 121,124
+  s_1449d0559569fa::t_9f253fc3f81d62 21-22
+  s_1449d0559569fa::t_1dbd0da1e7793f 161-164
+  s_1449d0559569fa::t_30d56df4a5ad48 136-139
+README.md
+  s_1449d0559569fa::t_e0bd9ee26a5a27 148-149
+  s_1449d0559569fa::t_2921b13111dea8 41
+  s_1449d0559569fa::t_52bf8f6a7d3658 86-101
+go.mod
+  s_1449d0559569fa::t_4e0270bf646f43 10,13,34,67,73-74,76-77
+cmd/bypass_test.go
+  s_1449d0559569fa::t_33bbe3a6e9b8f1 1-81
+cmd/auth.go
+  s_1449d0559569fa::t_40d25e1fae2f1e 169-171
+  s_1449d0559569fa::t_14c8395d6e14a7 28
+  s_1449d0559569fa::t_727eb7cef51113 53
+  s_1449d0559569fa::t_8f868102b23828 41-42
+  s_1449d0559569fa::t_73a4f8c883ceb1 149-150,152-153,155-158
+cmd/oauth_runtime.go
+  s_1449d0559569fa::t_f341a2d006506a 14-27,29-34,38,46-50,59-83
+internal/oauthproxy/auth_test.go
+  s_1449d0559569fa::t_c6324216bdc765 24-31,45
+internal/provider/provider_test.go
+  s_1449d0559569fa::t_c6324216bdc765 51-52,139-146
+cmd/cmd_test.go
+  s_1449d0559569fa::t_bd828e72a47874 52
+internal/claude/launcher_test.go
+  s_1449d0559569fa::t_4f2f3a7d4dedfe 447-458,460-466,468-481
+  s_1449d0559569fa::t_e83d1dceafc058 482-484
+cmd/auth_test.go
+  s_1449d0559569fa::t_4b3b007290ea3e 350-368,370-379
+  s_1449d0559569fa::t_cd6a1493d37420 246-299
+  s_1449d0559569fa::t_c6324216bdc765 25-28
+internal/provider/provider.go
+  s_1449d0559569fa::t_2995a8724ca005 26-27
+  s_1449d0559569fa::t_a1f8dff38b01e8 59-61,66,68-69
+  s_1449d0559569fa::t_034a60c406bea7 95-98
+  s_1449d0559569fa::t_686be5e30219a0 53,55-56
+  s_1449d0559569fa::t_f83cde8f6174c8 54
+cmd/root.go
+  s_1449d0559569fa::t_96a5178e8b03c6 90
+  s_1449d0559569fa::t_d15405abb5a7e2 85-88
+internal/claude/launcher.go
+  s_1449d0559569fa::t_cde605937279de 332-336
+cmd/bypass.go
+  s_1449d0559569fa::t_20a3a5af270457 1-102
+go.sum
+  s_1449d0559569fa::t_f95826c147478d 52-53,122-125,157-158,173-174,177-178,181-182,185-188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "cc03e49babddccb4d16fc9fbc1e1602129813d29",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_1449d0559569fa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80a198e1-cec9-420f-a1f6-9b23ea6ccb7d",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
