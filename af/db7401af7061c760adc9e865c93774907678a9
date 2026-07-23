@@ -1,0 +1,26 @@
+cmd/auth_test.go
+  s_1449d0559569fa::t_2f78c90ac342ec 323-346
+  s_1449d0559569fa::t_3c1ed01a102f8e 234-283
+  s_1449d0559569fa::t_8a2ef01b6c136a 374-398
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "afdb7401af7061c760adc9e865c93774907678a9",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_1449d0559569fa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80a198e1-cec9-420f-a1f6-9b23ea6ccb7d",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
