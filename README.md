@@ -1,57 +1,40 @@
-# ccl: Claude Code 多网关智能代理启动器 (Multi-Provider Launcher)
+# ccl: Claude Code 多网关智能代理启动器
 
-`ccl` 是一个专门为 Anthropic 官方 CLI 工具 **Claude Code** 开发的多模型网关代理与极速启动器。
+`ccl` 是 **Claude Code**（Anthropic 官方 CLI）的多模型网关启动器。
 
-它可以帮助你在运行 Claude Code 时，无缝对接 OpenAI 兼容格式的网关（如 DeepSeek、SiliconFlow、OpenRouter、OneAPI 等），实现超低成本运行。
+用一句话理解它：
 
-## ✨ 核心亮点
+> 你继续用 Claude Code 的界面和习惯，`ccl` 负责帮你接上不同的模型来源（DeepSeek / OpenRouter / ChatGPT 订阅 / Gemini / Grok / Copilot / Kimi 等），并在需要时自动做协议翻译。
 
-1. **智能多档模型映射 (无需复杂配置)**
-   - 当槽位未手动配置时，`ccl` 自动进入 **「智能协议代理映射模式」**。
-   - 自动在启动时拉取接口提供商的可用模型库，按关键词动态分析并分配到各档位：
-     - 💎 **Opus 强推理档** → 优先匹配 `deepseek-reasoner` (R1) 或 `o1`、`o3-mini`、`gpt-4o`
-     - 🚀 **Sonnet 黄金档** → 优先匹配 `deepseek-chat` (V3)、`gpt-4o`、`claude-3-5-sonnet`
-     - ⚡ **Haiku 极速档** → 优先匹配 `gpt-4o-mini`、`gpt-3.5-turbo`
-   - 若通过 `ccl set` 手动为某个档位指定了模型，则该档位的自动映射被覆盖，其余未配置的档位仍走自动映射。
+适合这些场景：
 
-2. **零感协议翻译与流式代理**
-   - 源码嵌入 CLIProxyAPI Go SDK。OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一由 SDK 暴露本机 `/v1/messages`，负责请求、流式响应、工具调用和模型别名转换；Anthropic provider 保持直连。
-
-3. **交互式 TUI 配置向导**
-   - 全新的 bubbletea 驱动的全屏 TUI：多页表单，键盘导航（方向键 / Tab / Enter / Esc），实时协议探测与模型拉取。
-   - Reasoning Effort 由 Claude Code 原生管理（`/effort`、`--effort`、settings）；`ccl set` 不再写入 `CLAUDE_CODE_EFFORT_LEVEL`。
-   - 自动识别 Anthropic 兼容网关的认证方式：官方 `x-api-key` 或 Bearer token（`ANTHROPIC_AUTH_TOKEN`）。
-   - **多语言支持**：中文 / English，运行时通过 `ccl lang` 随时切换。
-
-4. **智能环境探针与诊断 (`ccl doctor`)**
-   - 自动检查本地环境依赖（Node.js, Claude CLI）。
-   - 如果系统未安装 Claude CLI，`ccl` 将触发**全自动静默安装**。
-   - 提供连接探针，对各 Provider 的 Endpoint 连通性、API 鉴权密钥进行安全测试。
-   - **模型可用性检测**：并发批量测试所有配置的模型（50 并发 / 10s 超时），自动将可用模型排在配置文件前列。
-   - **实时进度条**：模型测试时显示 `[████████░░░░░░] 45/100 ✓38 ✗7` 进度条。
-
-5. **多通道配置与灵活切换**
-   - 支持添加、切换、列出、复制、重命名、删除以及管理多个独立网关。
-   - 配置统一存储在 `~/.ccl/config.yaml`，方便备份与迁移。
-
-6. **统一 CLIProxyAPI 运行时与 OAuth**
-   - 源码集成 CLIProxyAPI Go SDK，无需安装或管理第二个代理进程。
-   - 支持 `ccl auth chatgpt` / `gemini` / `grok` / `copilot`，且每个 provider 可通过别名挂载同一 backend 的多个账号；ChatGPT/Copilot 在底层使用 CLIProxyAPI 的 Codex OAuth backend，Gemini 使用 Antigravity，Grok 使用 xAI backend。
-   - OAuth 凭据保存在 `~/.ccl/auth`（每个账号一个 JSON），运行时仅绑定本机回环地址，并使用随机会话 key；每条 provider 通过 `oauthAccountCredential` 绑定到具体账号文件，不会串到同 backend 的其它账号。
-   - CLIProxyAPI 会在服务运行期间提前刷新即将过期的 OAuth token，收到 401 时也会尝试即时刷新并重试；刷新结果持久化回对应凭据 JSON。
-   - ChatGPT/Copilot 默认走 OpenAI Responses，Gemini/Grok 默认走 OpenAI Chat；手动 API key provider 与 OAuth provider 共用同一套 SDK 运行时。
+- 想用更便宜的 OpenAI 兼容网关跑 Claude Code
+- 想用 ChatGPT / Gemini / Grok / Copilot / Kimi 等订阅账号
+- 需要在多个网关 / 多个账号之间快速切换
+- 不想手写复杂的环境变量和模型映射
 
 ---
 
-## 🚀 安装与编译
+## 5 分钟上手（新手优先看这里）
 
-### 快速安装
+### 1. 安装
+
+任选一种方式：
+
 ```bash
+# 推荐：npm 全局安装
 npm install -g @claudecodelaunch/ccl
+
+# 或：Go 安装
+go install github.com/claude-code-launch/ccl@latest
+
+# 或：从源码编译
+git clone https://github.com/claude-code-launch/ccl.git
+cd ccl
+go build -o ccl .
 ```
 
-### 预编译二进制
-前往 [GitHub Releases](https://github.com/claude-code-launch/ccl/releases) 下载适合您平台的压缩包：
+也可以从 [GitHub Releases](https://github.com/claude-code-launch/ccl/releases) 下载对应平台的二进制：
 
 | 平台 | 文件名 |
 |------|--------|
@@ -67,77 +50,161 @@ chmod +x ccl-darwin-arm64
 mv ccl-darwin-arm64 /usr/local/bin/ccl
 ```
 
-### 源码编译
+安装后检查：
+
 ```bash
-git clone https://github.com/claude-code-launch/ccl.git
-cd ccl
-go build -o ccl .
+ccl version
+ccl doctor
 ```
 
-### Go 安装
+`ccl doctor` 会检查本地依赖；如果还没装 Claude Code CLI，会尝试自动安装。
+
+### 2. 选一条入门路径
+
+#### 路径 A：用订阅账号登录（最简单）
+
 ```bash
-go install github.com/claude-code-launch/ccl@latest
+# 任选其一
+ccl auth chatgpt    # ChatGPT / Codex
+ccl auth gemini     # Google Gemini
+ccl auth grok       # xAI Grok
+ccl auth copilot    # GitHub Copilot
+ccl auth kimi       # Kimi / Moonshot
+ccl auth claude     # Anthropic Claude 订阅
+
+# 登录成功后直接启动
+ccl
 ```
+
+登录成功后，`ccl` 会自动创建并切换到对应 provider。多账号可以加别名：
+
+```bash
+ccl auth chatgpt work
+ccl auth chatgpt personal
+ccl use work
+```
+
+#### 路径 B：用 API Key / 第三方网关
+
+```bash
+# 交互式配置（推荐）
+ccl set
+
+# 或指定名称
+ccl set deepseek
+```
+
+按提示填写：
+
+1. **Endpoint URL**（例如 `https://api.deepseek.com`）
+2. **API Key**
+3. 选择 **Auto**（自动映射模型）或 **Manual**（自己指定 Opus / Sonnet / Haiku）
+4. 在最后一页核对并保存
+
+然后启动：
+
+```bash
+ccl
+```
+
+### 3. 日常三板斧
+
+```bash
+ccl                 # 用当前 provider 启动 Claude Code
+ccl ls              # 看看有哪些 provider
+ccl use deepseek    # 切换 provider
+ccl doctor          # 连不通时先跑诊断
+```
+
+可选：信任环境里不想每次点权限确认时：
+
+```bash
+ccl bypass on       # 启动时自动加 --dangerously-skip-permissions
+ccl bypass          # 查看状态
+ccl bypass off      # 关闭
+```
+
+> **注意**：`bypass` 会跳过 Claude Code 的交互式权限确认，只在你信任的环境开启。
+
+### 4. 新手最常卡的点
+
+| 现象 | 建议 |
+|------|------|
+| 不知道从哪开始 | 有订阅就 `ccl auth ...`；有 API Key 就 `ccl set` |
+| 启动后模型不对 | `ccl map` 或 `ccl set` 重新映射 Opus / Sonnet / Haiku |
+| 连不上 / 鉴权失败 | `ccl doctor`，再 `ccl preview` 看注入了什么环境变量 |
+| 多个账号互相覆盖 | 登录时加别名：`ccl auth chatgpt work` |
+| 想换中英文界面 | `ccl lang zh` / `ccl lang en` |
+| 旧文档里的 `ccl auto` | 已更名为 **`ccl bypass`**，配置字段是 `bypass_mode` |
 
 ---
 
-## 🛠️ 命令参考
+## 它具体帮你做什么？
 
-### `ccl auto` — 自动跳过权限确认
+1. **智能多档模型映射**  
+   未手动配置时，自动拉取上游模型列表，按关键词分配到：
+   - 💎 Opus 强推理档
+   - 🚀 Sonnet 黄金档
+   - ⚡ Haiku 极速档  
+   用 `ccl set` / `ccl map` 手动指定后，对应档位以手动为准。
+
+2. **协议翻译与流式代理**  
+   内嵌 CLIProxyAPI Go SDK。OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一暴露本机 `/v1/messages`；Anthropic 兼容网关保持直连。
+
+3. **交互式 TUI 配置**  
+   全屏向导配置 endpoint、协议、模型槽位、上下文压缩等；支持中文 / English（`ccl lang`）。
+
+4. **环境诊断**  
+   `ccl doctor` 检查依赖、连通性、鉴权，并批量测模型可用性。
+
+5. **多通道 / 多账号**  
+   配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
+
+6. **订阅 OAuth 一键接入**  
+   `chatgpt` / `gemini` / `grok` / `copilot` / `kimi` / `claude`，支持多账号别名；token 会在运行时刷新。
+
+---
+
+## 命令速查
+
+### 启动 Claude Code
 
 ```bash
-# 查看状态
-ccl auto
-
-# 启用：后续每次由 ccl 启动 Claude Code 时自动传入
-# --dangerously-skip-permissions
-ccl auto on
-
-# 关闭
-ccl auto off
+ccl                              # 启动
+ccl resume                       # 透传参数给 Claude Code
+ccl --dangerously-skip-permissions
 ```
 
-`auto` 是全局开关，保存在 `~/.ccl/config.yaml` 的 `auto_mode`。开启后对所有 provider 生效，不需要每次手动输入 `--dangerously-skip-permissions`。该模式会跳过 Claude Code 的交互式权限确认，只应在可信环境中开启。
+### `ccl bypass` — 权限确认旁路（原 `ccl auto`）
+
+```bash
+ccl bypass          # 查看状态
+ccl bypass on       # 开启
+ccl bypass off      # 关闭
+```
+
+全局开关，写入 `~/.ccl/config.yaml` 的 `bypass_mode`。开启后，所有由 `ccl` 拉起的 Claude Code 会话都会自动带上 `--dangerously-skip-permissions`。
+
+> 旧版命令 `ccl auto` / 字段 `auto_mode` 已更名为 `ccl bypass` / `bypass_mode`。
 
 ### `ccl auth` — 登录订阅账号
 
 ```bash
-# ChatGPT OAuth，默认使用 OpenAI Responses
 ccl auth chatgpt
-
-# Google OAuth，默认通过 OpenAI Chat 使用 Gemini 模型
 ccl auth gemini
-
-# xAI/Grok OAuth（device-code flow），通过 OpenAI Chat 使用 Grok 模型
 ccl auth grok
-
-# GitHub Copilot OAuth（device-code flow），共用 Codex backend，走 OpenAI Responses
 ccl auth copilot
+ccl auth kimi
+ccl auth claude
 
-# 多账号：给每个账号起一个别名，独立 provider 与凭据互不覆盖
-ccl auth chatgpt a1
-ccl auth chatgpt a2
-ccl auth gemini work
-ccl auth grok personal
-ccl auth copilot gh
+# 多账号别名
+ccl auth chatgpt work
+ccl auth gemini personal
 
-# 不自动打开浏览器
+# 可选
 ccl auth chatgpt --no-browser
-
-# 覆盖 OAuth 回调端口（仅 Codex/ChatGPT 回调 flow 有效）
 ccl auth chatgpt --callback-port 1455
-
-# Claude Code fastMode（仅 chatgpt/copilot；≈1.5x 速度、更高用量）
-# 与 Claude Code 的 /fast 相同；在 ccl set 的「核对并应用 / Review & Apply」页可编辑
-# 也可在 Claude Code 会话内用 /fast 开关
 ```
-
-登录成功后，ccl 会创建一个 provider 并立即设为当前 provider。每次登录都会产出一条独立的 provider 条目：
-
-- 带别名时（`ccl auth chatgpt a1`）别名即 provider 名；不带别名时 ccl 从凭据文件名自动派生一个别名（如 `chatgpt-alice@example.com`），所以同一 backend 的多个账号互不覆盖。
-- 每条 provider 绑定到对应账号的凭据文件（`oauthAccountCredential`），运行时只加载、刷新和调度该账号的凭据与模型，不会串到同 backend 的其它账号。
-
-支持的 provider 与固定协议：
 
 | provider | backend | 协议 | 登录方式 |
 | --- | --- | --- | --- |
@@ -145,85 +212,60 @@ ccl auth chatgpt --callback-port 1455
 | `copilot` | codex | `openai(responses)` | GitHub device-code |
 | `gemini` | antigravity | `openai(chat)` | Google/Antigravity OAuth |
 | `grok` | xai | `openai(chat)` | xAI device-code |
-| `kimi` | kimi | `openai(chat)` | Kimi/Moonshot AI device-code |
+| `kimi` | kimi | `openai(chat)` | Kimi/Moonshot device-code |
 | `claude` | claude | `anthropic` | Anthropic OAuth 回调 |
 
-不再提供 `--protocol` 覆盖（运行时会忽略）。旧版创建的 `oauthProvider: codex` 仍可运行，并会在下次执行 `ccl auth chatgpt`（无别名）时迁移为 `chatgpt`。启动 `ccl`、`ccl set <provider>`、`ccl models` 或 `ccl doctor` 时，内嵌代理按需启动，并在命令退出时关闭，不需要常驻服务。`ccl set` 会通过临时本地 endpoint 和会话 key 获取、测试模型，但不会把它们写回配置。
+说明：
 
-### `ccl set` — 添加/更新 Provider
+- 不带别名时，会从凭据文件名派生 provider 名（如 `chatgpt-alice@example.com`），避免多账号互相覆盖。
+- 每条 provider 通过 `oauthAccountCredential` 绑定具体账号文件。
+- 不再提供 `--protocol` 覆盖；各 OAuth backend 协议固定。
+- **Fast mode**（约 1.5x 速度、更高用量）仅 `chatgpt` / `copilot` 有意义：可在 `ccl set` 的「核对并应用 / Review & Apply」页编辑，也可在 Claude Code 内用 `/fast` 开关。
+
+### `ccl set` — 添加 / 更新 Provider
 
 ```bash
-# 交互式选择已有 provider 或新建
-ccl set
-
-# 直接指定名称新建或更新
-ccl set my-provider
+ccl set                 # 交互选择已有或新建
+ccl set my-provider     # 指定名称
 ```
 
-无参数时弹出 **Provider 选择框**（↑↓ 选择，Enter 确认）：
+TUI 大致流程：
 
-```
-┌─ Select a provider or create new: ─────────────────┐
-│                                                     │
-│  ▸ + Create new provider                            │
-│    deepseek                                         │
-│    oc1 (active)                                     │
-│    zhipu                                            │
-│                                                     │
-│  ↑↓ choose · enter confirm · esc cancel             │
-└─────────────────────────────────────────────────────┘
-```
+| 步骤 | 内容 |
+|------|------|
+| Step 1 | Endpoint + API Key |
+| Step 2 | Auto / Manual 配置模式 |
+| Step 3 | Opus / Sonnet / Haiku / Custom / Subagent 映射 |
+| Step 4 | 扩展上下文 `[1m]` + Auto Compact 预设 |
+| Step 5 | 核对 Connection / Mapping / Runtime 并保存 |
 
-选择后进入**全屏 TUI 配置向导**，分 6 步完成：
+Context & Compact：
 
-| 步骤 | 内容 | 操作 |
-|------|------|------|
-| Step 1 | **凭据配置** — Endpoint URL + API Key | ↑↓ 切换输入框 · Enter 下一步 |
-| Step 2 | **配置模式** — Auto / Manual | ↑↓ 选择 · Enter 确认 |
-| Step 3 | **Slot 映射** — Opus / Sonnet / Haiku / Custom / Subagent | ↑↓ 选槽位 · Enter 进入模型列表 · 打字过滤 · Enter 锁定 |
-| Step 4 | **Context & Compact** — 扩展上下文槽位 + 自动压缩预设 | Enter 切换 `[1m]` / 选择压缩档 |
-| Step 5 | **核对保存** — Connection / Mapping / Runtime 摘要 | Enter 应用并完成 |
-
-Context & Compact 把两个概念拆开：
-
-1. **Extended Context `[1m]`**（按槽位）：声明该模型 ID 支持扩展上下文；同名模型切换时会同步到其它槽位。
-2. **Auto Compact**（Provider 全局）：`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 设置 Claude 对不识别模型采用的默认上下文大小，`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 设置绝对压缩窗口；**不会**再顺带删除 `[1m]`。
+1. **Extended Context `[1m]`**（按槽位）：声明该模型 ID 支持扩展上下文。
+2. **Auto Compact**（Provider 全局）：设置默认上下文与绝对压缩窗口。
 
 | 压缩预设 | 默认上下文 | 自动压缩窗口 | 说明 |
 |---------|-----------:|---------------:|------|
-| Custom (preserve) | 保留现值 | 保留现值 | 保护自定义或旧配置 |
-| Claude default | 未管理 | 未管理 | 删除 ccl 覆盖；Claude Code 仍会按内置默认值自动压缩 |
-| Switch-safe 300K / 200K | 300,000 | 200,000 | 适合常切换到标准上下文模型；可与 `[1m]` 并存 |
-| Balanced 500K / 400K | 500,000 | 400,000 | 平衡上下文容量与压缩余量 |
-| Maximum 1M / 900K | 1,000,000 | 900,000 | 最大深度长会话 |
+| Custom (preserve) | 保留现值 | 保留现值 | 保护自定义配置 |
+| Claude default | 未管理 | 未管理 | 删除 ccl 覆盖 |
+| Switch-safe 300K / 200K | 300,000 | 200,000 | 常切换标准上下文时较稳妥 |
+| Balanced 500K / 400K | 500,000 | 400,000 | 容量与余量平衡 |
+| Maximum 1M / 900K | 1,000,000 | 900,000 | 超长会话 |
 
-ccl 只对精确模型 ID `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 显示 1M 推荐；上游 `/models` 若带 `context_window` 仅显示为「目录报 1M」建议，**不会**自动勾选。旧的百分比预设会在下次保存时迁移为对应的绝对窗口；`[1m] + CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000` 旧配置继续兼容并显示为 legacy。`*_NAME` 显示名为 `model (1M)`，技术 ID 仍使用 `model[1m]`。
-
-页面间通过 `Tab` / `Shift+Tab` 或底部按钮 `[Next]` / `[Back]` 导航。
-
-### Provider 配置管理
+### Provider 管理
 
 ```bash
-# 列出所有 provider
 ccl ls
-ccl ls -a             # 展开详情与完整模型池（默认显示扫描表）
-ccl provider ls       # 完整语义入口，输出同 ccl ls
-
-# 复制配置
+ccl ls -a
+ccl use provider-name
 ccl cp source target
-ccl provider cp source target
-
-# 重命名
 ccl mv old-name new-name
-ccl provider mv old-name new-name
-
-# 删除
 ccl rm name
-ccl provider rm name
 
-# 其他 provider 子命令
-ccl provider set my-provider
+# 完整语义入口（效果相同）
+ccl provider ls
 ccl provider use my-provider
+ccl provider set my-provider
 ccl provider map
 ccl provider models
 ccl provider env
@@ -231,149 +273,59 @@ ccl provider doctor
 ccl provider preview
 ```
 
-### `ccl env` — 环境变量管理
+### `ccl map` — 快速映射模型槽位
 
 ```bash
-# 列出所有环境变量
-ccl env ls
-
-# 设置/修改
-ccl env KEY VALUE
-ccl provider env KEY VALUE
-
-# 重命名
-ccl env mv OLD_KEY NEW_KEY
-ccl provider env mv OLD_KEY NEW_KEY
-
-# 删除
-ccl env rm KEY
-ccl provider env rm KEY
-```
-
-### `ccl use` — 切换激活 Provider
-
-```bash
-ccl use provider-name
-```
-
-### `ccl lang` — 切换显示语言
-
-```bash
-# 交互式选择
-ccl lang
-
-# 直接指定
-ccl lang zh       # 中文
-ccl lang en       # English
-```
-
-设置后立即生效并持久化到 `~/.ccl/config.yaml`。优先级：`CCL_LANG` 环境变量 > config.yaml > 系统语言。
-
-### `ccl doctor` — 环境诊断
-
-```bash
-ccl doctor
-ccl provider doctor
-```
-
-检查本地依赖、Endpoint 连通性、API 鉴权。**并发测试所有配置模型**，自动将可用模型排在配置前列，显示实时进度条。如果 Claude CLI 未安装，自动触发一键安装。
-
-### `ccl models` — 查看可用模型
-
-```bash
-# 查看已配置模型的可用性
-ccl models
-
-# 查看 Provider 全部模型
-ccl models --all
-ccl provider models --all
-```
-
-并发测试每个模型，显示 `✓`（可用）或 `✗ (unavailable)`（不可用），带实时进度条。
-
-### `ccl map` — 快速设置 Slot 模型映射
-
-```bash
-# 交互式 TUI — 直接进入 Slot 映射页面
-ccl map
-ccl provider map
-
-# 自动填充 — 自动检测可用模型并填入前 4 个槽位
-ccl map auto
-ccl map auto my-provider
-ccl provider map auto
-
-# 直接指定 — 通过 CLI 参数快速映射
-ccl map --opus gpt-5.1 --sonnet gpt-5.1-codex-max
-ccl map --opus gpt-5.1 --sonnet gpt-5.1-mini --haiku gpt-4o-mini
+ccl map                                          # 交互式 TUI
+ccl map auto                                     # 自动填充前几个槽位
+ccl map --opus gpt-5.1 --sonnet gpt-5.1-mini
+ccl map --haiku gpt-4o-mini
 ccl map --custom gpt-5.1 my-provider
-ccl map --subagent gpt-5.4-mini my-provider
-ccl provider map --custom gpt-5.1 my-provider
+ccl map --subagent gpt-5.4-mini
 ```
 
-三种模式：交互式 TUI（直接跳转到 Slot 映射页面）、自动检测填充、CLI 参数直接映射。
+### `ccl models` / `ccl doctor` / `ccl preview`
 
 ```bash
-ccl ls
+ccl models              # 测试已配置模型
+ccl models --all        # 查看并测试 provider 全部模型
+ccl doctor              # 依赖 + 连通性 + 鉴权 + 模型可用性
+ccl preview             # 预览将注入 Claude Code 的 settings JSON
 ```
 
-### `ccl preview` — 预览 Claude Code 注入配置
+### `ccl env` — 环境变量
 
 ```bash
-ccl preview
-ccl provider preview
+ccl env ls
+ccl env KEY VALUE
+ccl env mv OLD_KEY NEW_KEY
+ccl env rm KEY
 ```
 
-输出当前激活 Provider 会生成的 settings JSON，适合检查 `ANTHROPIC_BASE_URL`、认证变量与 slot 模型映射。
-
-### `ccl update` — 升级
+### 其它
 
 ```bash
-ccl update
+ccl lang                # 交互切换语言
+ccl lang zh
+ccl lang en
+
+ccl update              # 升级
+ccl version             # 版本
+ccl completion zsh      # shell 补全（也支持 bash/fish/powershell）
 ```
 
-支持通过 `npm` / `go install` 一键升级。
-
-### `ccl version` — 查看版本
-
-```bash
-ccl version
-```
-
-显示当前二进制版本。Release 构建会从 tag 注入版本号。
-
-### `ccl completion` — Shell 补全脚本
-
-```bash
-ccl completion zsh
-ccl completion bash
-ccl completion fish
-ccl completion powershell
-```
-
-由 Cobra 自动生成对应 shell 的补全脚本。
-
-### `ccl` — 启动 Claude Code
-
-```bash
-# 直接启动
-ccl
-
-# 透传参数
-ccl resume
-ccl --dangerously-skip-permissions
-ccl claude --dangerously-skip-permissions
-```
+语言优先级：`CCL_LANG` 环境变量 > `config.yaml` > 系统语言。
 
 ---
 
-## ⚙️ 配置存储
+## 配置文件
 
-所有配置统一存储在 `~/.ccl/config.yaml`：
+路径：`~/.ccl/config.yaml`
 
 ```yaml
 active_provider: deepseek
 lang: zh-CN
+bypass_mode: false
 providers:
   deepseek:
     name: deepseek
@@ -396,20 +348,53 @@ providers:
     oauthProvider: chatgpt
 ```
 
-配置字段说明：
+字段要点：
 
-- `type: openai`（显示为 `openai(chat)`）：`ccl` 启动内嵌 CLIProxyAPI 的 OpenAI Compatibility runtime。Claude Code 直接连接 SDK 的 `/v1/messages`，由 SDK 转换到上游 **Chat Completions**；`model`、各 Claude slot、Subagent 与 `[1m]` 名称会注册为 SDK 模型路由或别名。
-- `type: openai_responses`（显示为 `openai(responses)`）：Claude Code 同样直接连接 CLIProxyAPI，但 SDK 使用 **Responses** API（`/v1/responses`）和 Codex API-key executor。它负责 Codex 客户端标识、请求规范化、流式响应与工具调用转换；`ccl set` 获取模型后，可在核对页的 Protocol 行用 ←→ / Enter 在 `openai(chat)` 与 `openai(responses)` 之间切换。
-- Codex 专用路由应填写服务商给出的生成基址，例如 `https://example.com/codex`。ccl 获取模型时会请求 `https://example.com/codex/models`，不会把额外路径写回 endpoint；若填写成 `/codex/v1`，ccl 会提示正确地址并停止，而不是静默修改。Codex 路径在最终核对页默认选择 Responses，仍可手动切换为 Chat。
-- 以 `/claude` 或 `/anthropic` 结尾的网关基址按 Anthropic 处理，模型列表请求会自动使用 `<endpoint>/v1/models`；其他 OpenAI 基址使用 `<endpoint>/models`。
-- `type: anthropic`：Claude Code 直连该 endpoint，`ccl` 不在请求链路中做协议转换；`model` 只作为 `ccl` 的本地模型池，用于 TUI 列表、`map auto`、默认 slot 映射和可用性检测。Claude Code 访问 `/v1/models` 时看到的是 provider 自己返回的结果。
-- `oauthProvider`：让相同的 CLIProxyAPI runtime 使用已保存的 OAuth 凭据。运行时 `endpoint` 和上游凭据会替换为仅本次会话有效的本机地址与随机 Bearer token，不会写回配置文件；OpenAI Chat/Responses provider 也使用相同的会话认证方式，避免 Claude Code 把代理 token 当作新的 Anthropic API key 反复确认。
-- Claude Code 运行时默认使用当前 Custom/Sonnet 映射作为子代理模型，工具并发默认 `3`，`ENABLE_TOOL_SEARCH=false`，`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认 `32000`。输出上限与 200K/1M 上下文窗口是两个独立概念。这些值可在 **Review & Apply** 页用 `‹ ›` 就地修改（选择 Default 会删除对应 env）；也可用 `ccl env` 覆盖。Max Output 仅对 **plain OpenAI Responses** 保证传到上游；ChatGPT OAuth 与专用 `/codex` 路径显示为 Upstream managed。
-- Anthropic 直连时 `endpoint` 建议使用裸域名，例如 `https://token.sensenova.cn`；`ccl set` 会自动去掉常见的 `/v1`、`/v1/messages`、`/v1/models` 后缀，避免 Claude Code 运行时拼成 `/v1/v1/messages`。
+- `type: openai`（显示 `openai(chat)`）：经 CLIProxyAPI 转到上游 Chat Completions。
+- `type: openai_responses`（显示 `openai(responses)`）：经 SDK 走 Responses API；Codex 路径默认选 Responses，可在核对页切换。
+- `type: anthropic`：Claude Code 直连 endpoint，不做协议转换。
+- `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
+- `bypass_mode`：全局是否自动附加 `--dangerously-skip-permissions`。
+- Anthropic 直连时 `endpoint` 建议裸域名（如 `https://token.sensenova.cn`），避免拼出 `/v1/v1/messages`。
+- 运行时默认：子代理模型优先 Custom/Sonnet；工具并发默认 `3`；`ENABLE_TOOL_SEARCH=false`；`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认 `32000`。可在 Review & Apply 页或 `ccl env` 覆盖。
 
-## ✅ 本地验证清单
+OAuth 凭据目录：`~/.ccl/auth/`（每个账号一个 JSON）。
 
-开发时可以用临时 `HOME` 验证配置，不会污染真实 `~/.ccl/config.yaml`：
+---
+
+## 推荐工作流示例
+
+### 只用 DeepSeek 便宜跑
+
+```bash
+ccl set deepseek
+# Endpoint: https://api.deepseek.com
+# 填 API Key → Auto 映射 → 保存
+ccl
+```
+
+### ChatGPT 订阅 + 本地 API 网关并存
+
+```bash
+ccl auth chatgpt work
+ccl set openrouter
+ccl ls
+ccl use work          # 切到订阅
+ccl use openrouter    # 切到网关
+```
+
+### 排查「为什么没用上我想要的模型」
+
+```bash
+ccl preview           # 看最终注入配置
+ccl models            # 看哪些模型真正可用
+ccl map               # 重新绑定槽位
+ccl doctor            # 连通性 / 鉴权
+```
+
+---
+
+## 本地验证（开发者）
 
 ```bash
 go test ./...
@@ -422,60 +407,63 @@ HOME="$CCL_TEST_HOME" /tmp/ccl-debug doctor
 HOME="$CCL_TEST_HOME" /tmp/ccl-debug models --all
 ```
 
-Anthropic 兼容网关（例如 `https://token.sensenova.cn`）应确认：
+Anthropic 兼容网关建议确认：
 
-- `endpoint` 保存为裸域名，不带 `/v1`。
-- Bearer 认证时 `preview` 里出现 `ANTHROPIC_AUTH_TOKEN`，不出现 `ANTHROPIC_API_KEY`。
-- `ccl set` 不再写入 `effortLevel` / `CLAUDE_CODE_EFFORT_LEVEL`；旧配置中的 effortLevel 会在下次保存时清除。
-- 配置了 Custom model 时，`preview` 顶层 `model` 与 `ANTHROPIC_CUSTOM_MODEL_OPTION` 保持一致。
+- `endpoint` 为裸域名，不带 `/v1`
+- Bearer 认证时 `preview` 出现 `ANTHROPIC_AUTH_TOKEN`，而不是 `ANTHROPIC_API_KEY`
+- `ccl set` 不再写入 `effortLevel` / `CLAUDE_CODE_EFFORT_LEVEL`
+- 配置了 Custom model 时，`preview` 顶层 `model` 与 `ANTHROPIC_CUSTOM_MODEL_OPTION` 一致
 
 ---
 
-## 🔧 CI/CD
+## CI/CD
 
-推送符合 `v*` 规范的 tag 触发自动编译发布：
+推送 `v*` tag 触发多平台构建与发布：
 
 ```bash
 git tag v1.2.0
 git push origin v1.2.0
 ```
 
-GitHub Actions 自动构建 6 个平台二进制并发布到 GitHub Releases + npm。
+GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + npm。
 
 ---
 
-## 📁 目录结构
+## 目录结构
 
 ```text
 ├── cmd/
-│   ├── advanced_config.go     # TUI 配置向导（5 页表单 + 协议探测）
-│   ├── auth.go                # Codex / ChatGPT / Gemini OAuth 登录
-│   ├── provider.go            # Provider 子命令入口（cp/ls/mv/rm/set/map/models/env/doctor/preview）
-│   ├── env.go                 # 环境变量管理（ls/rm/mv）
-│   ├── set.go                 # set 命令入口 + RunProviderSet 共享逻辑
-│   ├── select.go              # 通用 TUI 选择器组件
-│   ├── doctor.go              # 环境及密钥连通性自检
+│   ├── advanced_config.go     # TUI 配置向导
+│   ├── auth.go                # 订阅 OAuth 登录
+│   ├── bypass.go              # ccl bypass（权限旁路开关）
+│   ├── provider.go            # provider 子命令
+│   ├── env.go                 # 环境变量管理
+│   ├── set.go                 # set 命令
+│   ├── select.go              # 通用 TUI 选择器
+│   ├── doctor.go              # 环境与连通性自检
 │   ├── install.go             # Claude CLI 自动安装
-│   ├── lang_cmd.go            # ccl lang 命令
-│   ├── list.go                # ls 命令
-│   ├── map.go                 # ccl map 命令（交互式/自动/CLI 三种映射模式）
-│   ├── models.go              # 模型列表展示 + 可用性检测
-│   ├── root.go                # ccl 主入口 + passthrough 模式
+│   ├── lang_cmd.go            # 语言切换
+│   ├── list.go                # ls
+│   ├── map.go                 # 模型槽位映射
+│   ├── models.go              # 模型列表与可用性
+│   ├── root.go                # 主入口 + passthrough
 │   ├── preview.go             # 预览 settings JSON
-│   ├── update.go              # 自动升级
-│   ├── use.go                 # 切换激活 provider
-│   └── version.go             # 版本信息
+│   ├── update.go              # 升级
+│   ├── use.go                 # 切换 provider
+│   └── version.go             # 版本
 ├── internal/
-│   ├── claude/                # Claude Code 进程拉起 & 端口注入
-│   ├── config/                # yaml 配置文件读写
-│   ├── locale/                # 多语言支持（中文 / English）
-│   ├── modelrouting/          # Claude 档位 → 上游模型启发式映射
-│   ├── oauthproxy/            # CLIProxyAPI SDK 登录与内嵌运行时（OpenAI 族唯一路径）
-│   ├── protocol/              # Endpoint 规范化、模型列表拉取与 Responses 探测
-│   └── provider/              # Provider & Config 数据结构
+│   ├── claude/                # Claude Code 进程拉起
+│   ├── config/                # yaml 配置读写
+│   ├── locale/                # 多语言
+│   ├── modelrouting/          # 档位启发式映射
+│   ├── oauthproxy/            # CLIProxyAPI 登录与内嵌运行时
+│   ├── protocol/              # endpoint 规范化与探测
+│   └── provider/              # Provider / Config 结构
 └── main.go
 ```
 
-## 📄 开源许可
+---
+
+## 开源许可
 
 MIT。CLIProxyAPI SDK 的第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
