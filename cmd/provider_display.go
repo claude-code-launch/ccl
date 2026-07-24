@@ -34,10 +34,10 @@ func providerEffortSummary(p provider.Provider) string {
 }
 
 // providerFastSummary reports the Codex fastMode state for display. Only Codex
-// Responses OAuth backends (chatgpt/copilot) honour it; other providers show
+// Responses OAuth backends (gpt/copilot) honour it; other providers show
 // "off" regardless of the stored flag.
 func providerFastSummary(p provider.Provider) string {
-	if p.FastMode && (strings.EqualFold(p.OAuthProvider, "chatgpt") || strings.EqualFold(p.OAuthProvider, "copilot")) {
+	if p.FastMode && (strings.EqualFold(p.OAuthProvider, "gpt") || strings.EqualFold(p.OAuthProvider, "chatgpt") || strings.EqualFold(p.OAuthProvider, "copilot")) {
 		return "on"
 	}
 	return "off"

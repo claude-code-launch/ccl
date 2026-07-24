@@ -23,7 +23,7 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded CLIProxyAPI OAuth backend. Supported
-	// values are chatgpt, gemini, grok, copilot, kimi, and claude. The legacy
+	// values are gpt, gemini, grok, copilot, kimi, and claude. The legacy chatgpt
 	// codex value remains readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
@@ -43,7 +43,7 @@ type Provider struct {
 	// toggle flipped by the `/fast` slash command. It routes ChatGPT/Codex
 	// subscription accounts through Codex's faster responses (≈1.5x speed) at
 	// the cost of higher usage; only meaningful for OpenAI Responses OAuth
-	// backends (chatgpt/copilot). Empty/zero leaves Claude Code's own setting.
+	// backends (gpt/copilot). Empty/zero leaves Claude Code's own setting.
 	FastMode bool `yaml:"fastMode,omitempty" mapstructure:"fastMode,omitempty"`
 }
 
@@ -57,11 +57,11 @@ type Config struct {
 }
 
 // FixedOAuthProtocol returns the public protocol label ccl persists for an
-// OAuth backend. ChatGPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → OpenAI
+// OAuth backend. GPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → OpenAI
 // Chat; Claude → Anthropic. ok is false when oauthProvider is empty or unknown.
 func FixedOAuthProtocol(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
-	case "chatgpt", "codex", "copilot":
+	case "gpt", "chatgpt", "codex", "copilot":
 		return "openai_responses", true
 	case "gemini", "grok", "kimi":
 		return "openai", true
@@ -83,11 +83,15 @@ func InferOAuthProvider(providerName, endpoint string) string {
 
 	backend := strings.ToLower(strings.TrimSpace(u.Host))
 	switch backend {
-	case "codex", "chatgpt":
+	case "codex", "chatgpt", "gpt":
 		if strings.EqualFold(strings.TrimSpace(providerName), "codex") {
 			return "codex"
 		}
-		return "chatgpt"
+		// Prefer public name "gpt"; keep "chatgpt" only when the provider key itself is legacy.
+		if strings.EqualFold(strings.TrimSpace(providerName), "chatgpt") {
+			return "chatgpt"
+		}
+		return "gpt"
 	case "antigravity", "gemini":
 		return "gemini"
 	case "xai", "grok":

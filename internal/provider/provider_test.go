@@ -41,13 +41,13 @@ func TestInferOAuthProvider(t *testing.T) {
 		want         string
 	}{
 		{name: "ChatGPT Codex backend", providerName: "chatgpt", endpoint: "oauth://codex", want: "chatgpt"},
-		{name: "renamed ChatGPT provider", providerName: "my-account", endpoint: "oauth://codex", want: "chatgpt"},
+		{name: "renamed GPT provider", providerName: "my-account", endpoint: "oauth://codex", want: "gpt"},
 		{name: "legacy Codex provider", providerName: "codex", endpoint: "oauth://codex", want: "codex"},
 		{name: "Gemini Antigravity backend", providerName: "gemini", endpoint: "oauth://antigravity", want: "gemini"},
 		{name: "Gemini public backend", providerName: "google-account", endpoint: "oauth://gemini", want: "gemini"},
 		{name: "Grok xAI backend", providerName: "grok", endpoint: "oauth://xai", want: "grok"},
 		{name: "Grok renamed provider", providerName: "my-account", endpoint: "oauth://xai", want: "grok"},
-		{name: "Copilot shares codex backend", providerName: "copilot", endpoint: "oauth://codex", want: "chatgpt"},
+		{name: "Copilot shares codex backend", providerName: "copilot", endpoint: "oauth://codex", want: "gpt"},
 		{name: "Kimi backend", providerName: "kimi", endpoint: "oauth://kimi", want: "kimi"},
 		{name: "Claude backend", providerName: "claude", endpoint: "oauth://claude", want: "claude"},
 		{name: "ordinary HTTP provider", providerName: "chatgpt", endpoint: "https://example.test/v1", want: ""},
@@ -120,7 +120,11 @@ func TestIsAnthropicType(t *testing.T) {
 }
 
 func TestFixedOAuthProtocol(t *testing.T) {
-	got, ok := provider.FixedOAuthProtocol("chatgpt")
+	got, ok := provider.FixedOAuthProtocol("gpt")
+	if !ok || got != "openai_responses" {
+		t.Fatalf("gpt = %q %v", got, ok)
+	}
+	got, ok = provider.FixedOAuthProtocol("chatgpt")
 	if !ok || got != "openai_responses" {
 		t.Fatalf("chatgpt = %q %v", got, ok)
 	}

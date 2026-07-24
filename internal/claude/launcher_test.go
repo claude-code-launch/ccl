@@ -330,7 +330,7 @@ func TestPreviewSettingsPinsFastMode(t *testing.T) {
 		Name:          "chatgpt-fast",
 		Type:          "openai_responses",
 		Endpoint:      "oauth://codex",
-		OAuthProvider: "chatgpt",
+		OAuthProvider: "gpt",
 		Model:         "gpt-test",
 		CustomModelID: "gpt-test",
 		FastMode:      true,
@@ -788,5 +788,192 @@ func TestPreviewSettingsUsesDisplayNameWithoutTechnicalSuffix(t *testing.T) {
 	}
 	if settings.Env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] != "custom (1M)" {
 		t.Fatalf("custom display = %q", settings.Env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"])
+	}
+}
+
+func TestPreviewSettingsGrokPreferredDefaultsValidatedAgainstCatalog(t *testing.T) {
+	// Preferred Grok defaults apply; missing catalog entries fall back to pool mapping.
+	p := provider.Provider{
+		Name:          "grok-pref",
+		Type:          "openai",
+		Endpoint:      "https://api.x.ai/v1",
+		APIKey:        "sk-test",
+		OAuthProvider: "grok",
+		// Catalog has opus/custom preferred ID, but not sonnet/haiku preferred IDs.
+		Model: "grok-4.5,grok-4,grok-2-mini",
+	}
+
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.5" {
+		t.Fatalf("opus = %q, want grok-4.5", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Model != "grok-4.5" {
+		t.Fatalf("custom/top-level model = %q, want grok-4.5", settings.Model)
+	}
+	// Missing preferred sonnet/haiku should be cleared, then filled from the model pool.
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "grok-4.3" {
+		t.Fatalf("missing preferred sonnet should not stay pinned to grok-4.3")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "grok-3-mini" {
+		t.Fatalf("missing preferred haiku should not stay pinned to grok-3-mini")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "" {
+		t.Fatal("sonnet should be auto-mapped from catalog after preferred clear")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "" {
+		t.Fatal("haiku should be auto-mapped from catalog after preferred clear")
+	}
+}
+
+func TestPreviewSettingsGrokUsesPreferredWhenPresent(t *testing.T) {
+	p := provider.Provider{
+		Name:          "grok-full",
+		Type:          "openai",
+		Endpoint:      "https://api.x.ai/v1",
+		APIKey:        "sk-test",
+		OAuthProvider: "grok",
+		Model:         "grok-4.5,grok-4.3,grok-3-mini,grok-2",
+	}
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.5" {
+		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "grok-4.3" {
+		t.Fatalf("sonnet = %q", settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "grok-3-mini" {
+		t.Fatalf("haiku = %q", settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+	if settings.Model != "grok-4.5" {
+		t.Fatalf("custom model = %q", settings.Model)
+	}
+}
+
+func TestPreviewSettingsGeminiPreferredDefaultsValidatedAgainstCatalog(t *testing.T) {
+	p := provider.Provider{
+		Name:          "gemini-pref",
+		Type:          "openai",
+		Endpoint:      "https://generativelanguage.googleapis.com/v1",
+		APIKey:        "sk-test",
+		OAuthProvider: "gemini",
+		// Catalog has opus/custom preferred ID, but not sonnet/haiku preferred IDs.
+		Model: "claude-opus-4-6-thinking,gemini-2.5-pro,gemini-2.0-flash",
+	}
+
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-6-thinking" {
+		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Model != "claude-opus-4-6-thinking" {
+		t.Fatalf("custom/top-level model = %q", settings.Model)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-sonnet-4-6" {
+		t.Fatalf("missing preferred sonnet should not stay pinned")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "gemini-3.1-pro-low" {
+		t.Fatalf("missing preferred haiku should not stay pinned")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "" {
+		t.Fatal("sonnet should be auto-mapped from catalog after preferred clear")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "" {
+		t.Fatal("haiku should be auto-mapped from catalog after preferred clear")
+	}
+}
+
+func TestPreviewSettingsGeminiUsesPreferredWhenPresent(t *testing.T) {
+	p := provider.Provider{
+		Name:          "gemini-full",
+		Type:          "openai",
+		Endpoint:      "https://generativelanguage.googleapis.com/v1",
+		APIKey:        "sk-test",
+		OAuthProvider: "gemini",
+		Model:         "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3.1-pro-low,gemini-2.0-flash",
+	}
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-6-thinking" {
+		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "claude-sonnet-4-6" {
+		t.Fatalf("sonnet = %q", settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "gemini-3.1-pro-low" {
+		t.Fatalf("haiku = %q", settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+	if settings.Model != "claude-opus-4-6-thinking" {
+		t.Fatalf("custom model = %q", settings.Model)
+	}
+}
+
+func TestPreviewSettingsGPTUsesPreferredWhenPresent(t *testing.T) {
+	p := provider.Provider{
+		Name:          "gpt-full",
+		Type:          "openai_responses",
+		Endpoint:      "https://api.openai.com/v1",
+		APIKey:        "sk-test",
+		OAuthProvider: "gpt",
+		Model:         "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.4-mini",
+	}
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "gpt-5.6-sol" {
+		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "gpt-5.6-terra" {
+		t.Fatalf("sonnet = %q", settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "gpt-5.6-luna" {
+		t.Fatalf("haiku = %q", settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+	if settings.Model != "gpt-5.6-sol" {
+		t.Fatalf("custom model = %q", settings.Model)
+	}
+}
+
+func TestPreviewSettingsGPTPreferredDefaultsValidatedAgainstCatalog(t *testing.T) {
+	p := provider.Provider{
+		Name:          "gpt-pref",
+		Type:          "openai_responses",
+		Endpoint:      "https://api.openai.com/v1",
+		APIKey:        "sk-test",
+		OAuthProvider: "gpt",
+		// Catalog has opus/custom preferred ID, but not sonnet/haiku preferred IDs.
+		Model: "gpt-5.6-sol,gpt-5.4,gpt-5.4-mini",
+	}
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "gpt-5.6-sol" {
+		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if settings.Model != "gpt-5.6-sol" {
+		t.Fatalf("custom/top-level model = %q", settings.Model)
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "gpt-5.6-terra" {
+		t.Fatalf("missing preferred sonnet should not stay pinned")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "gpt-5.6-luna" {
+		t.Fatalf("missing preferred haiku should not stay pinned")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "" {
+		t.Fatal("sonnet should be auto-mapped from catalog after preferred clear")
+	}
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "" {
+		t.Fatal("haiku should be auto-mapped from catalog after preferred clear")
 	}
 }

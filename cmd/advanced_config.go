@@ -375,7 +375,7 @@ func (m *AdvancedConfigModel) availabilitySmokeTestModel() string {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "chatgpt", "codex", "copilot":
+	case "gpt", "chatgpt", "codex", "copilot":
 		return lowCostProbeModel
 	default:
 		return ""
@@ -637,7 +637,7 @@ func (m *AdvancedConfigModel) maxOutputUpstreamManaged() bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "chatgpt", "codex", "copilot":
+	case "gpt", "chatgpt", "codex", "copilot":
 		// Codex-family OAuth (ChatGPT/Copilot) ignore MaxOutputTokens in StartProvider.
 		return true
 	}

@@ -252,16 +252,16 @@ func TestApplyModelDetectionResultNormalizesAnthropicEndpoint(t *testing.T) {
 
 func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testing.T) {
 	p := provider.Provider{
-		Name:          "chatgpt",
+		Name:          "gpt",
 		Type:          "openai_responses",
 		Endpoint:      "oauth://codex",
-		OAuthProvider: "chatgpt",
+		OAuthProvider: "gpt",
 	}
 	m := NewAdvancedConfigModel(&p)
 	m.configureOAuthRuntime("http://127.0.0.1:54321/v1", "ccl-session-secret")
 
 	view := m.View().Content
-	for _, want := range []string{"OAuth Credentials", "oauth/chatgpt", "Ready (this session only)"} {
+	for _, want := range []string{"OAuth Credentials", "oauth/gpt", "Ready (this session only)"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("OAuth credential page should contain %q, got %q", want, view)
 		}
@@ -300,7 +300,7 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 func TestProviderConfigurationCompleteAcceptsOAuthWithoutAPIKey(t *testing.T) {
 	oauthProvider := provider.Provider{
 		Type:          "openai_responses",
-		OAuthProvider: "chatgpt",
+		OAuthProvider: "gpt",
 		Model:         "gpt-5.6-sol",
 	}
 	if !providerConfigurationComplete(oauthProvider) {
@@ -845,7 +845,7 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 		}
 	}
 
-	p := provider.Provider{OAuthProvider: "chatgpt"}
+	p := provider.Provider{OAuthProvider: "gpt"}
 	m := NewAdvancedConfigModelAtPage1(&p, models)
 	if view := m.View().Content; !strings.Contains(view, "Uses one low-cost test request with gpt-5.4-mini") {
 		t.Fatalf("OAuth test cost hint missing from view: %q", view)

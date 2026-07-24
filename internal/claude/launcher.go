@@ -380,18 +380,23 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 	return ctx, nil
 }
 
-// resolveModel auto-discovers the model list when none is configured.
+// resolveModel seeds preferred OAuth slot defaults for empty tiers, discovers
+// the model list when none is configured, then drops preferred defaults that
+// are absent from the live catalog so auto-mapping can fill those tiers.
 // Mutates the local copy only.
 func (c *providerContext) resolveModel() error {
-	if c.provider.Model != "" {
-		return nil
-	}
-	if c.oauth != nil {
+	// Apply first so existing Grok providers without saved slot pins still get
+	// the preferred mapping before catalog validation.
+	provider.ApplyOAuthSlotDefaults(&c.provider)
+	if c.provider.Model == "" && c.oauth != nil {
 		models, err := protocol.GetOpenAIModels(c.provider.Endpoint, c.provider.APIKey)
 		if err != nil {
 			return fmt.Errorf("discover embedded CLIProxyAPI models: %w", err)
 		}
 		c.provider.Model = models
+	}
+	if c.provider.Model != "" {
+		provider.ClearUnavailablePreferredDefaults(&c.provider, modelrouting.SplitCSV(c.provider.Model))
 	}
 	return nil
 }

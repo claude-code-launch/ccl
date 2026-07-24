@@ -25,24 +25,26 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "auth <chatgpt|gemini|grok|copilot|kimi|claude> [alias]",
+		Use:   "auth <gpt|gemini|grok|copilot|kimi|claude> [alias]",
 		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate a subscription-backed provider.
 
 Without an alias, ccl derives a unique provider name from the credential
-file (e.g. "chatgpt-alice@example.com") so multiple accounts never overwrite
+file (e.g. "gpt-alice@example.com") so multiple accounts never overwrite
 each other. With an alias, that name is used as the provider key:
 
-  ccl auth chatgpt
-  ccl auth chatgpt work
+  ccl auth gpt
+  ccl auth gpt work
   ccl auth gemini personal
   ccl auth grok
   ccl auth copilot
   ccl auth kimi
   ccl auth claude
 
+"chatgpt" is still accepted as a legacy alias for "gpt".
+
 Fast mode is not controlled here. Toggle it in Claude Code with /fast,
-or on the Review & Apply page of ccl set (ChatGPT/Copilot only).
+or on the Review & Apply page of ccl set (GPT/Copilot only).
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -58,7 +60,7 @@ or on the Review & Apply page of ccl set (ChatGPT/Copilot only).
 // Claude Code fastMode toggle (Codex Responses backends only).
 func supportsFastMode(providerName string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderCopilot:
+	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy, oauthproxy.ProviderCopilot:
 		return true
 	default:
 		return false
@@ -109,7 +111,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 		return fmt.Errorf("load ccl config: %w", err)
 	}
 	p, targetExists := cfg.Providers[providerName]
-	// ChatGPT and Copilot share the Codex backend; only ChatGPT migrates the
+	// GPT and Copilot share the Codex backend; only GPT migrates the
 	// legacy "codex" OAuth provider alias when no explicit alias is used.
 	if target == oauthproxy.ProviderChatGPT && alias == "" {
 		if legacy, exists := cfg.Providers[oauthproxy.ProviderCodex]; exists && strings.EqualFold(strings.TrimSpace(legacy.OAuthProvider), oauthproxy.ProviderCodex) {
@@ -131,6 +133,10 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	if !supportsFastMode(target) {
 		p.FastMode = false
 	}
+	// Seed empty Claude slots with provider-preferred defaults (e.g. GPT/Grok/Gemini).
+	// Existing user mappings are preserved; runtime drops any preferred
+	// default that is missing from the live model catalog.
+	provider.ApplyOAuthSlotDefaults(&p)
 	cfg.Providers[providerName] = p
 	cfg.ActiveProvider = providerName
 	if err := config.Save(cfg); err != nil {
@@ -163,7 +169,7 @@ func fixedOAuthProtocol(providerName string) string {
 // provider names or SDK backend keys.
 func isReservedProviderName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderCodex,
+	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy, oauthproxy.ProviderCodex,
 		oauthproxy.ProviderGemini, "antigravity",
 		oauthproxy.ProviderGrok, "xai",
 		oauthproxy.ProviderCopilot,
@@ -176,8 +182,8 @@ func isReservedProviderName(name string) bool {
 }
 
 // derivedProviderName builds an implicit alias from the credential filename so a
-// bare `ccl auth chatgpt` still creates a distinct provider per account: e.g.
-// `codex-alice@example.com.json` → `chatgpt-alice@example.com`; if the basename
+// bare `ccl auth gpt` still creates a distinct provider per account: e.g.
+// `codex-alice@example.com.json` → `gpt-alice@example.com`; if the basename
 // offers no usable fragment we fall back to `<target>-<basename>`.
 func derivedProviderName(target, credentialPath string) string {
 	base := filepath.Base(credentialPath)

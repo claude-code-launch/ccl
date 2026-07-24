@@ -65,7 +65,7 @@ ccl doctor
 
 ```bash
 # 任选其一
-ccl auth chatgpt    # ChatGPT / Codex
+ccl auth gpt        # GPT / Codex (OpenAI 订阅)
 ccl auth gemini     # Google Gemini
 ccl auth grok       # xAI Grok
 ccl auth copilot    # GitHub Copilot
@@ -79,8 +79,8 @@ ccl
 登录成功后，`ccl` 会自动创建并切换到对应 provider。多账号可以加别名：
 
 ```bash
-ccl auth chatgpt work
-ccl auth chatgpt personal
+ccl auth gpt work
+ccl auth gpt personal
 ccl use work
 ```
 
@@ -133,7 +133,7 @@ ccl bypass off      # 关闭
 | 不知道从哪开始 | 有订阅就 `ccl auth ...`；有 API Key 就 `ccl set` |
 | 启动后模型不对 | `ccl map` 或 `ccl set` 重新映射 Opus / Sonnet / Haiku |
 | 连不上 / 鉴权失败 | `ccl doctor`，再 `ccl preview` 看注入了什么环境变量 |
-| 多个账号互相覆盖 | 登录时加别名：`ccl auth chatgpt work` |
+| 多个账号互相覆盖 | 登录时加别名：`ccl auth gpt work` |
 | 想换中英文界面 | `ccl lang zh` / `ccl lang en` |
 | 旧文档里的 `ccl auto` | 已更名为 **`ccl bypass`**，配置字段是 `bypass_mode` |
 
@@ -161,7 +161,7 @@ ccl bypass off      # 关闭
    配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
 
 6. **订阅 OAuth 一键接入**  
-   `chatgpt` / `gemini` / `grok` / `copilot` / `kimi` / `claude`，支持多账号别名；token 会在运行时刷新。
+   `gpt` / `gemini` / `grok` / `copilot` / `kimi` / `claude`，支持多账号别名；token 会在运行时刷新。
 
 ---
 
@@ -190,7 +190,7 @@ ccl bypass off      # 关闭
 ### `ccl auth` — 登录订阅账号
 
 ```bash
-ccl auth chatgpt
+ccl auth gpt
 ccl auth gemini
 ccl auth grok
 ccl auth copilot
@@ -198,17 +198,17 @@ ccl auth kimi
 ccl auth claude
 
 # 多账号别名
-ccl auth chatgpt work
+ccl auth gpt work
 ccl auth gemini personal
 
 # 可选
-ccl auth chatgpt --no-browser
-ccl auth chatgpt --callback-port 1455
+ccl auth gpt --no-browser
+ccl auth gpt --callback-port 1455
 ```
 
 | provider | backend | 协议 | 登录方式 |
 | --- | --- | --- | --- |
-| `chatgpt` | codex | `openai(responses)` | OpenAI OAuth 回调 |
+| `gpt` | codex | `openai(responses)` | OpenAI OAuth 回调 |
 | `copilot` | codex | `openai(responses)` | GitHub device-code |
 | `gemini` | antigravity | `openai(chat)` | Google/Antigravity OAuth |
 | `grok` | xai | `openai(chat)` | xAI device-code |
@@ -217,10 +217,24 @@ ccl auth chatgpt --callback-port 1455
 
 说明：
 
-- 不带别名时，会从凭据文件名派生 provider 名（如 `chatgpt-alice@example.com`），避免多账号互相覆盖。
+- 不带别名时，会从凭据文件名派生 provider 名（如 `gpt-alice@example.com`），避免多账号互相覆盖。
 - 每条 provider 通过 `oauthAccountCredential` 绑定具体账号文件。
 - 不再提供 `--protocol` 覆盖；各 OAuth backend 协议固定。
-- **Fast mode**（约 1.5x 速度、更高用量）仅 `chatgpt` / `copilot` 有意义：可在 `ccl set` 的「核对并应用 / Review & Apply」页编辑，也可在 Claude Code 内用 `/fast` 开关。
+- 旧版 `ccl auth chatgpt` 仍可用，会规范为 `gpt`。
+- **GPT 默认槽位**（空槽位时写入；已有手动映射会保留；`chatgpt` 为兼容别名）：
+  - Opus / Custom → `gpt-5.6-sol`
+  - Sonnet → `gpt-5.6-terra`
+  - Haiku → `gpt-5.6-luna`
+- **Grok 默认槽位**（空槽位时写入；已有手动映射会保留）：
+  - Opus / Custom → `grok-4.5`
+  - Sonnet → `grok-4.3`
+  - Haiku → `grok-3-mini`
+- **Gemini 默认槽位**（空槽位时写入；已有手动映射会保留）：
+  - Opus / Custom → `claude-opus-4-6-thinking`
+  - Sonnet → `claude-sonnet-4-6`
+  - Haiku → `gemini-3.1-pro-low`
+- 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。
+- **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` / `copilot` 有意义：可在 `ccl set` 的「核对并应用 / Review & Apply」页编辑，也可在 Claude Code 内用 `/fast` 开关。
 
 ### `ccl set` — 添加 / 更新 Provider
 
@@ -341,11 +355,11 @@ providers:
     endpoint: https://token.sensenova.cn
     apikey: sk-xxx
     anthropicAuth: bearer
-  chatgpt:
-    name: chatgpt
+  gpt:
+    name: gpt
     type: openai_responses
     endpoint: oauth://codex
-    oauthProvider: chatgpt
+    oauthProvider: gpt
 ```
 
 字段要点：
@@ -376,7 +390,7 @@ ccl
 ### ChatGPT 订阅 + 本地 API 网关并存
 
 ```bash
-ccl auth chatgpt work
+ccl auth gpt work
 ccl set openrouter
 ccl ls
 ccl use work          # 切到订阅

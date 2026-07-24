@@ -22,7 +22,8 @@ import (
 func TestBackendProviderAliases(t *testing.T) {
 	tests := map[string]string{
 		"codex":   "codex",
-		"chatgpt": "codex",
+		"gpt": "codex",
+			"chatgpt": "codex",
 		"copilot": "codex",
 		"gemini":  "antigravity",
 		"grok":    "xai",
@@ -46,6 +47,9 @@ func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}
+	}
+	if got, err := ValidateLoginProvider(ProviderChatGPTLegacy); err != nil || got != ProviderChatGPT {
+		t.Fatalf("ValidateLoginProvider(chatgpt legacy) = %q, %v; want %q", got, err, ProviderChatGPT)
 	}
 	for _, name := range []string{ProviderCodex, "antigravity", "xai", ""} {
 		if _, err := ValidateLoginProvider(name); err == nil {

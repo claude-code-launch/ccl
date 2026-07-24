@@ -15,7 +15,9 @@ import (
 const (
 	ProviderCodex   = "codex"
 	ProviderGemini  = "gemini"
-	ProviderChatGPT = "chatgpt"
+	ProviderChatGPT = "gpt"
+	// ProviderChatGPTLegacy is accepted by auth for older configs/docs.
+	ProviderChatGPTLegacy = "chatgpt"
 	ProviderGrok    = "grok"
 	ProviderCopilot = "copilot"
 	ProviderKimi    = "kimi"
@@ -112,7 +114,7 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 
 // ValidateLoginProvider returns the canonical public OAuth provider name.
 // Codex remains an internal backend and a legacy runtime value, but new logins
-// use the ChatGPT name because both routes authenticate the same account.
+// use the public GPT name (model family) because both routes authenticate the same account.
 // Copilot reuses the Codex backend but logs in through the GitHub-backed device
 // flow, so it is exposed as its own public provider.
 func ValidateLoginProvider(providerName string) (string, error) {
@@ -120,14 +122,17 @@ func ValidateLoginProvider(providerName string) (string, error) {
 	switch target {
 	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderClaude:
 		return target, nil
+	case ProviderChatGPTLegacy:
+		// Keep accepting "chatgpt" as a login alias; canonicalize to "gpt".
+		return ProviderChatGPT, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use chatgpt, gemini, grok, copilot, kimi, or claude)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, kimi, or claude)", providerName)
 	}
 }
 
 func BackendProvider(providerName string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case ProviderCodex, ProviderChatGPT, ProviderCopilot:
+	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy, ProviderCopilot:
 		return ProviderCodex, nil
 	case ProviderGemini:
 		return "antigravity", nil

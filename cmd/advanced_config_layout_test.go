@@ -49,8 +49,8 @@ func TestTruncateMiddleEmoji(t *testing.T) {
 }
 
 func TestReviewShowsFastStatus(t *testing.T) {
-	chatgpt := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
-	chatgpt.OAuthProvider = "chatgpt"
+	chatgpt := providerFrom("gpt", "https://api.openai.com/v1", "openai_responses")
+	chatgpt.OAuthProvider = "gpt"
 	chatgpt.FastMode = true
 	m := NewAdvancedConfigModel(&chatgpt)
 	m.page = 4
@@ -76,8 +76,8 @@ func TestReviewShowsFastStatus(t *testing.T) {
 }
 
 func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
-	chatgpt := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
-	chatgpt.OAuthProvider = "chatgpt"
+	chatgpt := providerFrom("gpt", "https://api.openai.com/v1", "openai_responses")
+	chatgpt.OAuthProvider = "gpt"
 	m := NewAdvancedConfigModel(&chatgpt)
 	if !m.maxOutputUpstreamManaged() {
 		t.Fatal("ChatGPT OAuth should treat max output as upstream-managed")
