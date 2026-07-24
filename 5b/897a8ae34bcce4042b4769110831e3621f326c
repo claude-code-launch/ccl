@@ -1,0 +1,64 @@
+cmd/provider_display.go
+  s_6e6b456adcfd5b::t_8439c6adb10a12 37,40
+internal/provider/provider.go
+  s_6e6b456adcfd5b::t_8439c6adb10a12 26,46,60,64,86,90-94
+internal/oauthproxy/auth_test.go
+  s_6e6b456adcfd5b::t_45df0983a29116 25-26,51-52
+  s_6e6b456adcfd5b::t_f316e16bca5e4a 53
+cmd/set_test.go
+  s_6e6b456adcfd5b::t_45df0983a29116 255,258,264,303,848
+internal/provider/provider_test.go
+  s_6e6b456adcfd5b::t_45df0983a29116 44,50,123-127
+cmd/advanced_config_layout_test.go
+  s_6e6b456adcfd5b::t_45df0983a29116 52-53,79-80
+internal/provider/oauth_defaults_test.go
+  s_6e6b456adcfd5b::t_45df0983a29116 9-20,29-30
+  s_6e6b456adcfd5b::t_59bee69ca618f6 1-8,21-28,31-33,45-52,64-91
+  s_6e6b456adcfd5b::t_f21e038981b174 34-44,53-63
+cmd/auth.go
+  s_6e6b456adcfd5b::t_cdf35e231adeec 137-139
+  s_6e6b456adcfd5b::t_8439c6adb10a12 28,33,36-37,44-45,47,63,114,136,172,185-186
+README.md
+  s_6e6b456adcfd5b::t_d30f37f4304608 223-227
+  s_6e6b456adcfd5b::t_98238029ce9ec5 68,82-83,136,164,193,201,205-206,211,220,228-237,358-359,362,393
+internal/claude/launcher_test.go
+  s_6e6b456adcfd5b::t_45df0983a29116 333,855-977
+  s_6e6b456adcfd5b::t_77b43637074176 793-854,978-979
+cmd/advanced_config.go
+  s_6e6b456adcfd5b::t_8439c6adb10a12 378,640
+cmd/auth_test.go
+  s_6e6b456adcfd5b::t_e85d60cbf79d69 245-284
+  s_6e6b456adcfd5b::t_45df0983a29116 47,54,56,86,93-94,151-190,201,371-372,491,502,515-516,524-525,640,665-713
+  s_6e6b456adcfd5b::t_b4cff2c814cec3 100
+internal/provider/oauth_defaults.go
+  s_6e6b456adcfd5b::t_0e2347bc320d34 1-13,19-22,26-119
+  s_6e6b456adcfd5b::t_b70cc65895b69f 23-25
+  s_6e6b456adcfd5b::t_8439c6adb10a12 14-18
+internal/claude/launcher.go
+  s_6e6b456adcfd5b::t_32ed408fccc8e2 383-385,388-390
+  s_6e6b456adcfd5b::t_cd64df92066bac 391,398-399
+  s_6e6b456adcfd5b::t_18cbabf0173f34 400
+internal/oauthproxy/auth.go
+  s_6e6b456adcfd5b::t_42bce28897dd23 18-20,117,125-127,129,135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "5b897a8ae34bcce4042b4769110831e3621f326c",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_6e6b456adcfd5b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8bbd74f5-75fd-4126-a674-d4464e6d255f",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
