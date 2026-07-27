@@ -1,0 +1,105 @@
+README.md
+  s_edce7043b8653d::t_b4fc986ec1da2c 296
+  s_edce7043b8653d::t_aacdb593493a13 318-321,347,366,368,388
+  s_edce7043b8653d::t_c490bb6517ce42 286-289,297-298,301
+  s_edce7043b8653d::t_13df8255068995 344-345
+  s_edce7043b8653d::t_3424900807e850 300
+  s_edce7043b8653d::t_e8c91411990d36 275
+  s_edce7043b8653d::t_e948437b5831b3 293
+  s_1449d0559569fa::t_ee91c7545c4ad8 190-199
+  s_edce7043b8653d::t_32284c8a143bf3 292
+  s_edce7043b8653d::t_2f0313636004e4 302,305,307-308,323-326,338-339,341,369-373,375-380,382,391,644
+  s_edce7043b8653d::t_86346fbc7381a1 306,309-317,327-337,342-343,346,349-365,384-387
+  s_edce7043b8653d::t_95d309f1f26c93 249-272,276-285,290-291,294-295,299,303,516-531,540,622-624
+  s_edce7043b8653d::t_c0cd8aaaab9247 304,322,348,367,374,381,383,389-390,625
+  s_edce7043b8653d::t_53945271d6ed0c 273-274
+  s_edce7043b8653d::t_64205d1a6f55ef 340
+  s_1449d0559569fa::t_d72220eabe3727 627
+cmd/cmd_test.go
+  s_1449d0559569fa::t_2227a143fdef85 52
+  s_edce7043b8653d::t_7abe4479dee0a2 270-296
+internal/claude/launcher.go
+  s_1449d0559569fa::t_f967f66a446fa3 12
+  s_edce7043b8653d::t_a4a51fce8ee3d2 358-363,366
+  s_1449d0559569fa::t_c5b973977716e0 496-517
+  s_edce7043b8653d::t_6bbff647f33ab0 14,365,387-402
+  s_edce7043b8653d::t_4b0d151d9c178e 364
+  s_edce7043b8653d::t_146f0bbc9b7fa9 403-404
+cmd/debug.go
+  s_1449d0559569fa::t_50931efbaceb11 1-112
+internal/oauthproxy/auth_test.go
+  s_edce7043b8653d::t_34b54de956d377 254-264,266-270,322-323
+  s_edce7043b8653d::t_cd581654574425 216-253
+  s_edce7043b8653d::t_2f32fe85da205f 265
+  s_edce7043b8653d::t_3e8141b0315b3c 26-27
+  s_edce7043b8653d::t_2412c98c6993a7 15,271-321
+internal/oauthproxy/debug.go
+  s_1449d0559569fa::t_11c379f41d4cec 1-16,21-172
+  s_1449d0559569fa::t_b5ee049986e714 17-20
+cmd/auth.go
+  s_edce7043b8653d::t_6d333f5ee80482 124,140-159
+  s_edce7043b8653d::t_2ae60afb119e4c 160-161
+internal/oauthproxy/debug_test.go
+  s_1449d0559569fa::t_52a7406eb5ba67 1-64,66-76,80-98
+  s_1449d0559569fa::t_4be510b6e826a8 65
+  s_1449d0559569fa::t_d8dc15cc26726c 77-79
+cmd/auth_test.go
+  s_edce7043b8653d::t_ef5d10a0495f16 714-726
+cmd/debug_test.go
+  s_1449d0559569fa::t_da04cd7cf190e7 1-58
+internal/provider/provider.go
+  s_edce7043b8653d::t_a4a51fce8ee3d2 59-60
+  s_1449d0559569fa::t_d39d9fa1a694f7 63-68
+  s_edce7043b8653d::t_1a4e0e6d55b859 33-40,69-78
+internal/oauthproxy/runtime.go
+  s_1449d0559569fa::t_f2a4476bd4b04b 868-877
+  s_edce7043b8653d::t_5df5daa80d8e19 72-76,80-83,87,189-196,213-217,242,260,262-263,296,298,318-319,321,323-327,329-330,343,348-350,392,862,938-954,963-966
+  s_1449d0559569fa::t_09e3c91542987a 393-394
+  s_edce7043b8653d::t_68ba25dbf8abad 84-86,183-184,197-200,203-212,218-241,243,247-249,255,261,297,320,322,328,331,385-391,395
+  s_edce7043b8653d::t_a4a51fce8ee3d2 180-182,185
+  s_edce7043b8653d::t_4f176c028e2b3e 19,43,811-861
+  s_1449d0559569fa::t_0df8549e3655ef 442-447
+  s_1449d0559569fa::t_dbe343b5318274 544-548
+  s_edce7043b8653d::t_1935c69f12295e 863
+cmd/root.go
+  s_1449d0559569fa::t_68f3fb9c0393e5 96-100
+  s_1449d0559569fa::t_c6fb63cde774b3 11
+  s_edce7043b8653d::t_669182a3dc0832 4,52-55
+cmd/oauth_runtime.go
+  s_edce7043b8653d::t_6bbff647f33ab0 8,26,63-78
+  s_edce7043b8653d::t_4b0d151d9c178e 25
+  s_edce7043b8653d::t_a4a51fce8ee3d2 19-24,27
+  s_edce7043b8653d::t_abc15b24e7e8bb 79-80
+go.mod
+  s_edce7043b8653d::t_65359ec521c167 9,14
+  s_edce7043b8653d::t_7ee33aa3734016 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3181b59cae24cf0556d1f9ed3442c2b2a10e5c4e",
+  "prompts": {},
+  "humans": {
+    "h_1d8661cb669d01": {
+      "author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_1449d0559569fa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80a198e1-cec9-420f-a1f6-9b23ea6ccb7d",
+        "model": "grok-4.5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_edce7043b8653d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7f20-1b84-7561-8964-12646b8e9156",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
