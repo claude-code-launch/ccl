@@ -25,26 +25,28 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "auth <gpt|gemini|grok|copilot|kimi|claude> [alias]",
+		Use:   "oauth <gpt|gemini|grok|copilot|kimi|claude> [alias]",
+		Aliases: []string{"auth"},
 		Short: "Authenticate a subscription-backed provider",
-		Long: `Authenticate a subscription-backed provider.
+		Long: `Authenticate subscription-backed providers and manage OAuth credentials.
 
-Without an alias, ccl derives a unique provider name from the credential
-file (e.g. "gpt-alice@example.com") so multiple accounts never overwrite
-each other. With an alias, that name is used as the provider key:
+Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
-  ccl auth gpt
-  ccl auth gpt work
-  ccl auth gemini personal
-  ccl auth grok
-  ccl auth copilot
-  ccl auth kimi
-  ccl auth claude
+  ccl oauth gpt                 # ChatGPT / Codex subscription
+  ccl oauth gpt work            # same backend, provider name "work"
+  ccl oauth gemini|grok|copilot|kimi|claude
 
-"chatgpt" is still accepted as a legacy alias for "gpt".
+Subcommands:
 
-Fast mode is not controlled here. Toggle it in Claude Code with /fast,
-or on the Review & Apply page of ccl set (GPT/Copilot only).
+  ccl oauth import <file|dir>   Import existing CPA credential JSON
+  ccl oauth group [name]        Multi-account token pool on one backend
+  ccl oauth sync                Reconcile config and delete invalid accounts
+
+Notes:
+  - Alias "auth" still works: ccl auth gpt
+  - Legacy "chatgpt" is accepted and normalized to "gpt"
+  - Fast mode (gpt/copilot): Claude /fast or ccl set Review & Apply
+  - Flags: --no-browser, --callback-port (ChatGPT/Claude)
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -189,7 +191,7 @@ func isReservedProviderName(name string) bool {
 }
 
 // derivedProviderName builds an implicit alias from the credential filename so a
-// bare `ccl auth gpt` still creates a distinct provider per account: e.g.
+// bare `ccl oauth gpt` still creates a distinct provider per account: e.g.
 // `codex-alice@example.com.json` → `gpt-alice@example.com`; if the basename
 // offers no usable fragment we fall back to `<target>-<basename>`.
 func derivedProviderName(target, credentialPath string) string {
@@ -206,5 +208,8 @@ func derivedProviderName(target, credentialPath string) string {
 }
 
 func init() {
+	authCmd.AddCommand(newOAuthSyncCommand())
 	rootCmd.AddCommand(authCmd)
+	// Compatibility: bare `ccl sync` still works.
+	rootCmd.AddCommand(newOAuthSyncCommand())
 }

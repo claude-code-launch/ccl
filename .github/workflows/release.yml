@@ -41,10 +41,17 @@ jobs:
       - name: Build Binaries
         env:
           CGO_ENABLED: 0
+          # Optional override of the built-in public Desktop OAuth client secret.
+          # The default is compiled into source; set GOOGLE_OAUTH_CLIENT_SECRET only
+          # when rotating the Google Cloud client without a source change.
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
         run: |
           mkdir -p dist
           VERSION="${{ github.ref_name }}"
           LDFLAGS="-s -w -X github.com/claude-code-launch/ccl/cmd.Version=${VERSION}"
+          if [[ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ]]; then
+            LDFLAGS="$LDFLAGS -X github.com/claude-code-launch/ccl/internal/cloudsync.googleOAuthClientSecret=${GOOGLE_OAUTH_CLIENT_SECRET}"
+          fi
           # 💡 注意：为了对齐 Node.js 的 process.platform，Windows 这里统一命名为 win32
           pids=()
           GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/ccl-darwin-amd64 main.go & pids+=($!)

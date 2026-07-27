@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"gopkg.in/yaml.v3"
@@ -55,7 +56,8 @@ func migrateLegacyConfig(path string) error {
 
 func Load() (*provider.Config, error) {
 	cfg := &provider.Config{
-		Providers: make(map[string]provider.Provider),
+		Providers:  make(map[string]provider.Provider),
+		AuthGroups: make(map[string]provider.AuthGroup),
 	}
 
 	path, err := configPath()
@@ -82,6 +84,9 @@ func Load() (*provider.Config, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]provider.Provider)
 	}
+	if cfg.AuthGroups == nil {
+		cfg.AuthGroups = make(map[string]provider.AuthGroup)
+	}
 	dirty := false
 	for name, p := range cfg.Providers {
 		changed := false
@@ -97,8 +102,18 @@ func Load() (*provider.Config, error) {
 			p.Type = fixed
 			changed = true
 		}
+		if groupName := strings.TrimSpace(p.AuthGroup); groupName != "" {
+			if group, ok := cfg.AuthGroups[groupName]; ok {
+				// Preserve nil versus non-nil: an empty group must not turn into
+				// the legacy "load every backend credential" behavior.
+				p.OAuthAccountCredentials = append([]string{}, group.Credentials...)
+			} else {
+				p.OAuthAccountCredentials = []string{}
+			}
+		}
+		// Always retain runtime-only group hydration in the returned config.
+		cfg.Providers[name] = p
 		if changed {
-			cfg.Providers[name] = p
 			dirty = true
 		}
 	}

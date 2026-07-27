@@ -262,6 +262,7 @@ func (s *providerTokenStore) List(ctx context.Context) ([]*coreauth.Auth, error)
 				continue
 			}
 		}
+		hydrateAuthHealthFromMetadata(auth)
 		filtered = append(filtered, auth)
 	}
 	return filtered, nil
@@ -271,7 +272,106 @@ func (s *providerTokenStore) Save(ctx context.Context, auth *coreauth.Auth) (str
 	if auth != nil && !strings.EqualFold(strings.TrimSpace(auth.Provider), s.backend) {
 		return "", fmt.Errorf("refuse to persist %q credentials in %q OAuth runtime", auth.Provider, s.backend)
 	}
+	// CPA's MarkResult keeps quota/unavailable on Auth fields; FileTokenStore only
+	// serializes Metadata (+ token storage). Mirror runtime health into Metadata so
+	// exhausted accounts survive restarts and doctor/offline scans can see them.
+	enrichAuthMetadataForPersist(auth)
 	return s.store.Save(ctx, auth)
+}
+
+// enrichAuthMetadataForPersist copies CPA runtime health into auth.Metadata so
+// token-file saves retain quota/unavailable markers across process restarts.
+func enrichAuthMetadataForPersist(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["disabled"] = auth.Disabled
+	auth.Metadata["unavailable"] = auth.Unavailable
+	if status := strings.TrimSpace(string(auth.Status)); status != "" {
+		auth.Metadata["status"] = status
+	}
+	if msg := strings.TrimSpace(auth.StatusMessage); msg != "" {
+		auth.Metadata["status_message"] = msg
+	} else if !auth.Unavailable && !auth.Quota.Exceeded {
+		delete(auth.Metadata, "status_message")
+	}
+	if auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel != 0 {
+		quota := map[string]any{
+			"exceeded": auth.Quota.Exceeded,
+		}
+		if reason := strings.TrimSpace(auth.Quota.Reason); reason != "" {
+			quota["reason"] = reason
+		}
+		if !auth.Quota.NextRecoverAt.IsZero() {
+			quota["next_recover_at"] = auth.Quota.NextRecoverAt.UTC().Format(time.RFC3339)
+		}
+		if auth.Quota.BackoffLevel != 0 {
+			quota["backoff_level"] = auth.Quota.BackoffLevel
+		}
+		auth.Metadata["quota"] = quota
+	} else if !auth.Unavailable {
+		// Clear stale quota markers when the account recovered.
+		delete(auth.Metadata, "quota")
+	}
+	if !auth.NextRetryAfter.IsZero() {
+		auth.Metadata["next_retry_after"] = auth.NextRetryAfter.UTC().Format(time.RFC3339)
+	} else {
+		delete(auth.Metadata, "next_retry_after")
+	}
+}
+
+// hydrateAuthHealthFromMetadata restores runtime health fields that CPA stores
+// only on Auth (not rehydrated by FileTokenStore on load).
+func hydrateAuthHealthFromMetadata(auth *coreauth.Auth) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	if unavailable, ok := auth.Metadata["unavailable"].(bool); ok {
+		auth.Unavailable = unavailable
+	}
+	if status, ok := auth.Metadata["status"].(string); ok && strings.TrimSpace(status) != "" {
+		auth.Status = coreauth.Status(strings.TrimSpace(status))
+	}
+	if msg, ok := auth.Metadata["status_message"].(string); ok {
+		auth.StatusMessage = strings.TrimSpace(msg)
+	}
+	if raw, ok := auth.Metadata["quota"].(map[string]any); ok {
+		if exceeded, ok := raw["exceeded"].(bool); ok {
+			auth.Quota.Exceeded = exceeded
+		}
+		if reason, ok := raw["reason"].(string); ok {
+			auth.Quota.Reason = strings.TrimSpace(reason)
+		}
+		if recoverAt, ok := raw["next_recover_at"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(recoverAt)); err == nil {
+				auth.Quota.NextRecoverAt = t
+			}
+		}
+		switch v := raw["backoff_level"].(type) {
+		case float64:
+			auth.Quota.BackoffLevel = int(v)
+		case int:
+			auth.Quota.BackoffLevel = v
+		}
+	}
+	if retryAfter, ok := auth.Metadata["next_retry_after"].(string); ok {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(retryAfter)); err == nil {
+			auth.NextRetryAfter = t
+		}
+	}
+	// Metadata-only quota markers should also surface as unavailable for scheduling.
+	if auth.Quota.Exceeded && !auth.Unavailable {
+		auth.Unavailable = true
+		if auth.Status == "" || auth.Status == coreauth.StatusActive {
+			auth.Status = coreauth.StatusError
+		}
+		if auth.StatusMessage == "" {
+			auth.StatusMessage = "quota exhausted"
+		}
+	}
 }
 
 func (s *providerTokenStore) Delete(ctx context.Context, id string) error {
@@ -346,9 +446,9 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 	}
 	if !found {
 		if restrictToFiles && len(credentialFiles) == 0 {
-			return nil, fmt.Errorf("OAuth group for %s has no credentials; edit it with `ccl auth group` or run `ccl sync`", providerName)
+			return nil, fmt.Errorf("OAuth group for %s has no credentials; edit it with `ccl oauth group` or run `ccl oauth sync`", providerName)
 		}
-		return nil, fmt.Errorf("no %s credentials found; run `ccl auth %s` first", backend, providerName)
+		return nil, fmt.Errorf("no %s credentials found; run `ccl oauth %s` first", backend, providerName)
 	}
 
 	port, err := availablePort()
@@ -982,6 +1082,15 @@ func hasCredentials(authDir, backend string, credentialFiles []string, restrictT
 }
 
 func (r *Runtime) Endpoint() string { return r.endpoint }
+
+// ListAuths returns a snapshot of CPA core-manager auths currently loaded in
+// this runtime (already filtered to the OAuth backend / group membership).
+func (r *Runtime) ListAuths() []*coreauth.Auth {
+	if r == nil || r.coreManager == nil {
+		return nil
+	}
+	return r.coreManager.List()
+}
 
 // ClaudeBaseURL is the origin Claude Code uses before appending /v1/messages.
 // Endpoint includes /v1 because ccl's model and diagnostics clients expect an

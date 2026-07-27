@@ -1819,6 +1819,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.usesOAuth() {
 			body.WriteString(m.renderPageHeader(locale.T("OAuth 认证配置", "OAuth Credentials"), "OAuth"))
 			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Provider", cyanText.Render(m.p.OAuthProvider)))
+			if m.p.AuthGroup != "" {
+				body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Group", cyanText.Render(m.p.AuthGroup)))
+				body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Accounts", cyanText.Render(fmt.Sprintf("%d", len(m.p.OAuthAccountCredentials)))))
+			}
 			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Fast", cyanText.Render(providerFastSummary(*m.p))))
 			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
 			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
@@ -2058,6 +2062,9 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
 		}
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
+		if m.p.AuthGroup != "" {
+			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Group", availableStyle.Render(m.p.AuthGroup)))
+		}
 		// FastMode (Claude Code /fast) for ChatGPT/Copilot OAuth; editable on review.
 		if m.canEditFastMode() {
 			prefix := "  "

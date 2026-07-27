@@ -94,10 +94,12 @@ func RunProviderSet(args []string) error {
 	}
 
 	var p provider.Provider
+	var original provider.Provider
 	isUpdate := false
 	if targetName != "" {
 		if existing, exists := cfg.Providers[targetName]; exists {
 			p = existing
+			original = existing
 			isUpdate = true
 		} else {
 			p.Name = targetName
@@ -111,7 +113,7 @@ func RunProviderSet(args []string) error {
 	// 🚀 运行基于特定域 v2 架构的超级大面板
 	m := NewAdvancedConfigModel(&p)
 	if p.OAuthProvider != "" {
-		runtimeProvider, cleanup, err := prepareProviderRuntime(p)
+		runtimeProvider, _, cleanup, err := prepareProviderRuntime(p)
 		if err != nil {
 			return fmt.Errorf("prepare OAuth provider for configuration: %w", err)
 		}
@@ -127,6 +129,12 @@ func RunProviderSet(args []string) error {
 
 	updatedModel := finalModel.(*AdvancedConfigModel)
 	p = *updatedModel.p
+	if original.AuthGroup != "" {
+		p, err = preserveGroupBindingAfterSet(cfg, original, p)
+		if err != nil {
+			return err
+		}
+	}
 	setDebugf(
 		"advanced config finished name=%q endpoint_empty=%t api_key_len=%d type=%q model_count=%d effort=%q slots=%s one_m=%s page=%d cursor=%d detecting=%t detection_error=%v model_pool_count=%d",
 		p.Name,
@@ -207,6 +215,19 @@ func RunProviderSet(args []string) error {
 		fmt.Printf("✅ %s %q\n", locale.T("已添加 Provider", "Successfully added provider"), p.Name)
 	}
 	return nil
+}
+
+func preserveGroupBindingAfterSet(cfg *provider.Config, original, updated provider.Provider) (provider.Provider, error) {
+	group, exists := cfg.AuthGroups[original.AuthGroup]
+	if !exists {
+		return provider.Provider{}, fmt.Errorf("auth group %q no longer exists; run `ccl sync`", original.AuthGroup)
+	}
+	updated.AuthGroup = original.AuthGroup
+	updated = configureOAuthProvider(updated, original.Name, group.OAuthProvider, "")
+	updated.AuthGroup = original.AuthGroup
+	updated.OAuthAccountCredential = ""
+	updated.OAuthAccountCredentials = append([]string{}, group.Credentials...)
+	return updated, nil
 }
 
 func providerConfigurationComplete(p provider.Provider) bool {

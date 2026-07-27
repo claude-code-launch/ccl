@@ -34,6 +34,9 @@ Show status:
 Enable or disable:
   ccl debug on
   ccl debug off
+
+When a ccl-launched Claude session exits with debug enabled, ccl prints:
+  [ccl debug] session ended · log: <path>
 `,
 		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {

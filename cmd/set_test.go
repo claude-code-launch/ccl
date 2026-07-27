@@ -297,6 +297,53 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 	}
 }
 
+func TestGroupAdvancedConfigShowsAndPreservesGroupBinding(t *testing.T) {
+	original := provider.Provider{
+		Name:                    "grok-pool",
+		Type:                    "openai",
+		Endpoint:                "oauth://xai",
+		OAuthProvider:           "grok",
+		AuthGroup:               "grok-team",
+		OAuthAccountCredentials: []string{"xai-a.json", "xai-b.json"},
+		SonnetModel:             "grok-shared-model",
+	}
+	rendered := original
+	m := NewAdvancedConfigModel(&rendered)
+	m.configureOAuthRuntime("http://127.0.0.1:54321/v1", "temporary")
+	view := m.View().Content
+	for _, want := range []string{"Group", "grok-team", "Accounts", "2", "group(2)"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("group set page should contain %q, got %q", want, view)
+		}
+	}
+
+	updated := original
+	updated.Name = "accidental-rename"
+	updated.AuthGroup = ""
+	updated.OAuthProvider = "gpt"
+	updated.Endpoint = "temporary"
+	updated.APIKey = "temporary"
+	updated.SonnetModel = "new-shared-model"
+	cfg := &provider.Config{AuthGroups: map[string]provider.AuthGroup{
+		"grok-team": {
+			OAuthProvider: "grok",
+			Credentials:   []string{"xai-a.json", "xai-b.json"},
+		},
+	}}
+	got, err := preserveGroupBindingAfterSet(cfg, original, updated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "grok-pool" || got.AuthGroup != "grok-team" ||
+		got.OAuthProvider != "grok" || got.Endpoint != "oauth://xai" ||
+		got.APIKey != "" || got.SonnetModel != "new-shared-model" {
+		t.Fatalf("group binding after set = %+v", got)
+	}
+	if len(got.OAuthAccountCredentials) != 2 || got.OAuthAccountCredential != "" {
+		t.Fatalf("group member binding after set = %+v", got)
+	}
+}
+
 func TestProviderConfigurationCompleteAcceptsOAuthWithoutAPIKey(t *testing.T) {
 	oauthProvider := provider.Provider{
 		Type:          "openai_responses",

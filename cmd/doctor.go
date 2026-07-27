@@ -2,107 +2,187 @@ package cmd
 
 import (
 	"bytes"
+
+	"charm.land/lipgloss/v2"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/cloudsync"
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 
-var doctorCmd = newDoctorCommand("doctor")
+var doctorCmd = newDoctorCommand()
 
-func newDoctorCommand(use string) *cobra.Command {
+func newDoctorCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   use,
-		Short: "Check system prerequisites and provider connectivity",
+		Use:   "doctor",
+		Short: "Show provider status and check connectivity",
+		Long: `Show environment prerequisites, active provider status, and connectivity.
+
+For normal API-key providers it prints the Review & Apply essentials
+(endpoint, masked key, protocol, runtime, slot mappings). For OAuth groups
+it also summarizes CPA credential health: healthy, invalid/missing, and
+quota-exhausted members.
+
+Model pool (provider.Model) is an optional candidate list used by ccl set/map
+for discovery and bulk checks. Claude Code actually uses the slot mappings
+(Opus/Sonnet/Haiku/Custom/Subagent). An empty pool with filled slots is normal.
+
+Note: root "ccl status" is cloud sync status (see "ccl cloud status"), not this command.
+For live request failures enable "ccl debug on" and check the log path printed
+when the Claude session ends (default /tmp/ccl-debug.log).
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor()
 		},
 	}
 }
 
+
+func doctorHeader(title string) {
+	fmt.Println(titleStyle.Foreground(colorAccent).Render(title))
+	fmt.Println(grayText.Render(strings.Repeat("─", 44)))
+}
+
+func doctorSection(title string) {
+	fmt.Println()
+	fmt.Println(titleStyle.Foreground(colorSecondary).Render("▸ " + title))
+}
+
+func doctorKV(label, value string) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "-"
+	}
+	fmt.Printf("  %s %s\n",
+		grayText.Render(fmt.Sprintf("%-18s", label)),
+		cyanText.Render(value),
+	)
+}
+
+func doctorOK(msg string) {
+	fmt.Printf("  %s %s\n", availableStyle.Render("✓"), msg)
+}
+
+func doctorWarn(msg string) {
+	fmt.Printf("  %s %s\n",
+		lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("!"),
+		msg,
+	)
+}
+
+func doctorErr(msg string) {
+	fmt.Printf("  %s %s\n", unavailableStyle.Render("✗"), msg)
+}
+
+func doctorInfo(msg string) {
+	fmt.Printf("  %s %s\n", grayText.Render("•"), msg)
+}
+
+func doctorHint(msg string) {
+	fmt.Println(grayText.Render("  ↳ " + msg))
+}
+
 func runDoctor() error {
-	fmt.Println("ccl Doctor")
-	fmt.Println("==========")
-	fmt.Println("Environment")
+	doctorHeader("ccl Doctor")
+
+	doctorSection("Environment")
 
 	// 1. Check Node.js
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
-		fmt.Println("  • Node.js: not installed (not required by newer native Claude Code binaries)")
+		doctorInfo("Node.js: not installed (not required by newer native Claude Code binaries)")
 	} else {
-		fmt.Printf("  ✓ Node.js: %s\n", nodePath)
+		doctorOK("Node.js: " + nodePath)
 	}
 
 	// 2. Check Claude CLI
 	claudeInstalled := IsInstalled()
 	if !claudeInstalled {
-		fmt.Println("  ✗ Claude Code CLI: not installed or not in PATH")
+		doctorErr("Claude Code CLI: not installed or not in PATH")
 		// Prompt to install automatically
 		err := AutoInstall()
 		if err != nil {
-			fmt.Printf("  ✗ Auto-installation failed: %v\n", err)
-			fmt.Println("    Install manually: https://code.claude.com/")
+			doctorErr(fmt.Sprintf("Auto-installation failed: %v", err))
+			doctorHint("Install manually: https://code.claude.com/")
 		}
 	} else {
 		claudePath, _ := exec.LookPath("claude")
-		fmt.Printf("  ✓ Claude Code CLI: %s\n", claudePath)
+		doctorOK("Claude Code CLI: " + claudePath)
 	}
 
 	// 3. Check Configuration File
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Printf("  ✗ Config: %v\n", err)
+		doctorErr(fmt.Sprintf("Config: %v", err))
 		return nil
 	}
-	fmt.Printf("  ✓ Config: %s\n", config.ConfigPath())
+	doctorOK("Config: " + config.ConfigPath())
+	printCloudSyncDiagnostics()
 
 	// 4. Check Active Provider
 	if cfg.ActiveProvider == "" {
-		fmt.Println("\nProvider\n  ✗ No active provider. Use `ccl set` or `ccl use`.")
+		doctorSection("Provider")
+		doctorErr("No active provider. Use `ccl set` or `ccl use`.")
 		return nil
 	}
-	fmt.Printf("\nProvider · %s\n", cfg.ActiveProvider)
+	doctorSection("Provider · " + cfg.ActiveProvider)
 
 	p, ok := cfg.Providers[cfg.ActiveProvider]
 	if !ok {
-		fmt.Printf("  ✗ Selected provider %q does not exist in config\n", cfg.ActiveProvider)
+		doctorErr(fmt.Sprintf("Selected provider %q does not exist in config", cfg.ActiveProvider))
 		return nil
 	}
 
-	fmt.Printf("  Protocol: %s\n", provider.ProtocolLabel(p.Type))
-	fmt.Printf("  Auth: %s\n", providerAuthLabel(p))
-	fmt.Printf("  Endpoint: %s\n", p.Endpoint)
-	fmt.Printf("  Model pool: %d configured\n", len(parseModelList(p.Model)))
-	fmt.Printf("  Effort: %s\n", providerEffortSummary(p))
-	fmt.Printf("  Fast: %s\n", providerFastSummary(p))
-	fmt.Printf("  Context/Compact: %s\n", providerOneMSummary(p))
-	printProviderModelMappings(p)
+	printDoctorProviderIdentity(p)
+	groupValid := true
+	if p.AuthGroup != "" {
+		groupValid = printDoctorGroupValidation(cfg, p)
+	}
+	printDoctorProviderDetails(p)
 	printProviderExperienceWarnings(p)
 
 	configuredProvider := p
-	p, cleanup, err := prepareProviderRuntime(p)
+	if !groupValid {
+		printDoctorGroupHealth(cfg, p, nil)
+		doctorHint("Run `ccl oauth sync` to reconcile group members with ~/.ccl/auth.")
+		return nil
+	}
+
+	p, runtime, cleanup, err := prepareProviderRuntime(p)
 	if err != nil {
-		fmt.Printf("\nConnectivity\n  ✗ %v\n", err)
+		if configuredProvider.AuthGroup != "" || configuredProvider.OAuthProvider != "" {
+			printDoctorGroupHealth(cfg, configuredProvider, nil)
+		}
+		doctorSection("Connectivity")
+		doctorErr(err.Error())
 		return nil
 	}
 	defer cleanup()
+	if configuredProvider.AuthGroup != "" || configuredProvider.OAuthProvider != "" {
+		printDoctorGroupHealth(cfg, configuredProvider, runtime)
+	}
 
 	// 5. Test Endpoint reachability and API Authentication key
 	if p.Endpoint != "" {
 		endpointReachable := false
-		fmt.Printf("\nConnectivity\n")
-		fmt.Printf("  Checking endpoint and credentials...\n")
+		doctorSection("Connectivity")
+		doctorInfo("Checking endpoint and credentials...")
 		client := http.Client{
 			Timeout: 5 * time.Second,
 		}
@@ -116,20 +196,20 @@ func runDoctor() error {
 
 		req, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 		if err != nil {
-			fmt.Printf("  ✗ Failed to create validation request: %v\n", err)
+			doctorErr(fmt.Sprintf("Failed to create validation request: %v", err))
 		} else {
 			setProviderAuthHeaders(req, p)
 
 			resp, err := client.Do(req)
 			if err != nil {
-				fmt.Printf("  ✗ Endpoint is unreachable: %v\n", err)
+				doctorErr(fmt.Sprintf("Endpoint is unreachable: %v", err))
 			} else {
 				defer resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
-					fmt.Printf("  ✓ Connected and verified (HTTP %d)\n", resp.StatusCode)
+					doctorOK(fmt.Sprintf("Connected and verified (HTTP %d)", resp.StatusCode))
 					endpointReachable = true
 				} else if resp.StatusCode == http.StatusUnauthorized {
-					fmt.Printf("  ✗ Authentication failed (HTTP %d). Verify the API key.\n", resp.StatusCode)
+					doctorErr(fmt.Sprintf("Authentication failed (HTTP %d). Verify the API key.", resp.StatusCode))
 				} else if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
 					// Fallback strategy if GET models returns 404 or 403 on third-party proxies
 					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -137,25 +217,25 @@ func runDoctor() error {
 
 					fallbackReq, fallbackErr := http.NewRequestWithContext(fallbackCtx, "GET", p.Endpoint, nil)
 					if fallbackErr != nil {
-						fmt.Printf("  ✗ Models discovery returned HTTP %d. Failed to create fallback request: %v\n", resp.StatusCode, fallbackErr)
+						doctorErr(fmt.Sprintf("Models discovery returned HTTP %d. Failed to create fallback request: %v", resp.StatusCode, fallbackErr))
 					} else {
 						setProviderAuthHeaders(fallbackReq, p)
 
 						fallbackResp, fallbackErr := client.Do(fallbackReq)
 						if fallbackErr != nil {
-							fmt.Printf("  ✗ Models discovery returned HTTP %d; base endpoint fallback is unreachable: %v\n", resp.StatusCode, fallbackErr)
+							doctorErr(fmt.Sprintf("Models discovery returned HTTP %d; base endpoint fallback is unreachable: %v", resp.StatusCode, fallbackErr))
 						} else {
 							defer fallbackResp.Body.Close()
 							if fallbackResp.StatusCode == http.StatusUnauthorized || fallbackResp.StatusCode == http.StatusForbidden {
-								fmt.Printf("  ✗ Authentication failed. Base endpoint returned HTTP %d. Verify the API key.\n", fallbackResp.StatusCode)
+								doctorErr(fmt.Sprintf("Authentication failed. Base endpoint returned HTTP %d. Verify the API key.", fallbackResp.StatusCode))
 							} else {
-								fmt.Printf("  ✓ Connected and verified (HTTP %d, models discovery bypassed)\n", resp.StatusCode)
+								doctorOK(fmt.Sprintf("Connected and verified (HTTP %d, models discovery bypassed)", resp.StatusCode))
 								endpointReachable = true
 							}
 						}
 					}
 				} else {
-					fmt.Printf("  ! Connected, but returned unexpected status (HTTP %d)\n", resp.StatusCode)
+					doctorWarn(fmt.Sprintf("Connected, but returned unexpected status (HTTP %d)", resp.StatusCode))
 				}
 			}
 		}
@@ -164,12 +244,12 @@ func runDoctor() error {
 		if endpointReachable && p.Model != "" {
 			configuredModels := parseModelList(p.Model)
 			if len(configuredModels) > 0 {
-				fmt.Printf("\nModel verification\n")
+				doctorSection("Model verification")
 				availableSet := testModelsConcurrently(configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
 				available, unavailable := classifyModels(configuredModels, availableSet)
-				fmt.Printf("  %s\n", modelVerificationSummary(available, unavailable))
+				doctorKV("Summary", modelVerificationSummary(available, unavailable))
 				if len(unavailable) > 0 {
-					fmt.Println("  Run `ccl models` to inspect individual model results.")
+					doctorHint("Run `ccl models` to inspect individual model results.")
 				}
 
 				// Reorder and save: available first, unavailable last
@@ -179,9 +259,9 @@ func runDoctor() error {
 					configuredProvider.Model = newModel
 					cfg.Providers[cfg.ActiveProvider] = configuredProvider
 					if err := config.Save(cfg); err != nil {
-						fmt.Printf("  ✗ Failed to save reordered models: %v\n", err)
+						doctorErr(fmt.Sprintf("Failed to save reordered models: %v", err))
 					} else {
-						fmt.Printf("  ✓ Config updated: available models prioritized.\n")
+						doctorOK("Config updated: available models prioritized.")
 					}
 				}
 			}
@@ -189,6 +269,148 @@ func runDoctor() error {
 	}
 
 	return nil
+}
+
+func printCloudSyncDiagnostics() {
+	report := cloudsync.DiagnoseLocal()
+	doctorSection("Cloud sync")
+	for _, check := range report.Checks {
+		switch check.Level {
+		case "ok":
+			doctorOK(check.Message)
+		case "warning":
+			doctorWarn(check.Message)
+		case "error":
+			doctorErr(check.Message)
+		default:
+			doctorInfo(check.Message)
+		}
+	}
+}
+
+type doctorGroupValidation struct {
+	Name              string
+	OAuthProvider     string
+	CredentialType    string
+	ConfiguredMembers int
+	AvailableMembers  int
+	HealthyMembers    int
+	InvalidMembers    int
+	QuotaMembers      int
+	DisabledMembers   int
+	Problems          []string
+}
+
+// validateDoctorAuthGroup validates the group definition against the current
+// one-level auth directory. Group identity comes from Provider.AuthGroup; the
+// provider's display name and group- prefix are deliberately irrelevant.
+func validateDoctorAuthGroup(cfg *provider.Config, p provider.Provider) doctorGroupValidation {
+	result := doctorGroupValidation{Name: strings.TrimSpace(p.AuthGroup)}
+	group, ok := cfg.AuthGroups[result.Name]
+	if !ok {
+		result.Problems = append(result.Problems, fmt.Sprintf("group definition %q is missing", result.Name))
+		return result
+	}
+	result.OAuthProvider = group.OAuthProvider
+	result.ConfiguredMembers = len(group.Credentials)
+
+	backend, err := oauthproxy.BackendProvider(group.OAuthProvider)
+	if err != nil {
+		result.Problems = append(result.Problems, fmt.Sprintf("group has unsupported OAuth backend %q", group.OAuthProvider))
+	} else {
+		result.CredentialType = backend
+	}
+	if strings.TrimSpace(p.OAuthProvider) == "" {
+		result.Problems = append(result.Problems, "group provider has no OAuth backend")
+	} else if backend != "" {
+		providerBackend, providerErr := oauthproxy.BackendProvider(p.OAuthProvider)
+		if providerErr != nil || !strings.EqualFold(providerBackend, backend) {
+			result.Problems = append(result.Problems,
+				fmt.Sprintf("provider backend %q does not match group credential type %q", p.OAuthProvider, backend))
+		}
+	}
+	if len(group.Credentials) == 0 {
+		result.Problems = append(result.Problems, "group contains no credential files")
+		return result
+	}
+
+	credentials, listErr := oauthproxy.ListCredentials()
+	if listErr != nil {
+		result.Problems = append(result.Problems, fmt.Sprintf("cannot scan auth directory: %v", listErr))
+		return result
+	}
+	byFile := make(map[string]oauthproxy.CredentialInfo, len(credentials))
+	for _, credential := range credentials {
+		byFile[strings.ToLower(credential.FileName)] = credential
+	}
+	seen := make(map[string]bool, len(group.Credentials))
+	for _, file := range group.Credentials {
+		file = strings.TrimSpace(file)
+		key := strings.ToLower(file)
+		if file == "" {
+			result.InvalidMembers++
+			result.Problems = append(result.Problems, "group contains an empty credential filename")
+			continue
+		}
+		if seen[key] {
+			result.InvalidMembers++
+			result.Problems = append(result.Problems, fmt.Sprintf("credential %q is listed more than once", file))
+			continue
+		}
+		seen[key] = true
+		credential, exists := byFile[key]
+		if !exists {
+			result.InvalidMembers++
+			result.Problems = append(result.Problems,
+				fmt.Sprintf("credential %q is missing, invalid, or has an unsupported type", file))
+			continue
+		}
+		if backend != "" && !strings.EqualFold(credential.Backend, backend) {
+			result.InvalidMembers++
+			result.Problems = append(result.Problems,
+				fmt.Sprintf("credential %q has type %q; group requires %q", file, credential.Backend, backend))
+			continue
+		}
+		result.AvailableMembers++
+		if credential.Disabled {
+			result.DisabledMembers++
+			result.InvalidMembers++
+			result.Problems = append(result.Problems, fmt.Sprintf("credential %q is disabled", file))
+			continue
+		}
+		if credential.QuotaExceeded {
+			result.QuotaMembers++
+			continue
+		}
+		if credential.Unavailable {
+			result.InvalidMembers++
+			continue
+		}
+		result.HealthyMembers++
+	}
+	return result
+}
+
+func printDoctorGroupValidation(cfg *provider.Config, p provider.Provider) bool {
+	result := validateDoctorAuthGroup(cfg, p)
+	doctorKV("Group", result.Name)
+	if result.OAuthProvider != "" {
+		if result.CredentialType != "" {
+			doctorKV("Group backend", fmt.Sprintf("%s (credential type %s)", result.OAuthProvider, result.CredentialType))
+		} else {
+			doctorKV("Group backend", result.OAuthProvider)
+		}
+	}
+	doctorKV("Group members", fmt.Sprintf("%d configured · %d available",
+		result.ConfiguredMembers, result.AvailableMembers))
+	if len(result.Problems) == 0 {
+		doctorOK("Group configuration is valid and homogeneous")
+		return true
+	}
+	for _, problem := range result.Problems {
+		doctorErr("Group: " + problem)
+	}
+	return false
 }
 
 // testModelsConcurrently tests multiple models in batches of 50 concurrent workers.
@@ -203,12 +425,12 @@ func testModelsConcurrently(models []string, endpoint, apiKey, providerType, ant
 	var completed, okCount, failCount int64
 	total := int64(len(models))
 
-	fmt.Printf("  Checking %d model(s)...\n", total)
+	doctorInfo(fmt.Sprintf("Checking %d model(s)...", total))
 	defer func() {
 		c := atomic.LoadInt64(&completed)
 		o := atomic.LoadInt64(&okCount)
 		f := atomic.LoadInt64(&failCount)
-		fmt.Printf("  Done: %d/%d checked, %d available, %d unavailable\n", c, total, o, f)
+		doctorKV("Checked", fmt.Sprintf("%d/%d · %d available · %d unavailable", c, total, o, f))
 	}()
 
 	for start := 0; start < len(models); start += batchSize {
@@ -371,6 +593,356 @@ func modelVerificationSummary(available, unavailable []string) string {
 	return fmt.Sprintf("%d available · %d unavailable", len(available), len(unavailable))
 }
 
+
+func printDoctorGroupHealth(cfg *provider.Config, p provider.Provider, runtime *oauthproxy.Runtime) {
+	result := validateDoctorAuthGroup(cfg, p)
+	doctorSection("CPA accounts")
+
+	if runtime == nil {
+		// Offline file scan only — used when runtime failed to start or config is invalid.
+		doctorKV("Source", "offline files (~/.ccl/auth)")
+		doctorKV("Configured", fmt.Sprintf("%d", result.ConfiguredMembers))
+		doctorKV("Present", fmt.Sprintf("%d", result.HealthyMembers))
+		doctorKV("Invalid", fmt.Sprintf("%d", result.InvalidMembers))
+		doctorKV("Quota flagged", fmt.Sprintf("%d", result.QuotaMembers))
+		if result.DisabledMembers > 0 {
+			doctorKV("Disabled", fmt.Sprintf("%d", result.DisabledMembers))
+		}
+		printDoctorAuthMetadataCounts(countOfflineAuthMetadata(cfg, p))
+		doctorHint("Live health needs embedded CPA; runtime did not start")
+		return
+	}
+
+	live := summarizeRuntimeAuthHealth(runtime, result)
+	doctorKV("Source", "CPA runtime (coreManager.List)")
+	doctorKV("Loaded", fmt.Sprintf("%d / %d configured", live.Loaded, result.ConfiguredMembers))
+	doctorKV("Healthy", fmt.Sprintf("%d", live.Healthy))
+	doctorKV("Invalid", fmt.Sprintf("%d", live.Invalid))
+	doctorKV("Quota exhausted", fmt.Sprintf("%d", live.Quota))
+	if live.Disabled > 0 {
+		doctorKV("Disabled", fmt.Sprintf("%d", live.Disabled))
+	}
+	if live.Cooldown > 0 {
+		doctorKV("Cooling down", fmt.Sprintf("%d", live.Cooldown))
+	}
+	printDoctorAuthMetadataCounts(live.Metadata)
+
+	switch {
+	case live.Healthy > 0 && live.Invalid == 0 && live.Quota == 0:
+		doctorOK("Round-robin pool is healthy")
+	case live.Healthy == 0:
+		doctorWarn("No healthy credentials for round-robin")
+		doctorHint("Accounts are marked in ~/.ccl/auth; CPA skips them until recovery or re-auth")
+	default:
+		doctorInfo(fmt.Sprintf("Pool degraded: %d usable of %d loaded", live.Healthy, live.Loaded))
+	}
+	if result.ConfiguredMembers > 0 && live.Loaded < result.ConfiguredMembers {
+		doctorWarn(fmt.Sprintf("Only %d of %d group members loaded into CPA", live.Loaded, result.ConfiguredMembers))
+	}
+}
+
+func printDoctorAuthMetadataCounts(counts authMetadataCounts) {
+	fmt.Println(grayText.Render("  Metadata markers (persisted in credential JSON)"))
+	doctorKV("unavailable", fmt.Sprintf("%d", counts.Unavailable))
+	doctorKV("status", fmt.Sprintf("%d", counts.Status))
+	doctorKV("status_message", fmt.Sprintf("%d", counts.StatusMessage))
+	doctorKV("quota", fmt.Sprintf("%d", counts.Quota))
+	doctorKV("next_retry_after", fmt.Sprintf("%d", counts.NextRetryAfter))
+}
+
+type authMetadataCounts struct {
+	Unavailable    int
+	Status         int
+	StatusMessage  int
+	Quota          int
+	NextRetryAfter int
+}
+
+type runtimeAuthHealth struct {
+	Loaded   int
+	Healthy  int
+	Invalid  int
+	Quota    int
+	Disabled int
+	Cooldown  int
+	Metadata authMetadataCounts
+}
+
+func summarizeRuntimeAuthHealth(runtime *oauthproxy.Runtime, offline doctorGroupValidation) runtimeAuthHealth {
+	var out runtimeAuthHealth
+	if runtime == nil {
+		return out
+	}
+	now := time.Now()
+	for _, auth := range runtime.ListAuths() {
+		if auth == nil {
+			continue
+		}
+		out.Loaded++
+		accumulateAuthMetadata(&out.Metadata, auth.Metadata, auth.Unavailable, string(auth.Status), auth.StatusMessage, auth.Quota.Exceeded, !auth.NextRetryAfter.IsZero())
+		switch {
+		case auth.Disabled || auth.Status == "disabled":
+			out.Disabled++
+			out.Invalid++
+		case auth.Quota.Exceeded ||
+			strings.Contains(strings.ToLower(auth.StatusMessage), "quota") ||
+			strings.Contains(strings.ToLower(auth.Quota.Reason), "quota"):
+			out.Quota++
+		case auth.Unavailable || auth.Status == "error":
+			out.Invalid++
+		default:
+			out.Healthy++
+		}
+		if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+			out.Cooldown++
+		} else if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+			out.Cooldown++
+		}
+	}
+	// Members configured but missing from runtime still count as invalid relative to the group.
+	if offline.ConfiguredMembers > out.Loaded {
+		missing := offline.ConfiguredMembers - out.Loaded
+		// Avoid double-counting offline invalid files already excluded from load.
+		if offline.InvalidMembers < missing {
+			out.Invalid += missing - offline.InvalidMembers
+		}
+	}
+	return out
+}
+
+func countOfflineAuthMetadata(cfg *provider.Config, p provider.Provider) authMetadataCounts {
+	var counts authMetadataCounts
+	groupName := strings.TrimSpace(p.AuthGroup)
+	if groupName == "" {
+		return counts
+	}
+	group, ok := cfg.AuthGroups[groupName]
+	if !ok {
+		return counts
+	}
+	credentials, err := oauthproxy.ListCredentials()
+	if err != nil {
+		return counts
+	}
+	byFile := make(map[string]oauthproxy.CredentialInfo, len(credentials))
+	for _, credential := range credentials {
+		byFile[strings.ToLower(credential.FileName)] = credential
+	}
+	// ListCredentials already parses disabled/unavailable/quota, but not raw
+	// status/status_message/next_retry_after presence. Re-read member files for
+	// exact Metadata key counts that Save writes.
+	authDir, err := oauthproxy.AuthDir()
+	if err != nil {
+		// Fall back to CredentialInfo flags only.
+		for _, file := range group.Credentials {
+			credential, exists := byFile[strings.ToLower(strings.TrimSpace(file))]
+			if !exists {
+				continue
+			}
+			if credential.Unavailable {
+				counts.Unavailable++
+			}
+			if credential.QuotaExceeded {
+				counts.Quota++
+			}
+			if credential.Status != "" {
+				counts.Status++
+			}
+			if credential.StatusMessage != "" {
+				counts.StatusMessage++
+			}
+		}
+		return counts
+	}
+	for _, file := range group.Credentials {
+		file = strings.TrimSpace(file)
+		if file == "" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(authDir, filepath.Base(file)))
+		if err != nil {
+			continue
+		}
+		metadata := map[string]any{}
+		if json.Unmarshal(raw, &metadata) != nil {
+			continue
+		}
+		accumulateAuthMetadata(&counts, metadata, false, "", "", false, false)
+	}
+	return counts
+}
+
+// accumulateAuthMetadata counts persisted health keys. When metadata is nil/partial,
+// runtime field fallbacks still contribute so doctor reflects in-memory CPA state.
+func accumulateAuthMetadata(counts *authMetadataCounts, metadata map[string]any, unavailable bool, status, statusMessage string, quotaExceeded, hasNextRetry bool) {
+	if metadataHasKey(metadata, "unavailable") || unavailable {
+		// Count only true unavailable, or key present with true; bare false should not inflate.
+		if metadataBoolTrue(metadata, "unavailable") || (unavailable && !metadataHasKey(metadata, "unavailable")) {
+			counts.Unavailable++
+		}
+	}
+	if metadataStringPresent(metadata, "status") || strings.TrimSpace(status) != "" {
+		if metadataStringPresent(metadata, "status") || strings.TrimSpace(status) != "" {
+			// Prefer metadata presence; runtime status also counts when metadata lacks it.
+			if metadataStringPresent(metadata, "status") || (!metadataHasKey(metadata, "status") && strings.TrimSpace(status) != "") {
+				counts.Status++
+			}
+		}
+	}
+	if metadataStringPresent(metadata, "status_message") || strings.TrimSpace(statusMessage) != "" {
+		if metadataStringPresent(metadata, "status_message") || (!metadataHasKey(metadata, "status_message") && strings.TrimSpace(statusMessage) != "") {
+			counts.StatusMessage++
+		}
+	}
+	if metadataHasKey(metadata, "quota") || quotaExceeded {
+		if metadataHasKey(metadata, "quota") || (!metadataHasKey(metadata, "quota") && quotaExceeded) {
+			counts.Quota++
+		}
+	}
+	if metadataStringPresent(metadata, "next_retry_after") || hasNextRetry {
+		if metadataStringPresent(metadata, "next_retry_after") || (!metadataHasKey(metadata, "next_retry_after") && hasNextRetry) {
+			counts.NextRetryAfter++
+		}
+	}
+}
+
+func metadataHasKey(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	_, ok := metadata[key]
+	return ok
+}
+
+func metadataBoolTrue(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	v, ok := metadata[key].(bool)
+	return ok && v
+}
+
+func metadataStringPresent(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	v, ok := metadata[key].(string)
+	return ok && strings.TrimSpace(v) != ""
+}
+
+func printDoctorProviderIdentity(p provider.Provider) {
+	doctorKV("Kind", providerKindLabel(p))
+	doctorKV("Protocol", provider.ProtocolLabel(p.Type))
+	doctorKV("Auth", providerAuthLabel(p))
+}
+
+func printDoctorProviderDetails(p provider.Provider) {
+	doctorKV("Endpoint", doctorEndpointDisplay(p))
+	if p.AuthGroup == "" && p.OAuthProvider == "" {
+		doctorKV("API Key", maskAPIKey(p.APIKey))
+	} else if p.OAuthProvider != "" && p.AuthGroup == "" {
+		cred := strings.TrimSpace(p.OAuthAccountCredential)
+		if cred == "" {
+			cred = "(all backend credentials)"
+		}
+		doctorKV("Credential", cred)
+	}
+	pool := parseModelList(p.Model)
+	slotsConfigured := doctorConfiguredSlotCount(p)
+	if len(pool) == 0 {
+		// Model pool (provider.Model) is optional once Opus/Sonnet/... slots are set.
+		// It only feeds map/set discovery, defaults, and bulk availability checks.
+		if slotsConfigured > 0 {
+			doctorKV("Model pool", "0 (optional)")
+			doctorHint("Slot mappings below are what Claude Code uses; pool is only a candidate list for `ccl map`/`ccl set`")
+		} else {
+			doctorWarn("Model pool: 0 configured and no slot mappings")
+			doctorHint("Run `ccl set` or `ccl map` to detect models and fill Opus/Sonnet/Haiku slots")
+		}
+	} else {
+		doctorKV("Model pool", fmt.Sprintf("%d configured", len(pool)))
+	}
+	doctorKV("Effort", providerEffortSummary(p))
+	doctorKV("Fast", providerFastSummary(p))
+	doctorKV("Context/Compact", providerOneMSummary(p))
+	doctorKV("Max Output", providerMaxOutputSummary(p))
+	doctorKV("Tools", providerToolsSummary(p))
+	doctorKV("Tool Search", providerToolSearchSummary(p))
+	printProviderModelMappings(p)
+}
+
+
+func doctorConfiguredSlotCount(p provider.Provider) int {
+	n := 0
+	for _, model := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.CustomModelID, p.SubagentModel} {
+		if strings.TrimSpace(model) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+func doctorEndpointDisplay(p provider.Provider) string {
+	ep := strings.TrimSpace(p.Endpoint)
+	if ep == "" {
+		return "(unset)"
+	}
+	return ep
+}
+
+func maskAPIKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "(unset)"
+	}
+	runes := []rune(key)
+	n := len(runes)
+	if n <= 8 {
+		return strings.Repeat("*", n)
+	}
+	mid := n - 8
+	if mid > 12 {
+		mid = 12
+	}
+	return string(runes[:4]) + strings.Repeat("*", mid) + string(runes[n-4:])
+}
+
+func providerMaxOutputSummary(p provider.Provider) string {
+	runtimes := claude.ResolveRuntimeSettings(p)
+	switch runtimes.MaxOutputTokens {
+	case "", claude.DefaultMaxOutputTokens: // "32000"
+		return "default (32K)"
+	case "16000":
+		return "16K"
+	case "64000":
+		return "64K"
+	case "128000":
+		return "128K"
+	default:
+		return runtimes.MaxOutputTokens
+	}
+}
+
+func providerToolsSummary(p provider.Provider) string {
+	runtimes := claude.ResolveRuntimeSettings(p)
+	if runtimes.ToolUseConcurrency == "" || runtimes.ToolUseConcurrency == claude.DefaultToolUseConcurrency {
+		return "default (3)"
+	}
+	return runtimes.ToolUseConcurrency
+}
+
+func providerToolSearchSummary(p provider.Provider) string {
+	runtimes := claude.ResolveRuntimeSettings(p)
+	switch strings.ToLower(strings.TrimSpace(runtimes.ToolSearch)) {
+	case "", "false", "0", "off", "no":
+		return "off"
+	case "true", "1", "on", "yes":
+		return "on"
+	default:
+		return runtimes.ToolSearch
+	}
+}
+
 func printProviderModelMappings(p provider.Provider) {
 	mappings := []struct {
 		label string
@@ -383,13 +955,13 @@ func printProviderModelMappings(p provider.Provider) {
 		{"Subagent", subagentMappingDisplay(p)},
 	}
 
-	fmt.Println("  Slot mappings:")
+	fmt.Println(grayText.Render("  Slot mappings"))
 	for _, mapping := range mappings {
 		model := mapping.model
 		if model == "" {
 			model = "(unset)"
 		}
-		fmt.Printf("    %-10s %s\n", mapping.label+":", model)
+		doctorKV(mapping.label, model)
 	}
 }
 

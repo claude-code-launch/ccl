@@ -15,8 +15,27 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "ccl",
-	Short: "ccl is a multi-provider launcher for Claude Code",
-	Long:  `ccl manages different LLM providers for Claude Code and runs Claude Code with injected configurations.`,
+	Short: "Multi-provider launcher for Claude Code",
+	Long: `ccl launches Claude Code with the active provider from ~/.ccl/config.yaml.
+
+Common commands:
+  ccl                         Start Claude Code with the active provider
+  ccl ls / ccl use <name>     List or switch providers
+  ccl set [name]              Add/update an API-key or OAuth provider (TUI)
+  ccl oauth <gpt|grok|...>    Log in with a subscription account
+  ccl oauth group / sync      Multi-account pools and credential cleanup
+  ccl doctor                  Environment + provider + CPA account health
+  ccl cloud login|push|pull   Encrypted multi-remote config sync
+  ccl debug on|off            Runtime diagnostics (log path printed when a session ends)
+
+Compatibility aliases still work for older scripts:
+  ccl auth ...        → ccl oauth ...
+  ccl sync            → ccl oauth sync
+  ccl login/push/...  → ccl cloud login/push/...
+
+Run "ccl <command> --help" for details. Extra args after ccl are passed through
+to Claude Code (for example: ccl resume, ccl -p "hello").
+`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runClaude(args)
 	},
@@ -98,7 +117,15 @@ func runClaude(args []string) error {
 	// debug are independent global toggles persisted in config.yaml.
 	oauthproxy.SetDebug(cfg.DebugMode, oauthproxy.ResolveDebugLogPath())
 
-	return claude.Run(p, applyBypassMode(args, cfg.BypassMode))
+	err = claude.Run(p, applyBypassMode(args, cfg.BypassMode))
+	if cfg.DebugMode {
+		logPath := oauthproxy.DebugLogPath()
+		if logPath == "" {
+			logPath = oauthproxy.ResolveDebugLogPath()
+		}
+		fmt.Fprintf(os.Stderr, "\n[ccl debug] session ended · log: %s\n", logPath)
+	}
+	return err
 }
 
 // resolveProvider determines the active provider.

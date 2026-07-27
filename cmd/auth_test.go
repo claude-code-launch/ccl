@@ -539,7 +539,7 @@ func TestPrepareProviderRuntimeStartsClaudeOAuth(t *testing.T) {
 		t.Fatalf("write credential: %v", err)
 	}
 
-	runtimeProvider, cleanup, err := prepareProviderRuntime(provider.Provider{
+	runtimeProvider, _, cleanup, err := prepareProviderRuntime(provider.Provider{
 		Name:                   "anthropic-acct",
 		Type:                   "anthropic",
 		OAuthProvider:          "claude",
@@ -570,7 +570,7 @@ func TestPrepareProviderRuntimeRoutesManualResponsesThroughCodexAdapter(t *testi
 		Model:    "gpt-5.4-mini",
 	}
 
-	runtimeProvider, cleanup, err := prepareProviderRuntime(original)
+	runtimeProvider, _, cleanup, err := prepareProviderRuntime(original)
 	if err != nil {
 		t.Fatalf("prepareProviderRuntime() error: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestPrepareProviderRuntimeRoutesManualChatThroughCLIProxyAPI(t *testing.T) 
 		Model:    "gpt-5.4-mini",
 	}
 
-	runtimeProvider, cleanup, err := prepareProviderRuntime(original)
+	runtimeProvider, _, cleanup, err := prepareProviderRuntime(original)
 	if err != nil {
 		t.Fatalf("prepareProviderRuntime() error: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 		Endpoint:      "oauth://codex",
 		OAuthProvider: "gpt",
 	}
-	runtimeProvider, cleanup, err := prepareProviderRuntime(p)
+	runtimeProvider, _, cleanup, err := prepareProviderRuntime(p)
 	if err != nil {
 		t.Fatalf("prepareProviderRuntime() error: %v", err)
 	}

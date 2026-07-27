@@ -12,6 +12,9 @@ import (
 
 func providerAuthLabel(p provider.Provider) string {
 	if p.OAuthProvider != "" {
+		if p.AuthGroup != "" {
+			return fmt.Sprintf("oauth/%s group(%d)", p.OAuthProvider, len(p.OAuthAccountCredentials))
+		}
 		return "oauth/" + p.OAuthProvider
 	}
 	if provider.IsOpenAICompatibleType(p.Type) {
@@ -24,6 +27,13 @@ func providerAuthLabel(p provider.Provider) string {
 		return "x-api-key"
 	}
 	return "unknown"
+}
+
+func providerKindLabel(p provider.Provider) string {
+	if strings.TrimSpace(p.AuthGroup) != "" {
+		return "group"
+	}
+	return "normal"
 }
 
 func providerEffortSummary(p provider.Provider) string {
@@ -96,13 +106,13 @@ func setProviderAuthHeaders(req *http.Request, p provider.Provider) {
 
 func printProviderExperienceWarnings(p provider.Provider) {
 	if strings.TrimSpace(p.EffortLevel) != "" {
-		fmt.Println("  ! Effort is pinned by ccl; choose Default in ccl set if Claude /model effort changes should apply.")
+		doctorWarn("Effort is pinned by ccl; choose Default in ccl set if Claude /model effort changes should apply.")
 	}
 	if p.FastMode {
-		fmt.Println("  ! FastMode is on: Codex faster responses at higher usage; toggle with /fast in Claude Code or ccl set Review & Apply.")
+		doctorWarn("FastMode is on: Codex faster responses at higher usage; toggle with /fast in Claude Code or ccl set Review & Apply.")
 	}
 	if p.OAuthProvider == "" && provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
-		fmt.Println("  ! OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")
+		doctorWarn("OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")
 	}
 }
 

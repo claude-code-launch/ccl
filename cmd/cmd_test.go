@@ -49,7 +49,7 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  auth", "  bypass", "  debug", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
+	for _, want := range []string{"  oauth", "  bypass", "  debug", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
@@ -67,7 +67,7 @@ func TestProviderHelpUsesShortSubcommands(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"ccl provider [command]", "  ls", "  cp", "  mv", "  rm", "  preview", "  set", "  use", "  map", "  models", "  env", "  doctor"} {
+	for _, want := range []string{"ccl provider [command]", "  ls", "  cp", "  mv", "  rm", "  preview", "  set", "  use", "  map", "  models", "  env"} {
 		if !contains(out, want) {
 			t.Fatalf("expected provider help to contain %q, got:\n%s", want, out)
 		}
@@ -82,7 +82,7 @@ func TestProviderSubcommandAliasesExist(t *testing.T) {
 		{"provider", "map", "--help"},
 		{"provider", "models", "--help"},
 		{"provider", "env", "--help"},
-		{"provider", "doctor", "--help"},
+		{"doctor", "--help"},
 		{"version", "--help"},
 		{"update", "--help"},
 	} {
@@ -267,6 +267,54 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	}
 }
 
+func TestPrintProvidersHidesSingleAccountProvidersInAuthGroups(t *testing.T) {
+	cfg := &provider.Config{
+		Providers: map[string]provider.Provider{
+			"gg": {
+				Name:      "gg",
+				Type:      "openai",
+				AuthGroup: "gg",
+			},
+			"grok-a": {
+				Name:                   "grok-a",
+				Type:                   "openai",
+				OAuthAccountCredential: "xai-a.json",
+			},
+			"grok-b": {
+				Name:                   "grok-b",
+				Type:                   "openai",
+				OAuthAccountCredential: "xai-b.json",
+			},
+			"grok-c": {
+				Name:                   "grok-c",
+				Type:                   "openai",
+				OAuthAccountCredential: "xai-c.json",
+			},
+		},
+		AuthGroups: map[string]provider.AuthGroup{
+			"gg": {OAuthProvider: "grok", Credentials: []string{"xai-a.json", "XAI-B.JSON"}},
+		},
+	}
+
+	for _, showAll := range []bool{false, true} {
+		buf := new(bytes.Buffer)
+		if err := printProviders(buf, cfg, showAll, "empty", "Registered providers:"); err != nil {
+			t.Fatalf("printProviders(showAll=%t) failed: %v", showAll, err)
+		}
+		out := buf.String()
+		for _, hidden := range []string{"grok-a", "grok-b"} {
+			if contains(out, hidden) {
+				t.Fatalf("group member %q should be hidden (showAll=%t):\n%s", hidden, showAll, out)
+			}
+		}
+		for _, visible := range []string{"gg", "grok-c"} {
+			if !contains(out, visible) {
+				t.Fatalf("provider %q should remain visible (showAll=%t):\n%s", visible, showAll, out)
+			}
+		}
+	}
+}
+
 func TestPrintProvidersDistinguishesGroupFromNormalByConfiguration(t *testing.T) {
 	cfg := &provider.Config{
 		Providers: map[string]provider.Provider{
@@ -421,5 +469,123 @@ func TestMapAutoPreservesModernOneMCompactPreset(t *testing.T) {
 	}
 	if _, ok := p.Env[autoCompactPctEnv]; ok {
 		t.Fatalf("unexpected legacy percentage override: %+v", p.Env)
+	}
+}
+
+func TestCloudAndOAuthCommandTrees(t *testing.T) {
+	for _, args := range [][]string{
+		{"cloud", "--help"},
+		{"cloud", "login", "--help"},
+		{"cloud", "remote", "ls", "--help"},
+		{"cloud", "status", "--help"},
+		{"cloud", "key", "export", "--help"},
+		{"cloud", "device", "--help"},
+		{"oauth", "sync", "--help"},
+		{"oauth", "group", "--help"},
+		{"oauth", "import", "--help"},
+		// root compatibility aliases
+		{"login", "--help"},
+		{"push", "--help"},
+		{"pull", "--help"},
+		{"status", "--help"},
+		{"key", "--help"},
+		{"device", "--help"},
+		{"sync", "--help"},
+		{"logout", "--help"},
+		{"tag", "--help"},
+	} {
+		out, err := executeCommand(RootCmd(), args...)
+		if err != nil {
+			t.Fatalf("expected %v to be registered, got error: %v\n%s", args, err, out)
+		}
+	}
+}
+
+func TestCloudLoginHelpDescribesPlatformsAndKeyModes(t *testing.T) {
+	out, err := executeCommand(RootCmd(), "cloud", "login", "--help")
+	if err != nil {
+		t.Fatalf("cloud login --help: %v", err)
+	}
+	for _, want := range []string{
+		"icloud",
+		"google-drive",
+		"Built-in Desktop OAuth",
+		"no OAuth JSON required",
+		"drive.appdata",
+		"appDataFolder",
+		"ccl cloud key export",
+		"CCL_SYNC_PASSPHRASE",
+		"--passphrase",
+		"Examples:",
+		"ccl cloud login google-drive personal",
+	} {
+		if !contains(out, want) {
+			t.Fatalf("expected cloud login help to contain %q, got:\n%s", want, out)
+		}
+	}
+	// Root compatibility alias should share the same command help.
+	rootOut, err := executeCommand(RootCmd(), "login", "--help")
+	if err != nil {
+		t.Fatalf("login --help: %v", err)
+	}
+	if !contains(rootOut, "google-drive") || !contains(rootOut, "Built-in Desktop OAuth") {
+		t.Fatalf("root login --help should describe google-drive login, got:\n%s", rootOut)
+	}
+}
+
+func TestDoctorHelpDescribesProviderHealth(t *testing.T) {
+	out, err := executeCommand(RootCmd(), "doctor", "--help")
+	if err != nil {
+		t.Fatalf("doctor --help: %v", err)
+	}
+	for _, want := range []string{
+		"Show environment prerequisites",
+		"Model pool (provider.Model) is an optional candidate list",
+		"empty pool with filled slots is normal",
+		"ccl cloud status",
+	} {
+		if !contains(out, want) {
+			t.Fatalf("expected doctor help to contain %q, got:\n%s", want, out)
+		}
+	}
+	// provider status/doctor entry points were removed.
+	providerHelp, err := executeCommand(RootCmd(), "provider", "--help")
+	if err != nil {
+		t.Fatalf("provider --help: %v", err)
+	}
+	for _, unwanted := range []string{"\n  status", "\n  doctor"} {
+		if contains(providerHelp, unwanted) {
+			t.Fatalf("provider help should not list %q, got:\n%s", unwanted, providerHelp)
+		}
+	}
+}
+
+func TestDoctorConfiguredSlotCount(t *testing.T) {
+	p := provider.Provider{OpusModel: "a", SonnetModel: "b"}
+	if got := doctorConfiguredSlotCount(p); got != 2 {
+		t.Fatalf("slot count = %d, want 2", got)
+	}
+	if got := doctorConfiguredSlotCount(provider.Provider{}); got != 0 {
+		t.Fatalf("empty slot count = %d", got)
+	}
+}
+
+func TestAccumulateAuthMetadataCounts(t *testing.T) {
+	var counts authMetadataCounts
+	accumulateAuthMetadata(&counts, map[string]any{
+		"unavailable":      true,
+		"status":           "error",
+		"status_message":   "quota exhausted",
+		"quota":            map[string]any{"exceeded": true},
+		"next_retry_after": "2026-07-28T12:00:00Z",
+	}, false, "", "", false, false)
+	if counts != (authMetadataCounts{Unavailable: 1, Status: 1, StatusMessage: 1, Quota: 1, NextRetryAfter: 1}) {
+		t.Fatalf("metadata counts = %+v", counts)
+	}
+
+	var runtimeOnly authMetadataCounts
+	accumulateAuthMetadata(&runtimeOnly, nil, true, "error", "quota exhausted", true, true)
+	if runtimeOnly != (authMetadataCounts{Unavailable: 1, Status: 1, StatusMessage: 1, Quota: 1, NextRetryAfter: 1}) {
+		t.Fatalf("runtime fallback counts = %+v", runtimeOnly)
 	}
 }

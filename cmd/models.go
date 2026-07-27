@@ -14,7 +14,15 @@ func newModelsCommand(use string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: "List available models with availability status",
-		Long:  `List all available models for the active provider and test each for availability.`,
+		Long: `List and probe models for the active provider.
+
+Without --all, tests the configured model pool (provider.Model). With --all,
+fetches the upstream catalog (or OAuth runtime models) and tests those instead.
+
+Examples:
+  ccl models
+  ccl models --all
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runModels(showAll)
 		},
@@ -28,7 +36,7 @@ func runModels(showAll bool) error {
 	if err != nil {
 		return err
 	}
-	p, cleanup, err := prepareProviderRuntime(p)
+	p, _, cleanup, err := prepareProviderRuntime(p)
 	if err != nil {
 		return err
 	}

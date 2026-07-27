@@ -72,7 +72,7 @@ type Config struct {
 
 // AuthGroup is a homogeneous pool of OAuth credentials. Credentials contains
 // canonical basenames under ~/.ccl/auth; models and Claude slot mappings live
-// on the generated group-<name> Provider instead of being repeated per token.
+// on the generated group Provider instead of being repeated per token.
 type AuthGroup struct {
 	OAuthProvider string   `yaml:"oauthProvider" mapstructure:"oauthProvider"`
 	Credentials   []string `yaml:"credentials" mapstructure:"credentials"`

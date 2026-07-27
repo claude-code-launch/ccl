@@ -11,7 +11,8 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), error) {
+func prepareProviderRuntime(p provider.Provider) (provider.Provider, *oauthproxy.Runtime, func(), error) {
+	nop := func() {}
 	// Anthropic OAuth (claude) still uses the embedded CPA runtime so Claude
 	// Code talks to a local /v1/messages endpoint with a session token.
 	if p.OAuthProvider != "" {
@@ -27,21 +28,21 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), err
 			MaxOutputTokens:         oauthMaxOutputTokens(p),
 		})
 		if err != nil {
-			return provider.Provider{}, nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
+			return provider.Provider{}, nil, nop, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
 		}
 		p.Endpoint = runtime.Endpoint()
 		p.APIKey = runtime.APIKey()
-		return p, runtime.Stop, nil
+		return p, runtime, runtime.Stop, nil
 	}
 
 	if !provider.IsOpenAICompatibleType(p.Type) {
-		return p, func() {}, nil
+		return p, nil, nop, nil
 	}
 
 	if strings.TrimSpace(p.Model) == "" {
 		models, err := protocol.GetOpenAIModels(p.Endpoint, p.APIKey)
 		if err != nil {
-			return provider.Provider{}, nil, fmt.Errorf("discover OpenAI models before starting CLIProxyAPI: %w", err)
+			return provider.Provider{}, nil, nop, fmt.Errorf("discover OpenAI models before starting CLIProxyAPI: %w", err)
 		}
 		p.Model = models
 	}
@@ -53,11 +54,11 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), err
 		MaxOutputTokens: oauthMaxOutputTokens(p),
 	})
 	if err != nil {
-		return provider.Provider{}, nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
+		return provider.Provider{}, nil, nop, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
 	}
 	p.Endpoint = runtime.Endpoint()
 	p.APIKey = runtime.APIKey()
-	return p, runtime.Stop, nil
+	return p, runtime, runtime.Stop, nil
 }
 
 func oauthGroupCredentialResolver(groupName string) func() ([]string, error) {

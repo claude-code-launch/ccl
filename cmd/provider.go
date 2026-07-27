@@ -14,7 +14,21 @@ import (
 var providerCmd = &cobra.Command{
 	Use:   "provider",
 	Short: "Manage providers",
-	Long:  "Manage providers: set, ls, use, cp, mv, rm, map, models, env, doctor, or preview injected settings.",
+	Long: `Manage LLM providers stored in ~/.ccl/config.yaml.
+
+Subcommands:
+  set [name]     Interactive add/update (TUI)
+  ls             List providers (hides single accounts already in a group)
+  use [name]     Switch active provider
+  cp/mv/rm       Copy, rename, delete
+  map            Slot → model mapping (Opus/Sonnet/Haiku/Custom)
+  models         Availability check for the model pool
+  env            Provider-scoped environment variables
+  preview        Show settings JSON injected into Claude Code
+
+Most of these are also available as root shortcuts:
+  ccl set / ccl ls / ccl use / ccl map / ccl models / ccl env / ccl preview
+`,
 }
 
 var cpCmd = newProviderCopyCommand("cp <source> <target>")
@@ -254,6 +268,15 @@ func cloneProvider(p provider.Provider, name string) provider.Provider {
 			cloned.Env[k] = v
 		}
 	}
+	if p.OAuthAccountCredentials != nil {
+		cloned.OAuthAccountCredentials = append([]string{}, p.OAuthAccountCredentials...)
+	}
+	if p.ModelOverrides != nil {
+		cloned.ModelOverrides = make(map[string]string, len(p.ModelOverrides))
+		for k, v := range p.ModelOverrides {
+			cloned.ModelOverrides[k] = v
+		}
+	}
 	return cloned
 }
 
@@ -269,7 +292,6 @@ func init() {
 		newMapCommand("map [provider-name]"),
 		newModelsCommand("models"),
 		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
-		newDoctorCommand("doctor"),
 	)
 	rootCmd.AddCommand(providerCmd, cpCmd, mvCmd, rmCmd)
 }
