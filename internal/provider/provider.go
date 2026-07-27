@@ -30,6 +30,14 @@ type Provider struct {
 	// (basename of the JSON under ~/.ccl/auth). The OAuth runtime loads only
 	// that account when set; empty falls back to all backend credentials.
 	OAuthAccountCredential string `yaml:"oauthAccountCredential,omitempty" mapstructure:"oauthAccountCredential,omitempty"`
+	// AuthGroup points at Config.AuthGroups. Group providers keep their model
+	// mapping here while config.Load hydrates OAuthAccountCredentials from the
+	// latest group membership before each command/launch.
+	AuthGroup string `yaml:"authGroup,omitempty" mapstructure:"authGroup,omitempty"`
+	// OAuthAccountCredentials is runtime-only. A non-nil slice means the OAuth
+	// runtime must load exactly these files; an empty non-nil slice is an empty
+	// group and must never fall back to every account on the backend.
+	OAuthAccountCredentials []string `yaml:"-" mapstructure:"-"`
 
 	// Custom model configuration (Claude Code native features)
 	CustomModelID  string            `yaml:"customModelId,omitempty" mapstructure:"customModelId,omitempty"`   // ANTHROPIC_CUSTOM_MODEL_OPTION
@@ -48,12 +56,26 @@ type Provider struct {
 }
 
 type Config struct {
-	ActiveProvider string              `yaml:"active_provider" mapstructure:"active_provider"`
-	Lang           string              `yaml:"lang,omitempty" mapstructure:"lang,omitempty"`
+	ActiveProvider string `yaml:"active_provider" mapstructure:"active_provider"`
+	Lang           string `yaml:"lang,omitempty" mapstructure:"lang,omitempty"`
 	// BypassMode automatically passes --dangerously-skip-permissions to Claude
 	// Code for every ccl-launched session. It is a global launcher setting.
-	BypassMode bool                `yaml:"bypass_mode,omitempty" mapstructure:"bypass_mode,omitempty"`
-	Providers  map[string]Provider `yaml:"providers" mapstructure:"providers"`
+	BypassMode bool `yaml:"bypass_mode,omitempty" mapstructure:"bypass_mode,omitempty"`
+	// DebugMode enables ccl runtime diagnostics for ccl-launched sessions:
+	// runtime startup, upstream HTTP status, OAuth refresh, request metadata.
+	// Logs to /tmp/ccl-debug.log (override with CCL_DEBUG_LOG). It never logs
+	// credentials, refresh tokens, or request/response bodies.
+	DebugMode  bool                 `yaml:"debug_mode,omitempty" mapstructure:"debug_mode,omitempty"`
+	Providers  map[string]Provider  `yaml:"providers" mapstructure:"providers"`
+	AuthGroups map[string]AuthGroup `yaml:"auth_groups,omitempty" mapstructure:"auth_groups,omitempty"`
+}
+
+// AuthGroup is a homogeneous pool of OAuth credentials. Credentials contains
+// canonical basenames under ~/.ccl/auth; models and Claude slot mappings live
+// on the generated group-<name> Provider instead of being repeated per token.
+type AuthGroup struct {
+	OAuthProvider string   `yaml:"oauthProvider" mapstructure:"oauthProvider"`
+	Credentials   []string `yaml:"credentials" mapstructure:"credentials"`
 }
 
 // FixedOAuthProtocol returns the public protocol label ccl persists for an

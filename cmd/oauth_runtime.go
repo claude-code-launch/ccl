@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -15,13 +16,15 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), err
 	// Code talks to a local /v1/messages endpoint with a session token.
 	if p.OAuthProvider != "" {
 		runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
-			Protocol:               oauthRuntimeProtocol(p),
-			Endpoint:               p.Endpoint,
-			APIKey:                 p.APIKey,
-			ModelSpec:              provider.RuntimeModelSpec(p),
-			OAuthProvider:          p.OAuthProvider,
-			OAuthAccountCredential: p.OAuthAccountCredential,
-			MaxOutputTokens:        oauthMaxOutputTokens(p),
+			Protocol:                oauthRuntimeProtocol(p),
+			Endpoint:                p.Endpoint,
+			APIKey:                  p.APIKey,
+			ModelSpec:               provider.RuntimeModelSpec(p),
+			OAuthProvider:           p.OAuthProvider,
+			OAuthAccountCredential:  p.OAuthAccountCredential,
+			OAuthAccountCredentials: p.OAuthAccountCredentials,
+			OAuthCredentialResolver: oauthGroupCredentialResolver(p.AuthGroup),
+			MaxOutputTokens:         oauthMaxOutputTokens(p),
 		})
 		if err != nil {
 			return provider.Provider{}, nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
@@ -55,6 +58,24 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, func(), err
 	p.Endpoint = runtime.Endpoint()
 	p.APIKey = runtime.APIKey()
 	return p, runtime.Stop, nil
+}
+
+func oauthGroupCredentialResolver(groupName string) func() ([]string, error) {
+	groupName = strings.TrimSpace(groupName)
+	if groupName == "" {
+		return nil
+	}
+	return func() ([]string, error) {
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+		group, ok := cfg.AuthGroups[groupName]
+		if !ok {
+			return []string{}, nil
+		}
+		return append([]string{}, group.Credentials...), nil
+	}
 }
 
 func oauthRuntimeProtocol(p provider.Provider) oauthproxy.UpstreamProtocol {

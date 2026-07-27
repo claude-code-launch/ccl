@@ -1,0 +1,172 @@
+package oauthproxy
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+// defaultDebugLogPath is the on-disk destination for ccl debug diagnostics.
+// It can be overridden with the CCL_DEBUG_LOG environment variable.
+const defaultDebugLogPath = "/tmp/ccl-debug.log"
+
+var (
+	debugStateMu sync.RWMutex
+	debugEnabled bool
+	debugLogPath string
+	debugFile    *os.File
+)
+
+// sensitiveMarkers identifies log lines that likely carry credentials. The
+// whole line is dropped to avoid leaking refresh tokens, access tokens, API
+// keys, or Authorization headers into the debug log.
+var sensitiveMarkers = []string{
+	"refresh_token",
+	"refresh token",
+	"access_token",
+	"access token",
+	"authorization:",
+	"authorization =",
+	"api_key",
+	"apikey",
+	"api-key",
+	"bearer ",
+	"\"token\":",
+	"token=",
+}
+
+// interestingMarkers identifies log lines worth keeping: upstream errors, rate
+// limiting, OAuth refresh/cooldown, and stream failures. Everything else from
+// the noisy CLIProxyAPI logrus stream is dropped.
+var interestingMarkers = []string{
+	"refresh",
+	"cooldown",
+	"unauthorized",
+	"401",
+	"429",
+	"500",
+	"502",
+	"503",
+	"504",
+	"rate limit",
+	"ratelimit",
+	"quota",
+	"stream",
+	"expired",
+	"token refreshed",
+	"refreshing token",
+	"tryrefresh",
+	"error",
+	"fail",
+}
+
+// SetDebug enables or disables runtime diagnostics at the package level. When
+// enabling, the given path (or the resolved default/override) is opened in
+// append mode; when disabling, any open file is closed so the log stops
+// growing and prior content is preserved.
+func SetDebug(enabled bool, path string) {
+	debugStateMu.Lock()
+	defer debugStateMu.Unlock()
+
+	if !enabled {
+		if debugFile != nil {
+			_ = debugFile.Close()
+			debugFile = nil
+		}
+		debugEnabled = false
+		debugLogPath = ""
+		return
+	}
+
+	if strings.TrimSpace(path) == "" {
+		path = ResolveDebugLogPath()
+	}
+	if debugFile != nil && debugLogPath == path {
+		debugEnabled = true
+		return
+	}
+	if debugFile != nil {
+		_ = debugFile.Close()
+		debugFile = nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		// Fall back to disabled state rather than crashing the launcher.
+		debugEnabled = false
+		debugLogPath = ""
+		return
+	}
+	debugEnabled = true
+	debugLogPath = path
+	debugFile = f
+}
+
+// ResolveDebugLogPath returns the configured debug log destination, honoring
+// the CCL_DEBUG_LOG override before the default /tmp/ccl-debug.log.
+func ResolveDebugLogPath() string {
+	if v := strings.TrimSpace(os.Getenv("CCL_DEBUG_LOG")); v != "" {
+		return v
+	}
+	return defaultDebugLogPath
+}
+
+// DebugEnabled reports whether diagnostics are currently active.
+func DebugEnabled() bool {
+	debugStateMu.RLock()
+	defer debugStateMu.RUnlock()
+	return debugEnabled
+}
+
+// DebugLogPath returns the active debug log path (empty when disabled).
+func DebugLogPath() string {
+	debugStateMu.RLock()
+	defer debugStateMu.RUnlock()
+	return debugLogPath
+}
+
+// Debugf writes a single timestamped line to the debug log when enabled. It is
+// a no-op when disabled; callers pass only non-sensitive fields.
+func Debugf(format string, args ...any) {
+	debugStateMu.RLock()
+	enabled := debugEnabled
+	f := debugFile
+	debugStateMu.RUnlock()
+	if !enabled || f == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(f, "%s ", time.Now().Format(time.RFC3339Nano))
+	_, _ = fmt.Fprintf(f, format, args...)
+	_, _ = fmt.Fprintln(f)
+}
+
+// debugFilterWriter is an io.Writer that screens CLIProxyAPI logrus output
+// before it reaches the debug file: drop lines carrying secrets, keep only
+// lines that look like useful diagnostics, write the survivors with a prefix
+// so they are distinguishable from ccl's own Debugf lines.
+type debugFilterWriter struct{}
+
+func (debugFilterWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	if line == "" {
+		return len(p), nil
+	}
+	lower := strings.ToLower(line)
+	for _, marker := range sensitiveMarkers {
+		if strings.Contains(lower, marker) {
+			return len(p), nil
+		}
+	}
+	for _, marker := range interestingMarkers {
+		if strings.Contains(lower, marker) {
+			Debugf("[cpa] %s", line)
+			return len(p), nil
+		}
+	}
+	return len(p), nil
+}
+
+// newDebugFilterWriter returns a debug-screening writer for logrus output.
+func newDebugFilterWriter() io.Writer { return debugFilterWriter{} }

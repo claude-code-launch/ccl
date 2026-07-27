@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,8 +23,8 @@ import (
 func TestBackendProviderAliases(t *testing.T) {
 	tests := map[string]string{
 		"codex":   "codex",
-		"gpt": "codex",
-			"chatgpt": "codex",
+		"gpt":     "codex",
+		"chatgpt": "codex",
 		"copilot": "codex",
 		"gemini":  "antigravity",
 		"grok":    "xai",
@@ -210,6 +211,114 @@ func TestProviderTokenStoreFiltersByCredentialFile(t *testing.T) {
 	if got := filepath.Base(auths[0].FileName); got != "codex-bob@example.com.json" {
 		t.Fatalf("selected file = %q, want codex-bob@example.com.json", got)
 	}
+}
+
+func TestProviderTokenStoreFiltersExactCredentialGroup(t *testing.T) {
+	authDir := t.TempDir()
+	credentials := map[string][]byte{
+		"xai-a.json": []byte(`{"type":"xai","access_token":"a","email":"a@example.com"}`),
+		"xai-b.json": []byte(`{"type":"xai","access_token":"b","email":"b@example.com"}`),
+		"xai-c.json": []byte(`{"type":"xai","access_token":"c","email":"c@example.com"}`),
+	}
+	for name, data := range credentials {
+		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := newProviderTokenStoreFiles(authDir, backendXAI, []string{"xai-a.json", "xai-c.json"}, true)
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("group auth count = %d, want 2", len(auths))
+	}
+	files := map[string]bool{}
+	for _, auth := range auths {
+		files[filepath.Base(auth.FileName)] = true
+	}
+	if !files["xai-a.json"] || !files["xai-c.json"] || files["xai-b.json"] {
+		t.Fatalf("group auth files = %+v", files)
+	}
+
+	empty := newProviderTokenStoreFiles(authDir, backendXAI, []string{}, true)
+	auths, err = empty.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auths) != 0 {
+		t.Fatalf("empty restricted group leaked %d auths", len(auths))
+	}
+}
+
+func TestStartProviderEmptyCredentialGroupDoesNotLoadAllBackendAccounts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "xai-a.json"), []byte(`{"type":"xai","access_token":"a","email":"a@example.com"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := StartProvider(context.Background(), StartOptions{
+		OAuthProvider:           ProviderGrok,
+		OAuthAccountCredentials: []string{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "has no credentials") {
+		t.Fatalf("StartProvider(empty group) error = %v", err)
+	}
+}
+
+func TestRunningOAuthGroupReloadsChangedMembership(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		"codex-a.json": `{"type":"codex","access_token":"a","refresh_token":"ra","email":"a@example.com"}`,
+		"codex-b.json": `{"type":"codex","access_token":"b","refresh_token":"rb","email":"b@example.com"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(authDir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var membersMu sync.RWMutex
+	members := []string{"codex-a.json"}
+	resolver := func() ([]string, error) {
+		membersMu.RLock()
+		defer membersMu.RUnlock()
+		return append([]string{}, members...), nil
+	}
+	proxyRuntime, err := StartProvider(context.Background(), StartOptions{
+		OAuthProvider:           ProviderChatGPT,
+		OAuthAccountCredentials: []string{"codex-a.json"},
+		OAuthCredentialResolver: resolver,
+		ModelSpec:               "gpt-5.4-mini",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxyRuntime.Stop()
+	if auths := proxyRuntime.coreManager.List(); len(auths) != 1 || filepath.Base(auths[0].FileName) != "codex-a.json" {
+		t.Fatalf("initial group auths = %+v", auths)
+	}
+
+	membersMu.Lock()
+	members = []string{"codex-b.json"}
+	membersMu.Unlock()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		auths := proxyRuntime.coreManager.List()
+		if len(auths) == 1 && filepath.Base(auths[0].FileName) == "codex-b.json" {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("running group did not reload membership: %+v", proxyRuntime.coreManager.List())
 }
 
 func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {

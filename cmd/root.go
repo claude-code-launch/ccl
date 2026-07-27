@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
@@ -47,6 +49,10 @@ func Execute() {
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
+		var exitCoder interface{ ExitCode() int }
+		if errors.As(err, &exitCoder) {
+			os.Exit(exitCoder.ExitCode())
+		}
 		os.Exit(1)
 	}
 }
@@ -86,6 +92,11 @@ func runClaude(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load ccl config for launcher options: %w", err)
 	}
+
+	// Establish the runtime debug sink before the embedded CPA starts so its
+	// logrus funnel and startup Debugf see the enabled state. Bypass mode and
+	// debug are independent global toggles persisted in config.yaml.
+	oauthproxy.SetDebug(cfg.DebugMode, oauthproxy.ResolveDebugLogPath())
 
 	return claude.Run(p, applyBypassMode(args, cfg.BypassMode))
 }

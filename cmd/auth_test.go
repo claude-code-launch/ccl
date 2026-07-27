@@ -711,3 +711,16 @@ func TestRunAuthChatGPTLegacyAliasCanonicalizesToGPT(t *testing.T) {
 	}
 }
 
+func TestConfigureOAuthProviderPreservesGroupCredentialSelection(t *testing.T) {
+	p := provider.Provider{
+		AuthGroup:               "grok-team",
+		OAuthAccountCredentials: []string{"xai-a.json", "xai-b.json"},
+	}
+	got := configureOAuthProvider(p, "grok-pool", "grok", "")
+	if got.AuthGroup != "grok-team" || len(got.OAuthAccountCredentials) != 2 {
+		t.Fatalf("group credential selection was cleared: %+v", got)
+	}
+	if got.OAuthAccountCredential != "" || got.Endpoint != "oauth://xai" {
+		t.Fatalf("group provider was not normalized: %+v", got)
+	}
+}

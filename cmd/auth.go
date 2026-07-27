@@ -121,22 +121,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 			delete(cfg.Providers, oauthproxy.ProviderCodex)
 		}
 	}
-	p.Name = providerName
-	p.Type = protocolType
-	p.Endpoint = "oauth://" + result.Backend
-	p.APIKey = ""
-	p.AnthropicAuth = ""
-	p.OAuthProvider = target
-	p.OAuthAccountCredential = credentialFile
-	// FastMode is managed by Claude Code /fast or ccl set Review & Apply.
-	// Re-auth preserves an existing pin; non-Codex backends never keep it.
-	if !supportsFastMode(target) {
-		p.FastMode = false
-	}
-	// Seed empty Claude slots with provider-preferred defaults (e.g. GPT/Grok/Gemini).
-	// Existing user mappings are preserved; runtime drops any preferred
-	// default that is missing from the live model catalog.
-	provider.ApplyOAuthSlotDefaults(&p)
+	p = configureOAuthProvider(p, providerName, target, credentialFile)
 	cfg.Providers[providerName] = p
 	cfg.ActiveProvider = providerName
 	if err := config.Save(cfg); err != nil {
@@ -150,6 +135,28 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 		fmt.Fprintf(out, "Fast: %s (toggle with /fast or ccl set Review & Apply)\n", providerFastSummary(p))
 	}
 	return nil
+}
+
+// configureOAuthProvider normalizes the shared shape used by login, import,
+// sync, and generated auth-group providers while preserving model mappings and
+// other user-tuned fields already present on p.
+func configureOAuthProvider(p provider.Provider, name, oauthProvider, credentialFile string) provider.Provider {
+	backend, _ := oauthproxy.BackendProvider(oauthProvider)
+	p.Name = name
+	p.Type = fixedOAuthProtocol(oauthProvider)
+	p.Endpoint = "oauth://" + backend
+	p.APIKey = ""
+	p.AnthropicAuth = ""
+	p.OAuthProvider = oauthProvider
+	p.OAuthAccountCredential = strings.TrimSpace(credentialFile)
+	if p.AuthGroup == "" {
+		p.OAuthAccountCredentials = nil
+	}
+	if !supportsFastMode(oauthProvider) {
+		p.FastMode = false
+	}
+	provider.ApplyOAuthSlotDefaults(&p)
+	return p
 }
 
 // fixedOAuthProtocol is the protocol label persisted for each subscription backend.

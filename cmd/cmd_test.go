@@ -49,7 +49,7 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  auth", "  bypass", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider"} {
+	for _, want := range []string{"  auth", "  bypass", "  debug", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
@@ -263,6 +263,33 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	for _, want := range []string{"* beta", "Endpoint : https://example.com/v1", "Models   : 4", "Pool     : pool-a,pool-b,pool-c,pool-d"} {
 		if !contains(out, want) {
 			t.Fatalf("expected detailed output to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintProvidersDistinguishesGroupFromNormalByConfiguration(t *testing.T) {
+	cfg := &provider.Config{
+		Providers: map[string]provider.Provider{
+			"ordinary": {
+				Name: "ordinary",
+				Type: "openai",
+			},
+			"shared-grok": {
+				Name:      "shared-grok",
+				Type:      "openai",
+				AuthGroup: "grok-team",
+			},
+		},
+	}
+
+	buf := new(bytes.Buffer)
+	if err := printProviders(buf, cfg, false, "empty", "Registered providers:"); err != nil {
+		t.Fatalf("printProviders failed: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"KIND", "ordinary", "normal", "shared-grok", "group"} {
+		if !contains(out, want) {
+			t.Fatalf("expected provider output to contain %q, got:\n%s", want, out)
 		}
 	}
 }

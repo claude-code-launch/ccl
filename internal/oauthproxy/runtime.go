@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ const (
 	codexClientUserAgentEnv     = "CCL_CODEX_USER_AGENT"
 	codexClientDetectionTimeout = 2 * time.Second
 	codexOSDetectionTimeout     = time.Second
+	credentialGroupPollInterval = 2 * time.Second
 )
 
 var codexVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
@@ -67,15 +69,22 @@ const (
 )
 
 type StartOptions struct {
-	Protocol        UpstreamProtocol
-	Endpoint        string
-	APIKey          string
-	ModelSpec       string
-	OAuthProvider   string
+	Protocol      UpstreamProtocol
+	Endpoint      string
+	APIKey        string
+	ModelSpec     string
+	OAuthProvider string
 	// OAuthAccountCredential optionally restricts the runtime to a single
 	// credential file (basename under the OAuth auth dir) for this backend.
 	OAuthAccountCredential string
-	MaxOutputTokens int // plain Responses only; 0 leaves SDK/default behavior
+	// OAuthAccountCredentials restricts the runtime to an exact credential
+	// set. A non-nil empty slice represents an empty auth group and must not
+	// fall back to all backend credentials.
+	OAuthAccountCredentials []string
+	// OAuthCredentialResolver optionally refreshes an auth group's exact file
+	// list while a ccl-launched Claude session is still running.
+	OAuthCredentialResolver func() ([]string, error)
+	MaxOutputTokens         int // plain Responses only; 0 leaves SDK/default behavior
 }
 
 type runtimeModelRoute struct {
@@ -168,29 +177,90 @@ type runtimeCodexModel struct {
 }
 
 type providerTokenStore struct {
-	backend        string
-	credentialFile string
-	store          coreauth.Store
+	backend         string
+	credentialFiles map[string]struct{}
+	restrictToFiles bool
+	resolver        func() ([]string, error)
+	mu              sync.RWMutex
+	store           coreauth.Store
 }
 
 func newProviderTokenStore(authDir, backend, credentialFile string) *providerTokenStore {
+	var credentialFiles []string
+	if strings.TrimSpace(credentialFile) != "" {
+		credentialFiles = []string{credentialFile}
+	}
+	return newProviderTokenStoreFiles(authDir, backend, credentialFiles, strings.TrimSpace(credentialFile) != "")
+}
+
+func newProviderTokenStoreFiles(authDir, backend string, credentialFiles []string, restrictToFiles bool) *providerTokenStore {
+	return newProviderTokenStoreResolver(authDir, backend, credentialFiles, restrictToFiles, nil)
+}
+
+func newProviderTokenStoreResolver(authDir, backend string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) *providerTokenStore {
 	store := sdkauth.NewFileTokenStore()
 	store.SetBaseDir(authDir)
-	return &providerTokenStore{backend: backend, credentialFile: strings.TrimSpace(credentialFile), store: store}
+	return &providerTokenStore{
+		backend:         backend,
+		credentialFiles: credentialFileSet(credentialFiles),
+		restrictToFiles: restrictToFiles,
+		resolver:        resolver,
+		store:           store,
+	}
+}
+
+func credentialFileSet(credentialFiles []string) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(credentialFiles))
+	for _, file := range credentialFiles {
+		if base := strings.ToLower(filepath.Base(strings.TrimSpace(file))); base != "" && base != "." {
+			allowed[base] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+func (s *providerTokenStore) refreshCredentialFiles() error {
+	if s == nil || s.resolver == nil {
+		return nil
+	}
+	files, err := s.resolver()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.credentialFiles = credentialFileSet(files)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *providerTokenStore) allowedCredentialFiles() map[string]struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	allowed := make(map[string]struct{}, len(s.credentialFiles))
+	for file := range s.credentialFiles {
+		allowed[file] = struct{}{}
+	}
+	return allowed
 }
 
 func (s *providerTokenStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	if err := s.refreshCredentialFiles(); err != nil {
+		return nil, err
+	}
 	auths, err := s.store.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	filtered := make([]*coreauth.Auth, 0, len(auths))
+	allowed := s.allowedCredentialFiles()
 	for _, auth := range auths {
 		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), s.backend) {
 			continue
 		}
-		if s.credentialFile != "" && !strings.EqualFold(filepath.Base(auth.FileName), s.credentialFile) {
-			continue
+		if s.restrictToFiles {
+			if _, ok := allowed[strings.ToLower(filepath.Base(auth.FileName))]; !ok {
+				continue
+			}
 		}
 		filtered = append(filtered, auth)
 	}
@@ -223,6 +293,9 @@ func Start(parent context.Context, providerName string) (*Runtime, error) {
 // cannot fall through to the plain Responses path and hit …/codex/v1/responses.
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	if strings.TrimSpace(options.OAuthProvider) != "" {
+		if options.OAuthAccountCredentials != nil {
+			return startOAuthWithFiles(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredentials, true, options.OAuthCredentialResolver)
+		}
 		return StartOAuth(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredential)
 	}
 	switch options.Protocol {
@@ -242,6 +315,20 @@ func StartProvider(parent context.Context, options StartOptions) (*Runtime, erro
 }
 
 func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile string) (*Runtime, error) {
+	credentialFile = strings.TrimSpace(credentialFile)
+	if credentialFile == "" {
+		return startOAuthWithFiles(parent, providerName, modelSpec, nil, false, nil)
+	}
+	return startOAuthWithFiles(parent, providerName, modelSpec, []string{credentialFile}, true, nil)
+}
+
+// StartOAuthAccounts starts an OAuth runtime restricted to exactly the supplied
+// canonical credential files. It is the group counterpart to StartOAuth.
+func StartOAuthAccounts(parent context.Context, providerName, modelSpec string, credentialFiles []string) (*Runtime, error) {
+	return startOAuthWithFiles(parent, providerName, modelSpec, credentialFiles, true, nil)
+}
+
+func startOAuthWithFiles(parent context.Context, providerName, modelSpec string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -253,12 +340,14 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if err != nil {
 		return nil, err
 	}
-	credentialFile = strings.TrimSpace(credentialFile)
-	found, err := hasCredential(authDir, backend, credentialFile)
+	found, err := hasCredentials(authDir, backend, credentialFiles, restrictToFiles)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
+		if restrictToFiles && len(credentialFiles) == 0 {
+			return nil, fmt.Errorf("OAuth group for %s has no credentials; edit it with `ccl auth group` or run `ccl sync`", providerName)
+		}
 		return nil, fmt.Errorf("no %s credentials found; run `ccl auth %s` first", backend, providerName)
 	}
 
@@ -293,8 +382,17 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if err != nil {
 		return nil, err
 	}
-	store := newProviderTokenStore(authDir, backend, credentialFile)
-	return startRuntime(parent, cfg, configPath, apiKey, store, "")
+	store := newProviderTokenStoreResolver(authDir, backend, credentialFiles, restrictToFiles, resolver)
+	runtime, err := startRuntime(parent, cfg, configPath, apiKey, store, "")
+	if err != nil {
+		return nil, err
+	}
+	if resolver != nil {
+		runtime.watchCredentialGroup(authDir, store)
+	}
+	Debugf("runtime start oauth provider=%s backend=%s protocol=openai port=%d credential_files=%d restricted=%t model_count=%d",
+		providerName, backend, port, len(credentialFiles), restrictToFiles, len(aliases))
+	return runtime, nil
 }
 
 // StartOpenAIChatAPI starts CLIProxyAPI with an OpenAI-compatible Chat
@@ -341,7 +439,12 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 		_ = os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("encode OpenAI Chat runtime config: %w", err)
 	}
-	return startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
+	proxyRuntime, err := startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
+	if err != nil {
+		return nil, err
+	}
+	Debugf("runtime start openai_chat endpoint=%q port=%d model_count=%d", endpoint, port, len(models))
+	return proxyRuntime, nil
 }
 
 // StartOpenAIResponsesAPI starts an embedded CLIProxyAPI runtime against a plain
@@ -438,6 +541,11 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 		return nil, err
 	}
 	proxyRuntime.responsesCompat = compat
+	mode := "openai_responses"
+	if codexIdentity {
+		mode = "codex_responses"
+	}
+	Debugf("runtime start %s endpoint=%q port=%d model_count=%d max_output_tokens=%d", mode, endpoint, port, len(models), maxOutputTokens)
 	return proxyRuntime, nil
 }
 
@@ -700,12 +808,73 @@ func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, api
 	return runtime, nil
 }
 
+// watchCredentialGroup reloads CPA only when the selected member list or one
+// of its credential files changes. The general CPA filesystem watcher remains
+// disabled, so unrelated accounts in ~/.ccl/auth can never enter this runtime.
+func (r *Runtime) watchCredentialGroup(authDir string, store *providerTokenStore) {
+	if r == nil || store == nil || store.resolver == nil {
+		return
+	}
+	lastSnapshot, _ := credentialGroupSnapshot(authDir, store)
+	go func() {
+		ticker := time.NewTicker(credentialGroupPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.done:
+				return
+			case <-ticker.C:
+				snapshot, err := credentialGroupSnapshot(authDir, store)
+				if err != nil || snapshot == lastSnapshot {
+					continue
+				}
+				if err := r.coreManager.Load(context.Background()); err == nil {
+					lastSnapshot = snapshot
+				}
+			}
+		}
+	}()
+}
+
+func credentialGroupSnapshot(authDir string, store *providerTokenStore) (string, error) {
+	if err := store.refreshCredentialFiles(); err != nil {
+		return "", err
+	}
+	allowed := store.allowedCredentialFiles()
+	files := make([]string, 0, len(allowed))
+	for file := range allowed {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	var snapshot strings.Builder
+	for _, file := range files {
+		snapshot.WriteString(file)
+		if info, err := os.Stat(filepath.Join(authDir, file)); err == nil {
+			fmt.Fprintf(&snapshot, ":%d:%d", info.Size(), info.ModTime().UnixNano())
+		} else if os.IsNotExist(err) {
+			snapshot.WriteString(":missing")
+		} else {
+			return "", err
+		}
+		snapshot.WriteByte('\n')
+	}
+	return snapshot.String(), nil
+}
+
 func silenceSDKLogs() func() {
 	sdkLogState.Lock()
 	if sdkLogState.users == 0 {
 		sdkLogState.previousLevel = log.GetLevel()
-		log.SetOutput(io.Discard)
-		log.SetLevel(log.PanicLevel)
+		if DebugEnabled() {
+			// Debug mode keeps the noisy CLIProxyAPI logrus stream but funnels it
+			// through debugFilterWriter: only diagnostic-looking lines survive,
+			// and any line carrying a credential marker is dropped entirely.
+			log.SetOutput(newDebugFilterWriter())
+			log.SetLevel(log.InfoLevel)
+		} else {
+			log.SetOutput(io.Discard)
+			log.SetLevel(log.PanicLevel)
+		}
 	}
 	sdkLogState.users++
 	sdkLogState.Unlock()
@@ -766,6 +935,23 @@ func silenceStdout() func() {
 
 func hasCredential(authDir, backend, credentialFile string) (bool, error) {
 	credentialFile = strings.TrimSpace(credentialFile)
+	var credentialFiles []string
+	if credentialFile != "" {
+		credentialFiles = []string{credentialFile}
+	}
+	return hasCredentials(authDir, backend, credentialFiles, credentialFile != "")
+}
+
+func hasCredentials(authDir, backend string, credentialFiles []string, restrictToFiles bool) (bool, error) {
+	allowed := make(map[string]struct{}, len(credentialFiles))
+	for _, file := range credentialFiles {
+		if base := strings.ToLower(filepath.Base(strings.TrimSpace(file))); base != "" && base != "." {
+			allowed[base] = struct{}{}
+		}
+	}
+	if restrictToFiles && len(allowed) == 0 {
+		return false, nil
+	}
 	entries, err := os.ReadDir(authDir)
 	if err != nil {
 		return false, fmt.Errorf("read auth directory: %w", err)
@@ -774,8 +960,10 @@ func hasCredential(authDir, backend, credentialFile string) (bool, error) {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		if credentialFile != "" && !strings.EqualFold(entry.Name(), credentialFile) {
-			continue
+		if restrictToFiles {
+			if _, ok := allowed[strings.ToLower(entry.Name())]; !ok {
+				continue
+			}
 		}
 		data, err := os.ReadFile(filepath.Join(authDir, entry.Name()))
 		if err != nil {

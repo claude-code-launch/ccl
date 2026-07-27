@@ -9,7 +9,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -353,13 +355,15 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 			}
 		}
 		runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
-			Protocol:               upstreamProtocol,
-			Endpoint:               providerCopy.Endpoint,
-			APIKey:                 providerCopy.APIKey,
-			ModelSpec:              provider.RuntimeModelSpec(providerCopy),
-			OAuthProvider:          providerCopy.OAuthProvider,
-			OAuthAccountCredential: providerCopy.OAuthAccountCredential,
-			MaxOutputTokens:        maxOut,
+			Protocol:                upstreamProtocol,
+			Endpoint:                providerCopy.Endpoint,
+			APIKey:                  providerCopy.APIKey,
+			ModelSpec:               provider.RuntimeModelSpec(providerCopy),
+			OAuthProvider:           providerCopy.OAuthProvider,
+			OAuthAccountCredential:  providerCopy.OAuthAccountCredential,
+			OAuthAccountCredentials: providerCopy.OAuthAccountCredentials,
+			OAuthCredentialResolver: groupCredentialResolver(providerCopy.AuthGroup),
+			MaxOutputTokens:         maxOut,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
@@ -378,6 +382,24 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 		return nil, err
 	}
 	return ctx, nil
+}
+
+func groupCredentialResolver(groupName string) func() ([]string, error) {
+	groupName = strings.TrimSpace(groupName)
+	if groupName == "" {
+		return nil
+	}
+	return func() ([]string, error) {
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+		group, ok := cfg.AuthGroups[groupName]
+		if !ok {
+			return []string{}, nil
+		}
+		return append([]string{}, group.Credentials...), nil
+	}
 }
 
 // resolveModel seeds preferred OAuth slot defaults for empty tiers, discovers
@@ -471,7 +493,28 @@ func Run(p provider.Provider, args []string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = buildProcessEnv(os.Environ(), sessionSettings, ctx.useProxy)
 
-	return cmd.Run()
+	start := time.Now()
+	runErr := cmd.Run()
+
+	// Approximate session metadata for the debug log. These are ccl-side counts,
+	// not the real upstream request size, and never include credentials or
+	// request bodies. Useful to correlate with upstream errors logged by CPA.
+	if oauthproxy.DebugEnabled() {
+		spec := provider.RuntimeModelSpec(p)
+		modelCount := 0
+		if spec != "" {
+			modelCount = len(strings.Split(spec, ","))
+		}
+		outcome := "ok"
+		if runErr != nil {
+			outcome = runErr.Error()
+		}
+		oauthproxy.Debugf("launcher exit provider=%q oauth=%q protocol=%q base=%q use_proxy=%t model_count=%d env_override=%d custom_model=%q fast=%t outcome=%s duration=%s",
+			p.Name, p.OAuthProvider, provider.ProtocolLabel(p.Type), ctx.baseURL,
+			ctx.useProxy, modelCount, len(p.Env), p.CustomModelID, p.FastMode,
+			outcome, time.Since(start).Round(time.Millisecond))
+	}
+	return runErr
 }
 
 // modelDisplayName is the human-facing label for Claude Code *_NAME env vars.
