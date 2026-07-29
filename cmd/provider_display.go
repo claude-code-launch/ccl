@@ -74,6 +74,9 @@ func backendManagedContextNote(p provider.Provider) string {
 	if strings.TrimSpace(p.OAuthProvider) == "" {
 		return ""
 	}
+	if provider.ContextBudgetIsManual(p) {
+		return " · manual override"
+	}
 	return " · backend-managed (preset is fallback)"
 }
 

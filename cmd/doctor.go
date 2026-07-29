@@ -241,11 +241,13 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	compactWindow := parseDoctorTokenEnv(configured.Env[autoCompactWindowEnv])
 	windows, source := claude.AdvertisedContextWindows(runtimeProvider.Endpoint, runtimeProvider.APIKey)
 	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
-	managed := strings.TrimSpace(configured.OAuthProvider) != "" && smallest > 0
+	manual := provider.ContextBudgetIsManual(configured)
+	managed := strings.TrimSpace(configured.OAuthProvider) != "" && smallest > 0 && !manual
 
 	oauthproxy.Debugf("doctor context budget provider=%q configured_max_context=%d configured_compact=%d catalog=%q models=%d smallest=%d smallest_model=%q managed=%t",
 		configured.Name, maxContext, compactWindow, source, len(windows), smallest, smallestModel, managed)
 
+	doctorKV("Mode", contextBudgetModeLabel(configured, managed))
 	if managed {
 		// The launcher overrides the stored preset with these values.
 		doctorKV("Managed by", source+" (subscription backend)")
@@ -275,12 +277,22 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 		return
 	}
 	if managed {
-		doctorOK("Context and compact settings follow the backend; the ccl preset is read-only for this provider")
+		doctorOK("Context and compact settings follow the backend; the ccl preset is the fallback")
 		if maxContext > smallest {
 			doctorInfo(fmt.Sprintf("Stored preset (%s) is larger than the advertised window and is ignored",
 				formatTokenCount(maxContext)))
 		}
+		doctorHint(fmt.Sprintf("The advertised window can be a catalog cap rather than the server limit; to aim higher set %s=%s in the provider env",
+			provider.EnvContextBudgetMode, provider.ContextBudgetManual))
 		return
+	}
+	if manual && strings.TrimSpace(configured.OAuthProvider) != "" {
+		doctorWarn(fmt.Sprintf("%s=%s: the configured limits are used as-is and are not checked against the backend",
+			provider.EnvContextBudgetMode, provider.ContextBudgetManual))
+		if smallest > 0 && maxContext > smallest {
+			doctorHint(fmt.Sprintf("Backend advertises %s for %s; if requests fail with context_length_exceeded, that is the real ceiling",
+				formatTokenCount(smallest), smallestModel))
+		}
 	}
 
 	threshold, thresholdLabel := effectiveCompactThreshold(maxContext, compactWindow)
@@ -297,6 +309,20 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	}
 	doctorOK(fmt.Sprintf("Compact threshold %s fits the smallest mapped window %s",
 		formatTokenCount(threshold), formatTokenCount(smallest)))
+}
+
+// contextBudgetModeLabel explains who owns the context limits for this provider.
+func contextBudgetModeLabel(p provider.Provider, managed bool) string {
+	switch {
+	case provider.ContextBudgetIsManual(p):
+		return "manual (" + provider.EnvContextBudgetMode + "=" + provider.ContextBudgetManual + ")"
+	case managed:
+		return "auto (backend-managed)"
+	case strings.TrimSpace(p.OAuthProvider) != "":
+		return "auto (no advertised window; using the configured preset)"
+	default:
+		return "configured preset"
+	}
 }
 
 // effectiveCompactThreshold reports the token count Claude Code will actually

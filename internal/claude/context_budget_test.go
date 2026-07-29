@@ -123,3 +123,41 @@ func TestApplyManagedContextBudgetOutranksStoredPreset(t *testing.T) {
 		t.Errorf("preset was overwritten without a managed window: %q", kept[provider.EnvMaxContextTokens])
 	}
 }
+
+func TestResolveManagedContextBudgetHonorsManualOverride(t *testing.T) {
+	server := codexCatalogServer(t, `{"models":[{"slug":"gpt-5.6-sol","context_window":272000}]}`)
+	p := provider.Provider{
+		OAuthProvider: "gpt",
+		Endpoint:      server.URL,
+		APIKey:        "session-key",
+		OpusModel:     "gpt-5.6-sol",
+		Env: map[string]string{
+			provider.EnvContextBudgetMode: provider.ContextBudgetManual,
+			provider.EnvMaxContextTokens:  "1050000",
+			provider.EnvAutoCompactWindow: "840000",
+		},
+	}
+	if _, ok := ResolveManagedContextBudget(p); ok {
+		t.Fatal("manual mode must keep the configured window, even above the advertised one")
+	}
+}
+
+func TestBuildEnvDropsCclDirectives(t *testing.T) {
+	p := provider.Provider{
+		Name:     "manual-gpt",
+		Type:     "openai_responses",
+		Endpoint: "https://example.test/v1",
+		APIKey:   "sk-test",
+		Env: map[string]string{
+			provider.EnvContextBudgetMode: provider.ContextBudgetManual,
+			provider.EnvMaxContextTokens:  "1050000",
+		},
+	}
+	env := buildEnv(p, "https://example.test", false)
+	if _, present := env[provider.EnvContextBudgetMode]; present {
+		t.Errorf("%s is a ccl directive and must not reach Claude Code", provider.EnvContextBudgetMode)
+	}
+	if env[provider.EnvMaxContextTokens] != "1050000" {
+		t.Errorf("configured context override was lost: %q", env[provider.EnvMaxContextTokens])
+	}
+}

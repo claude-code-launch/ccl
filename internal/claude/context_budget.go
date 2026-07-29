@@ -60,6 +60,13 @@ func ResolveManagedContextBudget(p provider.Provider) (ManagedContextBudget, boo
 	if strings.TrimSpace(p.OAuthProvider) == "" {
 		return ManagedContextBudget{}, false
 	}
+	if provider.ContextBudgetIsManual(p) {
+		// The advertised window can be a client-side catalog cap rather than the
+		// server's real limit, so an explicit opt-out must be able to aim higher.
+		oauthproxy.Debugf("context budget manual override provider=%q max_context_tokens=%q auto_compact_window=%q",
+			p.Name, p.Env[provider.EnvMaxContextTokens], p.Env[provider.EnvAutoCompactWindow])
+		return ManagedContextBudget{}, false
+	}
 	windows, source := AdvertisedContextWindows(p.Endpoint, p.APIKey)
 	if len(windows) == 0 {
 		return ManagedContextBudget{}, false

@@ -187,6 +187,8 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	for k, v := range p.Env {
 		env[k] = v
 	}
+	// ccl directives are not Claude Code variables.
+	removeEnvKey(env, provider.EnvContextBudgetMode)
 	if useProxy {
 		removeEnvKey(env, "ANTHROPIC_API_KEY")
 		removeEnvKey(env, "ANTHROPIC_BASE_URL")

@@ -17,7 +17,27 @@ const (
 	// EnvAutoCompactWindow is the absolute token count at which Claude Code
 	// auto-compacts the conversation.
 	EnvAutoCompactWindow = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
+	// EnvContextBudgetMode is a ccl directive, not a Claude Code variable: it
+	// selects who owns the two limits above for a subscription provider.
+	//
+	//	auto   (default) follow the window the backend advertises
+	//	manual keep the configured values, even when they are larger
+	//
+	// The advertised number can itself be a client-side catalog cap rather than
+	// the server's real limit, so "manual" exists to let a larger window be tried.
+	EnvContextBudgetMode = "CCL_CONTEXT_BUDGET"
+
+	// ContextBudgetManual is the EnvContextBudgetMode value that disables
+	// backend-driven context management.
+	ContextBudgetManual = "manual"
 )
+
+// ContextBudgetIsManual reports whether the provider opted out of backend-driven
+// context management.
+func ContextBudgetIsManual(p Provider) bool {
+	return strings.EqualFold(strings.TrimSpace(p.Env[EnvContextBudgetMode]), ContextBudgetManual)
+}
 
 type Provider struct {
 	Name     string `yaml:"name" mapstructure:"name"`
