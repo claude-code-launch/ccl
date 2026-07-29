@@ -31,13 +31,14 @@ under ~/.ccl/auth before refreshing providers and auth groups.
 Examples:
   ccl oauth import ~/xai-user@example.com.json
   ccl oauth import ~/credentials
-  ccl oauth import ~/codex.json --provider copilot`,
+  ccl oauth import ~/codex.json --provider copilot
+  ccl oauth import ~/.aws/sso/cache/kiro-auth-token.json`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAuthImport(cmd.OutOrStdout(), args[0], opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.providerHint, "provider", "", "Public provider hint for shared backends (gpt or copilot)")
+	cmd.Flags().StringVar(&opts.providerHint, "provider", "", "Public provider hint (normally only needed to distinguish gpt from copilot)")
 	return cmd
 }
 

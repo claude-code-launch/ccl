@@ -22,8 +22,8 @@ type Provider struct {
 	// AnthropicAuth controls how Claude Code authenticates direct Anthropic-compatible providers.
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
-	// OAuthProvider selects an embedded CLIProxyAPI OAuth backend. Supported
-	// values are gpt, gemini, grok, copilot, kimi, and claude. The legacy chatgpt
+	// OAuthProvider selects an embedded subscription runtime. Supported
+	// values are gpt, gemini, grok, copilot, kimi, kiro, and claude. The legacy chatgpt
 	// codex value remains readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
@@ -80,14 +80,14 @@ type AuthGroup struct {
 
 // FixedOAuthProtocol returns the public protocol label ccl persists for an
 // OAuth backend. GPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → OpenAI
-// Chat; Claude → Anthropic. ok is false when oauthProvider is empty or unknown.
+// Chat; Kiro/Claude → Anthropic. ok is false when oauthProvider is empty or unknown.
 func FixedOAuthProtocol(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
 	case "gpt", "chatgpt", "codex", "copilot":
 		return "openai_responses", true
 	case "gemini", "grok", "kimi":
 		return "openai", true
-	case "claude":
+	case "kiro", "claude":
 		return "anthropic", true
 	default:
 		return "", false
@@ -120,6 +120,8 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "grok"
 	case "kimi":
 		return "kimi"
+	case "kiro":
+		return "kiro"
 	case "claude":
 		return "claude"
 	default:

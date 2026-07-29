@@ -16,6 +16,7 @@ import (
 type authOptions struct {
 	noBrowser    bool
 	callbackPort int
+	kiroAuthMode string
 }
 
 var oauthLogin = oauthproxy.Login
@@ -25,16 +26,16 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "oauth <gpt|gemini|grok|copilot|kimi|claude> [alias]",
+		Use:     "oauth <gpt|gemini|grok|copilot|kimi|kiro|claude> [alias]",
 		Aliases: []string{"auth"},
-		Short: "Authenticate a subscription-backed provider",
+		Short:   "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers and manage OAuth credentials.
 
 Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|copilot|kimi|claude
+  ccl oauth gemini|grok|copilot|kimi|kiro|claude
 
 Subcommands:
 
@@ -46,7 +47,8 @@ Notes:
   - Alias "auth" still works: ccl auth gpt
   - Legacy "chatgpt" is accepted and normalized to "gpt"
   - Fast mode (gpt/copilot): Claude /fast or ccl set Review & Apply
-  - Flags: --no-browser, --callback-port (ChatGPT/Claude)
+  - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
+  - Flags: --no-browser, --callback-port, --kiro-auth
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -54,7 +56,8 @@ Notes:
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Claude only)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Claude/Kiro Portal)")
+	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	return cmd
 }
 
@@ -93,6 +96,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	result, err := oauthLogin(ctx, target, oauthproxy.LoginOptions{
 		NoBrowser:    opts.noBrowser,
 		CallbackPort: opts.callbackPort,
+		KiroAuthMode: opts.kiroAuthMode,
 	})
 	if err != nil {
 		return fmt.Errorf("authenticate %s: %w", target, err)
@@ -162,12 +166,12 @@ func configureOAuthProvider(p provider.Provider, name, oauthProvider, credential
 }
 
 // fixedOAuthProtocol is the protocol label persisted for each subscription backend.
-// ChatGPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → Chat; Claude → Anthropic.
+// ChatGPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → Chat; Kiro/Claude → Anthropic.
 func fixedOAuthProtocol(providerName string) string {
 	switch providerName {
 	case oauthproxy.ProviderGemini, oauthproxy.ProviderGrok, oauthproxy.ProviderKimi:
 		return "openai"
-	case oauthproxy.ProviderClaude:
+	case oauthproxy.ProviderKiro, oauthproxy.ProviderClaude:
 		return "anthropic"
 	default:
 		return "openai_responses"
@@ -183,6 +187,7 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderGrok, "xai",
 		oauthproxy.ProviderCopilot,
 		oauthproxy.ProviderKimi,
+		oauthproxy.ProviderKiro,
 		oauthproxy.ProviderClaude:
 		return true
 	default:

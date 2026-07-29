@@ -24,6 +24,7 @@ func TestFixedOAuthProtocolDefaults(t *testing.T) {
 		{oauthproxy.ProviderGemini, "openai"},
 		{oauthproxy.ProviderGrok, "openai"},
 		{oauthproxy.ProviderKimi, "openai"},
+		{oauthproxy.ProviderKiro, "anthropic"},
 		{oauthproxy.ProviderClaude, "anthropic"},
 		{oauthproxy.ProviderCopilot, "openai_responses"},
 	}
@@ -32,6 +33,34 @@ func TestFixedOAuthProtocolDefaults(t *testing.T) {
 		if got != test.want {
 			t.Fatalf("fixedOAuthProtocol(%q) = %q; want %q", test.provider, got, test.want)
 		}
+	}
+}
+
+func TestRunAuthKiroUsesAnthropicRuntimeAndDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: "kiro", Path: "kiro-dev@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"kiro", "aws"}, authOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Providers["aws"]
+	if p.Type != "anthropic" || p.Endpoint != "oauth://kiro" || p.OAuthProvider != "kiro" {
+		t.Fatalf("Kiro provider = %+v", p)
+	}
+	if p.OAuthAccountCredential != "kiro-dev@example.com.json" {
+		t.Fatalf("credential = %q", p.OAuthAccountCredential)
+	}
+	if p.OpusModel != "claude-opus-4-6" || p.SonnetModel != "claude-sonnet-4-6" ||
+		p.HaikuModel != "claude-haiku-4-5" {
+		t.Fatalf("Kiro preferred defaults not applied: %+v", p)
 	}
 }
 

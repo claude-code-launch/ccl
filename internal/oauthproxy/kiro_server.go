@@ -1,0 +1,466 @@
+package oauthproxy
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+const (
+	kiroIDEVersion             = "2.3.0"
+	kiroMaxInboundRequestBytes = int64(128 << 20)
+)
+
+type kiroService struct {
+	apiKey       string
+	models       []string
+	modelCatalog *kiroModelCatalog
+	pool         *kiroCredentialPool
+	client       *http.Client
+	upstreamURL  func(*kiroCredential) string
+}
+
+type kiroUpstreamError struct {
+	status int
+	body   string
+}
+
+func (e *kiroUpstreamError) Error() string {
+	return fmt.Sprintf("Kiro upstream returned HTTP %d: %s", e.status, e.body)
+}
+
+func startKiroOAuthWithFiles(parent context.Context, modelSpec string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) (*Runtime, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	authDir, err := ensureAuthDir()
+	if err != nil {
+		return nil, err
+	}
+	pool := newKiroCredentialPool(authDir, credentialFiles, restrictToFiles, resolver)
+	credentials, err := pool.load()
+	if err != nil {
+		return nil, err
+	}
+	if len(credentials) == 0 {
+		if restrictToFiles && len(credentialFiles) == 0 {
+			return nil, fmt.Errorf("OAuth group for %s has no credentials; edit it with `ccl oauth group` or run `ccl oauth sync`", ProviderKiro)
+		}
+		return nil, fmt.Errorf("no %s credentials found; run `ccl oauth %s` first", ProviderKiro, ProviderKiro)
+	}
+
+	apiKey, err := sessionAPIKey()
+	if err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("listen for Kiro runtime: %w", err)
+	}
+	models := kiroRuntimeModels(modelSpec)
+	service := &kiroService{
+		apiKey:       apiKey,
+		models:       models,
+		modelCatalog: newKiroModelCatalog(kiroAvailableModelsEndpoint),
+		pool:         pool,
+		client: &http.Client{Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			ResponseHeaderTimeout: 60 * time.Second,
+		}},
+		upstreamURL: func(credential *kiroCredential) string {
+			return "https://q." + credential.effectiveAPIRegion() + ".amazonaws.com/generateAssistantResponse"
+		},
+	}
+	runCtx, cancel := context.WithCancel(parent)
+	server := &http.Server{
+		Handler:           service.handler(),
+		ReadHeaderTimeout: 15 * time.Second,
+		BaseContext: func(net.Listener) context.Context {
+			return runCtx
+		},
+	}
+	started := make(chan struct{})
+	close(started)
+	proxyRuntime := &Runtime{
+		endpoint:   "http://" + listener.Addr().String() + "/v1",
+		apiKey:     apiKey,
+		httpServer: server,
+		listAuths:  pool.listAuths,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		runErr:     make(chan error, 1),
+		started:    started,
+	}
+	go func() {
+		err := server.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		proxyRuntime.runErr <- err
+		close(proxyRuntime.done)
+	}()
+	go func() {
+		select {
+		case <-runCtx.Done():
+			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = server.Shutdown(ctx)
+			stop()
+		case <-proxyRuntime.done:
+		}
+	}()
+	Debugf("runtime start oauth provider=kiro backend=kiro protocol=anthropic port=%s credential_files=%d restricted=%t model_count=%d",
+		listener.Addr().String(), len(credentialFiles), restrictToFiles, len(models))
+	return proxyRuntime, nil
+}
+
+func kiroRuntimeModels(modelSpec string) []string {
+	routes := runtimeModelRoutes(modelSpec)
+	models := make([]string, 0, len(routes))
+	seen := make(map[string]bool)
+	add := func(model string) {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[strings.ToLower(model)] {
+			return
+		}
+		seen[strings.ToLower(model)] = true
+		models = append(models, model)
+	}
+	for _, route := range routes {
+		add(route.Alias)
+	}
+	return models
+}
+
+func (s *kiroService) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"status":"ok"}`)
+	})
+	mux.HandleFunc("/v1/models", s.handleModels)
+	mux.HandleFunc("/v1/messages", s.handleMessages)
+	mux.HandleFunc("/v1/messages/count_tokens", s.handleCountTokens)
+	return mux
+}
+
+func (s *kiroService) authorized(request *http.Request) bool {
+	if request.Header.Get("x-api-key") == s.apiKey {
+		return true
+	}
+	return strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) == s.apiKey
+}
+
+func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeKiroError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		return
+	}
+	if request.Method != http.MethodGet {
+		writeKiroError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		return
+	}
+	models, err := s.availableModels(request.Context())
+	if err != nil {
+		writeKiroError(writer, http.StatusBadGateway, "api_error", "Unable to load available models from Kiro: "+err.Error())
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	data := make([]map[string]any, 0, len(models))
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		displayName := strings.TrimSpace(model.ModelName)
+		if displayName == "" {
+			displayName = model.ModelID
+		}
+		item := map[string]any{
+			"id":           model.ModelID,
+			"type":         "model",
+			"display_name": displayName,
+			"created_at":   now,
+		}
+		if model.Description != "" {
+			item["description"] = model.Description
+		}
+		if model.TokenLimits != nil {
+			if model.TokenLimits.MaxInputTokens > 0 {
+				item["max_input_tokens"] = model.TokenLimits.MaxInputTokens
+			}
+			if model.TokenLimits.MaxOutputTokens > 0 {
+				item["max_output_tokens"] = model.TokenLimits.MaxOutputTokens
+			}
+		}
+		if model.RateMultiplier != nil {
+			item["rate_multiplier"] = *model.RateMultiplier
+		}
+		if model.RateUnit != "" {
+			item["rate_unit"] = model.RateUnit
+		}
+		if len(model.SupportedInputTypes) > 0 {
+			item["supported_input_types"] = model.SupportedInputTypes
+		}
+		data = append(data, item)
+		ids = append(ids, model.ModelID)
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"data":     data,
+		"has_more": false,
+		"first_id": firstKiroModel(ids),
+		"last_id":  lastKiroModel(ids),
+	})
+}
+
+func (s *kiroService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeKiroError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		return
+	}
+	if request.Method != http.MethodPost {
+		writeKiroError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		return
+	}
+	raw, err := readKiroInboundBody(writer, request, kiroMaxInboundRequestBytes)
+	if err != nil {
+		writeKiroError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateKiroTokens(string(raw))})
+}
+
+func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeKiroError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		return
+	}
+	if request.Method != http.MethodPost {
+		writeKiroError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		return
+	}
+	Debugf("kiro messages inbound path=%q content_length=%d transfer_encoding_count=%d content_type=%q content_encoding=%q",
+		request.URL.RequestURI(), request.ContentLength, len(request.TransferEncoding),
+		request.Header.Get("Content-Type"), request.Header.Get("Content-Encoding"))
+	raw, err := readKiroInboundBody(writer, request, kiroMaxInboundRequestBytes)
+	if err != nil {
+		writeKiroError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	Debugf("kiro messages body bytes=%d", len(raw))
+	if len(bytes.TrimSpace(raw)) == 0 {
+		writeKiroError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Anthropic Messages request: request body is empty")
+		return
+	}
+	converted, err := convertAnthropicToKiro(raw)
+	if err != nil {
+		writeKiroError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if converted.droppedMedia > 0 || converted.dedupedMedia > 0 ||
+		converted.resizedMedia > 0 || converted.correctedMedia > 0 {
+		Debugf("kiro inline media normalized kept=%d capped=%d deduplicated=%d resized=%d mime_corrected=%d limit=%d",
+			converted.inlineMedia, converted.droppedMedia, converted.dedupedMedia,
+			converted.resizedMedia, converted.correctedMedia, kiroMaxInlineMediaSegments)
+	}
+	if converted.droppedToolUses > 0 || converted.droppedToolRuns > 0 {
+		Debugf("kiro tool pairing normalized dropped_uses=%d dropped_results=%d",
+			converted.droppedToolUses, converted.droppedToolRuns)
+	}
+	upstream, err := s.callUpstream(request.Context(), converted)
+	if err != nil {
+		var upstreamErr *kiroUpstreamError
+		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
+			writeKiroError(writer, http.StatusBadRequest, "invalid_request_error", upstreamErr.Error())
+		} else {
+			writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
+		}
+		return
+	}
+	defer upstream.Body.Close()
+
+	if converted.stream {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.Header().Set("Cache-Control", "no-cache")
+		writer.Header().Set("Connection", "keep-alive")
+		assembler := newKiroAnthropicAssembler(converted, writer)
+		if err := assembler.start(); err != nil {
+			return
+		}
+		if err := processKiroEventStream(upstream.Body, assembler); err != nil {
+			_ = assembler.emit("error", map[string]any{
+				"type": "error",
+				"error": map[string]any{
+					"type":    "api_error",
+					"message": err.Error(),
+				},
+			})
+		}
+		return
+	}
+
+	assembler := newKiroAnthropicAssembler(converted, nil)
+	if err := processKiroEventStream(upstream.Body, assembler); err != nil {
+		writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(assembler.response())
+}
+
+func readKiroInboundBody(writer http.ResponseWriter, request *http.Request, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("invalid Kiro request body limit")
+	}
+	if request.ContentLength > maxBytes {
+		return nil, fmt.Errorf("Anthropic Messages request body exceeds %s limit", kiroRequestLimitLabel(maxBytes))
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxBytes)
+	raw, err := io.ReadAll(request.Body)
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			return nil, fmt.Errorf("Anthropic Messages request body exceeds %s limit", kiroRequestLimitLabel(maxBytes))
+		}
+		return nil, fmt.Errorf("read Anthropic Messages request body: %w", err)
+	}
+	return raw, nil
+}
+
+func kiroRequestLimitLabel(maxBytes int64) string {
+	if maxBytes >= 1<<20 && maxBytes%(1<<20) == 0 {
+		return fmt.Sprintf("%d MiB", maxBytes>>20)
+	}
+	return fmt.Sprintf("%d bytes", maxBytes)
+}
+
+func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConvertedRequest) (*http.Response, error) {
+	credentials, err := s.pool.orderedCredentials()
+	if err != nil {
+		return nil, err
+	}
+	if len(credentials) == 0 {
+		return nil, fmt.Errorf("no usable Kiro credentials")
+	}
+	var lastErr error
+	for _, candidate := range credentials {
+		credential, err := s.pool.usableCredential(ctx, candidate, false)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		response, err := s.doUpstreamRequest(ctx, converted, credential)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			return response, nil
+		}
+		if response.StatusCode == http.StatusUnauthorized {
+			_ = response.Body.Close()
+			refreshed, refreshErr := s.pool.usableCredential(ctx, credential, true)
+			if refreshErr == nil {
+				response, err = s.doUpstreamRequest(ctx, converted, refreshed)
+				if err == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+					return response, nil
+				}
+			}
+		}
+		if response == nil {
+			lastErr = err
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		_ = response.Body.Close()
+		upstreamErr := &kiroUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
+		if response.StatusCode == http.StatusBadRequest {
+			return nil, upstreamErr
+		}
+		lastErr = upstreamErr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all Kiro credentials failed")
+	}
+	return nil, lastErr
+}
+
+func (s *kiroService) doUpstreamRequest(ctx context.Context, converted *kiroConvertedRequest, credential *kiroCredential) (*http.Response, error) {
+	body := make(map[string]any, len(converted.body)+1)
+	for key, value := range converted.body {
+		body[key] = value
+	}
+	if profileARN := credential.streamingProfileARN(); profileARN != "" {
+		body["profileArn"] = profileARN
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := s.upstreamURL(credential)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	machineID := credential.effectiveMachineID()
+	osName := runtime.GOOS
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Connection", "close")
+	request.Header.Set("x-amzn-codewhisperer-optout", "true")
+	request.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+	request.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.34 KiroIDE-"+kiroIDEVersion+"-"+machineID)
+	request.Header.Set("User-Agent", "aws-sdk-js/1.0.34 ua/2.1 os/"+osName+" lang/js md/nodejs#22.22.0 api/codewhispererstreaming#1.0.34 m/E KiroIDE-"+kiroIDEVersion+"-"+machineID)
+	request.Header.Set("amz-sdk-invocation-id", uuidString())
+	request.Header.Set("amz-sdk-request", "attempt=1; max=3")
+	request.Header.Set("Authorization", "Bearer "+credential.accessToken)
+	if strings.EqualFold(credential.authMethod, "external_idp") {
+		request.Header.Set("tokentype", "EXTERNAL_IDP")
+	}
+	Debugf("kiro upstream request host=%q model=%q credential=%q body_bytes=%d media=%d",
+		request.URL.Host, converted.model, credential.fileName, len(raw), converted.inlineMedia)
+	response, err := s.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("call Kiro upstream: %w", err)
+	}
+	Debugf("kiro upstream response status=%d model=%q credential=%q", response.StatusCode, converted.model, credential.fileName)
+	return response, nil
+}
+
+func writeKiroError(writer http.ResponseWriter, status int, errorType, message string) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    errorType,
+			"message": message,
+		},
+	})
+}
+
+func firstKiroModel(models []string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	return models[0]
+}
+
+func lastKiroModel(models []string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	return models[len(models)-1]
+}
+
+func uuidString() string {
+	return uuid.NewString()
+}

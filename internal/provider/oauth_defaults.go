@@ -23,6 +23,9 @@ func PreferredOAuthSlotDefaults(oauthProvider string) (custom, opus, sonnet, hai
 	case "gemini":
 		// Gemini / Antigravity subscription defaults. Same missing-catalog fallback.
 		return "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.1-pro-low", true
+	case "kiro":
+		// The direct Kiro Messages adapter maps Claude IDs to Amazon Q model IDs.
+		return "claude-opus-4-6", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5", true
 	default:
 		return "", "", "", "", false
 	}

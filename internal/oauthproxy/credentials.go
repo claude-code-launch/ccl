@@ -17,15 +17,15 @@ import (
 // Disabled / Unavailable / QuotaExceeded reflect CPA-persisted account health
 // when present in the credential JSON (runtime may also keep these in memory only).
 type CredentialInfo struct {
-	FileName       string
-	Backend        string
-	OAuthProvider  string
-	Email          string
-	Disabled       bool
-	Unavailable    bool
-	QuotaExceeded  bool
-	Status         string
-	StatusMessage  string
+	FileName      string
+	Backend       string
+	OAuthProvider string
+	Email         string
+	Disabled      bool
+	Unavailable   bool
+	QuotaExceeded bool
+	Status        string
+	StatusMessage string
 }
 
 // ImportCredential validates an existing CPA-compatible auth JSON, normalizes
@@ -119,6 +119,7 @@ func parseCredential(raw []byte, providerHint string) (map[string]any, Credentia
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		return nil, CredentialInfo{}, fmt.Errorf("invalid credential JSON: %w", err)
 	}
+	normalizeKiroCredentialMetadata(metadata)
 	rawType, _ := metadata["type"].(string)
 	backend, err := normalizeCredentialBackend(rawType)
 	if err != nil {
@@ -199,6 +200,8 @@ func normalizeCredentialBackend(value string) (string, error) {
 		return "antigravity", nil
 	case ProviderKimi:
 		return ProviderKimi, nil
+	case ProviderKiro:
+		return ProviderKiro, nil
 	case ProviderClaude:
 		return ProviderClaude, nil
 	default:
@@ -233,6 +236,11 @@ func publicProviderForBackend(backend, hint string) (string, error) {
 			return "", fmt.Errorf("credential provider hint %q is incompatible with kimi backend", hint)
 		}
 		return ProviderKimi, nil
+	case ProviderKiro:
+		if hint != "" && hint != ProviderKiro {
+			return "", fmt.Errorf("credential provider hint %q is incompatible with kiro backend", hint)
+		}
+		return ProviderKiro, nil
 	case ProviderClaude:
 		if hint != "" && hint != ProviderClaude {
 			return "", fmt.Errorf("credential provider hint %q is incompatible with claude backend", hint)
@@ -244,7 +252,15 @@ func publicProviderForBackend(backend, hint string) (string, error) {
 }
 
 func credentialIdentity(metadata map[string]any, raw []byte) string {
-	for _, key := range []string{"email", "sub", "subject", "account_id", "project_id", "device_id"} {
+	keys := []string{"email", "sub", "subject", "account_id", "profile_arn", "client_id", "project_id", "device_id"}
+	rawType, _ := metadata["type"].(string)
+	if strings.EqualFold(strings.TrimSpace(rawType), ProviderKiro) {
+		// Builder ID and Social profile ARNs are shared placeholders, so they
+		// cannot identify an account. Prefer the per-login OIDC client and fall
+		// back to the credential hash when Kiro does not expose an email.
+		keys = []string{"email", "user_id", "sub", "subject", "account_id", "client_id", "device_id"}
+	}
+	for _, key := range keys {
 		if value, ok := metadata[key].(string); ok {
 			if normalized := sanitizeCredentialIdentity(value); normalized != "" {
 				return normalized
@@ -253,6 +269,76 @@ func credentialIdentity(metadata map[string]any, raw []byte) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:6])
+}
+
+// normalizeKiroCredentialMetadata accepts both ccl's snake_case credential
+// shape and the camelCase token file written by Kiro IDE under
+// ~/.aws/sso/cache/kiro-auth-token.json. The direct Kiro runtime consumes
+// snake_case metadata, so imports normalize before persistence.
+func normalizeKiroCredentialMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	rawType, _ := metadata["type"].(string)
+	if strings.TrimSpace(rawType) == "" && looksLikeKiroCredential(metadata) {
+		metadata["type"] = ProviderKiro
+		rawType = ProviderKiro
+	}
+	if !strings.EqualFold(strings.TrimSpace(rawType), ProviderKiro) {
+		return
+	}
+	for camel, snake := range map[string]string{
+		"accessToken":   "access_token",
+		"refreshToken":  "refresh_token",
+		"profileArn":    "profile_arn",
+		"expiresAt":     "expires_at",
+		"authMethod":    "auth_method",
+		"clientId":      "client_id",
+		"clientSecret":  "client_secret",
+		"clientIdHash":  "client_id_hash",
+		"startUrl":      "start_url",
+		"authRegion":    "auth_region",
+		"apiRegion":     "api_region",
+		"machineId":     "machine_id",
+		"tokenEndpoint": "token_endpoint",
+		"issuerUrl":     "issuer_url",
+		"csrfToken":     "csrf_token",
+		"userId":        "user_id",
+		"visitorId":     "visitor_id",
+		"AccessToken":   "access_token",
+		"RefreshToken":  "refresh_token",
+		"Idp":           "provider",
+		"UserId":        "user_id",
+	} {
+		if _, exists := metadata[snake]; !exists {
+			if value, sourceExists := metadata[camel]; sourceExists {
+				metadata[snake] = value
+			}
+		}
+		delete(metadata, camel)
+	}
+}
+
+func looksLikeKiroCredential(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	if _, lower := metadata["accessToken"]; !lower {
+		if _, upper := metadata["AccessToken"]; !upper {
+			return false
+		}
+	}
+	if _, lower := metadata["refreshToken"]; !lower {
+		if _, upper := metadata["RefreshToken"]; !upper {
+			return false
+		}
+	}
+	for _, key := range []string{"profileArn", "authMethod", "clientIdHash", "startUrl", "csrfToken", "Idp"} {
+		if _, ok := metadata[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeCredentialIdentity(value string) string {

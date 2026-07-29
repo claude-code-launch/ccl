@@ -30,6 +30,7 @@ func TestBackendProviderAliases(t *testing.T) {
 		"grok":    "xai",
 		"xai":     "xai",
 		"kimi":    "kimi",
+		"kiro":    "kiro",
 		"claude":  "claude",
 	}
 	for input, want := range tests {
@@ -44,7 +45,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderClaude} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderKiro, ProviderClaude} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}
@@ -56,6 +57,45 @@ func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
 		if _, err := ValidateLoginProvider(name); err == nil {
 			t.Fatalf("ValidateLoginProvider(%q) should fail", name)
 		}
+	}
+}
+
+func TestKiroCredentialPoolFiltersExactCredential(t *testing.T) {
+	authDir := t.TempDir()
+	credentials := map[string][]byte{
+		"kiro-a.json":  []byte(`{"type":"kiro","access_token":"a","refresh_token":"ra","client_id":"ca","client_secret":"sa"}`),
+		"kiro-b.json":  []byte(`{"type":"kiro","access_token":"b","refresh_token":"rb","client_id":"cb","client_secret":"sb"}`),
+		"codex-c.json": []byte(`{"type":"codex","access_token":"c"}`),
+	}
+	for name, data := range credentials {
+		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pool := newKiroCredentialPool(authDir, []string{"kiro-b.json"}, true, nil)
+	auths, err := pool.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auths) != 1 || filepath.Base(auths[0].fileName) != "kiro-b.json" {
+		t.Fatalf("filtered Kiro auths = %+v", auths)
+	}
+}
+
+func TestKiroRuntimeModelsIncludeConfiguredRoutes(t *testing.T) {
+	models := kiroRuntimeModels("claude-sonnet-4-6[1m]")
+	got := make(map[string]bool, len(models))
+	for _, model := range models {
+		got[model] = true
+	}
+	for _, want := range []string{"claude-sonnet-4-6[1m]", "claude-sonnet-4-6"} {
+		if !got[want] {
+			t.Fatalf("Kiro models missing %q: %+v", want, models)
+		}
+	}
+	if got["claude-opus-4-6"] || got["claude-haiku-4-5"] {
+		t.Fatalf("Kiro models contain unconfigured static defaults: %+v", models)
 	}
 }
 

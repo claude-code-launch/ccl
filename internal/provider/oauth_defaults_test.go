@@ -42,6 +42,17 @@ func TestPreferredOAuthSlotDefaultsGemini(t *testing.T) {
 	}
 }
 
+func TestPreferredOAuthSlotDefaultsKiro(t *testing.T) {
+	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("kiro")
+	if !ok {
+		t.Fatal("expected kiro defaults")
+	}
+	if custom != "claude-opus-4-6" || opus != "claude-opus-4-6" ||
+		sonnet != "claude-sonnet-4-6" || haiku != "claude-haiku-4-5" {
+		t.Fatalf("kiro defaults = %q %q %q %q", custom, opus, sonnet, haiku)
+	}
+}
+
 func TestApplyOAuthSlotDefaultsFillsEmptyOnly(t *testing.T) {
 	p := provider.Provider{OAuthProvider: "grok", SonnetModel: "my-custom-sonnet"}
 	provider.ApplyOAuthSlotDefaults(&p)

@@ -18,10 +18,11 @@ const (
 	ProviderChatGPT = "gpt"
 	// ProviderChatGPTLegacy is accepted by auth for older configs/docs.
 	ProviderChatGPTLegacy = "chatgpt"
-	ProviderGrok    = "grok"
-	ProviderCopilot = "copilot"
-	ProviderKimi    = "kimi"
-	ProviderClaude  = "claude"
+	ProviderGrok          = "grok"
+	ProviderCopilot       = "copilot"
+	ProviderKimi          = "kimi"
+	ProviderKiro          = "kiro"
+	ProviderClaude        = "claude"
 	// backendXAI is the CLIProxyAPI authenticator provider key for xAI/Grok.
 	backendXAI = "xai"
 	// codexLoginModeMetadata mirrors CLIProxyAPI's sdk/auth LoginOptions key.
@@ -32,6 +33,7 @@ const (
 type LoginOptions struct {
 	NoBrowser    bool
 	CallbackPort int
+	KiroAuthMode string
 }
 
 type LoginResult struct {
@@ -71,12 +73,15 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 	if err != nil {
 		return LoginResult{}, err
 	}
-	_, authenticator, err := authenticatorFor(target)
+
+	authDir, err := ensureAuthDir()
 	if err != nil {
 		return LoginResult{}, err
 	}
-
-	authDir, err := ensureAuthDir()
+	if target == ProviderKiro {
+		return loginKiro(ctx, authDir, opts)
+	}
+	_, authenticator, err := authenticatorFor(target)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -120,13 +125,13 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderClaude:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderKiro, ProviderClaude:
 		return target, nil
 	case ProviderChatGPTLegacy:
 		// Keep accepting "chatgpt" as a login alias; canonicalize to "gpt".
 		return ProviderChatGPT, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, kimi, or claude)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, kimi, kiro, or claude)", providerName)
 	}
 }
 
@@ -140,6 +145,8 @@ func BackendProvider(providerName string) (string, error) {
 		return backendXAI, nil
 	case ProviderKimi:
 		return ProviderKimi, nil
+	case ProviderKiro:
+		return ProviderKiro, nil
 	case ProviderClaude:
 		return ProviderClaude, nil
 	default:

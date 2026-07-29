@@ -50,6 +50,8 @@ type Runtime struct {
 	apiKey          string
 	service         *cliproxy.Service
 	coreManager     *coreauth.Manager
+	httpServer      *http.Server
+	listAuths       func() []*coreauth.Auth
 	responsesCompat *responsesCompatibilityProxy
 	cancel          context.CancelFunc
 	done            chan struct{}
@@ -382,8 +384,8 @@ func Start(parent context.Context, providerName string) (*Runtime, error) {
 	return StartOAuth(parent, providerName, "", "")
 }
 
-// StartProvider starts the embedded CLIProxyAPI adapter for every OpenAI-family
-// provider. Claude Code connects directly to the runtime's /v1/messages route.
+// StartProvider starts a loopback Anthropic Messages adapter. Most backends use
+// embedded CLIProxyAPI; Kiro uses the direct Amazon Q adapter in kiro_server.go.
 //
 // openai_responses is split:
 //   - dedicated Codex bases (…/codex) → StartCodexAPI with Codex client identity
@@ -439,6 +441,9 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 	backend, err := BackendProvider(providerName)
 	if err != nil {
 		return nil, err
+	}
+	if backend == ProviderKiro {
+		return startKiroOAuthWithFiles(parent, modelSpec, credentialFiles, restrictToFiles, resolver)
 	}
 	found, err := hasCredentials(authDir, backend, credentialFiles, restrictToFiles)
 	if err != nil {
@@ -1083,13 +1088,19 @@ func hasCredentials(authDir, backend string, credentialFiles []string, restrictT
 
 func (r *Runtime) Endpoint() string { return r.endpoint }
 
-// ListAuths returns a snapshot of CPA core-manager auths currently loaded in
-// this runtime (already filtered to the OAuth backend / group membership).
+// ListAuths returns the credentials currently loaded in this runtime, already
+// filtered to the OAuth backend and selected account/group membership.
 func (r *Runtime) ListAuths() []*coreauth.Auth {
-	if r == nil || r.coreManager == nil {
+	if r == nil {
 		return nil
 	}
-	return r.coreManager.List()
+	if r.coreManager != nil {
+		return r.coreManager.List()
+	}
+	if r.listAuths != nil {
+		return r.listAuths()
+	}
+	return nil
 }
 
 // ClaudeBaseURL is the origin Claude Code uses before appending /v1/messages.
@@ -1122,9 +1133,13 @@ func (r *Runtime) Stop() {
 		case <-time.After(5 * time.Second):
 		}
 		// Force Shutdown only when Run did not exit cleanly in time.
-		if !stopped && r.service != nil {
+		if !stopped && (r.service != nil || r.httpServer != nil) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = r.service.Shutdown(ctx)
+			if r.service != nil {
+				_ = r.service.Shutdown(ctx)
+			} else if r.httpServer != nil {
+				_ = r.httpServer.Shutdown(ctx)
+			}
 			cancel()
 			select {
 			case <-r.done:

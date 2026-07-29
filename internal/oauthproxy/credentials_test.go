@@ -72,6 +72,123 @@ func TestImportCredentialUsesCopilotHintForCodexBackend(t *testing.T) {
 	}
 }
 
+func TestImportCredentialNormalizesKiroIDEToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	source := filepath.Join(t.TempDir(), "kiro-auth-token.json")
+	raw := []byte(`{
+		"accessToken":"access",
+		"refreshToken":"refresh",
+		"expiresAt":"2026-07-29T12:00:00Z",
+		"authMethod":"builder-id",
+		"provider":"AWS",
+		"clientId":"client",
+		"clientSecret":"secret",
+		"csrfToken":"csrf",
+		"userId":"user-1",
+		"visitorId":"visitor-1",
+		"email":"dev@example.com"
+	}`)
+	if err := os.WriteFile(source, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	credential, target, err := ImportCredential(source, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.Backend != "kiro" || credential.OAuthProvider != "kiro" {
+		t.Fatalf("credential = %+v", credential)
+	}
+	if credential.FileName != "kiro-dev@example.com.json" {
+		t.Fatalf("filename = %q", credential.FileName)
+	}
+	stored, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(stored, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"type":          "kiro",
+		"access_token":  "access",
+		"refresh_token": "refresh",
+		"auth_method":   "builder-id",
+		"client_id":     "client",
+		"client_secret": "secret",
+		"csrf_token":    "csrf",
+		"user_id":       "user-1",
+		"visitor_id":    "visitor-1",
+	} {
+		if got, _ := metadata[key].(string); got != want {
+			t.Fatalf("%s = %q, want %q; metadata=%#v", key, got, want, metadata)
+		}
+	}
+}
+
+func TestImportCredentialNormalizesKiroWebCookieFields(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	source := filepath.Join(t.TempDir(), "kiro-web-session.json")
+	raw := []byte(`{
+		"AccessToken":"access",
+		"RefreshToken":"refresh",
+		"Idp":"Google",
+		"UserId":"user-1",
+		"csrfToken":"csrf",
+		"profileArn":"arn:aws:codewhisperer:us-east-1:123:profile/example"
+	}`)
+	if err := os.WriteFile(source, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credential, target, err := ImportCredential(source, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.Backend != ProviderKiro || credential.OAuthProvider != ProviderKiro {
+		t.Fatalf("credential = %+v", credential)
+	}
+	stored, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(stored, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"access_token":  "access",
+		"refresh_token": "refresh",
+		"provider":      "Google",
+		"user_id":       "user-1",
+		"csrf_token":    "csrf",
+		"profile_arn":   "arn:aws:codewhisperer:us-east-1:123:profile/example",
+	} {
+		if got, _ := metadata[key].(string); got != want {
+			t.Fatalf("%s = %q, want %q; metadata=%#v", key, got, want, metadata)
+		}
+	}
+}
+
+func TestKiroCredentialIdentityDoesNotUseSharedProfileARN(t *testing.T) {
+	first := map[string]any{
+		"type":        "kiro",
+		"profile_arn": kiroBuilderProfileARN,
+		"client_id":   "client-a",
+	}
+	second := map[string]any{
+		"type":        "kiro",
+		"profile_arn": kiroBuilderProfileARN,
+		"client_id":   "client-b",
+	}
+	if got := credentialIdentity(first, []byte("a")); got != "client-a" {
+		t.Fatalf("first identity = %q", got)
+	}
+	if got := credentialIdentity(second, []byte("b")); got != "client-b" {
+		t.Fatalf("second identity = %q", got)
+	}
+}
+
 func TestListCredentialsIgnoresNestedDirectoriesAndInvalidJSON(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

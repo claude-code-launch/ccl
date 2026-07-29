@@ -70,6 +70,7 @@ ccl oauth gemini     # Google Gemini
 ccl oauth grok       # xAI Grok
 ccl oauth copilot    # GitHub Copilot
 ccl oauth kimi       # Kimi / Moonshot
+ccl oauth kiro       # Kiro Portal（Google / GitHub）
 ccl oauth claude     # Anthropic Claude 订阅
 
 # 登录成功后直接启动
@@ -149,7 +150,7 @@ ccl bypass off      # 关闭
    用 `ccl set` / `ccl map` 手动指定后，对应档位以手动为准。
 
 2. **协议翻译与流式代理**  
-   内嵌 CLIProxyAPI Go SDK。OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一暴露本机 `/v1/messages`；Anthropic 兼容网关保持直连。
+   OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一暴露本机 `/v1/messages`。通用转换内嵌 CLIProxyAPI Go SDK；Kiro 由 ccl 直接转换 Amazon Q 请求和 AWS EventStream；Anthropic 兼容网关保持直连。
 
 3. **交互式 TUI 配置**  
    全屏向导配置 endpoint、协议、模型槽位、上下文压缩等；支持中文 / English（`ccl lang`）。
@@ -161,7 +162,7 @@ ccl bypass off      # 关闭
    配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
 
 6. **订阅 OAuth 一键接入**  
-   `gpt` / `gemini` / `grok` / `copilot` / `kimi` / `claude`，支持多账号别名；token 会在运行时刷新。
+   `gpt` / `gemini` / `grok` / `copilot` / `kimi` / `kiro` / `claude`，支持多账号别名；token 会在运行时刷新。
 
 ---
 
@@ -206,7 +207,7 @@ ccl bypass off      # 关闭
 
 | 命令 | 作用 |
 |------|------|
-| `ccl oauth <gpt\|gemini\|grok\|copilot\|kimi\|claude> [alias]` | 浏览器 / 设备码登录订阅（别名：`ccl auth …`） |
+| `ccl oauth <gpt\|gemini\|grok\|copilot\|kimi\|kiro\|claude> [alias]` | 浏览器 / 设备码登录订阅（别名：`ccl auth …`） |
 | `ccl oauth import <file\|dir>` | 导入已有 CPA 凭据 JSON（目录只扫一层） |
 | `ccl oauth group [name]` | 创建 / 编辑同 backend 多账号组（TUI 全选数量） |
 | `ccl oauth group ls\|cp\|mv\|rm …` | 列出 / 复制 / 重命名 / 删除 group |
@@ -288,6 +289,7 @@ ccl oauth gemini
 ccl oauth grok
 ccl oauth copilot
 ccl oauth kimi
+ccl oauth kiro
 ccl oauth claude
 
 # 多账号别名
@@ -297,6 +299,7 @@ ccl oauth gemini personal
 # 可选
 ccl oauth gpt --no-browser
 ccl oauth gpt --callback-port 1455
+ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 ```
 
 | provider | backend | 协议 | 登录方式 |
@@ -306,6 +309,7 @@ ccl oauth gpt --callback-port 1455
 | `gemini` | antigravity | `openai(chat)` | Google/Antigravity OAuth |
 | `grok` | xai | `openai(chat)` | xAI device-code |
 | `kimi` | kimi | `openai(chat)` | Kimi/Moonshot device-code |
+| `kiro` | kiro | `anthropic` | Kiro Portal PKCE（默认，Google / GitHub）或 AWS Builder ID device-code |
 | `claude` | claude | `anthropic` | Anthropic OAuth 回调 |
 
 说明：
@@ -326,8 +330,33 @@ ccl oauth gpt --callback-port 1455
   - Opus / Custom → `claude-opus-4-6-thinking`
   - Sonnet → `claude-sonnet-4-6`
   - Haiku → `gemini-3.1-pro-low`
+- **Kiro 默认槽位**（空槽位时写入；已有手动映射会保留）：
+  - Opus / Custom → `claude-opus-4-6`
+  - Sonnet → `claude-sonnet-4-6`
+  - Haiku → `claude-haiku-4-5`
 - 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。
 - **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` / `copilot` 有意义：可在 `ccl set` 的「核对并应用 / Review & Apply」页编辑，也可在 Claude Code 内用 `/fast` 开关。
+
+`ccl oauth kiro` 默认打开 Kiro Portal，通过 PKCE 登录 Google / GitHub 账号；这样运行时和
+Web Portal `ListAvailableModels` 使用同一身份，可返回该账号完整的模型及 Credit 倍率。
+若需要 AWS Builder ID，使用：
+
+```bash
+ccl oauth kiro --kiro-auth builder
+```
+
+组织 IAM Identity Center（IDC）或已有 Kiro IDE 登录也可以直接导入 IDE token：
+
+```bash
+ccl oauth import ~/.aws/sso/cache/kiro-auth-token.json
+```
+
+导入时会自动识别 Kiro IDE 的 camelCase JSON，并规范化为 ccl runtime 使用的凭据格式。
+
+Kiro provider 的本地 `GET /v1/models` 会优先调用 Kiro Web Portal 的
+Smithy RPCv2 CBOR `ListAvailableModels`，返回实际模型、描述、Credit 倍率/单位和支持的输入类型；
+无法建立 Web 会话时回退到 Amazon Q `ListAvailableModels`。账号组会并发查询并合并各账号目录，
+结果按凭据缓存一小时；部分账号刷新失败时继续使用其最后一次成功目录。
 
 #### 导入已有授权文件
 
@@ -335,11 +364,13 @@ ccl oauth gpt --callback-port 1455
 ccl oauth import ~/xai-haiboyuwen@icloud.com.json
 ccl oauth import ~/auth-backup          # 只读取目录第一层的 *.json，不递归
 ccl oauth import ~/codex.json --provider copilot
+ccl oauth import ~/.aws/sso/cache/kiro-auth-token.json
 ```
 
 - 导入前会验证 JSON 和 CPA backend 类型。
 - ccl 不依赖源文件名，会按凭据身份生成规范名称（例如 `xai-user@example.com.json`），并在 `~/.ccl/auth/` 保存一份权限为 `0600` 的独立副本。
 - `codex` 文件默认识别为 `gpt`；如果它来自 GitHub Copilot device flow，使用 `--provider copilot`。
+- Kiro IDE 的 `kiro-auth-token.json` 可直接导入；camelCase token 字段会自动规范化。
 - 导入后自动刷新账号 provider。手动向 `~/.ccl/auth/` 移入、移出或删除 JSON 后，可运行：
 
 ```bash
@@ -622,7 +653,7 @@ auth_groups:
 
 - `type: openai`（显示 `openai(chat)`）：经 CLIProxyAPI 转到上游 Chat Completions。
 - `type: openai_responses`（显示 `openai(responses)`）：经 SDK 走 Responses API；Codex 路径默认选 Responses，可在核对页切换。
-- `type: anthropic`：Claude Code 直连 endpoint，不做协议转换。
+- `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用 ccl 的本机 Messages → Amazon Q 适配器。
 - `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
 - `authGroup`：引用 `auth_groups` 中的动态账号池；成员列表不会重复写入 provider。
 - `bypass_mode`：全局是否自动附加 `--dangerously-skip-permissions`。
@@ -733,7 +764,7 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 │   ├── config/                # yaml 配置读写
 │   ├── locale/                # 多语言
 │   ├── modelrouting/          # 档位启发式映射
-│   ├── oauthproxy/            # CLIProxyAPI 登录与内嵌运行时
+│   ├── oauthproxy/            # OAuth 登录、CLIProxyAPI 与 Kiro Messages 运行时
 │   ├── protocol/              # endpoint 规范化与探测
 │   └── provider/              # Provider / Config 结构
 └── main.go
@@ -743,4 +774,4 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 
 ## 开源许可
 
-MIT。CLIProxyAPI SDK 的第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+MIT。CLIProxyAPI SDK、kiro.rs 参考实现的第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

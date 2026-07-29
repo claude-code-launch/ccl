@@ -1,9 +1,9 @@
-// Package oauthproxy embeds CLIProxyAPI as ccl's OpenAI-family runtime.
+// Package oauthproxy implements ccl's local subscription and protocol runtimes.
 //
 // Production traffic for openai / openai_responses / OAuth providers goes
 // through this package only. Claude Code talks to a loopback Anthropic
-// Messages endpoint that CLIProxyAPI exposes; ccl never uses a second local
-// protocol-translation proxy for those providers.
+// Messages endpoint. Most providers use embedded CLIProxyAPI; Kiro uses ccl's
+// direct Messages-to-Amazon-Q adapter and AWS EventStream decoder.
 //
 // # Compatibility boundary with CLIProxyAPI
 //
@@ -38,7 +38,7 @@
 //     workers can still log after Shutdown. Nested starts use reference counts.
 //
 //  4. Session credentials
-//     Embedded runtimes bind 127.0.0.1 only and use a random per-session API
+//     All runtimes bind 127.0.0.1 only and use a random per-session API
 //     key that is never written back to ~/.ccl/config.yaml. OAuth credentials
 //     live under ~/.ccl/auth and are filtered per backend so multi-login
 //     providers do not share models or refresh tokens.
@@ -51,8 +51,8 @@
 //
 //	go test ./internal/oauthproxy ./internal/claude ./cmd
 //
-// and manually exercise ccl auth chatgpt, an openai_responses API-key
-// provider, and a plain openai(chat) provider with streaming + tool calls.
+// and manually exercise ccl oauth gpt, ccl oauth kiro, an openai_responses
+// API-key provider, and a plain openai(chat) provider with streaming + tool calls.
 //
 // Note: dedicated Codex bases still set Originator to embeddedCodexOriginator
 // ("codex_cli_rs") for custom API-key Codex endpoints. That is independent of

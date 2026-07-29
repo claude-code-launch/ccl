@@ -28,7 +28,7 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, *oauthproxy
 			MaxOutputTokens:         oauthMaxOutputTokens(p),
 		})
 		if err != nil {
-			return provider.Provider{}, nil, nop, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
+			return provider.Provider{}, nil, nop, fmt.Errorf("start embedded provider runtime: %w", err)
 		}
 		p.Endpoint = runtime.Endpoint()
 		p.APIKey = runtime.APIKey()
@@ -54,7 +54,7 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, *oauthproxy
 		MaxOutputTokens: oauthMaxOutputTokens(p),
 	})
 	if err != nil {
-		return provider.Provider{}, nil, nop, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
+		return provider.Provider{}, nil, nop, fmt.Errorf("start embedded provider runtime: %w", err)
 	}
 	p.Endpoint = runtime.Endpoint()
 	p.APIKey = runtime.APIKey()

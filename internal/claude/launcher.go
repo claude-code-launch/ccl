@@ -366,7 +366,7 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 			MaxOutputTokens:         maxOut,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("start embedded CLIProxyAPI: %w", err)
+			return nil, fmt.Errorf("start embedded provider runtime: %w", err)
 		}
 		ctx.oauth = runtime
 		providerCopy.Endpoint = runtime.Endpoint()
@@ -413,7 +413,7 @@ func (c *providerContext) resolveModel() error {
 	if c.provider.Model == "" && c.oauth != nil {
 		models, err := protocol.GetOpenAIModels(c.provider.Endpoint, c.provider.APIKey)
 		if err != nil {
-			return fmt.Errorf("discover embedded CLIProxyAPI models: %w", err)
+			return fmt.Errorf("discover embedded provider runtime models: %w", err)
 		}
 		c.provider.Model = models
 	}
