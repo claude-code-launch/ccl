@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -155,9 +156,9 @@ func TestKiroCallUpstreamKeepsUnauthorizedDiagnosticsWhenRefreshFails(t *testing
 	}
 }
 
-// newKiroRateLimitTestService wires a service whose upstream is handler and whose
-// rate-limit backoff is short enough for a unit test.
-func newKiroRateLimitTestService(t *testing.T, handler http.HandlerFunc) (*kiroService, func()) {
+// newKiroUpstreamTestService wires a service against handler as its upstream, with
+// a rate-limit backoff short enough for a unit test.
+func newKiroUpstreamTestService(t *testing.T, handler http.HandlerFunc) (*kiroService, func()) {
 	t.Helper()
 	authDir := t.TempDir()
 	writeKiroTestCredential(t, filepath.Join(authDir, "kiro-a.json"), nil)
@@ -180,7 +181,7 @@ func kiroRateLimitBody() string {
 
 func TestKiroCallUpstreamRetriesRateLimitedRequests(t *testing.T) {
 	var attempts atomic.Int32
-	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+	service, closeUpstream := newKiroUpstreamTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
 		if attempts.Add(1) <= 2 {
 			writer.WriteHeader(http.StatusTooManyRequests)
 			_, _ = io.WriteString(writer, kiroRateLimitBody())
@@ -205,7 +206,7 @@ func TestKiroCallUpstreamRetriesRateLimitedRequests(t *testing.T) {
 
 func TestKiroCallUpstreamStopsAfterRateLimitBudget(t *testing.T) {
 	var attempts atomic.Int32
-	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+	service, closeUpstream := newKiroUpstreamTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
 		attempts.Add(1)
 		writer.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(writer, kiroRateLimitBody())
@@ -234,7 +235,7 @@ func TestKiroCallUpstreamStopsAfterRateLimitBudget(t *testing.T) {
 
 func TestKiroCallUpstreamRateLimitRespectsCancellation(t *testing.T) {
 	var attempts atomic.Int32
-	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+	service, closeUpstream := newKiroUpstreamTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
 		attempts.Add(1)
 		writer.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(writer, kiroRateLimitBody())
@@ -262,14 +263,10 @@ func TestKiroCallUpstreamRateLimitRespectsCancellation(t *testing.T) {
 	}
 }
 
-// The 429 must reach the client as a rate limit, not as HTTP 400.
-func TestKiroMessagesReportsRateLimitStatus(t *testing.T) {
-	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
-		writer.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(writer, kiroRateLimitBody())
-	})
-	defer closeUpstream()
-
+// postKiroMessages sends a minimal Anthropic Messages request through the
+// service handler and returns the status plus decoded error payload.
+func postKiroMessages(t *testing.T, service *kiroService) (int, string, string) {
+	t.Helper()
 	front := httptest.NewServer(service.handler())
 	defer front.Close()
 
@@ -290,9 +287,6 @@ func TestKiroMessagesReportsRateLimitStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429; body=%s", response.StatusCode, raw)
-	}
 	var decoded struct {
 		Error struct {
 			Type    string `json:"type"`
@@ -302,10 +296,82 @@ func TestKiroMessagesReportsRateLimitStatus(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("decode error body: %v; body=%s", err, raw)
 	}
-	if decoded.Error.Type != "rate_limit_error" {
-		t.Fatalf("error type = %q, want rate_limit_error; body=%s", decoded.Error.Type, raw)
+	return response.StatusCode, decoded.Error.Type, decoded.Error.Message
+}
+
+// The 429 must reach the client as a rate limit, not as HTTP 400.
+func TestKiroMessagesReportsRateLimitStatus(t *testing.T) {
+	service, closeUpstream := newKiroUpstreamTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(writer, kiroRateLimitBody())
+	})
+	defer closeUpstream()
+
+	status, errorType, message := postKiroMessages(t, service)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", status)
 	}
-	if !strings.Contains(decoded.Error.Message, "USER_REQUEST_RATE_EXCEEDED") {
-		t.Fatalf("error message lost the upstream reason: %s", raw)
+	if errorType != "rate_limit_error" {
+		t.Fatalf("error type = %q, want rate_limit_error", errorType)
+	}
+	if !strings.Contains(message, "USER_REQUEST_RATE_EXCEEDED") {
+		t.Fatalf("error message lost the upstream reason: %s", message)
+	}
+}
+
+// Upstream client errors are forwarded verbatim so Claude Code can decide how to
+// react; only proxy-side and upstream server failures collapse into 502.
+func TestKiroMessagesForwardsUpstreamClientErrors(t *testing.T) {
+	cases := []struct {
+		upstreamStatus int
+		wantStatus     int
+		wantType       string
+	}{
+		{http.StatusBadRequest, http.StatusBadRequest, "invalid_request_error"},
+		{http.StatusUnauthorized, http.StatusUnauthorized, "authentication_error"},
+		{http.StatusForbidden, http.StatusForbidden, "permission_error"},
+		{http.StatusNotFound, http.StatusNotFound, "not_found_error"},
+		{http.StatusRequestEntityTooLarge, http.StatusRequestEntityTooLarge, "request_too_large"},
+		{http.StatusUnprocessableEntity, http.StatusUnprocessableEntity, "invalid_request_error"},
+		{http.StatusInternalServerError, http.StatusBadGateway, "api_error"},
+		{http.StatusServiceUnavailable, http.StatusBadGateway, "api_error"},
+	}
+	for _, testCase := range cases {
+		t.Run(strconv.Itoa(testCase.upstreamStatus), func(t *testing.T) {
+			service, closeUpstream := newKiroUpstreamTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(testCase.upstreamStatus)
+				_, _ = io.WriteString(writer, `{"message":"upstream said no","reason":"TEST_REASON"}`)
+			})
+			defer closeUpstream()
+
+			status, errorType, message := postKiroMessages(t, service)
+			if status != testCase.wantStatus {
+				t.Errorf("status = %d, want %d", status, testCase.wantStatus)
+			}
+			if errorType != testCase.wantType {
+				t.Errorf("error type = %q, want %q", errorType, testCase.wantType)
+			}
+			if !strings.Contains(message, "TEST_REASON") {
+				t.Errorf("error message lost the upstream body: %s", message)
+			}
+		})
+	}
+}
+
+func TestKiroMessagesUnauthorizedRefreshFailureKeepsStatus(t *testing.T) {
+	// The credential has no refresh token, so the forced refresh after the 401
+	// fails and the wrapped upstream status must still drive the response.
+	service, closeUpstream := newKiroUpstreamTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(writer, `{"message":"expired","reason":"TEST_REASON"}`)
+	})
+	defer closeUpstream()
+
+	status, errorType, message := postKiroMessages(t, service)
+	if status != http.StatusUnauthorized || errorType != "authentication_error" {
+		t.Fatalf("status = %d type = %q, want 401/authentication_error", status, errorType)
+	}
+	if !strings.Contains(message, "credential refresh failed") {
+		t.Fatalf("refresh failure was not reported: %s", message)
 	}
 }

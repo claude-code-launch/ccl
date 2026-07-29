@@ -279,18 +279,19 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 	}
 	upstream, err := s.callUpstream(request.Context(), converted)
 	if err != nil {
+		// Forward upstream client errors unchanged (status and Anthropic error
+		// type) so Claude Code can apply its own handling: back off on 429,
+		// re-authenticate on 401, shrink the request on 413. Collapsing them all
+		// into 400 made every one of those look like a malformed request.
 		var upstreamErr *kiroUpstreamError
-		isUpstream := errors.As(err, &upstreamErr)
-		switch {
-		case isUpstream && upstreamErr.status == http.StatusTooManyRequests:
-			// Retries are exhausted. Report it as rate limiting so the client can
-			// back off, instead of disguising it as a malformed request.
-			writeKiroError(writer, http.StatusTooManyRequests, "rate_limit_error", upstreamErr.Error())
-		case isUpstream && upstreamErr.status >= 400 && upstreamErr.status < 500:
-			writeKiroError(writer, http.StatusBadRequest, "invalid_request_error", upstreamErr.Error())
-		default:
-			writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
+		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
+			// err, not upstreamErr: the wrapper carries extra context such as a
+			// failed token refresh.
+			writeKiroError(writer, upstreamErr.status, kiroAnthropicErrorType(upstreamErr.status), err.Error())
+			return
 		}
+		// Everything else is a proxy-side or upstream server failure.
+		writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer upstream.Body.Close()
@@ -508,6 +509,26 @@ func (s *kiroService) doUpstreamRequest(ctx context.Context, converted *kiroConv
 	}
 	Debugf("kiro upstream response status=%d model=%q credential=%q", response.StatusCode, converted.model, credential.fileName)
 	return response, nil
+}
+
+// kiroAnthropicErrorType maps an HTTP status onto the error type the Anthropic
+// Messages API uses for it, so a forwarded status stays self-consistent for
+// clients that branch on error.type rather than on the status code.
+func kiroAnthropicErrorType(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	default:
+		return "invalid_request_error"
+	}
 }
 
 func writeKiroError(writer http.ResponseWriter, status int, errorType, message string) {
