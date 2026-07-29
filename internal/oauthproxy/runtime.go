@@ -41,6 +41,11 @@ const (
 	codexClientDetectionTimeout = 2 * time.Second
 	codexOSDetectionTimeout     = time.Second
 	credentialGroupPollInterval = 2 * time.Second
+	// credentialGroupLoadTimeout bounds one CPA reload triggered by a group change.
+	credentialGroupLoadTimeout = 30 * time.Second
+	// runtimeStopTimeout bounds each teardown wait in Runtime.Stop.
+	runtimeStopTimeout  = 5 * time.Second
+	runtimeLoopbackHost = "127.0.0.1"
 )
 
 var codexVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
@@ -111,35 +116,43 @@ var sdkLogState struct {
 	previousLevel log.Level
 }
 
+// runtimeConfigBase holds the CLIProxyAPI settings every embedded runtime shares.
+// The upstream-specific config files inline it so the common block is declared
+// (and filled) exactly once.
+type runtimeConfigBase struct {
+	Host                   string   `yaml:"host"`
+	Port                   int      `yaml:"port"`
+	AuthDir                string   `yaml:"auth-dir"`
+	APIKeys                []string `yaml:"api-keys"`
+	LogToFile              bool     `yaml:"logging-to-file"`
+	DisableImageGeneration string   `yaml:"disable-image-generation,omitempty"`
+}
+
+func newRuntimeConfigBase(port int, authDir, apiKey string) runtimeConfigBase {
+	return runtimeConfigBase{
+		Host:                   runtimeLoopbackHost,
+		Port:                   port,
+		AuthDir:                authDir,
+		APIKeys:                []string{apiKey},
+		LogToFile:              false,
+		DisableImageGeneration: "passthrough",
+	}
+}
+
 type runtimeConfigFile struct {
-	Host                   string                              `yaml:"host"`
-	Port                   int                                 `yaml:"port"`
-	AuthDir                string                              `yaml:"auth-dir"`
-	APIKeys                []string                            `yaml:"api-keys"`
-	LogToFile              bool                                `yaml:"logging-to-file"`
-	DisableImageGeneration string                              `yaml:"disable-image-generation,omitempty"`
-	OAuthModelAlias        map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
+	runtimeConfigBase `yaml:",inline"`
+	OAuthModelAlias   map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
 }
 
 type runtimeCodexConfigFile struct {
-	Host                   string                              `yaml:"host"`
-	Port                   int                                 `yaml:"port"`
-	AuthDir                string                              `yaml:"auth-dir"`
-	APIKeys                []string                            `yaml:"api-keys"`
-	LogToFile              bool                                `yaml:"logging-to-file"`
-	DisableImageGeneration string                              `yaml:"disable-image-generation,omitempty"`
-	CodexAPIKey            []runtimeCodexKey                   `yaml:"codex-api-key"`
-	OAuthModelAlias        map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
+	runtimeConfigBase `yaml:",inline"`
+	CodexAPIKey       []runtimeCodexKey                   `yaml:"codex-api-key"`
+	OAuthModelAlias   map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
 }
 
 type runtimeOpenAIConfigFile struct {
-	Host                   string                       `yaml:"host"`
-	Port                   int                          `yaml:"port"`
-	AuthDir                string                       `yaml:"auth-dir"`
-	APIKeys                []string                     `yaml:"api-keys"`
-	LogToFile              bool                         `yaml:"logging-to-file"`
-	DisableImageGeneration string                       `yaml:"disable-image-generation,omitempty"`
-	OpenAICompatibility    []runtimeOpenAICompatibility `yaml:"openai-compatibility"`
+	runtimeConfigBase   `yaml:",inline"`
+	OpenAICompatibility []runtimeOpenAICompatibility `yaml:"openai-compatibility"`
 }
 
 type runtimeOAuthModelAlias struct {
@@ -467,12 +480,7 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 	aliases := oauthModelAliases(modelSpec)
 	codexOAuthPolicy := usesCodexOAuthCooldownPolicy(providerName)
 	rawConfig, err := yaml.Marshal(runtimeConfigFile{
-		Host:                   "127.0.0.1",
-		Port:                   port,
-		AuthDir:                authDir,
-		APIKeys:                []string{apiKey},
-		LogToFile:              false,
-		DisableImageGeneration: "passthrough",
+		runtimeConfigBase: newRuntimeConfigBase(port, authDir, apiKey),
 		OAuthModelAlias: map[string][]runtimeOAuthModelAlias{
 			backend: aliases,
 		},
@@ -526,12 +534,7 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 		})
 	}
 	rawConfig, err := yaml.Marshal(runtimeOpenAIConfigFile{
-		Host:                   "127.0.0.1",
-		Port:                   port,
-		AuthDir:                runtimeDir,
-		APIKeys:                []string{apiKey},
-		LogToFile:              false,
-		DisableImageGeneration: "passthrough",
+		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
 		OpenAICompatibility: []runtimeOpenAICompatibility{{
 			Name:    "ccl-openai-chat",
 			BaseURL: endpoint,
@@ -623,12 +626,7 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 		models = append(models, runtimeCodexModel{Name: route.Name, Alias: route.Alias})
 	}
 	rawConfig, err := yaml.Marshal(runtimeCodexConfigFile{
-		Host:                   "127.0.0.1",
-		Port:                   port,
-		AuthDir:                runtimeDir,
-		APIKeys:                []string{apiKey},
-		LogToFile:              false,
-		DisableImageGeneration: "passthrough",
+		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
 		CodexAPIKey: []runtimeCodexKey{{
 			APIKey:  upstreamAPIKey,
 			BaseURL: compat.endpoint,
@@ -717,6 +715,27 @@ func runtimeModelRoutes(modelSpec string) []runtimeModelRoute {
 		}
 	}
 	return routes
+}
+
+// runtimeModelAliases returns the distinct client-facing aliases of a model spec,
+// keeping the order in which they were configured.
+func runtimeModelAliases(modelSpec string) []string {
+	routes := runtimeModelRoutes(modelSpec)
+	aliases := make([]string, 0, len(routes))
+	seen := make(map[string]struct{}, len(routes))
+	for _, route := range routes {
+		alias := strings.TrimSpace(route.Alias)
+		key := strings.ToLower(alias)
+		if alias == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		aliases = append(aliases, alias)
+	}
+	return aliases
 }
 
 func oauthModelAliases(modelSpec string) []runtimeOAuthModelAlias {
@@ -921,7 +940,12 @@ func (r *Runtime) watchCredentialGroup(authDir string, store *providerTokenStore
 	if r == nil || store == nil || store.resolver == nil {
 		return
 	}
-	lastSnapshot, _ := credentialGroupSnapshot(authDir, store)
+	lastSnapshot, err := credentialGroupSnapshot(authDir, store)
+	if err != nil {
+		// Without a baseline the first readable snapshot looks like a change and
+		// triggers one reload. Surface the reason instead of dropping it.
+		Debugf("credential group watch could not take an initial snapshot: %v", err)
+	}
 	go func() {
 		ticker := time.NewTicker(credentialGroupPollInterval)
 		defer ticker.Stop()
@@ -931,15 +955,36 @@ func (r *Runtime) watchCredentialGroup(authDir string, store *providerTokenStore
 				return
 			case <-ticker.C:
 				snapshot, err := credentialGroupSnapshot(authDir, store)
-				if err != nil || snapshot == lastSnapshot {
+				if err != nil {
+					Debugf("credential group watch snapshot failed: %v", err)
 					continue
 				}
-				if err := r.coreManager.Load(context.Background()); err == nil {
-					lastSnapshot = snapshot
+				if snapshot == lastSnapshot {
+					continue
 				}
+				if err := r.reloadCredentials(); err != nil {
+					Debugf("credential group watch reload failed: %v", err)
+					continue
+				}
+				lastSnapshot = snapshot
 			}
 		}
 	}()
+}
+
+// reloadCredentials asks CPA to reload its auth set. The call is bounded by a
+// timeout and by the runtime lifetime, so a stuck reload cannot outlive Stop.
+func (r *Runtime) reloadCredentials() error {
+	ctx, cancel := context.WithTimeout(context.Background(), credentialGroupLoadTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-r.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return r.coreManager.Load(ctx)
 }
 
 func credentialGroupSnapshot(authDir string, store *providerTokenStore) (string, error) {
@@ -956,7 +1001,10 @@ func credentialGroupSnapshot(authDir string, store *providerTokenStore) (string,
 	for _, file := range files {
 		snapshot.WriteString(file)
 		if info, err := os.Stat(filepath.Join(authDir, file)); err == nil {
-			fmt.Fprintf(&snapshot, ":%d:%d", info.Size(), info.ModTime().UnixNano())
+			snapshot.WriteByte(':')
+			snapshot.WriteString(strconv.FormatInt(info.Size(), 10))
+			snapshot.WriteByte(':')
+			snapshot.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
 		} else if os.IsNotExist(err) {
 			snapshot.WriteString(":missing")
 		} else {
@@ -1039,22 +1087,8 @@ func silenceStdout() func() {
 	}
 }
 
-func hasCredential(authDir, backend, credentialFile string) (bool, error) {
-	credentialFile = strings.TrimSpace(credentialFile)
-	var credentialFiles []string
-	if credentialFile != "" {
-		credentialFiles = []string{credentialFile}
-	}
-	return hasCredentials(authDir, backend, credentialFiles, credentialFile != "")
-}
-
 func hasCredentials(authDir, backend string, credentialFiles []string, restrictToFiles bool) (bool, error) {
-	allowed := make(map[string]struct{}, len(credentialFiles))
-	for _, file := range credentialFiles {
-		if base := strings.ToLower(filepath.Base(strings.TrimSpace(file))); base != "" && base != "." {
-			allowed[base] = struct{}{}
-		}
-	}
+	allowed := credentialFileSet(credentialFiles)
 	if restrictToFiles && len(allowed) == 0 {
 		return false, nil
 	}
@@ -1071,6 +1105,9 @@ func hasCredentials(authDir, backend string, credentialFiles []string, restrictT
 				continue
 			}
 		}
+		// An unreadable file is reported (it usually means a permission problem the
+		// user must fix), while a file that is simply not valid credential JSON is
+		// skipped like any other unrelated file in the directory.
 		data, err := os.ReadFile(filepath.Join(authDir, entry.Name()))
 		if err != nil {
 			return false, fmt.Errorf("read credential %s: %w", entry.Name(), err)
@@ -1079,8 +1116,11 @@ func hasCredentials(authDir, backend string, credentialFiles []string, restrictT
 			Type     string `json:"type"`
 			Disabled bool   `json:"disabled"`
 		}
-		if json.Unmarshal(data, &metadata) == nil &&
-			!metadata.Disabled && strings.EqualFold(strings.TrimSpace(metadata.Type), backend) {
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			Debugf("skip malformed credential file %s: %v", entry.Name(), err)
+			continue
+		}
+		if !metadata.Disabled && strings.EqualFold(strings.TrimSpace(metadata.Type), backend) {
 			return true, nil
 		}
 	}
@@ -1127,25 +1167,17 @@ func (r *Runtime) Stop() {
 		if r.cancel != nil {
 			r.cancel()
 		}
-		stopped := false
-		select {
-		case <-r.done:
-			stopped = true
-		case <-time.After(5 * time.Second):
-		}
+		stopped := waitClosed(r.done, runtimeStopTimeout)
 		// Force Shutdown only when Run did not exit cleanly in time.
 		if !stopped && (r.service != nil || r.httpServer != nil) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), runtimeStopTimeout)
 			if r.service != nil {
 				_ = r.service.Shutdown(ctx)
 			} else if r.httpServer != nil {
 				_ = r.httpServer.Shutdown(ctx)
 			}
 			cancel()
-			select {
-			case <-r.done:
-			case <-time.After(5 * time.Second):
-			}
+			waitClosed(r.done, runtimeStopTimeout)
 		}
 		if r.coreManager != nil {
 			registry := cliproxy.GlobalModelRegistry()
@@ -1166,6 +1198,20 @@ func (r *Runtime) Stop() {
 			r.restoreLogs()
 		}
 	})
+}
+
+// waitClosed reports whether done closed within timeout. Unlike time.After it
+// releases the timer as soon as the wait finishes, which matters because Stop can
+// be called for every launched runtime.
+func waitClosed(done <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func (r *Runtime) waitReady(ctx context.Context) error {

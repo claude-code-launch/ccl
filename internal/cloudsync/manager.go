@@ -675,7 +675,7 @@ func ExportRecoveryKey() (KeyExportResult, error) {
 		return KeyExportResult{}, err
 	}
 	return KeyExportResult{
-		ProfileID: registry.ActiveProfileID,
+		ProfileID:   registry.ActiveProfileID,
 		RecoveryKey: recoveryKey, KeyMode: profile.KeyMode,
 	}, nil
 }

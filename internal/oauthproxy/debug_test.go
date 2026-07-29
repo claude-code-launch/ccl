@@ -55,12 +55,12 @@ func TestDebugFilterWriterDropsSecretsKeepsDiagnostics(t *testing.T) {
 	cases := map[string]bool{
 		"level=info msg=\"token refreshed\" provider=codex": true,
 		"level=warn msg=\"429 Too Many Requests\"":          true,
-		"level=error msg=\"refresh failed\" ":              true,
-		"level=info msg=\"cooldown active 12s\"":           true,
-		"access_token=eyJhbGciOi... secret=leak":           false,
-		"refresh_token=abc123 must not appear":             false,
-		"authorization: Bearer eyJ...":                     false,
-		"some routine progress line about nothing":        false,
+		"level=error msg=\"refresh failed\" ":               true,
+		"level=info msg=\"cooldown active 12s\"":            true,
+		"access_token=eyJhbGciOi... secret=leak":            false,
+		"refresh_token=abc123 must not appear":              false,
+		"authorization: Bearer eyJ...":                      false,
+		"some routine progress line about nothing":          false,
 	}
 	for line := range cases {
 		_, err := w.Write([]byte(line))

@@ -1,6 +1,8 @@
 package oauthproxy
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,12 +28,85 @@ type kiroToolAccumulator struct {
 	input strings.Builder
 }
 
+// kiroBlockBuffer accumulates the streamed text/thinking of one content block.
+// Appending to a strings.Builder keeps assembly linear; concatenating onto the
+// block's string field would copy the whole block on every delta.
+type kiroBlockBuffer struct {
+	text     strings.Builder
+	thinking strings.Builder
+}
+
+// Server-sent event payloads on the streaming hot path. These are typed structs
+// rather than nested maps so each delta costs one small allocation instead of
+// three maps plus reflection over them.
+type kiroBlockDeltaEvent struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+	Delta any    `json:"delta"`
+}
+
+type kiroBlockStartEvent struct {
+	Type         string `json:"type"`
+	Index        int    `json:"index"`
+	ContentBlock any    `json:"content_block"`
+}
+
+type kiroBlockIndexEvent struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+}
+
+type kiroTextDelta struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type kiroThinkingDelta struct {
+	Type     string `json:"type"`
+	Thinking string `json:"thinking"`
+}
+
+type kiroSignatureDelta struct {
+	Type      string `json:"type"`
+	Signature string `json:"signature"`
+}
+
+type kiroInputJSONDelta struct {
+	Type        string `json:"type"`
+	PartialJSON string `json:"partial_json"`
+}
+
+type kiroTextBlockStart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type kiroThinkingBlockStart struct {
+	Type     string `json:"type"`
+	Thinking string `json:"thinking"`
+}
+
+type kiroRedactedThinkingBlockStart struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
+}
+
+type kiroToolUseBlockStart struct {
+	Type  string         `json:"type"`
+	ID    string         `json:"id"`
+	Name  string         `json:"name"`
+	Input map[string]any `json:"input"`
+}
+
 type kiroAnthropicAssembler struct {
 	request         *kiroConvertedRequest
 	writer          http.ResponseWriter
 	flusher         http.Flusher
 	messageID       string
 	blocks          []kiroResponseBlock
+	buffers         []*kiroBlockBuffer
+	eventBuffer     bytes.Buffer
+	encoder         *json.Encoder
 	activeIndex     int
 	activeType      string
 	outputTokens    int
@@ -60,7 +135,36 @@ func newKiroAnthropicAssembler(request *kiroConvertedRequest, writer http.Respon
 	if writer != nil {
 		assembler.flusher, _ = writer.(http.Flusher)
 	}
+	assembler.encoder = json.NewEncoder(&assembler.eventBuffer)
 	return assembler
+}
+
+// appendBlock registers a new content block and its accumulation buffer, keeping
+// both slices index-aligned.
+func (a *kiroAnthropicAssembler) appendBlock(block kiroResponseBlock) int {
+	index := len(a.blocks)
+	a.blocks = append(a.blocks, block)
+	a.buffers = append(a.buffers, &kiroBlockBuffer{})
+	return index
+}
+
+// contentBlocks materializes the accumulated text/thinking into a copy of the
+// block list. Call it only when a full response body is needed.
+func (a *kiroAnthropicAssembler) contentBlocks() []kiroResponseBlock {
+	blocks := make([]kiroResponseBlock, len(a.blocks))
+	copy(blocks, a.blocks)
+	for index := range blocks {
+		if index >= len(a.buffers) || a.buffers[index] == nil {
+			continue
+		}
+		if buffer := a.buffers[index]; buffer.text.Len() > 0 {
+			blocks[index].Text = buffer.text.String()
+		}
+		if buffer := a.buffers[index]; buffer.thinking.Len() > 0 {
+			blocks[index].Thinking = buffer.thinking.String()
+		}
+	}
+	return blocks
 }
 
 func (a *kiroAnthropicAssembler) start() error {
@@ -137,19 +241,18 @@ func (a *kiroAnthropicAssembler) processEvent(eventType string, payload []byte) 
 			if err := a.closeActive(); err != nil {
 				return err
 			}
-			index := len(a.blocks)
-			a.blocks = append(a.blocks, kiroResponseBlock{Type: "redacted_thinking", Data: event.RedactedContent})
-			if err := a.emit("content_block_start", map[string]any{
-				"type":  "content_block_start",
-				"index": index,
-				"content_block": map[string]any{
-					"type": "redacted_thinking",
-					"data": event.RedactedContent,
+			index := a.appendBlock(kiroResponseBlock{Type: "redacted_thinking", Data: event.RedactedContent})
+			if err := a.emit("content_block_start", kiroBlockStartEvent{
+				Type:  "content_block_start",
+				Index: index,
+				ContentBlock: kiroRedactedThinkingBlockStart{
+					Type: "redacted_thinking",
+					Data: event.RedactedContent,
 				},
 			}); err != nil {
 				return err
 			}
-			if err := a.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index}); err != nil {
+			if err := a.emit("content_block_stop", kiroBlockIndexEvent{Type: "content_block_stop", Index: index}); err != nil {
 				return err
 			}
 		}
@@ -308,12 +411,12 @@ func (a *kiroAnthropicAssembler) addText(text string) error {
 	if err != nil {
 		return err
 	}
-	a.blocks[index].Text += text
+	a.buffers[index].text.WriteString(text)
 	a.outputTokens += estimateKiroTokens(text)
-	return a.emit("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]any{"type": "text_delta", "text": text},
+	return a.emit("content_block_delta", kiroBlockDeltaEvent{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: kiroTextDelta{Type: "text_delta", Text: text},
 	})
 }
 
@@ -325,12 +428,12 @@ func (a *kiroAnthropicAssembler) addThinking(thinking string) error {
 	if err != nil {
 		return err
 	}
-	a.blocks[index].Thinking += thinking
+	a.buffers[index].thinking.WriteString(thinking)
 	a.outputTokens += estimateKiroTokens(thinking)
-	return a.emit("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]any{"type": "thinking_delta", "thinking": thinking},
+	return a.emit("content_block_delta", kiroBlockDeltaEvent{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: kiroThinkingDelta{Type: "thinking_delta", Thinking: thinking},
 	})
 }
 
@@ -347,33 +450,29 @@ func (a *kiroAnthropicAssembler) addToolUse(id, name, partialJSON string) error 
 	} else if err := json.Unmarshal([]byte(partialJSON), &input); err != nil {
 		return fmt.Errorf("Kiro tool %s returned invalid JSON input: %w", name, err)
 	}
-	index := len(a.blocks)
-	a.blocks = append(a.blocks, kiroResponseBlock{Type: "tool_use", ID: id, Name: name, Input: &input})
+	index := a.appendBlock(kiroResponseBlock{Type: "tool_use", ID: id, Name: name, Input: &input})
 	a.hasToolUse = true
 	a.outputTokens += estimateKiroTokens(partialJSON)
-	if err := a.emit("content_block_start", map[string]any{
-		"type":  "content_block_start",
-		"index": index,
-		"content_block": map[string]any{
-			"type":  "tool_use",
-			"id":    id,
-			"name":  name,
-			"input": map[string]any{},
+	if err := a.emit("content_block_start", kiroBlockStartEvent{
+		Type:  "content_block_start",
+		Index: index,
+		ContentBlock: kiroToolUseBlockStart{
+			Type:  "tool_use",
+			ID:    id,
+			Name:  name,
+			Input: map[string]any{},
 		},
 	}); err != nil {
 		return err
 	}
-	if err := a.emit("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]any{
-			"type":         "input_json_delta",
-			"partial_json": partialJSON,
-		},
+	if err := a.emit("content_block_delta", kiroBlockDeltaEvent{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: kiroInputJSONDelta{Type: "input_json_delta", PartialJSON: partialJSON},
 	}); err != nil {
 		return err
 	}
-	return a.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+	return a.emit("content_block_stop", kiroBlockIndexEvent{Type: "content_block_stop", Index: index})
 }
 
 func (a *kiroAnthropicAssembler) ensureBlock(blockType string) (int, error) {
@@ -383,21 +482,17 @@ func (a *kiroAnthropicAssembler) ensureBlock(blockType string) (int, error) {
 	if err := a.closeActive(); err != nil {
 		return -1, err
 	}
-	index := len(a.blocks)
-	block := kiroResponseBlock{Type: blockType}
-	contentBlock := map[string]any{"type": blockType}
+	var contentBlock any = kiroThinkingBlockStart{Type: blockType}
 	if blockType == "text" {
-		contentBlock["text"] = ""
-	} else {
-		contentBlock["thinking"] = ""
+		contentBlock = kiroTextBlockStart{Type: blockType}
 	}
-	a.blocks = append(a.blocks, block)
+	index := a.appendBlock(kiroResponseBlock{Type: blockType})
 	a.activeIndex = index
 	a.activeType = blockType
-	if err := a.emit("content_block_start", map[string]any{
-		"type":          "content_block_start",
-		"index":         index,
-		"content_block": contentBlock,
+	if err := a.emit("content_block_start", kiroBlockStartEvent{
+		Type:         "content_block_start",
+		Index:        index,
+		ContentBlock: contentBlock,
 	}); err != nil {
 		return -1, err
 	}
@@ -415,17 +510,17 @@ func (a *kiroAnthropicAssembler) closeActive() error {
 			signature = "kiro"
 			a.blocks[index].Signature = signature
 		}
-		if err := a.emit("content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": index,
-			"delta": map[string]any{"type": "signature_delta", "signature": signature},
+		if err := a.emit("content_block_delta", kiroBlockDeltaEvent{
+			Type:  "content_block_delta",
+			Index: index,
+			Delta: kiroSignatureDelta{Type: "signature_delta", Signature: signature},
 		}); err != nil {
 			return err
 		}
 	}
 	a.activeIndex = -1
 	a.activeType = ""
-	return a.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+	return a.emit("content_block_stop", kiroBlockIndexEvent{Type: "content_block_stop", Index: index})
 }
 
 func (a *kiroAnthropicAssembler) finish() error {
@@ -451,17 +546,11 @@ func (a *kiroAnthropicAssembler) finish() error {
 			return err
 		}
 	}
-	stopReason := "end_turn"
-	if a.stopReason != "" {
-		stopReason = a.stopReason
-	} else if a.hasToolUse {
-		stopReason = "tool_use"
-	}
 	usage := a.usage()
 	if err := a.emit("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
-			"stop_reason":   stopReason,
+			"stop_reason":   a.resolvedStopReason(),
 			"stop_sequence": nil,
 		},
 		"usage": usage,
@@ -475,20 +564,25 @@ func (a *kiroAnthropicAssembler) finish() error {
 	return nil
 }
 
-func (a *kiroAnthropicAssembler) response() map[string]any {
-	stopReason := "end_turn"
+// resolvedStopReason reports the Anthropic stop reason for the assembled turn.
+func (a *kiroAnthropicAssembler) resolvedStopReason() string {
 	if a.stopReason != "" {
-		stopReason = a.stopReason
-	} else if a.hasToolUse {
-		stopReason = "tool_use"
+		return a.stopReason
 	}
+	if a.hasToolUse {
+		return "tool_use"
+	}
+	return "end_turn"
+}
+
+func (a *kiroAnthropicAssembler) response() map[string]any {
 	return map[string]any{
 		"id":            a.messageID,
 		"type":          "message",
 		"role":          "assistant",
 		"model":         a.request.clientModel,
-		"content":       a.blocks,
-		"stop_reason":   stopReason,
+		"content":       a.contentBlocks(),
+		"stop_reason":   a.resolvedStopReason(),
 		"stop_sequence": nil,
 		"usage":         a.usage(),
 	}
@@ -517,11 +611,18 @@ func (a *kiroAnthropicAssembler) emit(event string, data any) error {
 	if a.writer == nil {
 		return nil
 	}
-	raw, err := json.Marshal(data)
-	if err != nil {
+	// Serialize straight into a reused buffer: one write per event, and no
+	// intermediate []byte/format allocation per streamed token.
+	a.eventBuffer.Reset()
+	a.eventBuffer.WriteString("event: ")
+	a.eventBuffer.WriteString(event)
+	a.eventBuffer.WriteString("\ndata: ")
+	if err := a.encoder.Encode(data); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(a.writer, "event: %s\ndata: %s\n\n", event, raw); err != nil {
+	// Encode already appended the record newline; SSE needs a blank line too.
+	a.eventBuffer.WriteByte('\n')
+	if _, err := a.writer.Write(a.eventBuffer.Bytes()); err != nil {
 		return err
 	}
 	if a.flusher != nil {
@@ -531,8 +632,11 @@ func (a *kiroAnthropicAssembler) emit(event string, data any) error {
 }
 
 func processKiroEventStream(reader io.Reader, assembler *kiroAnthropicAssembler) error {
+	// Frames are read in two small chunks (prelude, then remainder), so reading
+	// straight from the network body would cost two syscalls per frame.
+	buffered := bufio.NewReaderSize(reader, kiroEventReadBufferSize)
 	for {
-		frame, err := readKiroEventFrame(reader)
+		frame, err := readKiroEventFrame(buffered)
 		if err == io.EOF {
 			return assembler.finish()
 		}

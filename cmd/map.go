@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -53,7 +54,7 @@ Examples:
 				return runMapDirect(cmd, args, opts)
 			}
 			if len(args) > 0 && args[0] == "auto" {
-				return runMapAuto(args[1:])
+				return runMapAuto(cmd.Context(), args[1:])
 			}
 			return runMapTUI(args)
 		},
@@ -130,7 +131,7 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 }
 
 // runMapAuto fetches available models and maps usable models to slots in order.
-func runMapAuto(args []string) error {
+func runMapAuto(ctx context.Context, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -153,7 +154,7 @@ func runMapAuto(args []string) error {
 		return fmt.Errorf("no models found from provider")
 	}
 
-	availableSet := testModelsConcurrently(models, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
+	availableSet := testModelsConcurrently(ctx, models, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
 	available, unavailable := classifyModels(models, availableSet)
 
 	if len(available) == 0 {

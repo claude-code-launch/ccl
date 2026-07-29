@@ -386,7 +386,7 @@ func estimateKiroContentTokens(body map[string]any) int {
 	}
 	addJSON := func(value any) {
 		raw, _ := json.Marshal(value)
-		total += estimateKiroTokens(string(raw))
+		total += estimateKiroTokensBytes(raw)
 	}
 	addMessage := func(kind string, message map[string]any) {
 		addText(metadataString(message, "content"))

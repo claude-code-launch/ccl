@@ -536,13 +536,24 @@ func advancedSlotRefs(p *provider.Provider) []advancedSlotRef {
 	}
 }
 
+// uniqueModels drops blanks and duplicates while preserving order. A seen-set
+// keeps it linear; the model pool can hold hundreds of entries.
 func uniqueModels(models []string) []string {
-	var out []string
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
 	for _, mod := range models {
 		mod = strings.TrimSpace(mod)
-		if mod != "" && !stringInSlice(mod, out) {
-			out = append(out, mod)
+		if mod == "" {
+			continue
 		}
+		if _, ok := seen[mod]; ok {
+			continue
+		}
+		seen[mod] = struct{}{}
+		out = append(out, mod)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

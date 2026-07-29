@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -269,7 +270,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 		stream:          request.Stream,
 		thinkingEnabled: thinkingEnabled,
 		maxTokens:       request.MaxTokens,
-		inputTokens:     estimateKiroTokens(string(raw)),
+		inputTokens:     estimateKiroTokensBytes(raw),
 		toolNameMap:     toolNameMap,
 		inlineMedia:     inlineMedia,
 		droppedMedia:    droppedMedia,
@@ -724,9 +725,21 @@ func kiroEnvironmentState() map[string]any {
 	}
 }
 
+// estimateKiroTokens approximates the token count of text as one token per four
+// runes. Counting runes in place keeps this allocation-free, which matters both
+// for whole request bodies and for the per-delta calls on the streaming path.
 func estimateKiroTokens(text string) int {
 	if text == "" {
 		return 0
 	}
-	return (len([]rune(text)) + 3) / 4
+	return (utf8.RuneCountInString(text) + 3) / 4
+}
+
+// estimateKiroTokensBytes is estimateKiroTokens without forcing a []byte to
+// string copy of the payload.
+func estimateKiroTokensBytes(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	return (utf8.RuneCount(raw) + 3) / 4
 }

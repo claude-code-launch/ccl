@@ -425,7 +425,6 @@ func TestAuthGroupListShowsConfigurationAndCredentialPaths(t *testing.T) {
 	}
 }
 
-
 func TestDoctorGroupHealthCounts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -434,9 +433,9 @@ func TestDoctorGroupHealthCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"xai-ok.json":    `{"type":"xai","access_token":"a"}`,
-		"xai-quota.json": `{"type":"xai","access_token":"b","status_message":"quota exhausted","quota":{"exceeded":true}}`,
-		"xai-bad.json":   `{"type":"xai","access_token":"c","disabled":true}`,
+		"xai-ok.json":      `{"type":"xai","access_token":"a"}`,
+		"xai-quota.json":   `{"type":"xai","access_token":"b","status_message":"quota exhausted","quota":{"exceeded":true}}`,
+		"xai-bad.json":     `{"type":"xai","access_token":"c","disabled":true}`,
 		"xai-unavail.json": `{"type":"xai","access_token":"d","unavailable":true}`,
 	}
 	for name, data := range files {
