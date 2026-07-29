@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -151,5 +152,160 @@ func TestKiroCallUpstreamKeepsUnauthorizedDiagnosticsWhenRefreshFails(t *testing
 	var upstreamErr *kiroUpstreamError
 	if !errors.As(err, &upstreamErr) || upstreamErr.status != http.StatusUnauthorized {
 		t.Fatalf("error does not carry the upstream status: %v", err)
+	}
+}
+
+// newKiroRateLimitTestService wires a service whose upstream is handler and whose
+// rate-limit backoff is short enough for a unit test.
+func newKiroRateLimitTestService(t *testing.T, handler http.HandlerFunc) (*kiroService, func()) {
+	t.Helper()
+	authDir := t.TempDir()
+	writeKiroTestCredential(t, filepath.Join(authDir, "kiro-a.json"), nil)
+
+	upstream := httptest.NewServer(handler)
+	service := &kiroService{
+		apiKey:           "ccl-test-key",
+		models:           kiroRuntimeModels("claude-sonnet-4.6"),
+		pool:             newKiroCredentialPool(authDir, nil, false, nil),
+		client:           upstream.Client(),
+		upstreamURL:      func(*kiroCredential) string { return upstream.URL },
+		rateLimitBackoff: []time.Duration{time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond},
+	}
+	return service, upstream.Close
+}
+
+func kiroRateLimitBody() string {
+	return `{"message":"Too many requests, please wait before trying again.","reason":"USER_REQUEST_RATE_EXCEEDED"}`
+}
+
+func TestKiroCallUpstreamRetriesRateLimitedRequests(t *testing.T) {
+	var attempts atomic.Int32
+	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) <= 2 {
+			writer.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(writer, kiroRateLimitBody())
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	})
+	defer closeUpstream()
+
+	response, err := service.callUpstream(context.Background(), &kiroConvertedRequest{
+		body:  map[string]any{"conversationState": map[string]any{}},
+		model: "claude-sonnet-4.6",
+	})
+	if err != nil {
+		t.Fatalf("callUpstream after transient rate limits: %v", err)
+	}
+	_ = response.Body.Close()
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("upstream attempts = %d, want 3 (initial + 2 retries)", got)
+	}
+}
+
+func TestKiroCallUpstreamStopsAfterRateLimitBudget(t *testing.T) {
+	var attempts atomic.Int32
+	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(writer, kiroRateLimitBody())
+	})
+	defer closeUpstream()
+
+	_, err := service.callUpstream(context.Background(), &kiroConvertedRequest{
+		body:  map[string]any{"conversationState": map[string]any{}},
+		model: "claude-sonnet-4.6",
+	})
+	if err == nil {
+		t.Fatal("expected the rate limit to be returned once the budget is spent")
+	}
+	// One initial attempt plus one per configured backoff step.
+	if got, want := attempts.Load(), int32(1+len(service.rateLimitBackoff)); got != want {
+		t.Fatalf("upstream attempts = %d, want %d", got, want)
+	}
+	var upstreamErr *kiroUpstreamError
+	if !errors.As(err, &upstreamErr) || upstreamErr.status != http.StatusTooManyRequests {
+		t.Fatalf("error does not carry HTTP 429: %v", err)
+	}
+	if !strings.Contains(err.Error(), "USER_REQUEST_RATE_EXCEEDED") {
+		t.Fatalf("upstream reason was lost: %v", err)
+	}
+}
+
+func TestKiroCallUpstreamRateLimitRespectsCancellation(t *testing.T) {
+	var attempts atomic.Int32
+	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(writer, kiroRateLimitBody())
+	})
+	defer closeUpstream()
+	service.rateLimitBackoff = []time.Duration{time.Minute, time.Minute, time.Minute}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for attempts.Load() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		cancel()
+	}()
+	_, err := service.callUpstream(ctx, &kiroConvertedRequest{
+		body:  map[string]any{"conversationState": map[string]any{}},
+		model: "claude-sonnet-4.6",
+	})
+	cancel()
+	if err == nil {
+		t.Fatal("expected an error when the client cancels during backoff")
+	}
+	if attempts.Load() > 1 {
+		t.Fatalf("kept retrying after cancellation: attempts = %d", attempts.Load())
+	}
+}
+
+// The 429 must reach the client as a rate limit, not as HTTP 400.
+func TestKiroMessagesReportsRateLimitStatus(t *testing.T) {
+	service, closeUpstream := newKiroRateLimitTestService(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(writer, kiroRateLimitBody())
+	})
+	defer closeUpstream()
+
+	front := httptest.NewServer(service.handler())
+	defer front.Close()
+
+	body := `{"model":"claude-sonnet-4.6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	request, err := http.NewRequest(http.MethodPost, front.URL+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("x-api-key", service.apiKey)
+
+	response, err := front.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body=%s", response.StatusCode, raw)
+	}
+	var decoded struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode error body: %v; body=%s", err, raw)
+	}
+	if decoded.Error.Type != "rate_limit_error" {
+		t.Fatalf("error type = %q, want rate_limit_error; body=%s", decoded.Error.Type, raw)
+	}
+	if !strings.Contains(decoded.Error.Message, "USER_REQUEST_RATE_EXCEEDED") {
+		t.Fatalf("error message lost the upstream reason: %s", raw)
 	}
 }
