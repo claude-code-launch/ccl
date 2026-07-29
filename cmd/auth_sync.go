@@ -15,14 +15,14 @@ import (
 )
 
 type authSyncResult struct {
-	Credentials    int
-	Added          int
-	Removed        int
-	GroupsPruned   int
-	GroupsUpdated  int
-	Cleaned        int
-	CleanInvalid   bool
-	CleanQuota     bool
+	Credentials   int
+	Added         int
+	Removed       int
+	GroupsPruned  int
+	GroupsUpdated int
+	Cleaned       int
+	CleanInvalid  bool
+	CleanQuota    bool
 
 	// Invalid account diagnostics.
 	Disabled         []string
@@ -370,4 +370,3 @@ func ensureGroupProvider(cfg *provider.Config, groupName string) error {
 	cfg.Providers[name] = p
 	return nil
 }
-

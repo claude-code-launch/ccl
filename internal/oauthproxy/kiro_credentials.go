@@ -54,8 +54,14 @@ type kiroCredentialPool struct {
 	resolver        func() ([]string, error)
 	client          *http.Client
 	next            atomic.Uint64
+	cache           kiroCredentialCache
 }
 
+// kiroCredentialRefreshLocks serializes token refreshes per credential file.
+// It is process-global on purpose: several runtimes (and therefore several
+// pools) can point at the same file in ~/.ccl/auth, and a refresh must not be
+// attempted twice concurrently. Entries are keyed by credential path, so the map
+// is bounded by the number of credential files the process has seen.
 var kiroCredentialRefreshLocks sync.Map
 
 func newKiroCredentialPool(authDir string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) *kiroCredentialPool {
@@ -66,6 +72,84 @@ func newKiroCredentialPool(authDir string, credentialFiles []string, restrictToF
 		resolver:        resolver,
 		client:          &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// kiroCredentialCache memoizes parsed credential files, validated against the
+// file's size and modification time. Without it every inbound request re-read
+// and re-parsed every JSON file in the auth directory two or three times.
+type kiroCredentialCache struct {
+	mu      sync.Mutex
+	entries map[string]kiroCredentialCacheEntry
+}
+
+type kiroCredentialCacheEntry struct {
+	modTime time.Time
+	size    int64
+	parsed  *kiroCredential
+}
+
+// get returns the credential stored at path, parsing it only when the file
+// changed since it was last read. info may be nil, in which case the file is
+// stat'ed. The returned credential is a private copy: callers such as
+// refreshCredential mutate it.
+func (c *kiroCredentialCache) get(path string, info os.FileInfo) (*kiroCredential, error) {
+	if info == nil {
+		stat, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		info = stat
+	}
+	c.mu.Lock()
+	entry, ok := c.entries[path]
+	c.mu.Unlock()
+	if ok && entry.size == info.Size() && entry.modTime.Equal(info.ModTime()) {
+		return entry.parsed.clone(), nil
+	}
+
+	parsed, err := loadKiroCredential(path)
+	if err != nil {
+		c.invalidate(path)
+		return nil, err
+	}
+	c.mu.Lock()
+	if c.entries == nil {
+		c.entries = make(map[string]kiroCredentialCacheEntry)
+	}
+	c.entries[path] = kiroCredentialCacheEntry{modTime: info.ModTime(), size: info.Size(), parsed: parsed}
+	c.mu.Unlock()
+	return parsed.clone(), nil
+}
+
+func (c *kiroCredentialCache) invalidate(path string) {
+	c.mu.Lock()
+	delete(c.entries, path)
+	c.mu.Unlock()
+}
+
+// retain drops cache entries for credential files that no longer exist or are no
+// longer selected, so the cache cannot outgrow the auth directory.
+func (c *kiroCredentialCache) retain(live map[string]struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for path := range c.entries {
+		if _, ok := live[path]; !ok {
+			delete(c.entries, path)
+		}
+	}
+}
+
+// clone returns a copy that shares no mutable state with the receiver.
+func (credential *kiroCredential) clone() *kiroCredential {
+	if credential == nil {
+		return nil
+	}
+	copied := *credential
+	copied.metadata = make(map[string]any, len(credential.metadata))
+	for key, value := range credential.metadata {
+		copied.metadata[key] = value
+	}
+	return &copied
 }
 
 func (p *kiroCredentialPool) selectedFiles() (map[string]struct{}, error) {
@@ -96,6 +180,7 @@ func (p *kiroCredentialPool) load() ([]*kiroCredential, error) {
 		return nil, fmt.Errorf("read Kiro auth directory: %w", err)
 	}
 	credentials := make([]*kiroCredential, 0, len(entries))
+	live := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 			continue
@@ -106,12 +191,20 @@ func (p *kiroCredentialPool) load() ([]*kiroCredential, error) {
 			}
 		}
 		path := filepath.Join(p.authDir, entry.Name())
-		credential, err := loadKiroCredential(path)
+		live[path] = struct{}{}
+		// entry.Info() is a stat at worst; the cache turns the common case into
+		// zero reads and zero JSON parsing.
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			info = nil
+		}
+		credential, err := p.cache.get(path, info)
 		if err != nil || credential.disabled {
 			continue
 		}
 		credentials = append(credentials, credential)
 	}
+	p.cache.retain(live)
 	sort.Slice(credentials, func(i, j int) bool {
 		return strings.ToLower(credentials[i].fileName) < strings.ToLower(credentials[j].fileName)
 	})
@@ -211,7 +304,7 @@ func (p *kiroCredentialPool) usableCredential(ctx context.Context, credential *k
 	refreshLock.Lock()
 	defer refreshLock.Unlock()
 
-	latest, err := loadKiroCredential(credential.path)
+	latest, err := p.cache.get(credential.path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +324,14 @@ func (p *kiroCredentialPool) usableCredential(ctx context.Context, credential *k
 	if err := p.refreshCredential(ctx, latest); err != nil {
 		return nil, err
 	}
-	return loadKiroCredential(latest.path)
+	// The file was just rewritten: read it back directly so a coarse filesystem
+	// timestamp can never hand back the pre-refresh token.
+	p.cache.invalidate(latest.path)
+	refreshed, err := loadKiroCredential(latest.path)
+	if err != nil {
+		return nil, err
+	}
+	return refreshed, nil
 }
 
 func (p *kiroCredentialPool) refreshCredential(ctx context.Context, credential *kiroCredential) error {
@@ -369,6 +469,15 @@ func (credential *kiroCredential) streamingProfileARN() string {
 	return kiroBuilderProfileARN
 }
 
+// effectiveMachineID returns the 64 hex character device fingerprint that the
+// Kiro IDE sends in its user agents.
+//
+// Stored machine IDs come in two shapes: the 64 hex character value the IDE
+// generates, and a UUID (32 hex characters once the dashes are stripped). The
+// IDE derives the long form from the short one by repeating it, so a 32
+// character value is doubled rather than rejected. Anything else - including a
+// missing or non-hex value - is replaced by a stable hash of the credential so
+// the fingerprint stays constant for that account.
 func (credential *kiroCredential) effectiveMachineID() string {
 	normalized := strings.ReplaceAll(strings.TrimSpace(credential.machineID), "-", "")
 	if len(normalized) == 32 {

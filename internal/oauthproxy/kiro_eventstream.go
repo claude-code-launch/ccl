@@ -11,6 +11,10 @@ const (
 	kiroEventPreludeSize = 12
 	kiroEventMinSize     = 16
 	kiroEventMaxSize     = 16 << 20
+
+	// kiroEventReadBufferSize buffers the upstream body so a frame costs one
+	// buffered read instead of one syscall per prelude and remainder.
+	kiroEventReadBufferSize = 32 << 10
 )
 
 type kiroEventFrame struct {
@@ -19,8 +23,8 @@ type kiroEventFrame struct {
 }
 
 func readKiroEventFrame(reader io.Reader) (*kiroEventFrame, error) {
-	prelude := make([]byte, kiroEventPreludeSize)
-	if _, err := io.ReadFull(reader, prelude); err != nil {
+	var prelude [kiroEventPreludeSize]byte
+	if _, err := io.ReadFull(reader, prelude[:]); err != nil {
 		return nil, err
 	}
 	totalLength := int(binary.BigEndian.Uint32(prelude[0:4]))
@@ -40,18 +44,22 @@ func readKiroEventFrame(reader io.Reader) (*kiroEventFrame, error) {
 	if _, err := io.ReadFull(reader, remainder); err != nil {
 		return nil, err
 	}
-	message := append(append(make([]byte, 0, totalLength), prelude...), remainder...)
-	expectedCRC := binary.BigEndian.Uint32(message[totalLength-4:])
-	if actual := crc32.ChecksumIEEE(message[:totalLength-4]); actual != expectedCRC {
+	// The trailing CRC covers prelude+headers+payload. Fold the prelude in and
+	// then continue over the remainder so the two parts never have to be copied
+	// into a single buffer.
+	payloadEnd := len(remainder) - 4
+	expectedCRC := binary.BigEndian.Uint32(remainder[payloadEnd:])
+	messageCRC := crc32.Update(crc32.ChecksumIEEE(prelude[:]), crc32.IEEETable, remainder[:payloadEnd])
+	if messageCRC != expectedCRC {
 		return nil, fmt.Errorf("AWS EventStream message CRC mismatch")
 	}
 	headers, err := parseKiroEventHeaders(remainder[:headerLength])
 	if err != nil {
 		return nil, err
 	}
-	payloadEnd := len(remainder) - 4
-	payload := append([]byte{}, remainder[headerLength:payloadEnd]...)
-	return &kiroEventFrame{headers: headers, payload: payload}, nil
+	// remainder is freshly allocated per frame and never reused, so the payload
+	// can alias it instead of taking a second copy.
+	return &kiroEventFrame{headers: headers, payload: remainder[headerLength:payloadEnd]}, nil
 }
 
 func parseKiroEventHeaders(raw []byte) (map[string]string, error) {

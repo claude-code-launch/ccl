@@ -24,8 +24,17 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Run tests
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Run vet
         run: go vet ./...

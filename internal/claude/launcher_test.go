@@ -16,6 +16,26 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
+// previewSettingsJSON decodes what PreviewSettings would write to the settings
+// file. Providers with an OAuth backend need real credentials in ~/.ccl/auth to
+// start the embedded runtime, so on a machine without them (CI, a fresh clone)
+// the case is skipped instead of failing on the returned error string.
+func previewSettingsJSON(t *testing.T, p provider.Provider) settingsJSON {
+	t.Helper()
+	raw := claude.PreviewSettings(p)
+	if rest, isError := strings.CutPrefix(raw, "Error: "); isError {
+		if strings.Contains(rest, "credentials found") || strings.Contains(rest, "credential") {
+			t.Skipf("requires local OAuth credentials: %s", rest)
+		}
+		t.Fatalf("PreviewSettings failed: %s", rest)
+	}
+	var settings settingsJSON
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		t.Fatalf("decode settings: %v; result=%s", err, raw)
+	}
+	return settings
+}
+
 type settingsJSON struct {
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
@@ -623,10 +643,7 @@ func TestPreviewSettingsAppliesRuntimeDefaults(t *testing.T) {
 		CustomModelID: "gpt-5.6-sol",
 	}
 
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env[claude.SubagentModelEnv] != "gpt-5.6-sol" {
 		t.Fatalf("subagent model = %q", settings.Env[claude.SubagentModelEnv])
 	}
@@ -651,10 +668,7 @@ func TestPreviewSettingsAppliesExplicitSubagentMapping(t *testing.T) {
 		SubagentModel: "cheap-subagent-model",
 	}
 
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if got := settings.Env[claude.SubagentModelEnv]; got != "cheap-subagent-model" {
 		t.Fatalf("subagent model = %q, want explicit mapping", got)
 	}
@@ -676,10 +690,7 @@ func TestPreviewSettingsRuntimeDefaultsCanBeOverridden(t *testing.T) {
 		},
 	}
 
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env[claude.SubagentModelEnv] != "override-subagent" ||
 		settings.Env[claude.ToolUseConcurrencyEnv] != "7" ||
 		settings.Env[claude.ToolSearchEnv] != "true" ||
@@ -698,10 +709,7 @@ func TestPreviewSettingsRejectsOversizedMaxOutputTokenOverride(t *testing.T) {
 		},
 	}
 
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if got := settings.Env[claude.MaxOutputTokensEnv]; got != claude.DefaultMaxOutputTokens {
 		t.Fatalf("oversized max output tokens resolved to %q, want %q", got, claude.DefaultMaxOutputTokens)
 	}
@@ -813,10 +821,7 @@ func TestPreviewSettingsGrokPreferredDefaultsValidatedAgainstCatalog(t *testing.
 		Model: "grok-4.5,grok-4,grok-2-mini",
 	}
 
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.5" {
 		t.Fatalf("opus = %q, want grok-4.5", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
@@ -847,10 +852,7 @@ func TestPreviewSettingsGrokUsesPreferredWhenPresent(t *testing.T) {
 		OAuthProvider: "grok",
 		Model:         "grok-4.5,grok-4.3,grok-3-mini,grok-2",
 	}
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.5" {
 		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
@@ -876,10 +878,7 @@ func TestPreviewSettingsGeminiPreferredDefaultsValidatedAgainstCatalog(t *testin
 		Model: "claude-opus-4-6-thinking,gemini-2.5-pro,gemini-2.0-flash",
 	}
 
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-6-thinking" {
 		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
@@ -909,10 +908,7 @@ func TestPreviewSettingsGeminiUsesPreferredWhenPresent(t *testing.T) {
 		OAuthProvider: "gemini",
 		Model:         "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3.1-pro-low,gemini-2.0-flash",
 	}
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-6-thinking" {
 		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
@@ -936,10 +932,7 @@ func TestPreviewSettingsGPTUsesPreferredWhenPresent(t *testing.T) {
 		OAuthProvider: "gpt",
 		Model:         "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.4-mini",
 	}
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "gpt-5.6-sol" {
 		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
@@ -964,10 +957,7 @@ func TestPreviewSettingsGPTPreferredDefaultsValidatedAgainstCatalog(t *testing.T
 		// Catalog has opus/custom preferred ID, but not sonnet/haiku preferred IDs.
 		Model: "gpt-5.6-sol,gpt-5.4,gpt-5.4-mini",
 	}
-	var settings settingsJSON
-	if err := json.Unmarshal([]byte(claude.PreviewSettings(p)), &settings); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
+	settings := previewSettingsJSON(t, p)
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "gpt-5.6-sol" {
 		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}

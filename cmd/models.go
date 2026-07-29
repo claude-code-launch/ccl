@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -24,14 +25,14 @@ Examples:
   ccl models --all
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runModels(showAll)
+			return runModels(cmd.Context(), showAll)
 		},
 	}
 	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Show all provider models (not just configured ones)")
 	return cmd
 }
 
-func runModels(showAll bool) error {
+func runModels(ctx context.Context, showAll bool) error {
 	p, err := resolveProvider()
 	if err != nil {
 		return err
@@ -65,7 +66,7 @@ func runModels(showAll bool) error {
 	fmt.Printf("Models · %s\n", p.Name)
 	fmt.Printf("Source: %s · %d model(s)\n\n", source, len(modelList))
 
-	availableSet := testModelsConcurrently(modelList, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
+	availableSet := testModelsConcurrently(ctx, modelList, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
 	available, unavailable := classifyModels(modelList, availableSet)
 	fmt.Println()
 	printModelReport(available, unavailable)

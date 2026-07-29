@@ -77,9 +77,19 @@ type kiroModelCacheEntry struct {
 	fetchedAt time.Time
 }
 
+// kiroModelFetch is one in-flight discovery call. Concurrent requests for the
+// same credential wait on it instead of issuing their own upstream call.
+type kiroModelFetch struct {
+	done   chan struct{}
+	models []kiroAvailableModel
+	err    error
+}
+
 type kiroModelCatalog struct {
+	// mu guards cache and inflight only. It is never held across network I/O.
 	mu                   sync.Mutex
 	cache                map[string]kiroModelCacheEntry
+	inflight             map[string]*kiroModelFetch
 	ttl                  time.Duration
 	endpoint             func(string) string
 	portalHomeEndpoint   string
@@ -92,11 +102,69 @@ func newKiroModelCatalog(endpoint func(string) string) *kiroModelCatalog {
 	}
 	return &kiroModelCatalog{
 		cache:                make(map[string]kiroModelCacheEntry),
+		inflight:             make(map[string]*kiroModelFetch),
 		ttl:                  kiroModelsCacheTTL,
 		endpoint:             endpoint,
 		portalHomeEndpoint:   kiroWebPortalHomeEndpoint,
 		portalModelsEndpoint: kiroWebPortalModelsEndpoint,
 	}
+}
+
+func (c *kiroModelCatalog) cached(path string) (kiroModelCacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.cache[path]
+	return entry, ok
+}
+
+func (c *kiroModelCatalog) store(path string, models []kiroAvailableModel, fetchedAt time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]kiroModelCacheEntry)
+	}
+	c.cache[path] = kiroModelCacheEntry{models: models, fetchedAt: fetchedAt}
+}
+
+// retain evicts cached catalogs for credentials that are no longer selected, so
+// removed accounts do not linger for the lifetime of the process.
+func (c *kiroModelCatalog) retain(live map[string]struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for path := range c.cache {
+		if _, ok := live[path]; !ok {
+			delete(c.cache, path)
+		}
+	}
+}
+
+// fetchOnce discovers the catalog of one credential, collapsing concurrent
+// callers for that credential into a single upstream request.
+func (c *kiroModelCatalog) fetchOnce(ctx context.Context, service *kiroService, candidate *kiroCredential) ([]kiroAvailableModel, error) {
+	c.mu.Lock()
+	if c.inflight == nil {
+		c.inflight = make(map[string]*kiroModelFetch)
+	}
+	if existing, ok := c.inflight[candidate.path]; ok {
+		c.mu.Unlock()
+		select {
+		case <-existing.done:
+			return existing.models, existing.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	fetch := &kiroModelFetch{done: make(chan struct{})}
+	c.inflight[candidate.path] = fetch
+	c.mu.Unlock()
+
+	fetch.models, fetch.err = c.fetchCredentialModels(ctx, service, candidate)
+	close(fetch.done)
+
+	c.mu.Lock()
+	delete(c.inflight, candidate.path)
+	c.mu.Unlock()
+	return fetch.models, fetch.err
 }
 
 // availableModels discovers the actual catalog for every credential selected by
@@ -107,9 +175,6 @@ func (s *kiroService) availableModels(ctx context.Context) ([]kiroAvailableModel
 	if catalog == nil {
 		catalog = newKiroModelCatalog(nil)
 	}
-
-	catalog.mu.Lock()
-	defer catalog.mu.Unlock()
 
 	credentials, err := s.pool.load()
 	if err != nil {
@@ -129,8 +194,10 @@ func (s *kiroService) availableModels(ctx context.Context) ([]kiroAvailableModel
 		hasCache   bool
 	}
 	pending := make([]pendingCredential, 0, len(credentials))
+	live := make(map[string]struct{}, len(credentials))
 	for _, candidate := range credentials {
-		cached, hasCache := catalog.cache[candidate.path]
+		live[candidate.path] = struct{}{}
+		cached, hasCache := catalog.cached(candidate.path)
 		if hasCache && now.Sub(cached.fetchedAt) < catalog.ttl {
 			mergeKiroAvailableModels(merged, cached.models)
 			successes++
@@ -142,6 +209,7 @@ func (s *kiroService) availableModels(ctx context.Context) ([]kiroAvailableModel
 			hasCache:   hasCache,
 		})
 	}
+	catalog.retain(live)
 
 	type discoveryResult struct {
 		pending pendingCredential
@@ -160,7 +228,7 @@ func (s *kiroService) availableModels(ctx context.Context) ([]kiroAvailableModel
 				results <- discoveryResult{pending: item, err: ctx.Err()}
 				return
 			}
-			models, fetchErr := catalog.fetchCredentialModels(ctx, s, item.credential)
+			models, fetchErr := catalog.fetchOnce(ctx, s, item.credential)
 			results <- discoveryResult{pending: item, models: models, err: fetchErr}
 		}()
 	}
@@ -178,7 +246,7 @@ func (s *kiroService) availableModels(ctx context.Context) ([]kiroAvailableModel
 		}
 
 		copied := cloneKiroAvailableModels(result.models)
-		catalog.cache[result.pending.credential.path] = kiroModelCacheEntry{models: copied, fetchedAt: now}
+		catalog.store(result.pending.credential.path, copied, now)
 		mergeKiroAvailableModels(merged, copied)
 		successes++
 	}
@@ -216,34 +284,33 @@ func (s *kiroService) availableModels(ctx context.Context) ([]kiroAvailableModel
 	return models, nil
 }
 
+// cloneKiroAvailableModel deep-copies the pointer and slice fields so cached and
+// merged entries never share mutable state with the decoded response.
+func cloneKiroAvailableModel(model kiroAvailableModel) kiroAvailableModel {
+	cloned := model
+	if model.TokenLimits != nil {
+		limits := *model.TokenLimits
+		cloned.TokenLimits = &limits
+	}
+	if model.RateMultiplier != nil {
+		multiplier := *model.RateMultiplier
+		cloned.RateMultiplier = &multiplier
+	}
+	cloned.SupportedInputTypes = append([]string(nil), model.SupportedInputTypes...)
+	return cloned
+}
+
 func cloneKiroAvailableModels(models []kiroAvailableModel) []kiroAvailableModel {
 	cloned := make([]kiroAvailableModel, len(models))
 	for index, model := range models {
-		cloned[index] = model
-		if model.TokenLimits != nil {
-			limits := *model.TokenLimits
-			cloned[index].TokenLimits = &limits
-		}
-		if model.RateMultiplier != nil {
-			multiplier := *model.RateMultiplier
-			cloned[index].RateMultiplier = &multiplier
-		}
-		cloned[index].SupportedInputTypes = append([]string(nil), model.SupportedInputTypes...)
+		cloned[index] = cloneKiroAvailableModel(model)
 	}
 	return cloned
 }
 
 func mergeKiroAvailableModels(merged map[string]kiroAvailableModel, incoming []kiroAvailableModel) {
-	for _, model := range incoming {
-		if model.TokenLimits != nil {
-			limits := *model.TokenLimits
-			model.TokenLimits = &limits
-		}
-		if model.RateMultiplier != nil {
-			multiplier := *model.RateMultiplier
-			model.RateMultiplier = &multiplier
-		}
-		model.SupportedInputTypes = append([]string(nil), model.SupportedInputTypes...)
+	for _, incomingModel := range incoming {
+		model := cloneKiroAvailableModel(incomingModel)
 		model.ModelID = strings.TrimSpace(model.ModelID)
 		if model.ModelID == "" {
 			continue

@@ -19,6 +19,7 @@ import (
 const (
 	kiroIDEVersion             = "2.3.0"
 	kiroMaxInboundRequestBytes = int64(128 << 20)
+	kiroMaxUpstreamErrorBytes  = int64(1 << 20)
 )
 
 type kiroService struct {
@@ -124,22 +125,9 @@ func startKiroOAuthWithFiles(parent context.Context, modelSpec string, credentia
 	return proxyRuntime, nil
 }
 
+// kiroRuntimeModels lists the client-visible model aliases of a model spec.
 func kiroRuntimeModels(modelSpec string) []string {
-	routes := runtimeModelRoutes(modelSpec)
-	models := make([]string, 0, len(routes))
-	seen := make(map[string]bool)
-	add := func(model string) {
-		model = strings.TrimSpace(model)
-		if model == "" || seen[strings.ToLower(model)] {
-			return
-		}
-		seen[strings.ToLower(model)] = true
-		models = append(models, model)
-	}
-	for _, route := range routes {
-		add(route.Alias)
-	}
-	return models
+	return runtimeModelAliases(modelSpec)
 }
 
 func (s *kiroService) handler() http.Handler {
@@ -212,12 +200,13 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 		data = append(data, item)
 		ids = append(ids, model.ModelID)
 	}
+	firstID, lastID := kiroModelBounds(ids)
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"data":     data,
 		"has_more": false,
-		"first_id": firstKiroModel(ids),
-		"last_id":  lastKiroModel(ids),
+		"first_id": firstID,
+		"last_id":  lastID,
 	})
 }
 
@@ -236,7 +225,7 @@ func (s *kiroService) handleCountTokens(writer http.ResponseWriter, request *htt
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateKiroTokens(string(raw))})
+	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateKiroTokensBytes(raw)})
 }
 
 func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.Request) {
@@ -340,6 +329,17 @@ func readKiroInboundBody(writer http.ResponseWriter, request *http.Request, maxB
 	return raw, nil
 }
 
+// drainKiroErrorBody reads a bounded prefix of an upstream error body and closes
+// it, so the diagnostics survive after the response is discarded.
+func drainKiroErrorBody(response *http.Response) string {
+	if response == nil || response.Body == nil {
+		return ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, kiroMaxUpstreamErrorBytes))
+	_ = response.Body.Close()
+	return strings.TrimSpace(string(body))
+}
+
 func kiroRequestLimitLabel(maxBytes int64) string {
 	if maxBytes >= 1<<20 && maxBytes%(1<<20) == 0 {
 		return fmt.Sprintf("%d MiB", maxBytes>>20)
@@ -367,26 +367,26 @@ func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConverted
 			lastErr = err
 			continue
 		}
+		if response.StatusCode == http.StatusUnauthorized {
+			// Drain the rejected response before closing it: if the refresh then
+			// fails we still have the upstream diagnostics to report.
+			unauthorized := drainKiroErrorBody(response)
+			refreshed, refreshErr := s.pool.usableCredential(ctx, credential, true)
+			if refreshErr != nil {
+				lastErr = fmt.Errorf("%w (credential refresh failed: %v)",
+					&kiroUpstreamError{status: http.StatusUnauthorized, body: unauthorized}, refreshErr)
+				continue
+			}
+			response, err = s.doUpstreamRequest(ctx, converted, refreshed)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			return response, nil
 		}
-		if response.StatusCode == http.StatusUnauthorized {
-			_ = response.Body.Close()
-			refreshed, refreshErr := s.pool.usableCredential(ctx, credential, true)
-			if refreshErr == nil {
-				response, err = s.doUpstreamRequest(ctx, converted, refreshed)
-				if err == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-					return response, nil
-				}
-			}
-		}
-		if response == nil {
-			lastErr = err
-			continue
-		}
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		_ = response.Body.Close()
-		upstreamErr := &kiroUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
+		upstreamErr := &kiroUpstreamError{status: response.StatusCode, body: drainKiroErrorBody(response)}
 		if response.StatusCode == http.StatusBadRequest {
 			return nil, upstreamErr
 		}
@@ -454,18 +454,13 @@ func writeKiroError(writer http.ResponseWriter, status int, errorType, message s
 	})
 }
 
-func firstKiroModel(models []string) string {
+// kiroModelBounds reports the first and last model id of a page, or empty
+// strings when the page is empty.
+func kiroModelBounds(models []string) (string, string) {
 	if len(models) == 0 {
-		return ""
+		return "", ""
 	}
-	return models[0]
-}
-
-func lastKiroModel(models []string) string {
-	if len(models) == 0 {
-		return ""
-	}
-	return models[len(models)-1]
+	return models[0], models[len(models)-1]
 }
 
 func uuidString() string {

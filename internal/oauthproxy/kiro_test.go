@@ -611,15 +611,15 @@ func TestKiroInlineThinkingIsConvertedToAnthropicBlock(t *testing.T) {
 	if err := assembler.finish(); err != nil {
 		t.Fatal(err)
 	}
-	if len(assembler.blocks) != 2 {
-		t.Fatalf("blocks = %#v", assembler.blocks)
+	blocks := assembler.contentBlocks()
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %#v", blocks)
 	}
-	if assembler.blocks[0].Type != "thinking" || assembler.blocks[0].Thinking != "plan" ||
-		assembler.blocks[0].Signature == "" {
-		t.Fatalf("thinking block = %#v", assembler.blocks[0])
+	if blocks[0].Type != "thinking" || blocks[0].Thinking != "plan" || blocks[0].Signature == "" {
+		t.Fatalf("thinking block = %#v", blocks[0])
 	}
-	if assembler.blocks[1].Type != "text" || assembler.blocks[1].Text != "answer" {
-		t.Fatalf("text block = %#v", assembler.blocks[1])
+	if blocks[1].Type != "text" || blocks[1].Text != "answer" {
+		t.Fatalf("text block = %#v", blocks[1])
 	}
 }
 
@@ -767,9 +767,9 @@ func TestKiroMessagesStreamingConversion(t *testing.T) {
 	stream := string(body)
 	for _, want := range []string{
 		"event: message_start",
-		`"thinking":"think","type":"thinking_delta"`,
-		`"signature":"sig","type":"signature_delta"`,
-		`"text":"hello","type":"text_delta"`,
+		`"type":"thinking_delta","thinking":"think"`,
+		`"type":"signature_delta","signature":"sig"`,
+		`"type":"text_delta","text":"hello"`,
 		`"type":"tool_use"`,
 		`"partial_json":"{\"path\":\"/tmp/a\"}"`,
 		`"stop_reason":"tool_use"`,

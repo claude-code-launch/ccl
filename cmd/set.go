@@ -25,6 +25,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// maxModelListProbeBytes caps how much of a model-list response is buffered while
+// detecting whether an endpoint speaks OpenAI or Anthropic.
+const maxModelListProbeBytes = 8 << 20
+
 var setCmd = &cobra.Command{
 	Use:   "set [name]",
 	Short: "Add or update an LLM provider configuration",
@@ -615,7 +619,9 @@ func fetchModelListForDetection(req *http.Request, timeout time.Duration) (model
 	}
 	defer resp.Body.Close()
 	setDebugf("models probe status url=%q status=%d", req.URL.String(), resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
+	// A misconfigured endpoint can point at anything, so never buffer an unbounded
+	// response just to sniff a model list out of it.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelListProbeBytes))
 	if err != nil {
 		return modelListDetection{}, err
 	}

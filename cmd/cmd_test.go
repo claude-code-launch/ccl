@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/config"
@@ -399,7 +400,7 @@ func TestMapAutoRefreshesModelPoolWithoutTransferringOneMToUnknownModels(t *test
 		t.Fatalf("failed to save config: %v", err)
 	}
 
-	if err := runMapAuto([]string{"mock"}); err != nil {
+	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
 		t.Fatalf("runMapAuto failed: %v", err)
 	}
 
@@ -455,7 +456,7 @@ func TestMapAutoPreservesModernOneMCompactPreset(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := runMapAuto([]string{"mock"}); err != nil {
+	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := config.Load()
