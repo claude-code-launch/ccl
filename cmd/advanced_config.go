@@ -629,16 +629,16 @@ func (m *AdvancedConfigModel) canToggleOpenAIProtocol() bool {
 	return strings.TrimSpace(m.p.OAuthProvider) == ""
 }
 
-// maxOutputUpstreamManaged is true when Claude Code's max-output setting cannot
-// be forwarded by the current upstream path (Codex OAuth / dedicated /codex).
-// Plain openai_responses re-injects max_output_tokens in the compat proxy.
+// maxOutputUpstreamManaged is true when the selected path has no supported
+// upstream output-limit field. ChatGPT OAuth remains editable because the value
+// still configures Claude Code's client limit; Kiro's Amazon Q request schema
+// has no equivalent for Anthropic max_tokens.
 func (m *AdvancedConfigModel) maxOutputUpstreamManaged() bool {
 	if m.p == nil {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "gpt", "chatgpt", "codex", "copilot":
-		// Codex-family OAuth (ChatGPT/Copilot) ignore MaxOutputTokens in StartProvider.
+	case "codex", "copilot", "kiro":
 		return true
 	}
 	// Gemini OAuth (antigravity) maps Claude max_tokens → generationConfig.maxOutputTokens.

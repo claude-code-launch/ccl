@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ugorji/go/codec"
 )
@@ -157,6 +158,202 @@ func TestKiroInlineMediaDeduplicationKeepsNewestCopy(t *testing.T) {
 	}
 }
 
+func TestKiroContentBudgetDropsOldestCompleteTurn(t *testing.T) {
+	systemUser := map[string]any{"content": "system"}
+	systemAssistant := map[string]any{"content": "ack"}
+	oldUser := map[string]any{
+		"content": strings.Repeat("u", 12_000),
+		"images": []any{map[string]any{
+			"format": "jpeg",
+			"source": map[string]any{"bytes": strings.Repeat("x", 12_000)},
+		}},
+	}
+	oldAssistant := map[string]any{"content": strings.Repeat("a", 12_000)}
+	newUser := map[string]any{"content": "new user"}
+	newAssistant := map[string]any{"content": "new assistant"}
+	state := map[string]any{
+		"history": []any{
+			map[string]any{"userInputMessage": systemUser},
+			map[string]any{"assistantResponseMessage": systemAssistant},
+			map[string]any{"userInputMessage": oldUser},
+			map[string]any{"assistantResponseMessage": oldAssistant},
+			map[string]any{"userInputMessage": newUser},
+			map[string]any{"assistantResponseMessage": newAssistant},
+		},
+		"currentMessage": map[string]any{"userInputMessage": map[string]any{
+			"content":                 "continue",
+			"userInputMessageContext": map[string]any{"envState": kiroEnvironmentState()},
+		}},
+	}
+	body := map[string]any{"conversationState": state}
+	originalTokens := estimateKiroContentTokens(body)
+	limit := originalTokens - 4_500
+
+	stats := enforceKiroContentBudget(body, 2, limit)
+	if stats.droppedHistoryMessages != 2 || stats.droppedImages != 1 {
+		t.Fatalf("budget stats = %+v", stats)
+	}
+	if stats.finalTokens > limit {
+		t.Fatalf("final tokens = %d, limit = %d", stats.finalTokens, limit)
+	}
+	history := kiroAnySlice(state["history"])
+	if len(history) != 4 {
+		t.Fatalf("history length = %d, history=%#v", len(history), history)
+	}
+	if metadataString(kiroAnyMap(history[0].(map[string]any)["userInputMessage"]), "content") != "system" ||
+		metadataString(kiroAnyMap(history[1].(map[string]any)["assistantResponseMessage"]), "content") != "ack" ||
+		metadataString(kiroAnyMap(history[2].(map[string]any)["userInputMessage"]), "content") != "new user" ||
+		metadataString(kiroAnyMap(history[3].(map[string]any)["assistantResponseMessage"]), "content") != "new assistant" {
+		t.Fatalf("wrong history retained: %#v", history)
+	}
+}
+
+func TestKiroContentBudgetDropsWholeToolChainAndKeepsValidAlternation(t *testing.T) {
+	toolUse := map[string]any{
+		"toolUseId": "toolu_old",
+		"name":      "Read",
+		"input":     map[string]any{"path": "/tmp/old"},
+	}
+	toolResult := map[string]any{
+		"toolUseId": "toolu_old",
+		"content":   []any{map[string]any{"text": strings.Repeat("r", 12_000)}},
+		"status":    "success",
+	}
+	state := map[string]any{
+		"history": []any{
+			map[string]any{"userInputMessage": map[string]any{"content": "system"}},
+			map[string]any{"assistantResponseMessage": map[string]any{"content": "ack"}},
+			map[string]any{"userInputMessage": map[string]any{"content": strings.Repeat("u", 12_000)}},
+			map[string]any{"assistantResponseMessage": map[string]any{
+				"content":  " ",
+				"toolUses": []any{toolUse},
+			}},
+			map[string]any{"userInputMessage": map[string]any{
+				"content": "",
+				"userInputMessageContext": map[string]any{
+					"envState":    kiroEnvironmentState(),
+					"toolResults": []any{toolResult},
+				},
+			}},
+			map[string]any{"assistantResponseMessage": map[string]any{"content": strings.Repeat("a", 12_000)}},
+			map[string]any{"userInputMessage": map[string]any{"content": "new user"}},
+			map[string]any{"assistantResponseMessage": map[string]any{"content": "new assistant"}},
+		},
+		"currentMessage": map[string]any{"userInputMessage": map[string]any{
+			"content":                 "continue",
+			"userInputMessageContext": map[string]any{"envState": kiroEnvironmentState()},
+		}},
+	}
+	body := map[string]any{"conversationState": state}
+	originalTokens := estimateKiroContentTokens(body)
+
+	stats := enforceKiroContentBudget(body, 2, originalTokens-5_000)
+	if stats.droppedHistoryMessages != 4 {
+		t.Fatalf("dropped history = %d, want complete four-message tool chain; stats=%+v", stats.droppedHistoryMessages, stats)
+	}
+	history := kiroAnySlice(state["history"])
+	if len(history) != 4 {
+		t.Fatalf("history length = %d, history=%#v", len(history), history)
+	}
+	wantRoles := []string{"user", "assistant", "user", "assistant"}
+	for index, want := range wantRoles {
+		got, message := kiroHistoryMessage(history[index])
+		if got != want || !kiroHistoryMessageHasContent(got, message) {
+			t.Fatalf("history[%d] role=%q meaningful=%t, want %q: %#v",
+				index, got, kiroHistoryMessageHasContent(got, message), want, history)
+		}
+	}
+}
+
+func TestConvertAnthropicRequestDoesNotChargeMediaAgainstTextBudget(t *testing.T) {
+	imageBlocks := make([]any, 8)
+	for index := range imageBlocks {
+		rawImage := make([]byte, 300_000)
+		rawImage[0] = byte(index + 1)
+		imageBlocks[index] = map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": "image/jpeg",
+				"data":       base64.StdEncoding.EncodeToString(rawImage),
+			},
+		}
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-5",
+		"max_tokens": 1024,
+		"system":     strings.Repeat("s", 200_000),
+		"messages": []any{
+			map[string]any{"role": "user", "content": imageBlocks},
+			map[string]any{"role": "assistant", "content": strings.Repeat("a", 200_000)},
+			map[string]any{"role": "user", "content": strings.Repeat("c", 100_000)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	converted, err := convertAnthropicToKiro(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.originalBody <= 3_600_000 {
+		t.Fatalf("fixture body = %d, expected a media-heavy request", converted.originalBody)
+	}
+	if converted.originalTokens > kiroMaxEstimatedContentTokens ||
+		converted.finalTokens > kiroMaxEstimatedContentTokens {
+		t.Fatalf("content tokens original=%d final=%d", converted.originalTokens, converted.finalTokens)
+	}
+	if converted.budgetMedia != 0 || converted.inlineMedia != 8 {
+		t.Fatalf("budget dropped media=%d retained=%d", converted.budgetMedia, converted.inlineMedia)
+	}
+	state := kiroAnyMap(converted.body["conversationState"])
+	current := kiroCurrentUserMessage(state)
+	if metadataString(current, "content") != strings.Repeat("c", 100_000) {
+		t.Fatal("content budget unexpectedly changed the current message")
+	}
+}
+
+func TestConvertAnthropicRequestTrimsTextHistoryBelowKiroContextBudget(t *testing.T) {
+	messages := make([]any, 0, 21)
+	for index := 0; index < 10; index++ {
+		messages = append(messages,
+			map[string]any{"role": "user", "content": fmt.Sprintf("user-%02d-", index) + strings.Repeat("u", 50_000)},
+			map[string]any{"role": "assistant", "content": fmt.Sprintf("assistant-%02d-", index) + strings.Repeat("a", 50_000)},
+		)
+	}
+	messages = append(messages, map[string]any{"role": "user", "content": "CURRENT-" + strings.Repeat("c", 10_000)})
+	payload, err := json.Marshal(map[string]any{
+		"model":      "claude-sonnet-5",
+		"max_tokens": 1024,
+		"system":     "SYSTEM-" + strings.Repeat("s", 100_000),
+		"messages":   messages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	converted, err := convertAnthropicToKiro(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.originalTokens <= kiroMaxEstimatedContentTokens {
+		t.Fatalf("fixture tokens = %d, expected over %d", converted.originalTokens, kiroMaxEstimatedContentTokens)
+	}
+	if converted.finalTokens > kiroMaxEstimatedContentTokens || converted.budgetHistory == 0 {
+		t.Fatalf("budget final tokens=%d dropped history=%d", converted.finalTokens, converted.budgetHistory)
+	}
+	state := kiroAnyMap(converted.body["conversationState"])
+	history := kiroAnySlice(state["history"])
+	if len(history) < 2 ||
+		!strings.HasPrefix(metadataString(kiroAnyMap(history[0].(map[string]any)["userInputMessage"]), "content"), "SYSTEM-") {
+		t.Fatalf("protected system history missing: %#v", history)
+	}
+	if !strings.HasPrefix(metadataString(kiroCurrentUserMessage(state), "content"), "CURRENT-") {
+		t.Fatal("current message was not preserved")
+	}
+}
+
 func TestConvertAnthropicToolResultImagesHonorsKiroMediaLimit(t *testing.T) {
 	toolResultImages := make([]any, kiroMaxInlineMediaSegments+5)
 	for index := range toolResultImages {
@@ -274,6 +471,49 @@ func TestNormalizeKiroToolPairingDropsOrphansAndDuplicates(t *testing.T) {
 	}
 }
 
+func TestLimitKiroTextFieldsKeepsHeadAndTail(t *testing.T) {
+	longCurrent := "CURRENT-BEGIN-" + strings.Repeat("中", 160_000) + "-CURRENT-END"
+	longAssistant := "ASSISTANT-BEGIN-" + strings.Repeat("a", kiroMaxTextFieldBytes) + "-ASSISTANT-END"
+	longToolResult := "RESULT-BEGIN-" + strings.Repeat("r", kiroMaxTextFieldBytes) + "-RESULT-END"
+	toolResultContent := map[string]any{"text": longToolResult}
+	state := map[string]any{
+		"currentMessage": map[string]any{"userInputMessage": map[string]any{
+			"content": longCurrent,
+			"userInputMessageContext": map[string]any{
+				"toolResults": []any{map[string]any{
+					"content": []any{toolResultContent},
+				}},
+			},
+		}},
+		"history": []any{
+			map[string]any{"assistantResponseMessage": map[string]any{"content": longAssistant}},
+		},
+	}
+
+	stats := limitKiroTextFields(state, kiroMaxTextFieldBytes)
+	if stats.truncated != 3 || stats.droppedBytes <= 0 || stats.largestBytes != len(longCurrent) {
+		t.Fatalf("text stats = %+v", stats)
+	}
+	current := state["currentMessage"].(map[string]any)["userInputMessage"].(map[string]any)["content"].(string)
+	assistant := state["history"].([]any)[0].(map[string]any)["assistantResponseMessage"].(map[string]any)["content"].(string)
+	result := toolResultContent["text"].(string)
+	for name, value := range map[string]string{
+		"current":   current,
+		"assistant": assistant,
+		"result":    result,
+	} {
+		if len(value) > kiroMaxTextFieldBytes || !strings.Contains(value, "[ccl truncated ") {
+			t.Fatalf("%s length=%d marker=%t", name, len(value), strings.Contains(value, "[ccl truncated "))
+		}
+	}
+	if !strings.HasPrefix(current, "CURRENT-BEGIN-") || !strings.HasSuffix(current, "-CURRENT-END") {
+		t.Fatalf("current did not retain head/tail: prefix=%q suffix=%q", current[:20], current[len(current)-20:])
+	}
+	if !utf8.ValidString(current) {
+		t.Fatal("truncated content is not valid UTF-8")
+	}
+}
+
 func TestConvertAnthropicImageCorrectsMIMEAndResizesLongSide(t *testing.T) {
 	sourceImage := image.NewRGBA(image.Rect(0, 0, 2000, 20))
 	for y := 0; y < sourceImage.Bounds().Dy(); y++ {
@@ -380,6 +620,29 @@ func TestKiroInlineThinkingIsConvertedToAnthropicBlock(t *testing.T) {
 	}
 	if assembler.blocks[1].Type != "text" || assembler.blocks[1].Text != "answer" {
 		t.Fatalf("text block = %#v", assembler.blocks[1])
+	}
+}
+
+func TestKiroContextWindowMatchesAdvertisedPortalModels(t *testing.T) {
+	for _, model := range []string{
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-opus-4.8",
+		"claude-opus-4.7",
+		"claude-opus-4.6",
+		"claude-sonnet-4.6",
+	} {
+		if got := kiroContextWindow(model); got != 1_000_000 {
+			t.Errorf("%s context window = %d, want 1000000", model, got)
+		}
+	}
+	for _, model := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		if got := kiroContextWindow(model); got != 272_000 {
+			t.Errorf("%s context window = %d, want 272000", model, got)
+		}
+	}
+	if got := kiroContextWindow("claude-haiku-4.5"); got != 200_000 {
+		t.Errorf("fallback context window = %d, want 200000", got)
 	}
 }
 

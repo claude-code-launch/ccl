@@ -75,15 +75,31 @@ func TestReviewShowsFastStatus(t *testing.T) {
 	}
 }
 
-func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
+func TestMaxOutputEditableForChatGPTOAuthAndManagedForCodexAndKiro(t *testing.T) {
 	chatgpt := providerFrom("gpt", "https://api.openai.com/v1", "openai_responses")
 	chatgpt.OAuthProvider = "gpt"
 	m := NewAdvancedConfigModel(&chatgpt)
-	if !m.maxOutputUpstreamManaged() {
-		t.Fatal("ChatGPT OAuth should treat max output as upstream-managed")
+	if m.maxOutputUpstreamManaged() {
+		t.Fatal("ChatGPT OAuth should allow client max output editing")
 	}
 	if m.canToggleOpenAIProtocol() {
 		t.Fatal("OAuth protocol must be read-only on review")
+	}
+	m.page = 4
+	view := m.View().Content
+	if strings.Contains(view, "Upstream managed") || !strings.Contains(view, "Max Output") {
+		t.Fatalf("ChatGPT OAuth review did not render editable Max Output: %q", view)
+	}
+	m.cursor = m.page4MaxOutCursor()
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
+	m = next.(*AdvancedConfigModel)
+	if got := m.p.Env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]; got != "16000" {
+		t.Fatalf("ChatGPT OAuth max output after right = %q, want 16000", got)
+	}
+	legacyChatGPT := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
+	legacyChatGPT.OAuthProvider = "chatgpt"
+	if NewAdvancedConfigModel(&legacyChatGPT).maxOutputUpstreamManaged() {
+		t.Fatal("legacy chatgpt OAuth alias should allow client max output editing")
 	}
 
 	copilot := providerFrom("copilot", "oauth://codex", "openai_responses")
@@ -103,6 +119,18 @@ func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
 		t.Fatal("Gemini OAuth should allow max output editing")
 	}
 
+	kiro := providerFrom("kiro", "oauth://kiro", "anthropic")
+	kiro.OAuthProvider = "kiro"
+	m = NewAdvancedConfigModel(&kiro)
+	if !m.maxOutputUpstreamManaged() {
+		t.Fatal("Kiro OAuth should treat max output as upstream-managed")
+	}
+	m.page = 4
+	view = m.View().Content
+	if !strings.Contains(view, "Upstream managed") {
+		t.Fatalf("Kiro review should show Upstream managed, got %q", view)
+	}
+
 	codex := providerFrom("codex", "https://example.com/codex", "openai_responses")
 	m = NewAdvancedConfigModel(&codex)
 	if !m.maxOutputUpstreamManaged() {
@@ -116,7 +144,7 @@ func TestMaxOutputUpstreamManagedForCodexAndOAuth(t *testing.T) {
 	}
 
 	m.page = 4
-	view := m.View().Content
+	view = m.View().Content
 	if strings.Contains(view, "Upstream managed") {
 		t.Fatalf("plain responses unexpectedly shows Upstream managed: %q", view)
 	}
