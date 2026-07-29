@@ -557,8 +557,12 @@ func kiroEventMessage(payload []byte) string {
 
 func kiroContextWindow(model string) int {
 	switch model {
-	case "claude-opus-4.6", "claude-sonnet-4.6":
+	case "claude-opus-5", "claude-sonnet-5",
+		"claude-opus-4.8", "claude-opus-4.7",
+		"claude-opus-4.6", "claude-sonnet-4.6":
 		return 1_000_000
+	case "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna":
+		return 272_000
 	default:
 		return 200_000
 	}

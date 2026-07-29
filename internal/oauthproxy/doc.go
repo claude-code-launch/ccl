@@ -47,6 +47,12 @@
 //     Stop unregisters every auth ID from cliproxy.GlobalModelRegistry so a
 //     later provider does not inherit another backend's routes.
 //
+//  6. CCL cooldown override (codex_cooldown.go)
+//     GPT OAuth and ordinary API-key runtimes shorten 408/5xx failures to 2s
+//     and 401/429 failures to 10s. The result hook updates the SDK manager after
+//     MarkResult and clears the SDK registry's longer 401/429 side effects.
+//     Kiro has an independent direct adapter and does not use this policy.
+//
 // When upgrading CLIProxyAPI, run at least:
 //
 //	go test ./internal/oauthproxy ./internal/claude ./cmd

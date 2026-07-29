@@ -465,6 +465,7 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 		return nil, err
 	}
 	aliases := oauthModelAliases(modelSpec)
+	codexOAuthPolicy := usesCodexOAuthCooldownPolicy(providerName)
 	rawConfig, err := yaml.Marshal(runtimeConfigFile{
 		Host:                   "127.0.0.1",
 		Port:                   port,
@@ -488,7 +489,7 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 		return nil, err
 	}
 	store := newProviderTokenStoreResolver(authDir, backend, credentialFiles, restrictToFiles, resolver)
-	runtime, err := startRuntime(parent, cfg, configPath, apiKey, store, "")
+	runtime, err := startRuntime(parent, cfg, configPath, apiKey, store, "", codexOAuthPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -689,7 +690,7 @@ func startAPIKeyRuntime(parent context.Context, rawConfig []byte, apiKey, runtim
 	}
 	store := sdkauth.NewFileTokenStore()
 	store.SetBaseDir(runtimeDir)
-	return startRuntime(parent, cfg, configPath, apiKey, store, runtimeDir)
+	return startRuntime(parent, cfg, configPath, apiKey, store, runtimeDir, true)
 }
 
 func runtimeModelRoutes(modelSpec string) []runtimeModelRoute {
@@ -863,8 +864,8 @@ func sanitizeUserAgentToken(value string) string {
 	return strings.Trim(b.String(), "_")
 }
 
-func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, apiKey string, store coreauth.Store, runtimeDir string) (*Runtime, error) {
-	coreManager := coreauth.NewManager(store, nil, nil)
+func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, apiKey string, store coreauth.Store, runtimeDir string, shortCooldownPolicy bool) (*Runtime, error) {
+	coreManager := newRuntimeCoreAuthManager(store, shortCooldownPolicy)
 	restoreLogs := silenceSDKLogs()
 	started := make(chan struct{})
 	service, err := cliproxy.NewBuilder().

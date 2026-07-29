@@ -276,6 +276,10 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		Debugf("kiro tool pairing normalized dropped_uses=%d dropped_results=%d",
 			converted.droppedToolUses, converted.droppedToolRuns)
 	}
+	if converted.truncatedTexts > 0 {
+		Debugf("kiro content fields truncated fields=%d dropped_bytes=%d largest_original_bytes=%d limit=%d",
+			converted.truncatedTexts, converted.droppedText, converted.largestText, kiroMaxTextFieldBytes)
+	}
 	upstream, err := s.callUpstream(request.Context(), converted)
 	if err != nil {
 		var upstreamErr *kiroUpstreamError
@@ -425,8 +429,11 @@ func (s *kiroService) doUpstreamRequest(ctx context.Context, converted *kiroConv
 	if strings.EqualFold(credential.authMethod, "external_idp") {
 		request.Header.Set("tokentype", "EXTERNAL_IDP")
 	}
-	Debugf("kiro upstream request host=%q model=%q credential=%q body_bytes=%d media=%d",
-		request.URL.Host, converted.model, credential.fileName, len(raw), converted.inlineMedia)
+	Debugf("kiro upstream request host=%q model=%q credential=%q body_bytes=%d media=%d budget_original_bytes=%d budget_final_bytes=%d budget_original_tokens=%d budget_final_tokens=%d budget_dropped_media=%d budget_dropped_history=%d budget_truncated_texts=%d budget_dropped_text_bytes=%d budget_dropped_tools=%d",
+		request.URL.Host, converted.model, credential.fileName, len(raw), converted.inlineMedia,
+		converted.originalBody, converted.finalBody, converted.originalTokens, converted.finalTokens,
+		converted.budgetMedia, converted.budgetHistory,
+		converted.budgetTexts, converted.budgetTextBytes, converted.budgetTools)
 	response, err := s.client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("call Kiro upstream: %w", err)

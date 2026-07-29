@@ -78,6 +78,18 @@ type kiroConvertedRequest struct {
 	correctedMedia  int
 	droppedToolUses int
 	droppedToolRuns int
+	truncatedTexts  int
+	droppedText     int
+	largestText     int
+	originalBody    int
+	finalBody       int
+	originalTokens  int
+	finalTokens     int
+	budgetMedia     int
+	budgetHistory   int
+	budgetTexts     int
+	budgetTextBytes int
+	budgetTools     int
 }
 
 type kiroContent struct {
@@ -233,6 +245,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 		conversationState["history"] = history
 	}
 	droppedToolUses, droppedToolRuns := normalizeKiroToolPairing(conversationState)
+	textStats := limitKiroTextFields(conversationState, kiroMaxTextFieldBytes)
 	dedupedMedia := deduplicateKiroInlineMedia(conversationState)
 	inlineMedia, droppedMedia := limitKiroInlineMedia(conversationState, kiroMaxInlineMediaSegments)
 	resizedMedia, correctedMedia := processKiroInlineMedia(conversationState)
@@ -240,6 +253,15 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	if additional := kiroReasoningFields(&request, model); additional != nil {
 		body["additionalModelRequestFields"] = additional
 	}
+	protectedHistoryPrefix := 0
+	if systemText != "" {
+		protectedHistoryPrefix = 2
+	}
+	budgetStats := enforceKiroContentBudget(body, protectedHistoryPrefix, kiroMaxEstimatedContentTokens)
+	if err := validateKiroConversationState(conversationState); err != nil {
+		return nil, err
+	}
+	inlineMedia = countKiroInlineMedia(conversationState)
 	return &kiroConvertedRequest{
 		body:            body,
 		model:           model,
@@ -256,7 +278,27 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 		correctedMedia:  correctedMedia,
 		droppedToolUses: droppedToolUses,
 		droppedToolRuns: droppedToolRuns,
+		truncatedTexts:  textStats.truncated,
+		droppedText:     textStats.droppedBytes,
+		largestText:     textStats.largestBytes,
+		originalBody:    budgetStats.originalBytes,
+		finalBody:       budgetStats.finalBytes,
+		originalTokens:  budgetStats.originalTokens,
+		finalTokens:     budgetStats.finalTokens,
+		budgetMedia:     budgetStats.droppedImages,
+		budgetHistory:   budgetStats.droppedHistoryMessages,
+		budgetTexts:     budgetStats.truncatedTexts,
+		budgetTextBytes: budgetStats.droppedTextBytes,
+		budgetTools:     budgetStats.droppedTools,
 	}, nil
+}
+
+func countKiroInlineMedia(conversationState map[string]any) int {
+	count := 0
+	for _, message := range kiroUserMessagesNewestFirst(conversationState) {
+		count += len(kiroAnySlice(message["images"]))
+	}
+	return count
 }
 
 // limitKiroInlineMedia applies Kiro's request-wide inline media limit. Images in
