@@ -282,13 +282,13 @@ func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 		// Failures are ignored — IDs still come from detection.
 		windows := map[string]int{}
 		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) {
-			if infos, err := protocol.GetOpenAIModelInfos(result.baseURL, apiKey); err == nil {
-				for _, info := range infos {
-					if info.ContextWindow > 0 {
-						windows[info.ID] = info.ContextWindow
-					}
-				}
+			// Subscription runtimes only expose windows through the Codex catalog,
+			// which AdvertisedContextWindows tries before the plain OpenAI list.
+			advertised, source := claude.AdvertisedContextWindows(result.baseURL, apiKey)
+			for id, window := range advertised {
+				windows[id] = window
 			}
+			setDebugf("modelFetchCmd context windows catalog=%q count=%d", source, len(windows))
 		}
 		return modelFetchDoneMsg{
 			endpoint:            endpoint,
@@ -1128,7 +1128,11 @@ func (m *AdvancedConfigModel) compactSummary() string {
 		state.legacy = false
 		state.custom = false
 	}
-	return compactStateSummary(state, m.oneMSlots)
+	summary := compactStateSummary(state, m.oneMSlots)
+	if m.p != nil {
+		summary += backendManagedContextNote(*m.p)
+	}
+	return summary
 }
 
 func reviewOneMSummary(oneMSlots map[string]bool) string {

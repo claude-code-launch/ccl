@@ -2,10 +2,13 @@ package claude
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -288,19 +291,31 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 	setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 }
 
-// writeSettingsFile serialises content to a temp JSON file and returns its path.
-// The caller is responsible for removing the file when done.
-func writeSettingsFile(content settingsJSON) (string, error) {
+// newSessionName returns the identifier shared by this session's settings file
+// and its debug log. It is generated before anything else runs so the very first
+// log line already lands in the per-session file.
+func newSessionName() string {
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		return "claude_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return "claude_" + hex.EncodeToString(raw)
+}
+
+// writeSettingsFile serialises content to a JSON file named after the session and
+// returns its path. The caller is responsible for removing the file when done.
+func writeSettingsFile(content settingsJSON, session string) (string, error) {
 	data, err := json.MarshalIndent(content, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal settings: %w", err)
 	}
 
-	f, err := os.CreateTemp("", "claude_*_settings.json")
+	path := filepath.Join(os.TempDir(), session+"_settings.json")
+	// O_EXCL: never reuse or overwrite another session's settings file.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", fmt.Errorf("create temp settings file: %w", err)
+		return "", fmt.Errorf("create settings file: %w", err)
 	}
-	path := f.Name()
 
 	if _, err := f.Write(data); err != nil {
 		f.Close()
@@ -324,6 +339,9 @@ type providerContext struct {
 	baseURL  string
 	useProxy bool
 	oauth    *oauthproxy.Runtime
+	// managedContext holds the context sizing the subscription backend advertises;
+	// zero Window means the configured preset stays in charge.
+	managedContext ManagedContextBudget
 }
 
 // setupProvider starts a proxy if needed and resolves the final model list.
@@ -381,6 +399,11 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 		ctx.cleanup()
 		return nil, err
 	}
+	// Slots are final here, so the advertised window can be resolved for exactly
+	// the models this session will use.
+	if budget, ok := ResolveManagedContextBudget(ctx.provider); ok {
+		ctx.managedContext = budget
+	}
 	return ctx, nil
 }
 
@@ -430,8 +453,12 @@ func (c *providerContext) cleanup() {
 }
 
 func (c *providerContext) settings() settingsJSON {
+	env := buildEnv(c.provider, c.baseURL, c.useProxy)
+	// Applied after the provider Env overrides: for subscription backends the live
+	// catalog outranks a preset the user stored earlier.
+	applyManagedContextBudget(env, c.managedContext)
 	return settingsJSON{
-		Env:                    buildEnv(c.provider, c.baseURL, c.useProxy),
+		Env:                    env,
 		HasCompletedOnboarding: true,
 		Model:                  c.provider.CustomModelID,
 		ModelOverrides:         c.provider.ModelOverrides,
@@ -462,21 +489,33 @@ func PreviewSettings(p provider.Provider) string {
 func Run(p provider.Provider, args []string) error {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
+		oauthproxy.Debugf("claude CLI not found in PATH: %v", err)
 		return fmt.Errorf("claude CLI not found in PATH (install with: npm install -g @anthropic-ai/claude-code): %w", err)
+	}
+
+	// Give this session its own debug log before the embedded runtime starts, so
+	// every line (runtime startup included) belongs to one readable file.
+	session := newSessionName()
+	if oauthproxy.DebugEnabled() {
+		oauthproxy.SetDebug(true, oauthproxy.SessionDebugLogPath(session))
+		oauthproxy.Debugf("session start name=%q provider=%q oauth=%q", session, p.Name, p.OAuthProvider)
 	}
 
 	ctx, err := setupProvider(p)
 	if err != nil {
+		oauthproxy.Debugf("session setup failed name=%q provider=%q oauth=%q error=%v", session, p.Name, p.OAuthProvider, err)
 		return err
 	}
 	defer ctx.cleanup()
 
 	sessionSettings := ctx.settings()
-	settingsPath, err := writeSettingsFile(sessionSettings)
+	settingsPath, err := writeSettingsFile(sessionSettings, session)
 	if err != nil {
+		oauthproxy.Debugf("session settings write failed name=%q error=%v", session, err)
 		return fmt.Errorf("create settings file: %w", err)
 	}
 	defer os.Remove(settingsPath)
+	logSessionContextBudget(p, sessionSettings, ctx.managedContext)
 
 	fmt.Println("Using provider-specific claude config:", settingsPath)
 
@@ -515,6 +554,35 @@ func Run(p provider.Provider, args []string) error {
 			outcome, time.Since(start).Round(time.Millisecond))
 	}
 	return runErr
+}
+
+// logSessionContextBudget records the context limits handed to Claude Code plus
+// the slot mapping they apply to.
+//
+// An "input exceeds the context window" failure mid-session is otherwise
+// invisible in the log: the upstream rejects the request because Claude Code was
+// told it could grow further than the backend allows, and nothing else records
+// which numbers were in effect. Compare these against `ccl doctor` →
+// "Context budget", which reads the window the backend advertises.
+func logSessionContextBudget(p provider.Provider, settings settingsJSON, budget ManagedContextBudget) {
+	if !oauthproxy.DebugEnabled() {
+		return
+	}
+	slots := provider.SlotModels(p)
+	mapped := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		mapped = append(mapped, slot.Slot+"="+slot.Model)
+	}
+	oauthproxy.Debugf("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q managed_window=%d managed_from=%q catalog=%q configured_max_context=%q configured_compact=%q effort=%q max_output=%q slots=[%s]",
+		p.Name, p.OAuthProvider,
+		settings.Env[provider.EnvMaxContextTokens],
+		settings.Env[provider.EnvAutoCompactWindow],
+		budget.Window, budget.Model, budget.Source,
+		p.Env[provider.EnvMaxContextTokens],
+		p.Env[provider.EnvAutoCompactWindow],
+		settings.Env["CLAUDE_CODE_EFFORT_LEVEL"],
+		settings.Env[MaxOutputTokensEnv],
+		strings.Join(mapped, " "))
 }
 
 // modelDisplayName is the human-facing label for Claude Code *_NAME env vars.

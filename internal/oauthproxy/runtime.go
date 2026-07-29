@@ -407,6 +407,19 @@ func Start(parent context.Context, providerName string) (*Runtime, error) {
 // Invalid Codex paths such as …/codex/v1 are rejected before routing so they
 // cannot fall through to the plain Responses path and hit …/codex/v1/responses.
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
+	runtime, err := startProvider(parent, options)
+	if err != nil {
+		// Successful starts are logged by each start function; failures were only
+		// visible to the caller, which made a session that never launched look
+		// like an empty log.
+		Debugf("runtime start failed oauth=%q protocol=%q endpoint=%q credentials=%d error=%v",
+			options.OAuthProvider, options.Protocol, options.Endpoint,
+			len(options.OAuthAccountCredentials), err)
+	}
+	return runtime, err
+}
+
+func startProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	if strings.TrimSpace(options.OAuthProvider) != "" {
 		if options.OAuthAccountCredentials != nil {
 			return startOAuthWithFiles(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredentials, true, options.OAuthCredentialResolver)
@@ -1164,10 +1177,15 @@ func (r *Runtime) Stop() {
 		return
 	}
 	r.stopOnce.Do(func() {
+		stopStarted := time.Now()
 		if r.cancel != nil {
 			r.cancel()
 		}
 		stopped := waitClosed(r.done, runtimeStopTimeout)
+		defer func() {
+			Debugf("runtime stop endpoint=%q clean_exit=%t duration=%s",
+				r.endpoint, stopped, time.Since(stopStarted).Round(time.Millisecond))
+		}()
 		// Force Shutdown only when Run did not exit cleanly in time.
 		if !stopped && (r.service != nil || r.httpServer != nil) {
 			ctx, cancel := context.WithTimeout(context.Background(), runtimeStopTimeout)

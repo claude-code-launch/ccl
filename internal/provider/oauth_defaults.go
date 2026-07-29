@@ -111,6 +111,33 @@ func modelListContains(availableModels []string, model string) bool {
 	return false
 }
 
+// SlotModel pairs a Claude Code model slot with the model mapped to it.
+type SlotModel struct {
+	Slot  string
+	Model string
+}
+
+// SlotModels lists the models mapped to Claude Code's slots, in menu order,
+// skipping empty slots and stripping display-only markers such as [1m].
+func SlotModels(p Provider) []SlotModel {
+	candidates := []SlotModel{
+		{Slot: "opus", Model: p.OpusModel},
+		{Slot: "sonnet", Model: p.SonnetModel},
+		{Slot: "haiku", Model: p.HaikuModel},
+		{Slot: "custom", Model: p.CustomModelID},
+		{Slot: "subagent", Model: p.SubagentModel},
+	}
+	mapped := make([]SlotModel, 0, len(candidates))
+	for _, candidate := range candidates {
+		model := stripContextSuffix(candidate.Model)
+		if model == "" {
+			continue
+		}
+		mapped = append(mapped, SlotModel{Slot: candidate.Slot, Model: model})
+	}
+	return mapped
+}
+
 // stripContextSuffix removes display-only context markers such as [1m] so
 // preferred IDs match catalog entries that omit the suffix.
 func stripContextSuffix(model string) string {

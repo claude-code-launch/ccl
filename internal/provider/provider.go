@@ -8,6 +8,17 @@ import (
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 )
 
+// Claude Code env vars that ccl manages through Provider.Env. They live here so
+// the launcher, the config TUI and the diagnostics all agree on the spelling.
+const (
+	// EnvMaxContextTokens is the fallback context size Claude Code assumes for a
+	// model it does not recognize.
+	EnvMaxContextTokens = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+	// EnvAutoCompactWindow is the absolute token count at which Claude Code
+	// auto-compacts the conversation.
+	EnvAutoCompactWindow = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+)
+
 type Provider struct {
 	Name     string `yaml:"name" mapstructure:"name"`
 	Type     string `yaml:"type" mapstructure:"type"`

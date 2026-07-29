@@ -3,7 +3,9 @@ package oauthproxy
 import (
 	"fmt"
 	"io"
+	stdlog "log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +63,16 @@ var interestingMarkers = []string{
 	"tryrefresh",
 	"error",
 	"fail",
+	// Context-limit rejections. Upstream reports them as a plain 400, which none
+	// of the status markers above match, so they would otherwise be dropped from
+	// the log even though they are one of the most common session failures.
+	"context_length",
+	"context length",
+	"context window",
+	"context_too_large",
+	"request_too_large",
+	"too large",
+	"invalid_request",
 }
 
 // SetDebug enables or disables runtime diagnostics at the package level. When
@@ -113,6 +125,37 @@ func ResolveDebugLogPath() string {
 	return defaultDebugLogPath
 }
 
+// SessionDebugLogPath returns a per-session log path derived from the configured
+// destination by appending the session name to its base name.
+//
+// One shared file interleaves every session, which makes a single run impossible
+// to read back: the runtime, the upstream errors and the launcher lines of
+// different sessions end up mixed together. Sessions are named after the settings
+// file ccl generates for them, so the log sits next to it.
+func SessionDebugLogPath(session string) string {
+	base := ResolveDebugLogPath()
+	session = sanitizeDebugSessionName(session)
+	if session == "" {
+		return base
+	}
+	extension := filepath.Ext(base)
+	return strings.TrimSuffix(base, extension) + "-" + session + extension
+}
+
+// sanitizeDebugSessionName keeps only characters that are safe in a file name.
+func sanitizeDebugSessionName(session string) string {
+	var builder strings.Builder
+	for _, char := range strings.TrimSpace(session) {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+			builder.WriteRune(char)
+		case char == '_', char == '-', char == '.':
+			builder.WriteRune(char)
+		}
+	}
+	return strings.Trim(builder.String(), ".-_")
+}
+
 // DebugEnabled reports whether diagnostics are currently active.
 func DebugEnabled() bool {
 	debugStateMu.RLock()
@@ -142,6 +185,46 @@ func Debugf(format string, args ...any) {
 	_, _ = fmt.Fprintln(f)
 }
 
+// debugPrefixWriter funnels a component's log output into the ccl debug log,
+// tagged with the component name and screened for credentials.
+//
+// Unlike debugFilterWriter it keeps every line: it is used for components whose
+// output is already low volume and always diagnostic, such as the reverse-proxy
+// error log, which was previously discarded entirely.
+type debugPrefixWriter struct{ prefix string }
+
+func (w debugPrefixWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	if line == "" {
+		return len(p), nil
+	}
+	lower := strings.ToLower(line)
+	for _, marker := range sensitiveMarkers {
+		if strings.Contains(lower, marker) {
+			return len(p), nil
+		}
+	}
+	Debugf("[%s] %s", w.prefix, line)
+	return len(p), nil
+}
+
+// newComponentLogger returns a logger whose lines land in the ccl debug log. It
+// is a no-op sink while debugging is disabled.
+func newComponentLogger(prefix string) *stdlog.Logger {
+	return stdlog.New(debugPrefixWriter{prefix: prefix}, "", 0)
+}
+
+// debugLineIsInteresting reports whether an already-lowercased CLIProxyAPI log
+// line carries a diagnostic worth keeping.
+func debugLineIsInteresting(lower string) bool {
+	for _, marker := range interestingMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // debugFilterWriter is an io.Writer that screens CLIProxyAPI logrus output
 // before it reaches the debug file: drop lines carrying secrets, keep only
 // lines that look like useful diagnostics, write the survivors with a prefix
@@ -159,11 +242,8 @@ func (debugFilterWriter) Write(p []byte) (int, error) {
 			return len(p), nil
 		}
 	}
-	for _, marker := range interestingMarkers {
-		if strings.Contains(lower, marker) {
-			Debugf("[cpa] %s", line)
-			return len(p), nil
-		}
+	if debugLineIsInteresting(lower) {
+		Debugf("[cpa] %s", line)
 	}
 	return len(p), nil
 }

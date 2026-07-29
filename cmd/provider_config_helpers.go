@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	maxContextTokensEnv  = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
-	autoCompactWindowEnv = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+	maxContextTokensEnv  = provider.EnvMaxContextTokens
+	autoCompactWindowEnv = provider.EnvAutoCompactWindow
 	// autoCompactPctEnv is kept only to recognize and clean up configurations
 	// written by ccl versions that used percentage-based compact presets.
 	autoCompactPctEnv = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"

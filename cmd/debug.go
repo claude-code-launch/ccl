@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/config"
@@ -18,12 +19,19 @@ func newDebugCommand() *cobra.Command {
 		Use:   "debug [on|off]",
 		Short: "Toggle ccl runtime diagnostics for ccl-launched sessions",
 		Long: `Toggle runtime diagnostics for every Claude Code session launched by ccl.
-When enabled, ccl logs (to /tmp/ccl-debug.log, override with CCL_DEBUG_LOG):
 
-  - runtime startup (provider, backend, protocol, port, credential count)
-  - upstream HTTP status / errors (429, 5xx, 401, stream failures)
-  - OAuth refresh and cooldown events
-  - session metadata (model count, settings size)
+Each session writes its own log next to the configured path, named after the
+settings file ccl generates for it, e.g. /tmp/ccl-debug-claude_9f2c1b7d4e05.log
+(base path overridable with CCL_DEBUG_LOG). The exact path is printed when the
+session ends.
+
+A session log records:
+
+  - session start/exit, and failures that stop a session from launching
+  - runtime startup and teardown (provider, backend, protocol, port, credentials)
+  - upstream HTTP status / errors (400 context limits, 401, 429, 5xx, streams)
+  - OAuth refresh, cooldown, and credential rotation
+  - the context/compact limits handed to Claude Code and where they came from
 
 It never logs credentials, refresh tokens, or request/response bodies. Use it
 to diagnose intermittent "Network error" messages without leaking secrets.
@@ -54,9 +62,9 @@ func runDebug(out io.Writer, args []string) error {
 	if len(args) == 0 {
 		fmt.Fprintf(out, "Debug = %s\n", onOff(cfg.DebugMode))
 		if cfg.DebugMode {
-			fmt.Fprintf(out, "Log: %s\n", oauthproxy.ResolveDebugLogPath())
+			printDebugLogLocation(out)
 		} else {
-			fmt.Fprintln(out, "Enable with: ccl debug on  (logs to /tmp/ccl-debug.log; CCL_DEBUG_LOG overrides)")
+			fmt.Fprintln(out, "Enable with: ccl debug on  (one log per session next to /tmp/ccl-debug.log; CCL_DEBUG_LOG overrides)")
 		}
 		return nil
 	}
@@ -72,10 +80,19 @@ func runDebug(out io.Writer, args []string) error {
 
 	fmt.Fprintf(out, "Debug = %s\n", onOff(enabled))
 	if enabled {
-		fmt.Fprintf(out, "Log: %s\n", oauthproxy.ResolveDebugLogPath())
-		fmt.Fprintln(out, "Run a ccl session; the log will record runtime startup, upstream errors, OAuth refresh, and session metadata.")
+		printDebugLogLocation(out)
+		fmt.Fprintln(out, "Run a ccl session; its log path is printed when the session ends.")
 	}
 	return nil
+}
+
+// printDebugLogLocation explains where session logs land: one file per session,
+// derived from the configured base path.
+func printDebugLogLocation(out io.Writer) {
+	base := oauthproxy.ResolveDebugLogPath()
+	extension := filepath.Ext(base)
+	fmt.Fprintf(out, "Log base: %s\n", base)
+	fmt.Fprintf(out, "Per session: %s-claude_<id>%s\n", strings.TrimSuffix(base, extension), extension)
 }
 
 func parseDebugOnOff(raw string) (bool, bool) {

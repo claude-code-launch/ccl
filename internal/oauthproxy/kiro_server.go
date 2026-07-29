@@ -168,6 +168,7 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 	}
 	models, err := s.availableModels(request.Context())
 	if err != nil {
+		Debugf("kiro models discovery failed error=%v", err)
 		writeKiroError(writer, http.StatusBadGateway, "api_error", "Unable to load available models from Kiro: "+err.Error())
 		return
 	}
@@ -285,12 +286,16 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		// into 400 made every one of those look like a malformed request.
 		var upstreamErr *kiroUpstreamError
 		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
+			errorType := kiroAnthropicErrorType(upstreamErr.status)
+			Debugf("kiro messages forwarded client error model=%q status=%d type=%s stream=%t",
+				converted.model, upstreamErr.status, errorType, converted.stream)
 			// err, not upstreamErr: the wrapper carries extra context such as a
 			// failed token refresh.
-			writeKiroError(writer, upstreamErr.status, kiroAnthropicErrorType(upstreamErr.status), err.Error())
+			writeKiroError(writer, upstreamErr.status, errorType, err.Error())
 			return
 		}
 		// Everything else is a proxy-side or upstream server failure.
+		Debugf("kiro messages failed model=%q stream=%t error=%v", converted.model, converted.stream, err)
 		writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
