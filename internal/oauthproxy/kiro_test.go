@@ -1576,3 +1576,60 @@ func encodeKiroTestHeader(name, value string) []byte {
 	raw = append(raw, value...)
 	return raw
 }
+
+func TestKiroAssemblerTokenTotalsUsesContextOverride(t *testing.T) {
+	assembler := newKiroAnthropicAssembler(&kiroConvertedRequest{inputTokens: 50}, nil)
+	assembler.outputTokens = 30
+	if input, output := assembler.tokenTotals(); input != 50 || output != 30 {
+		t.Fatalf("tokenTotals() = (%d, %d), want (50, 30)", input, output)
+	}
+
+	// contextUsageEvent overrides the request's estimated input tokens with the
+	// server-reported context size.
+	assembler.contextTokens = 4096
+	if input, output := assembler.tokenTotals(); input != 4096 || output != 30 {
+		t.Fatalf("tokenTotals() with contextTokens set = (%d, %d), want (4096, 30)", input, output)
+	}
+}
+
+func TestKiroAssemblerUsageMatchesTokenTotals(t *testing.T) {
+	assembler := newKiroAnthropicAssembler(&kiroConvertedRequest{inputTokens: 12}, nil)
+	assembler.outputTokens = 7
+	usage := assembler.usage()
+	if usage["input_tokens"] != 12 || usage["output_tokens"] != 7 {
+		t.Fatalf("usage() = %+v, want input_tokens=12 output_tokens=7", usage)
+	}
+}
+
+func TestKiroServiceRecordKiroUsageKeyedByClientModel(t *testing.T) {
+	service := &kiroService{usage: NewUsageTracker()}
+	converted := &kiroConvertedRequest{
+		model:       "claude-sonnet-4-6",
+		clientModel: "claude-sonnet-4-6[1m]",
+		inputTokens: 100,
+	}
+	assembler := newKiroAnthropicAssembler(converted, nil)
+	assembler.outputTokens = 40
+
+	service.recordKiroUsage(converted, assembler)
+
+	totals, ok := service.usage.Snapshot()
+	if !ok || len(totals) != 1 {
+		t.Fatalf("expected one recorded model, got %+v (ok=%t)", totals, ok)
+	}
+	got := totals[0]
+	if got.Model != "claude-sonnet-4-6[1m]" {
+		t.Fatalf("expected usage keyed by clientModel alias, got %q", got.Model)
+	}
+	if got.InputTokens != 100 || got.OutputTokens != 40 || got.Requests != 1 {
+		t.Fatalf("unexpected recorded totals: %+v", got)
+	}
+}
+
+func TestKiroServiceRecordKiroUsageNilTrackerIsNoop(t *testing.T) {
+	service := &kiroService{}
+	converted := &kiroConvertedRequest{clientModel: "claude-sonnet-4-6", inputTokens: 10}
+	assembler := newKiroAnthropicAssembler(converted, nil)
+	// Must not panic when the service has no usage tracker.
+	service.recordKiroUsage(converted, assembler)
+}

@@ -588,14 +588,22 @@ func (a *kiroAnthropicAssembler) response() map[string]any {
 	}
 }
 
-func (a *kiroAnthropicAssembler) usage() map[string]any {
-	inputTokens := a.request.inputTokens
+// tokenTotals returns the input/output token counts for this turn, using the
+// same fields the Anthropic usage object reports so the session summary matches
+// what was actually billed against the account.
+func (a *kiroAnthropicAssembler) tokenTotals() (input, output int) {
+	input = a.request.inputTokens
 	if a.contextTokens > 0 {
-		inputTokens = a.contextTokens
+		input = a.contextTokens
 	}
+	return input, a.outputTokens
+}
+
+func (a *kiroAnthropicAssembler) usage() map[string]any {
+	inputTokens, outputTokens := a.tokenTotals()
 	usage := map[string]any{
 		"input_tokens":                inputTokens,
-		"output_tokens":               a.outputTokens,
+		"output_tokens":               outputTokens,
 		"cache_creation_input_tokens": 0,
 		"cache_read_input_tokens":     0,
 	}

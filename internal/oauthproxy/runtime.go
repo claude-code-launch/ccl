@@ -28,6 +28,7 @@ import (
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxy "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cpausage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -66,6 +67,19 @@ type Runtime struct {
 	runtimeDir      string
 	restoreLogs     func()
 	stopOnce        sync.Once
+	// usage accumulates per-model token totals for this runtime. It is never nil:
+	// StartProvider always installs one, even when the backend cannot report
+	// usage, so callers do not need a nil check.
+	usage *UsageTracker
+}
+
+// Usage returns the token usage accumulated by this runtime so far. Safe to
+// call at any point in the runtime's lifetime, including after Stop.
+func (r *Runtime) Usage() *UsageTracker {
+	if r == nil {
+		return nil
+	}
+	return r.usage
 }
 
 type UpstreamProtocol string
@@ -918,6 +932,13 @@ func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, api
 	}
 
 	runCtx, cancel := context.WithCancel(parent)
+	usageTracker := NewUsageTracker()
+	// CLIProxyAPI's usage manager is process-global and has no unregister call,
+	// so the plugin is named uniquely per runtime (apiKey is a fresh random
+	// session token, see sessionAPIKey) rather than reusing a fixed name: a
+	// second name collision would silently replace the first runtime's plugin
+	// and its usage would stop being recorded.
+	cpausage.DefaultManager().RegisterNamed("ccl-usage-"+apiKey, cpaUsagePlugin{tracker: usageTracker})
 	runtime := &Runtime{
 		endpoint:    "http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/v1",
 		apiKey:      apiKey,
@@ -930,6 +951,7 @@ func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, api
 		configPath:  configPath,
 		runtimeDir:  runtimeDir,
 		restoreLogs: restoreLogs,
+		usage:       usageTracker,
 	}
 	restoreStdout := silenceStdout()
 	go func() {

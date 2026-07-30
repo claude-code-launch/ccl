@@ -586,6 +586,15 @@ func Run(p provider.Provider, args []string) error {
 	start := time.Now()
 	runErr := cmd.Run()
 
+	// Token usage, unlike the debug log, is printed unconditionally: it is
+	// information about what the session cost, not a diagnostic. ctx.oauth is
+	// nil for providers that never start an embedded runtime (plain Anthropic
+	// endpoints), and Usage()/Snapshot() are nil-safe, so this is a no-op for
+	// them rather than a special case here.
+	if summary := oauthproxy.FormatUsageSummary(usageSnapshot(ctx.oauth)); summary != "" {
+		fmt.Fprintln(os.Stderr, "\n"+summary)
+	}
+
 	// Approximate session metadata for the debug log. These are ccl-side counts,
 	// not the real upstream request size, and never include credentials or
 	// request bodies. Useful to correlate with upstream errors logged by CPA.
@@ -605,6 +614,17 @@ func Run(p provider.Provider, args []string) error {
 			outcome, time.Since(start).Round(time.Millisecond))
 	}
 	return runErr
+}
+
+// usageSnapshot returns the accumulated per-model token usage of an embedded
+// runtime, or nil when there is none (a plain Anthropic provider never starts
+// one, so this is the normal case for that provider type).
+func usageSnapshot(runtime *oauthproxy.Runtime) []oauthproxy.UsageModelTotals {
+	totals, ok := runtime.Usage().Snapshot()
+	if !ok {
+		return nil
+	}
+	return totals
 }
 
 // logSessionContextBudget records the context limits handed to Claude Code plus

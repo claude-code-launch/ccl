@@ -37,6 +37,8 @@ type kiroService struct {
 	upstreamURL  func(*kiroCredential) string
 	// rateLimitBackoff overrides kiroRateLimitBackoff (tests only).
 	rateLimitBackoff []time.Duration
+	// usage accumulates per-model token totals for this runtime.
+	usage *UsageTracker
 }
 
 type kiroUpstreamError struct {
@@ -77,11 +79,13 @@ func startKiroOAuthWithFiles(parent context.Context, modelSpec string, credentia
 		return nil, fmt.Errorf("listen for Kiro runtime: %w", err)
 	}
 	models := kiroRuntimeModels(modelSpec)
+	usageTracker := NewUsageTracker()
 	service := &kiroService{
 		apiKey:       apiKey,
 		models:       models,
 		modelCatalog: newKiroModelCatalog(kiroAvailableModelsEndpoint),
 		pool:         pool,
+		usage:        usageTracker,
 		client: &http.Client{Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			ForceAttemptHTTP2:     true,
@@ -110,6 +114,7 @@ func startKiroOAuthWithFiles(parent context.Context, modelSpec string, credentia
 		done:       make(chan struct{}),
 		runErr:     make(chan error, 1),
 		started:    started,
+		usage:      usageTracker,
 	}
 	go func() {
 		err := server.Serve(listener)
@@ -312,12 +317,14 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		if err := assembler.start(); err != nil {
 			return
 		}
-		if err := processKiroEventStream(upstream.Body, assembler); err != nil {
+		streamErr := processKiroEventStream(upstream.Body, assembler)
+		s.recordKiroUsage(converted, assembler)
+		if streamErr != nil {
 			_ = assembler.emit("error", map[string]any{
 				"type": "error",
 				"error": map[string]any{
 					"type":    "api_error",
-					"message": err.Error(),
+					"message": streamErr.Error(),
 				},
 			})
 		}
@@ -329,8 +336,21 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
+	s.recordKiroUsage(converted, assembler)
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(assembler.response())
+}
+
+// recordKiroUsage adds the token totals of one completed turn to the runtime's
+// usage tracker, keyed by the model the client requested (the [1m]-suffixed
+// alias when present) rather than the upstream model id, so it matches the slot
+// name Claude Code shows the user.
+func (s *kiroService) recordKiroUsage(converted *kiroConvertedRequest, assembler *kiroAnthropicAssembler) {
+	if s.usage == nil {
+		return
+	}
+	input, output := assembler.tokenTotals()
+	s.usage.Add(converted.clientModel, int64(input), int64(output), 0, 0)
 }
 
 func readKiroInboundBody(writer http.ResponseWriter, request *http.Request, maxBytes int64) ([]byte, error) {
