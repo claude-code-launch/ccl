@@ -274,3 +274,72 @@ func TestPage2DefaultsToClaudeAutoCompact(t *testing.T) {
 		t.Fatalf("Auto Compact should default to Claude Code default: %q", view)
 	}
 }
+
+func TestCredentialsPageResolvesClickToField(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "sk-test"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 0
+	m.width = 100
+	m.height = 30
+
+	view := m.View()
+	if view.MouseMode == tea.MouseModeNone {
+		t.Fatal("credentials page must report mouse clicks so fields can be focused")
+	}
+	if view.OnMouse == nil {
+		t.Fatal("credentials page has no mouse handler")
+	}
+	lines := strings.Split(view.Content, "\n")
+
+	// Every field is reachable by clicking its label row and the value row below it.
+	for cursor, label := range credentialFieldLabels {
+		labelRow := -1
+		for i, line := range lines {
+			if strings.Contains(line, label) {
+				labelRow = i
+				break
+			}
+		}
+		if labelRow < 0 {
+			t.Fatalf("label %q is not on the credentials page", label)
+		}
+		for _, row := range []int{labelRow, labelRow + 1} {
+			got, ok := credentialFieldAtLine(lines, row)
+			if !ok || got != cursor {
+				t.Fatalf("click on row %d resolved to (%d, %t), want cursor %d", row, got, ok, cursor)
+			}
+		}
+	}
+
+	// A click far away from any field must be ignored rather than stealing focus.
+	if _, ok := credentialFieldAtLine(lines, 0); ok {
+		t.Fatal("click on the top padding row resolved to a field")
+	}
+
+	// The resolved click focuses the API key input.
+	next, _ := m.Update(focusCredentialFieldMsg{cursor: 1})
+	m = next.(*AdvancedConfigModel)
+	if m.cursor != 1 || !m.keyInput.Focused() || m.urlInput.Focused() {
+		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the key input focused",
+			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
+	}
+	next, _ = m.Update(focusCredentialFieldMsg{cursor: 0})
+	m = next.(*AdvancedConfigModel)
+	if m.cursor != 0 || !m.urlInput.Focused() || m.keyInput.Focused() {
+		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the endpoint input focused",
+			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
+	}
+}
+
+func TestOAuthCredentialsPageLeavesMouseAlone(t *testing.T) {
+	// OAuth providers have no editable fields here, so the terminal keeps its own
+	// selection behaviour.
+	p := provider.Provider{Type: "openai_responses", OAuthProvider: "gpt", Endpoint: "oauth://codex"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 0
+	m.width = 100
+	m.height = 30
+	if view := m.View(); view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
+		t.Fatal("OAuth credentials page must not capture the mouse")
+	}
+}

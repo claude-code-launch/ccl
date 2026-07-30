@@ -1280,6 +1280,23 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateInputWidths()
 		return m, nil
 
+	case focusCredentialFieldMsg:
+		if m.page != 0 || m.usesOAuth() {
+			return m, nil
+		}
+		m.cursor = msg.cursor
+		var focusCmd tea.Cmd
+		switch msg.cursor {
+		case 0:
+			m.keyInput.Blur()
+			focusCmd = m.urlInput.Focus()
+		case 1:
+			m.urlInput.Blur()
+			focusCmd = m.keyInput.Focus()
+		}
+		setDebugf("page0 focus by click cursor=%d", m.cursor)
+		return m, focusCmd
+
 	case modelFetchTickMsg:
 		if !m.detecting {
 			return m, nil
@@ -1768,6 +1785,36 @@ func renderModelFetchProgress(progress, frame int, oauth bool) string {
 		selectedStyle.Render(fmt.Sprintf("%s %s", spin, label)) + "\n" +
 		cyanText.Render(fmt.Sprintf("[%s] %3d%%", bar, progress)) + "\n" +
 		grayText.Render(hint) + "\n"
+}
+
+// focusCredentialFieldMsg asks the model to focus one of the credential inputs.
+// The mouse handler runs against the last rendered frame (see View), so it
+// reports the intent as a message instead of mutating the model from the view.
+type focusCredentialFieldMsg struct{ cursor int }
+
+// credentialFieldLabels maps a page-0 cursor position onto its rendered label.
+var credentialFieldLabels = map[int]string{0: "Endpoint URL", 1: "API Key"}
+
+// credentialFieldAtLine resolves a clicked screen row to a credential input.
+//
+// The row is matched against the rendered frame rather than recomputed from the
+// layout: the panel is centered and its height varies with detection state, so
+// searching the frame that is actually on screen is both simpler and correct.
+// A field occupies its label line plus the value line below it.
+func credentialFieldAtLine(lines []string, y int) (int, bool) {
+	for _, offset := range []int{0, -1} {
+		row := y + offset
+		if row < 0 || row >= len(lines) {
+			continue
+		}
+		for cursor, label := range credentialFieldLabels {
+			// Labels survive styling as plain substrings, so no ANSI stripping.
+			if strings.Contains(lines[row], label) {
+				return cursor, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func renderCredentialField(label, value string, focused bool) string {
@@ -2294,5 +2341,22 @@ func (m *AdvancedConfigModel) View() tea.View {
 	}
 	v := tea.NewView(finalStr)
 	v.AltScreen = true
+	// Mouse reporting is enabled only on the credentials page, where clicking a
+	// field is the natural way to move focus. Everywhere else it stays off so the
+	// terminal keeps its own text selection.
+	if m.page == 0 && !m.usesOAuth() {
+		v.MouseMode = tea.MouseModeCellMotion
+		lines := strings.Split(finalStr, "\n")
+		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
+			if _, ok := msg.(tea.MouseClickMsg); !ok {
+				return nil
+			}
+			cursor, ok := credentialFieldAtLine(lines, msg.Mouse().Y)
+			if !ok {
+				return nil
+			}
+			return func() tea.Msg { return focusCredentialFieldMsg{cursor: cursor} }
+		}
+	}
 	return v
 }
