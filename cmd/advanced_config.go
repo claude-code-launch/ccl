@@ -719,13 +719,14 @@ func (m *AdvancedConfigModel) page4FastCursor() int {
 	return m.page4ProtocolOffset()
 }
 
-func (m *AdvancedConfigModel) page4CompactCursor() int { return m.page4Base() + 0 }
-func (m *AdvancedConfigModel) page4MaxOutCursor() int  { return m.page4Base() + 1 }
-func (m *AdvancedConfigModel) page4ToolsCursor() int   { return m.page4Base() + 2 }
-func (m *AdvancedConfigModel) page4SearchCursor() int  { return m.page4Base() + 3 }
-func (m *AdvancedConfigModel) page4ActiveCursor() int  { return m.page4Base() + 4 }
-func (m *AdvancedConfigModel) page4SaveCursor() int    { return m.page4Base() + 5 }
-func (m *AdvancedConfigModel) page4BackCursor() int    { return m.page4Base() + 6 }
+// Context sizing has no row here: it is expressed per slot by [1m] on page 2,
+// and ccl writes no session-wide context value that could be edited.
+func (m *AdvancedConfigModel) page4MaxOutCursor() int { return m.page4Base() + 0 }
+func (m *AdvancedConfigModel) page4ToolsCursor() int  { return m.page4Base() + 1 }
+func (m *AdvancedConfigModel) page4SearchCursor() int { return m.page4Base() + 2 }
+func (m *AdvancedConfigModel) page4ActiveCursor() int { return m.page4Base() + 3 }
+func (m *AdvancedConfigModel) page4SaveCursor() int   { return m.page4Base() + 4 }
+func (m *AdvancedConfigModel) page4BackCursor() int   { return m.page4Base() + 5 }
 
 func (m *AdvancedConfigModel) page4MaxCursor() int {
 	return m.page4BackCursor()
@@ -733,7 +734,10 @@ func (m *AdvancedConfigModel) page4MaxCursor() int {
 
 func (m *AdvancedConfigModel) page4InitialCursor() int {
 	// Prefer first editable runtime field for discoverability.
-	return m.page4CompactCursor()
+	if m.maxOutputUpstreamManaged() {
+		return m.page4ToolsCursor()
+	}
+	return m.page4MaxOutCursor()
 }
 
 // skipDisabledPage4Cursor moves past rows that are not interactive.
@@ -752,7 +756,13 @@ func (m *AdvancedConfigModel) skipDisabledPage4Cursor(direction int) {
 		m.cursor = m.page4ToolsCursor()
 		return
 	}
-	m.cursor = m.page4CompactCursor()
+	// Move to the row above Max Output when there is one (Protocol/Fast),
+	// otherwise there is nothing above it and Tools is the nearest live row.
+	if above := m.page4Base() - 1; above >= 0 {
+		m.cursor = above
+		return
+	}
+	m.cursor = m.page4ToolsCursor()
 }
 
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
@@ -945,9 +955,6 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		// Toggle like Protocol; left/right/enter all flip the pin.
 		m.p.FastMode = !m.p.FastMode
 		setDebugf("page4 fast toggled fast_mode=%t", m.p.FastMode)
-	case m.page4CompactCursor():
-		m.compactPreset = cycleCompactOption(m.compactPreset, delta)
-		m.compactState = compactConfigState{preset: m.compactPreset}
 	case m.page4MaxOutCursor():
 		if m.maxOutputUpstreamManaged() {
 			return
@@ -1616,7 +1623,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case 4:
 				switch m.cursor {
-				case m.page4ProtocolCursor(), m.page4FastCursor(), m.page4CompactCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
+				case m.page4ProtocolCursor(), m.page4FastCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
 					m.adjustReviewField(1)
 				case m.page4ActiveCursor():
 					m.IsActiveChosen = !m.IsActiveChosen
@@ -2124,7 +2131,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 			}
 			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, label, val))
 		}
-		renderEditable(m.page4CompactCursor(), "Compact", formatCompactLabel(m.compactPreset))
 		if m.maxOutputUpstreamManaged() {
 			// Read-only green: upstream path cannot honor CLAUDE_CODE_MAX_OUTPUT_TOKENS.
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Max Output", availableStyle.Render(locale.T("上游管理", "Upstream managed"))))

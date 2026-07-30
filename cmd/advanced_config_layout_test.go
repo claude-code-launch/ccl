@@ -164,13 +164,14 @@ func TestPage4UpFromToolsSkipsDisabledMaxOutput(t *testing.T) {
 	m.cursor = m.page4ToolsCursor()
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
 	m = next.(*AdvancedConfigModel)
-	if m.cursor != m.page4CompactCursor() {
-		t.Fatalf("up from Tools landed on cursor %d, want Compact %d (skip Max Output)", m.cursor, m.page4CompactCursor())
+	// Max Output is managed upstream for Codex, so moving up must not park on it.
+	if m.cursor == m.page4MaxOutCursor() {
+		t.Fatalf("up from Tools landed on the disabled Max Output row %d", m.cursor)
 	}
 	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
 	m = next.(*AdvancedConfigModel)
-	if m.cursor != m.page4ToolsCursor() {
-		t.Fatalf("down from Compact landed on cursor %d, want Tools %d", m.cursor, m.page4ToolsCursor())
+	if m.cursor == m.page4MaxOutCursor() {
+		t.Fatalf("down landed on the disabled Max Output row %d", m.cursor)
 	}
 }
 

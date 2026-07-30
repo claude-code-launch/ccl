@@ -463,14 +463,17 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	m.page = 4
 	m.oneMSlots["sonnet"] = true
-	m.compactPreset = compactPreset1M
-	m.compactState = compactConfigState{preset: compactPreset1M}
 
 	view := m.View().Content
-	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "[1M]", "Maximum 1M / 900K"} {
+	// The [1M] badge next to the slot is the whole story now: sizing is per slot
+	// and there is no session-wide compact value to review.
+	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "[1M]"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
 		}
+	}
+	if strings.Contains(view, "Compact") {
+		t.Fatalf("review page must no longer show a Compact row: %q", view)
 	}
 }
 
@@ -646,7 +649,6 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 		"Tools", "‹ Default · 3 ›",
 		"Tool Search", "‹ Default · Off ›",
 		"Max Output", "‹ Default · 32K ›",
-		"Compact",
 		"Set as active provider",
 		"Apply & Finish",
 		"purple editable",
@@ -728,9 +730,14 @@ func TestOpenAIReviewStartsOnProtocolSelection(t *testing.T) {
 	if m.page != 4 {
 		t.Fatalf("review opened at page=%d, want 4", m.page)
 	}
-	// Land on first editable runtime field for discoverability.
-	if m.cursor != m.page4CompactCursor() {
-		t.Fatalf("review cursor=%d, want compact editor %d", m.cursor, m.page4CompactCursor())
+	// Land on first editable runtime field for discoverability. Context sizing has
+	// no row here: it is per slot on page 2.
+	if m.cursor != m.page4InitialCursor() {
+		t.Fatalf("review cursor=%d, want first editable field %d", m.cursor, m.page4InitialCursor())
+	}
+	view := m.View().Content
+	if strings.Contains(view, "Compact") {
+		t.Fatalf("review page must not show a Compact row: %q", view)
 	}
 }
 
