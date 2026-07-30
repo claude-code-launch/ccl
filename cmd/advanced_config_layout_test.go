@@ -164,13 +164,14 @@ func TestPage4UpFromToolsSkipsDisabledMaxOutput(t *testing.T) {
 	m.cursor = m.page4ToolsCursor()
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
 	m = next.(*AdvancedConfigModel)
-	if m.cursor != m.page4CompactCursor() {
-		t.Fatalf("up from Tools landed on cursor %d, want Compact %d (skip Max Output)", m.cursor, m.page4CompactCursor())
+	// Max Output is managed upstream for Codex, so moving up must not park on it.
+	if m.cursor == m.page4MaxOutCursor() {
+		t.Fatalf("up from Tools landed on the disabled Max Output row %d", m.cursor)
 	}
 	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
 	m = next.(*AdvancedConfigModel)
-	if m.cursor != m.page4ToolsCursor() {
-		t.Fatalf("down from Compact landed on cursor %d, want Tools %d", m.cursor, m.page4ToolsCursor())
+	if m.cursor == m.page4MaxOutCursor() {
+		t.Fatalf("down landed on the disabled Max Output row %d", m.cursor)
 	}
 }
 
@@ -195,5 +196,150 @@ func TestReviewFitsCommonTerminalHeights(t *testing.T) {
 		if !strings.Contains(view, "Apply & Finish") {
 			t.Fatalf("Apply not visible at height %d", h)
 		}
+	}
+}
+
+func TestPage2BlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
+	p := provider.Provider{
+		Type:        "openai_responses",
+		Endpoint:    "https://example.test/v1",
+		OpusModel:   "small-window",
+		SonnetModel: "big-window",
+		HaikuModel:  "unknown-window",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 2
+	m.modelContextWindows = map[string]int{
+		"small-window": 272_000,
+		"big-window":   1_050_000,
+	}
+
+	view := m.View().Content
+	if !strings.Contains(view, "backend 272K") || !strings.Contains(view, "no 1M") {
+		t.Fatalf("expected the Opus row to explain why 1M is unavailable: %q", view)
+	}
+
+	// Opus: 1M must not be selectable.
+	m.cursor = 0
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.oneMSlots["opus"] {
+		t.Fatal("1M was enabled for a model whose backend window is 272K")
+	}
+
+	// Sonnet: a 1M-class window stays selectable.
+	m.cursor = 1
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.oneMSlots["sonnet"] {
+		t.Fatal("1M must remain selectable for a 1M-class model")
+	}
+
+	// Unknown window: the catalog is advisory, so keep it editable.
+	m.cursor = 2
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.oneMSlots["haiku"] {
+		t.Fatal("1M must stay editable when the window is unknown")
+	}
+
+	// An existing marker on a blocked slot can still be cleared.
+	m.oneMSlots["opus"] = true
+	m.cursor = 0
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.oneMSlots["opus"] {
+		t.Fatal("a stale [1m] marker on a blocked slot must be removable")
+	}
+}
+
+func TestPage2DefaultsToClaudeAutoCompact(t *testing.T) {
+	// A provider carrying the old Switch-safe preset must open on Claude default,
+	// because ccl no longer writes context env at all.
+	p := provider.Provider{
+		Type:     "openai_responses",
+		Endpoint: "https://example.test/v1",
+		Env: map[string]string{
+			maxContextTokensEnv:  maxContext300K,
+			autoCompactWindowEnv: compactWindow300K,
+		},
+	}
+	m := NewAdvancedConfigModel(&p)
+	if m.compactPreset != compactPresetDefault {
+		t.Fatalf("compact preset = %v, want Claude default", m.compactPreset)
+	}
+	m.page = 2
+	view := m.View().Content
+	if !strings.Contains(view, "(●)") || !strings.Contains(view, "Claude Code default") {
+		t.Fatalf("Auto Compact should default to Claude Code default: %q", view)
+	}
+}
+
+func TestCredentialsPageResolvesClickToField(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "sk-test"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 0
+	m.width = 100
+	m.height = 30
+
+	view := m.View()
+	if view.MouseMode == tea.MouseModeNone {
+		t.Fatal("credentials page must report mouse clicks so fields can be focused")
+	}
+	if view.OnMouse == nil {
+		t.Fatal("credentials page has no mouse handler")
+	}
+	lines := strings.Split(view.Content, "\n")
+
+	// Every field is reachable by clicking its label row and the value row below it.
+	for cursor, label := range credentialFieldLabels {
+		labelRow := -1
+		for i, line := range lines {
+			if strings.Contains(line, label) {
+				labelRow = i
+				break
+			}
+		}
+		if labelRow < 0 {
+			t.Fatalf("label %q is not on the credentials page", label)
+		}
+		for _, row := range []int{labelRow, labelRow + 1} {
+			got, ok := credentialFieldAtLine(lines, row)
+			if !ok || got != cursor {
+				t.Fatalf("click on row %d resolved to (%d, %t), want cursor %d", row, got, ok, cursor)
+			}
+		}
+	}
+
+	// A click far away from any field must be ignored rather than stealing focus.
+	if _, ok := credentialFieldAtLine(lines, 0); ok {
+		t.Fatal("click on the top padding row resolved to a field")
+	}
+
+	// The resolved click focuses the API key input.
+	next, _ := m.Update(focusCredentialFieldMsg{cursor: 1})
+	m = next.(*AdvancedConfigModel)
+	if m.cursor != 1 || !m.keyInput.Focused() || m.urlInput.Focused() {
+		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the key input focused",
+			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
+	}
+	next, _ = m.Update(focusCredentialFieldMsg{cursor: 0})
+	m = next.(*AdvancedConfigModel)
+	if m.cursor != 0 || !m.urlInput.Focused() || m.keyInput.Focused() {
+		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the endpoint input focused",
+			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
+	}
+}
+
+func TestOAuthCredentialsPageLeavesMouseAlone(t *testing.T) {
+	// OAuth providers have no editable fields here, so the terminal keeps its own
+	// selection behaviour.
+	p := provider.Provider{Type: "openai_responses", OAuthProvider: "gpt", Endpoint: "oauth://codex"}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 0
+	m.width = 100
+	m.height = 30
+	if view := m.View(); view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
+		t.Fatal("OAuth credentials page must not capture the mouse")
 	}
 }

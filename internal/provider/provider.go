@@ -8,6 +8,91 @@ import (
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 )
 
+// Claude Code env vars that ccl manages through Provider.Env. They live here so
+// the launcher, the config TUI and the diagnostics all agree on the spelling.
+const (
+	// EnvMaxContextTokens is the fallback context size Claude Code assumes for a
+	// model it does not recognize.
+	EnvMaxContextTokens = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+	// EnvAutoCompactWindow is the absolute token count at which Claude Code
+	// auto-compacts the conversation.
+	EnvAutoCompactWindow = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
+	// EnvContextBudgetMode is a ccl directive, not a Claude Code variable: it
+	// selects who owns the two limits above for a subscription provider.
+	//
+	//	auto   (default) follow the window the backend advertises
+	//	manual keep the configured values, even when they are larger
+	//
+	// The advertised number can itself be a client-side catalog cap rather than
+	// the server's real limit, so "manual" exists to let a larger window be tried.
+	EnvContextBudgetMode = "CCL_CONTEXT_BUDGET"
+
+	// ContextBudgetManual is the EnvContextBudgetMode value that disables
+	// backend-driven context management.
+	ContextBudgetManual = "manual"
+
+	// EnvAutoCompactPct is Claude Code's percentage-based auto-compact threshold.
+	// It only ever lowers the trigger point, and Claude Code has repeatedly
+	// ignored it when it arrives through the settings file, so ccl also exports it
+	// to the child process environment.
+	EnvAutoCompactPct = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+)
+
+// ManagedContextEnvKeys are the context-sizing variables ccl forwards. They are
+// exported to the Claude Code process as well as written to the settings file,
+// because the settings-file channel has proven unreliable for them.
+func ManagedContextEnvKeys() []string {
+	return []string{EnvMaxContextTokens, EnvAutoCompactWindow, EnvAutoCompactPct}
+}
+
+// cclContextPresets are the (max context, auto-compact window) pairs that older
+// ccl versions wrote for their 300K/500K/1M compact presets, and the even older
+// percentage-based pairs.
+//
+// ccl no longer declares context sizes: Claude Code offers a 200K default and a
+// per-slot 1M variant, and it sizes its own compaction buffer for whichever
+// applies. A leftover global preset only breaks that, so these exact pairs are
+// recognized in order to drop them, while any other value is treated as a
+// deliberate manual setting and preserved.
+var cclContextPresets = [][3]string{
+	{"1000000", "900000", ""},
+	{"500000", "400000", ""},
+	{"300000", "200000", ""},
+	{"", "1000000", "90"},
+	{"", "500000", "80"},
+	{"", "200000", "70"},
+	{"", "1000000", ""},
+}
+
+// IsCclContextPreset reports whether env holds one of the context presets a
+// previous ccl version wrote, rather than values the user chose.
+func IsCclContextPreset(env map[string]string) bool {
+	if len(env) == 0 {
+		return false
+	}
+	actual := [3]string{
+		strings.TrimSpace(env[EnvMaxContextTokens]),
+		strings.TrimSpace(env[EnvAutoCompactWindow]),
+		strings.TrimSpace(env[EnvAutoCompactPct]),
+	}
+	if actual == [3]string{"", "", ""} {
+		return false
+	}
+	for _, preset := range cclContextPresets {
+		if actual == preset {
+			return true
+		}
+	}
+	return false
+}
+
+// ContextBudgetIsManual reports whether the provider opted out of backend-driven
+// context management.
+func ContextBudgetIsManual(p Provider) bool {
+	return strings.EqualFold(strings.TrimSpace(p.Env[EnvContextBudgetMode]), ContextBudgetManual)
+}
+
 type Provider struct {
 	Name     string `yaml:"name" mapstructure:"name"`
 	Type     string `yaml:"type" mapstructure:"type"`

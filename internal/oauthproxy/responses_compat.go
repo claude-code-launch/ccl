@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -78,16 +78,22 @@ func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequ
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
+			// A failed rewrite silently ships the original body upstream (missing
+			// max_output_tokens or Codex identity), so record it.
 			if identity != nil {
-				_ = normalizeCodexRequestIdentity(request.Out, *identity)
-			} else {
-				_ = sanitizePlainResponsesRequest(request.Out, maxOutputTokens)
+				if err := normalizeCodexRequestIdentity(request.Out, *identity); err != nil {
+					Debugf("responses proxy codex identity rewrite failed path=%q error=%v", request.Out.URL.Path, err)
+				}
+			} else if err := sanitizePlainResponsesRequest(request.Out, maxOutputTokens); err != nil {
+				Debugf("responses proxy plain rewrite failed path=%q error=%v", request.Out.URL.Path, err)
 			}
 			request.SetURL(target)
 			request.Out.Host = target.Host
 		},
 		ModifyResponse: normalizeCompletedOnlyResponses,
-		ErrorLog:       log.New(io.Discard, "", 0),
+		// Transport failures used to be discarded, so an unreachable upstream
+		// surfaced in Claude Code as a bare "Network error" with an empty log.
+		ErrorLog: newComponentLogger("responses-proxy"),
 	}
 	server := &http.Server{Handler: proxy}
 	compat := &responsesCompatibilityProxy{
@@ -96,8 +102,13 @@ func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequ
 		done:            make(chan struct{}),
 		maxOutputTokens: maxOutputTokens,
 	}
+	Debugf("responses proxy start endpoint=%q target=%q codex_identity=%t max_output_tokens=%d",
+		compat.endpoint, target.Redacted(), identity != nil, maxOutputTokens)
 	go func() {
-		_ = server.Serve(listener)
+		err := server.Serve(listener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			Debugf("responses proxy stopped endpoint=%q error=%v", compat.endpoint, err)
+		}
 		close(compat.done)
 	}()
 	return compat, nil

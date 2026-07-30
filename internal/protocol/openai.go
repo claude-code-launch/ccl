@@ -77,31 +77,36 @@ func GetOpenAIModels(baseURL, apiKey string) (string, error) {
 	return strings.Join(ids, ","), nil
 }
 
-// GetOpenAIModelInfos fetches model IDs and optional context_window metadata.
-func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
-	url := NormalizeOpenAIModelsURL(baseURL)
-
+// fetchModelsPayload performs an authenticated GET against a models endpoint and
+// decodes the JSON body into out.
+func fetchModelsPayload(url, apiKey string, out any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New(resp.Status)
+		return errors.New(resp.Status)
 	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("解析响应失败: %w", err)
+	}
+	return nil
+}
 
+// GetOpenAIModelInfos fetches model IDs and optional context_window metadata.
+func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 	var result ModelResponse
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+	if err := fetchModelsPayload(NormalizeOpenAIModelsURL(baseURL), apiKey, &result); err != nil {
+		return nil, err
 	}
 	models := make([]ModelInfo, 0, len(result.Data))
 	for _, m := range result.Data {
@@ -117,6 +122,57 @@ func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 			ID:            m.Id,
 			ContextWindow: window,
 		})
+	}
+	return models, nil
+}
+
+// codexClientVersionQuery is any non-empty client_version value. CLIProxyAPI only
+// checks that the query parameter is present before switching /v1/models to the
+// Codex client catalog, which is the only shape that carries context windows.
+const codexClientVersionQuery = "ccl"
+
+// codexClientModelsResponse is the Codex client catalog payload. Entries reuse
+// the Codex model template, where the id lives in "slug".
+type codexClientModelsResponse struct {
+	Models []struct {
+		ID               string `json:"id"`
+		Slug             string `json:"slug"`
+		ContextWindow    int    `json:"context_window,omitempty"`
+		MaxContextWindow int    `json:"max_context_window,omitempty"`
+	} `json:"models"`
+}
+
+// GetCodexClientModelInfos reads the Codex-flavoured model catalog that
+// CLIProxyAPI serves from /v1/models?client_version=…
+//
+// This matters for subscription (OAuth) providers: the plain OpenAI list is
+// trimmed to id/object/created/owned_by, so it never reveals a context window,
+// while the Codex catalog reports the window the backend advertises for the
+// account. Values remain advisory — the server may still enforce less.
+func GetCodexClientModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
+	url := NormalizeOpenAIModelsURL(baseURL)
+	separator := "?"
+	if strings.Contains(url, "?") {
+		separator = "&"
+	}
+	var payload codexClientModelsResponse
+	if err := fetchModelsPayload(url+separator+"client_version="+codexClientVersionQuery, apiKey, &payload); err != nil {
+		return nil, err
+	}
+	models := make([]ModelInfo, 0, len(payload.Models))
+	for _, model := range payload.Models {
+		id := strings.TrimSpace(model.Slug)
+		if id == "" {
+			id = strings.TrimSpace(model.ID)
+		}
+		if id == "" {
+			continue
+		}
+		window := model.ContextWindow
+		if window == 0 {
+			window = model.MaxContextWindow
+		}
+		models = append(models, ModelInfo{ID: id, ContextWindow: window})
 	}
 	return models, nil
 }

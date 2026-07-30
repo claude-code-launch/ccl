@@ -96,3 +96,38 @@ func TestDebugfNoOpWhenDisabled(t *testing.T) {
 		t.Fatalf("unexpected output: %q", buf.String())
 	}
 }
+
+func TestSessionDebugLogPathIsDerivedFromBase(t *testing.T) {
+	t.Setenv("CCL_DEBUG_LOG", "/var/log/ccl/debug.log")
+	if got, want := SessionDebugLogPath("claude_9f2c1b7d"), "/var/log/ccl/debug-claude_9f2c1b7d.log"; got != want {
+		t.Fatalf("SessionDebugLogPath = %q, want %q", got, want)
+	}
+	// Unsafe characters must never reach the file system.
+	if got, want := SessionDebugLogPath("../../etc/passwd"), "/var/log/ccl/debug-etcpasswd.log"; got != want {
+		t.Fatalf("sanitized path = %q, want %q", got, want)
+	}
+	// Without a usable session name the shared base path stays in use.
+	if got := SessionDebugLogPath("  "); got != "/var/log/ccl/debug.log" {
+		t.Fatalf("empty session path = %q", got)
+	}
+}
+
+func TestSessionDebugLogPathWithoutExtension(t *testing.T) {
+	t.Setenv("CCL_DEBUG_LOG", "/tmp/ccl-debug")
+	if got, want := SessionDebugLogPath("claude_1"), "/tmp/ccl-debug-claude_1"; got != want {
+		t.Fatalf("SessionDebugLogPath = %q, want %q", got, want)
+	}
+}
+
+func TestDebugFilterKeepsContextLimitFailures(t *testing.T) {
+	// A context-window rejection arrives as a plain 400 with no status marker the
+	// other rules match, so it must be recognized on its own.
+	for _, line := range []string{
+		`{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}`,
+		"request_too_large: prompt is too large for this model",
+	} {
+		if !debugLineIsInteresting(strings.ToLower(line)) {
+			t.Errorf("context-limit line was dropped from the log: %s", line)
+		}
+	}
+}

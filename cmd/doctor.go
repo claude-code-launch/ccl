@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -182,6 +183,7 @@ func runDoctor(ctx context.Context) error {
 	if configuredProvider.AuthGroup != "" || configuredProvider.OAuthProvider != "" {
 		printDoctorGroupHealth(cfg, configuredProvider, runtime)
 	}
+	printDoctorContextBudget(p, configuredProvider)
 
 	// 5. Test Endpoint reachability and API Authentication key
 	if p.Endpoint != "" {
@@ -216,6 +218,190 @@ func runDoctor(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// printDoctorContextBudget reports how this session will be sized.
+//
+// ccl declares no context size: Claude Code uses its 200K default, or a 1M-class
+// window for slots carrying the [1m] marker, and scales its own compaction to
+// whichever applies. So this section shows the per-slot sizing, the window each
+// model advertises, and flags the two ways that can go wrong: a [1m] marker on a
+// model whose backend window is far smaller, and leftover manual overrides.
+//
+// runtimeProvider carries the live endpoint/key of the embedded runtime;
+// configured carries the user's ccl config.
+func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
+	doctorSection("Context budget")
+
+	maxContext := parseDoctorTokenEnv(configured.Env[maxContextTokensEnv])
+	compactWindow := parseDoctorTokenEnv(configured.Env[autoCompactWindowEnv])
+	compactPct := strings.TrimSpace(configured.Env[provider.EnvAutoCompactPct])
+	overridden := maxContext > 0 || compactWindow > 0 || compactPct != ""
+	windows, source := claude.AdvertisedContextWindows(runtimeProvider.Endpoint, runtimeProvider.APIKey)
+	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
+
+	oauthproxy.Debugf("doctor context budget provider=%q max_context=%d compact_window=%d compact_pct=%q manual=%t catalog=%q models=%d smallest=%d smallest_model=%q",
+		configured.Name, maxContext, compactWindow, compactPct,
+		provider.ContextBudgetIsManual(configured), source, len(windows), smallest, smallestModel)
+
+	oneMSlots := oneMSlotsFromProvider(configured)
+	if overridden {
+		doctorKV("Sizing", "manual override in provider env")
+		doctorKV("Assumed context", doctorTokenLabel(maxContext, "Claude Code default"))
+		doctorKV("Auto-compact at", doctorTokenLabel(compactWindow, "Claude Code default"))
+		if compactPct != "" {
+			doctorKV("Auto-compact pct", compactPct+"%")
+		}
+	} else {
+		doctorKV("Sizing", "per slot (Claude Code decides; ccl sets no context env)")
+		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
+	}
+
+	// Per-slot sizing is what actually applies, whether or not a catalog is
+	// available: the [1m] marker is the only per-model signal.
+	for _, slot := range provider.SlotModels(configured) {
+		sizing := "200K default"
+		if oneMSlots[slot.Slot] {
+			sizing = "1M ([1m])"
+		}
+		advertised := "backend window unknown"
+		if window, ok := windows[strings.ToLower(slot.Model)]; ok && window > 0 {
+			advertised = "backend " + formatTokenCount(window) + ", " + claude.ContextClassLabel(window)
+		}
+		doctorKV(slot.Slot, fmt.Sprintf("%s · %s · %s", slot.Model, sizing, advertised))
+	}
+	if len(windows) == 0 {
+		doctorInfo("Backend does not advertise context windows, so [1m] markers cannot be verified here")
+		return
+	}
+	doctorKV("Window source", source)
+	if unknown > 0 {
+		doctorInfo(fmt.Sprintf("%d mapped model(s) are absent from the catalog; their window is unknown", unknown))
+	}
+
+	printDoctorOneMConsistency(configured, windows)
+	if claude.MappedContextClassesDiffer(configured, windows) {
+		doctorInfo("Mapped models span both context classes; that is fine because sizing is per slot, but one global override would not be")
+	}
+	if !overridden {
+		doctorOK("No ccl context override; each slot keeps the sizing Claude Code computes for it")
+		return
+	}
+	if smallest > 0 && maxContext > smallest {
+		doctorWarn(fmt.Sprintf("Manual context override %s exceeds the %s window of %s",
+			formatTokenCount(maxContext), smallestModel, formatTokenCount(smallest)))
+		doctorHint("Requests can be rejected with context_length_exceeded (HTTP 400) before Claude Code auto-compacts")
+	}
+	if provider.ContextBudgetIsManual(configured) {
+		doctorHint(fmt.Sprintf("%s=%s keeps these values as-is; remove them to let Claude Code size the session",
+			provider.EnvContextBudgetMode, provider.ContextBudgetManual))
+	} else {
+		doctorHint("These values were set manually; ccl keeps them but no longer writes context env itself")
+	}
+}
+
+// printDoctorOneMConsistency checks the [1m] markers against the advertised
+// windows.
+//
+// The suffix is how Claude Code is told a slot runs the 1M variant of a model: it
+// sizes the session for a 1M window and scales its auto-compact buffer to it, so
+// a [1m] marker on a model whose backend window is far smaller makes Claude Code
+// compact much too late and the upstream rejects the turn first. The suffix is
+// only an Anthropic capability signal — it never widens a third-party window.
+func printDoctorOneMConsistency(p provider.Provider, windows map[string]int) {
+	if len(windows) == 0 {
+		return
+	}
+	oneMSlots := oneMSlotsFromProvider(p)
+	if len(oneMSlots) == 0 {
+		return
+	}
+	for _, slot := range provider.SlotModels(p) {
+		if !oneMSlots[slot.Slot] {
+			continue
+		}
+		window, ok := windows[strings.ToLower(slot.Model)]
+		if !ok || window <= 0 || protocol.ContextWindowSuggests1M(window) {
+			continue
+		}
+		doctorWarn(fmt.Sprintf("%s is marked [1m] but %s advertises only %s",
+			slot.Slot, slot.Model, formatTokenCount(window)))
+		doctorHint("Claude Code sizes the session (and its compact buffer) for 1M, so it compacts after the backend already refuses the request")
+		doctorHint("Clear the Extended Context checkbox for that slot in `ccl set`, or confirm the backend really accepts 1M")
+	}
+}
+
+// contextBudgetModeLabel explains who owns the context limits for this provider.
+func contextBudgetModeLabel(p provider.Provider, managed bool) string {
+	switch {
+	case provider.ContextBudgetIsManual(p):
+		return "manual (" + provider.EnvContextBudgetMode + "=" + provider.ContextBudgetManual + ")"
+	case managed:
+		return "auto (backend-managed)"
+	case strings.TrimSpace(p.OAuthProvider) != "":
+		return "auto (no advertised window; using the configured preset)"
+	default:
+		return "configured preset"
+	}
+}
+
+// effectiveCompactThreshold reports the token count Claude Code will actually
+// grow to, and a label for it. The absolute auto-compact window wins when set;
+// otherwise the assumed context size governs. Zero means ccl set no override and
+// Claude Code follows its own defaults.
+func effectiveCompactThreshold(maxContext, compactWindow int) (int, string) {
+	if compactWindow > 0 {
+		return compactWindow, "auto-compact threshold"
+	}
+	if maxContext > 0 {
+		return maxContext, "assumed context size"
+	}
+	return 0, ""
+}
+
+// smallestMappedWindow returns the smallest advertised context window across the
+// provider's mapped slots, the model it belongs to, and how many mapped models
+// the catalog did not report a window for.
+func smallestMappedWindow(p provider.Provider, windows map[string]int) (smallest int, model string, unknown int) {
+	for _, slot := range provider.SlotModels(p) {
+		window, ok := windows[strings.ToLower(slot.Model)]
+		if !ok || window <= 0 {
+			unknown++
+			continue
+		}
+		if smallest == 0 || window < smallest {
+			smallest, model = window, slot.Model
+		}
+	}
+	return smallest, model, unknown
+}
+
+func parseDoctorTokenEnv(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
+}
+
+func doctorTokenLabel(tokens int, fallback string) string {
+	if tokens == 0 {
+		return fallback
+	}
+	return formatTokenCount(tokens)
+}
+
+// formatTokenCount renders a token count as a compact K/M label plus the exact
+// number, so a warning is both readable and precise.
+func formatTokenCount(tokens int) string {
+	switch {
+	case tokens >= 1_000_000 && tokens%1_000_000 == 0:
+		return fmt.Sprintf("%dM (%d)", tokens/1_000_000, tokens)
+	case tokens >= 1_000 && tokens%1_000 == 0:
+		return fmt.Sprintf("%dK (%d)", tokens/1_000, tokens)
+	default:
+		return strconv.Itoa(tokens)
+	}
 }
 
 // checkDoctorConnectivity probes the provider endpoint and reports whether it is

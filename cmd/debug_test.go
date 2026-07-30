@@ -33,7 +33,10 @@ func TestRunDebugToggleAndShow(t *testing.T) {
 	if err := runDebug(&out, nil); err != nil {
 		t.Fatalf("runDebug(show): %v", err)
 	}
-	if out.String() != "Debug = on\nLog: /tmp/ccl-debug.log\n" && !bytes.Contains(out.Bytes(), []byte("Log: ")) {
+	// The status must name the base path and make clear that each session gets its
+	// own file derived from it.
+	if !bytes.Contains(out.Bytes(), []byte("Log base: ")) ||
+		!bytes.Contains(out.Bytes(), []byte("Per session: ")) {
 		t.Fatalf("show output = %q", out.String())
 	}
 

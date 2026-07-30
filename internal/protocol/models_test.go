@@ -258,3 +258,42 @@ func TestGetOpenAIModelInfosAcceptsTopLevelContextWindow(t *testing.T) {
 		t.Fatalf("nested context_window not parsed: %#v", byID)
 	}
 }
+
+func TestGetCodexClientModelInfosRequiresClientVersion(t *testing.T) {
+	var sawClientVersion bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["client_version"]; !ok {
+			// CLIProxyAPI trims the plain list to identity fields only.
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-sol","object":"model"}]}`))
+			return
+		}
+		sawClientVersion = true
+		_, _ = w.Write([]byte(`{"models":[
+			{"slug":"gpt-5.6-sol","context_window":272000},
+			{"id":"legacy-id","max_context_window":128000},
+			{"slug":"no-window"}
+		]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	infos, err := protocol.GetCodexClientModelInfos(server.URL, "key")
+	if err != nil {
+		t.Fatalf("GetCodexClientModelInfos: %v", err)
+	}
+	if !sawClientVersion {
+		t.Fatal("request did not carry client_version, so the trimmed list would be parsed")
+	}
+	byID := map[string]int{}
+	for _, info := range infos {
+		byID[info.ID] = info.ContextWindow
+	}
+	if byID["gpt-5.6-sol"] != 272000 {
+		t.Errorf("slug entry window = %d, want 272000", byID["gpt-5.6-sol"])
+	}
+	if byID["legacy-id"] != 128000 {
+		t.Errorf("id entry falling back to max_context_window = %d, want 128000", byID["legacy-id"])
+	}
+	if window, ok := byID["no-window"]; !ok || window != 0 {
+		t.Errorf("entry without a window = %d (present=%t), want 0", window, ok)
+	}
+}

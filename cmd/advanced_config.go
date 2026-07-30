@@ -60,8 +60,8 @@ const (
 	slotTestCursor        = slotMappingCount
 	slotNextCursor        = slotTestCursor + 1
 	slotBackCursor        = slotNextCursor + 1
-	// Page 2: slots 0..4, compact radios 5..9, Next/Back after.
-	compactRadioCount   = 5
+	// Page 2: slots 0..4, context radios 5..6, Next/Back after.
+	compactRadioCount   = 2
 	oneMCompactStart    = slotMappingCount
 	oneMNextCursor      = oneMCompactStart + compactRadioCount
 	oneMBackCursor      = oneMNextCursor + 1
@@ -69,13 +69,15 @@ const (
 	lowCostProbeModel   = "gpt-5.4-mini"
 )
 
-// compactRadioOrder matches the product mockup Auto Compact radio list.
+// compactRadioOrder is the context sizing choice offered to the user.
+//
+// Claude Code has one default window and a per-slot 1M variant, and it scales its
+// own compaction to whichever a slot uses, so ccl no longer offers intermediate
+// context presets: pick the 1M variant per slot with Extended Context, or keep
+// manual env values.
 var compactRadioOrder = []compactPreset{
 	compactPresetDefault,
-	compactPreset300K,
-	compactPreset500K,
-	compactPreset1M,
-	compactPresetPreserve, // Custom
+	compactPresetPreserve, // Custom (manual env)
 }
 
 type AdvancedConfigModel struct {
@@ -282,13 +284,13 @@ func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 		// Failures are ignored — IDs still come from detection.
 		windows := map[string]int{}
 		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) {
-			if infos, err := protocol.GetOpenAIModelInfos(result.baseURL, apiKey); err == nil {
-				for _, info := range infos {
-					if info.ContextWindow > 0 {
-						windows[info.ID] = info.ContextWindow
-					}
-				}
+			// Subscription runtimes only expose windows through the Codex catalog,
+			// which AdvertisedContextWindows tries before the plain OpenAI list.
+			advertised, source := claude.AdvertisedContextWindows(result.baseURL, apiKey)
+			for id, window := range advertised {
+				windows[id] = window
 			}
+			setDebugf("modelFetchCmd context windows catalog=%q count=%d", source, len(windows))
 		}
 		return modelFetchDoneMsg{
 			endpoint:            endpoint,
@@ -681,6 +683,26 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 //	purple      = editable values, always wrapped as ‹ value ›
 //	blue        = current focus / primary action
 //	yellow      = [1M] badges
+//
+// oneMSlotBlocked reports that the backend advertises a window well below 1M for
+// this slot's model, so the 1M variant must not be offered: it would only make
+// Claude Code size the session (and its compaction) for a window the backend
+// does not have, and the request is rejected before compaction runs.
+//
+// Unknown windows stay editable — the catalog is advisory and often absent.
+func (m *AdvancedConfigModel) oneMSlotBlocked(modelVal string) bool {
+	window, ok := m.modelContextWindows[stripOneMSuffix(modelVal)]
+	return ok && window > 0 && !protocol.ContextWindowSuggests1M(window)
+}
+
+// slotModelForIndex returns the model configured in the page-2 row order.
+func (m *AdvancedConfigModel) slotModelForIndex(idx int) string {
+	if m.p == nil || idx < 0 || idx >= slotMappingCount {
+		return ""
+	}
+	return []string{m.p.OpusModel, m.p.SonnetModel, m.p.HaikuModel, m.p.CustomModelID, m.p.SubagentModel}[idx]
+}
+
 func (m *AdvancedConfigModel) canEditFastMode() bool {
 	return m.p != nil && supportsFastMode(m.p.OAuthProvider)
 }
@@ -717,13 +739,14 @@ func (m *AdvancedConfigModel) page4FastCursor() int {
 	return m.page4ProtocolOffset()
 }
 
-func (m *AdvancedConfigModel) page4CompactCursor() int { return m.page4Base() + 0 }
-func (m *AdvancedConfigModel) page4MaxOutCursor() int  { return m.page4Base() + 1 }
-func (m *AdvancedConfigModel) page4ToolsCursor() int   { return m.page4Base() + 2 }
-func (m *AdvancedConfigModel) page4SearchCursor() int  { return m.page4Base() + 3 }
-func (m *AdvancedConfigModel) page4ActiveCursor() int  { return m.page4Base() + 4 }
-func (m *AdvancedConfigModel) page4SaveCursor() int    { return m.page4Base() + 5 }
-func (m *AdvancedConfigModel) page4BackCursor() int    { return m.page4Base() + 6 }
+// Context sizing has no row here: it is expressed per slot by [1m] on page 2,
+// and ccl writes no session-wide context value that could be edited.
+func (m *AdvancedConfigModel) page4MaxOutCursor() int { return m.page4Base() + 0 }
+func (m *AdvancedConfigModel) page4ToolsCursor() int  { return m.page4Base() + 1 }
+func (m *AdvancedConfigModel) page4SearchCursor() int { return m.page4Base() + 2 }
+func (m *AdvancedConfigModel) page4ActiveCursor() int { return m.page4Base() + 3 }
+func (m *AdvancedConfigModel) page4SaveCursor() int   { return m.page4Base() + 4 }
+func (m *AdvancedConfigModel) page4BackCursor() int   { return m.page4Base() + 5 }
 
 func (m *AdvancedConfigModel) page4MaxCursor() int {
 	return m.page4BackCursor()
@@ -731,7 +754,10 @@ func (m *AdvancedConfigModel) page4MaxCursor() int {
 
 func (m *AdvancedConfigModel) page4InitialCursor() int {
 	// Prefer first editable runtime field for discoverability.
-	return m.page4CompactCursor()
+	if m.maxOutputUpstreamManaged() {
+		return m.page4ToolsCursor()
+	}
+	return m.page4MaxOutCursor()
 }
 
 // skipDisabledPage4Cursor moves past rows that are not interactive.
@@ -750,7 +776,13 @@ func (m *AdvancedConfigModel) skipDisabledPage4Cursor(direction int) {
 		m.cursor = m.page4ToolsCursor()
 		return
 	}
-	m.cursor = m.page4CompactCursor()
+	// Move to the row above Max Output when there is one (Protocol/Fast),
+	// otherwise there is nothing above it and Tools is the nearest live row.
+	if above := m.page4Base() - 1; above >= 0 {
+		m.cursor = above
+		return
+	}
+	m.cursor = m.page4ToolsCursor()
 }
 
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
@@ -760,9 +792,6 @@ var (
 	reviewSearchOptions  = []string{"", "true", "false"} // Default / On / Off
 	reviewCompactOptions = []compactPreset{
 		compactPresetDefault,
-		compactPreset300K,
-		compactPreset500K,
-		compactPreset1M,
 		compactPresetPreserve,
 	}
 )
@@ -908,6 +937,12 @@ func formatSearchLabel(value string) string {
 }
 
 func formatCompactLabel(preset compactPreset) string {
+	if preset == compactPresetPreserve {
+		return "Custom (manual env)"
+	}
+	if preset == compactPresetDefault {
+		return "Claude default · 1M per slot"
+	}
 	switch preset {
 	case compactPresetDefault:
 		return formatEditableValue("Claude default", false)
@@ -940,9 +975,6 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		// Toggle like Protocol; left/right/enter all flip the pin.
 		m.p.FastMode = !m.p.FastMode
 		setDebugf("page4 fast toggled fast_mode=%t", m.p.FastMode)
-	case m.page4CompactCursor():
-		m.compactPreset = cycleCompactOption(m.compactPreset, delta)
-		m.compactState = compactConfigState{preset: m.compactPreset}
 	case m.page4MaxOutCursor():
 		if m.maxOutputUpstreamManaged() {
 			return
@@ -1076,6 +1108,12 @@ func (m *AdvancedConfigModel) selectCompactPreset(radioIdx int) {
 }
 
 func compactRadioLabel(preset compactPreset) string {
+	if preset == compactPresetPreserve {
+		return "Custom — keep the context env set by hand"
+	}
+	if preset == compactPresetDefault {
+		return "Claude Code default — 1M per slot via Extended Context"
+	}
 	switch preset {
 	case compactPresetDefault:
 		return "Claude default"
@@ -1128,7 +1166,11 @@ func (m *AdvancedConfigModel) compactSummary() string {
 		state.legacy = false
 		state.custom = false
 	}
-	return compactStateSummary(state, m.oneMSlots)
+	summary := compactStateSummary(state, m.oneMSlots)
+	if m.p != nil {
+		summary += backendManagedContextNote(*m.p)
+	}
+	return summary
 }
 
 func reviewOneMSummary(oneMSlots map[string]bool) string {
@@ -1237,6 +1279,23 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.updateInputWidths()
 		return m, nil
+
+	case focusCredentialFieldMsg:
+		if m.page != 0 || m.usesOAuth() {
+			return m, nil
+		}
+		m.cursor = msg.cursor
+		var focusCmd tea.Cmd
+		switch msg.cursor {
+		case 0:
+			m.keyInput.Blur()
+			focusCmd = m.urlInput.Focus()
+		case 1:
+			m.urlInput.Blur()
+			focusCmd = m.keyInput.Focus()
+		}
+		setDebugf("page0 focus by click cursor=%d", m.cursor)
+		return m, focusCmd
 
 	case modelFetchTickMsg:
 		if !m.detecting {
@@ -1583,6 +1642,12 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < slotMappingCount {
 					// Extended context only — compact preset is independent.
 					slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.cursor]
+					// Turning 1M on is refused when the backend window rules it out;
+					// turning an existing marker off stays possible.
+					if !m.oneMSlots[slot] && m.oneMSlotBlocked(m.slotModelForIndex(m.cursor)) {
+						setDebugf("page2 one_m blocked slot=%s model=%q", slot, m.slotModelForIndex(m.cursor))
+						return m, nil
+					}
 					if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
 						return m, nil
 					}
@@ -1601,7 +1666,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case 4:
 				switch m.cursor {
-				case m.page4ProtocolCursor(), m.page4FastCursor(), m.page4CompactCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
+				case m.page4ProtocolCursor(), m.page4FastCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
 					m.adjustReviewField(1)
 				case m.page4ActiveCursor():
 					m.IsActiveChosen = !m.IsActiveChosen
@@ -1720,6 +1785,36 @@ func renderModelFetchProgress(progress, frame int, oauth bool) string {
 		selectedStyle.Render(fmt.Sprintf("%s %s", spin, label)) + "\n" +
 		cyanText.Render(fmt.Sprintf("[%s] %3d%%", bar, progress)) + "\n" +
 		grayText.Render(hint) + "\n"
+}
+
+// focusCredentialFieldMsg asks the model to focus one of the credential inputs.
+// The mouse handler runs against the last rendered frame (see View), so it
+// reports the intent as a message instead of mutating the model from the view.
+type focusCredentialFieldMsg struct{ cursor int }
+
+// credentialFieldLabels maps a page-0 cursor position onto its rendered label.
+var credentialFieldLabels = map[int]string{0: "Endpoint URL", 1: "API Key"}
+
+// credentialFieldAtLine resolves a clicked screen row to a credential input.
+//
+// The row is matched against the rendered frame rather than recomputed from the
+// layout: the panel is centered and its height varies with detection state, so
+// searching the frame that is actually on screen is both simpler and correct.
+// A field occupies its label line plus the value line below it.
+func credentialFieldAtLine(lines []string, y int) (int, bool) {
+	for _, offset := range []int{0, -1} {
+		row := y + offset
+		if row < 0 || row >= len(lines) {
+			continue
+		}
+		for cursor, label := range credentialFieldLabels {
+			// Labels survive styling as plain substrings, so no ANSI stripping.
+			if strings.Contains(lines[row], label) {
+				return cursor, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func renderCredentialField(label, value string, focused bool) string {
@@ -1966,15 +2061,24 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 		renderContextRow := func(idx int, label, modelVal string) {
 			slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[idx]
+			blocked := m.oneMSlotBlocked(modelVal)
 			box := "[ ]"
 			if m.oneMSlots[slotKey] {
 				box = "[x]"
 			}
+			if blocked && !m.oneMSlots[slotKey] {
+				box = "[-]"
+			}
 
-			// Editable slot control: purple label/checkbox when idle, blue when focused.
+			// Editable slot control: purple label/checkbox when idle, blue when
+			// focused, gray when the backend window rules 1M out.
 			prefix := "  "
 			boxStyled := purpleText.Render(box)
 			labelStyled := purpleText.Render(fmt.Sprintf("%-10s", label))
+			if blocked {
+				boxStyled = grayText.Render(box)
+				labelStyled = grayText.Render(fmt.Sprintf("%-10s", label))
+			}
 			if m.cursor == idx {
 				prefix = selectedStyle.Render("> ")
 				boxStyled = selectedStyle.Render(box)
@@ -1992,7 +2096,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 			}
 
 			capLabel := grayText.Render("Standard/unknown")
-			if m.oneMSlots[slotKey] {
+			if blocked {
+				window := m.modelContextWindows[stripOneMSuffix(modelVal)]
+				capLabel = grayText.Render(fmt.Sprintf(locale.T("后端 %s · 无 1M", "backend %s · no 1M"), formatTokenCount(window)))
+			} else if m.oneMSlots[slotKey] {
 				capLabel = lightning
 			} else if recommendedOneMModel(modelVal) {
 				capLabel = availableStyle.Render(locale.T("建议 1M", "1M recommended"))
@@ -2109,7 +2216,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 			}
 			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, label, val))
 		}
-		renderEditable(m.page4CompactCursor(), "Compact", formatCompactLabel(m.compactPreset))
 		if m.maxOutputUpstreamManaged() {
 			// Read-only green: upstream path cannot honor CLAUDE_CODE_MAX_OUTPUT_TOKENS.
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Max Output", availableStyle.Render(locale.T("上游管理", "Upstream managed"))))
@@ -2235,5 +2341,22 @@ func (m *AdvancedConfigModel) View() tea.View {
 	}
 	v := tea.NewView(finalStr)
 	v.AltScreen = true
+	// Mouse reporting is enabled only on the credentials page, where clicking a
+	// field is the natural way to move focus. Everywhere else it stays off so the
+	// terminal keeps its own text selection.
+	if m.page == 0 && !m.usesOAuth() {
+		v.MouseMode = tea.MouseModeCellMotion
+		lines := strings.Split(finalStr, "\n")
+		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
+			if _, ok := msg.(tea.MouseClickMsg); !ok {
+				return nil
+			}
+			cursor, ok := credentialFieldAtLine(lines, msg.Mouse().Y)
+			if !ok {
+				return nil
+			}
+			return func() tea.Msg { return focusCredentialFieldMsg{cursor: cursor} }
+		}
+	}
 	return v
 }

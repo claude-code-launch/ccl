@@ -22,6 +22,12 @@ const (
 	kiroMaxUpstreamErrorBytes  = int64(1 << 20)
 )
 
+// kiroRateLimitBackoff is how long to wait before each retry of a rate-limited
+// request. Kiro answers short bursts with HTTP 429 / USER_REQUEST_RATE_EXCEEDED,
+// which normally clears within seconds, so the turn is retried here instead of
+// being handed straight back to the user.
+var kiroRateLimitBackoff = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+
 type kiroService struct {
 	apiKey       string
 	models       []string
@@ -29,6 +35,8 @@ type kiroService struct {
 	pool         *kiroCredentialPool
 	client       *http.Client
 	upstreamURL  func(*kiroCredential) string
+	// rateLimitBackoff overrides kiroRateLimitBackoff (tests only).
+	rateLimitBackoff []time.Duration
 }
 
 type kiroUpstreamError struct {
@@ -160,6 +168,7 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 	}
 	models, err := s.availableModels(request.Context())
 	if err != nil {
+		Debugf("kiro models discovery failed error=%v", err)
 		writeKiroError(writer, http.StatusBadGateway, "api_error", "Unable to load available models from Kiro: "+err.Error())
 		return
 	}
@@ -271,12 +280,23 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 	}
 	upstream, err := s.callUpstream(request.Context(), converted)
 	if err != nil {
+		// Forward upstream client errors unchanged (status and Anthropic error
+		// type) so Claude Code can apply its own handling: back off on 429,
+		// re-authenticate on 401, shrink the request on 413. Collapsing them all
+		// into 400 made every one of those look like a malformed request.
 		var upstreamErr *kiroUpstreamError
 		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
-			writeKiroError(writer, http.StatusBadRequest, "invalid_request_error", upstreamErr.Error())
-		} else {
-			writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
+			errorType := kiroAnthropicErrorType(upstreamErr.status)
+			Debugf("kiro messages forwarded client error model=%q status=%d type=%s stream=%t",
+				converted.model, upstreamErr.status, errorType, converted.stream)
+			// err, not upstreamErr: the wrapper carries extra context such as a
+			// failed token refresh.
+			writeKiroError(writer, upstreamErr.status, errorType, err.Error())
+			return
 		}
+		// Everything else is a proxy-side or upstream server failure.
+		Debugf("kiro messages failed model=%q stream=%t error=%v", converted.model, converted.stream, err)
+		writeKiroError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer upstream.Body.Close()
@@ -347,7 +367,52 @@ func kiroRequestLimitLabel(maxBytes int64) string {
 	return fmt.Sprintf("%d bytes", maxBytes)
 }
 
+// callUpstream sends the converted request upstream, retrying while the account
+// is rate limited. Every credential is tried before a retry sleeps, so rotating
+// to a second account is always preferred over waiting. Once the backoff budget
+// is spent the 429 is returned to the caller.
 func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConvertedRequest) (*http.Response, error) {
+	backoff := s.rateLimitBackoff
+	if backoff == nil {
+		backoff = kiroRateLimitBackoff
+	}
+	for attempt := 0; ; attempt++ {
+		response, err := s.callUpstreamOnce(ctx, converted)
+		if err == nil {
+			return response, nil
+		}
+		if !isKiroRateLimitError(err) || attempt >= len(backoff) {
+			return nil, err
+		}
+		delay := backoff[attempt]
+		Debugf("kiro upstream rate limited model=%q retry=%d/%d wait=%s", converted.model, attempt+1, len(backoff), delay)
+		if waitErr := sleepContext(ctx, delay); waitErr != nil {
+			// The client gave up: report the rate limit, not the cancellation.
+			return nil, err
+		}
+	}
+}
+
+// isKiroRateLimitError reports whether err is an upstream HTTP 429.
+func isKiroRateLimitError(err error) bool {
+	var upstreamErr *kiroUpstreamError
+	return errors.As(err, &upstreamErr) && upstreamErr.status == http.StatusTooManyRequests
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// callUpstreamOnce tries every selected credential once and returns the first
+// successful response.
+func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConvertedRequest) (*http.Response, error) {
 	credentials, err := s.pool.orderedCredentials()
 	if err != nil {
 		return nil, err
@@ -356,6 +421,7 @@ func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConverted
 		return nil, fmt.Errorf("no usable Kiro credentials")
 	}
 	var lastErr error
+	var rateLimitErr error
 	for _, candidate := range credentials {
 		credential, err := s.pool.usableCredential(ctx, candidate, false)
 		if err != nil {
@@ -390,7 +456,15 @@ func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConverted
 		if response.StatusCode == http.StatusBadRequest {
 			return nil, upstreamErr
 		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			rateLimitErr = upstreamErr
+		}
 		lastErr = upstreamErr
+	}
+	// A rate limit is the retryable outcome, so it wins over whatever the last
+	// credential happened to fail with.
+	if rateLimitErr != nil {
+		return nil, rateLimitErr
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all Kiro credentials failed")
@@ -440,6 +514,26 @@ func (s *kiroService) doUpstreamRequest(ctx context.Context, converted *kiroConv
 	}
 	Debugf("kiro upstream response status=%d model=%q credential=%q", response.StatusCode, converted.model, credential.fileName)
 	return response, nil
+}
+
+// kiroAnthropicErrorType maps an HTTP status onto the error type the Anthropic
+// Messages API uses for it, so a forwarded status stays self-consistent for
+// clients that branch on error.type rather than on the status code.
+func kiroAnthropicErrorType(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	default:
+		return "invalid_request_error"
+	}
 }
 
 func writeKiroError(writer http.ResponseWriter, status int, errorType, message string) {

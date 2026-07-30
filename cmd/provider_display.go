@@ -67,10 +67,23 @@ func subagentMappingDisplay(p provider.Provider) string {
 	return fmt.Sprintf("(auto: %s)", effective)
 }
 
+// backendManagedContextNote marks the compact/context summary of subscription
+// providers, whose limits come from the backend catalog at launch. The stored
+// preset only applies when the backend advertises nothing.
+func backendManagedContextNote(p provider.Provider) string {
+	if strings.TrimSpace(p.OAuthProvider) == "" {
+		return ""
+	}
+	if provider.ContextBudgetIsManual(p) {
+		return " · manual override"
+	}
+	return " · backend-managed (preset is fallback)"
+}
+
 func providerOneMSummary(p provider.Provider) string {
 	state := compactStateFromProvider(p)
 	slots := oneMSlotsFromProvider(p)
-	contextPart := reviewOneMSummary(slots)
+	contextPart := reviewOneMSummary(slots) + backendManagedContextNote(p)
 	if state.legacy {
 		return "legacy 1M · " + contextPart
 	}

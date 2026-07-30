@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	maxContextTokensEnv  = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
-	autoCompactWindowEnv = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+	maxContextTokensEnv  = provider.EnvMaxContextTokens
+	autoCompactWindowEnv = provider.EnvAutoCompactWindow
 	// autoCompactPctEnv is kept only to recognize and clean up configurations
 	// written by ccl versions that used percentage-based compact presets.
 	autoCompactPctEnv = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
@@ -67,26 +67,15 @@ func compactStateFromProvider(p provider.Provider) compactConfigState {
 		pct = strings.TrimSpace(p.Env[autoCompactPctEnv])
 	}
 
-	// Presets are detected only from env values, never from [1m] slots.
-	// Recognize the old percentage-based pairs as the same preset so the next
-	// save transparently migrates them to absolute windows.
+	// Values ccl itself wrote in earlier versions are reported as the default
+	// choice: ccl no longer declares context sizes, so the next save clears them.
+	// Anything else is the user's own and is preserved as Custom.
 	switch {
-	case contextSize == maxContext1M && window == compactWindow1M && pct == "":
-		return compactConfigState{preset: compactPreset1M, context: contextSize, window: window}
-	case contextSize == maxContext500K && window == compactWindow500K && pct == "":
-		return compactConfigState{preset: compactPreset500K, context: contextSize, window: window}
-	case contextSize == maxContext300K && window == compactWindow300K && pct == "":
-		return compactConfigState{preset: compactPreset300K, context: contextSize, window: window}
-	case contextSize == "" && window == legacyCompactWindow1M && pct == legacyCompactPct1M:
-		return compactConfigState{preset: compactPreset1M, window: window, pct: pct}
-	case contextSize == "" && window == legacyCompactWindow500K && pct == legacyCompactPct500K:
-		return compactConfigState{preset: compactPreset500K, window: window, pct: pct}
-	case contextSize == "" && window == legacyCompactWindow200K && pct == legacyCompactPct200K:
-		return compactConfigState{preset: compactPreset300K, window: window, pct: pct}
-	case contextSize == "" && window == legacyCompactWindow1M && pct == "":
-		// Legacy: older ccl wrote window=1M without a percentage.
-		return compactConfigState{preset: compactPresetPreserve, legacy: true, window: window}
 	case contextSize == "" && window == "" && pct == "":
+		return compactConfigState{preset: compactPresetDefault}
+	case provider.IsCclContextPreset(p.Env):
+		// Written by an older ccl version: report the default choice so saving
+		// clears it, and do not surface the stale numbers.
 		return compactConfigState{preset: compactPresetDefault}
 	default:
 		return compactConfigState{preset: compactPresetPreserve, custom: true, context: contextSize, window: window, pct: pct}
@@ -165,36 +154,26 @@ func applyOneMSuffixes(p *provider.Provider, oneMSlots map[string]bool) {
 	}
 }
 
-// applyCompactConfig applies per-slot [1m] markers and the provider-wide
-// fallback context/auto-compact preset independently.
+// applyCompactConfig applies the per-slot [1m] markers and the context sizing
+// choice.
+//
+// ccl no longer writes a context size or an auto-compact threshold: Claude Code
+// sizes a session from the slot's model (its default window, or 1M when the slot
+// carries [1m]) and scales its own compaction buffer to it. A session-wide
+// override cannot express that — with a mixed model pool it is wrong for at least
+// one slot — so every non-custom choice clears those variables. Custom keeps
+// whatever the user put there by hand.
 func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset compactPreset) {
 	applyOneMSuffixes(p, oneMSlots)
 
-	switch preset {
-	case compactPresetPreserve:
+	if preset == compactPresetPreserve {
 		// Keep existing compact env values; only suffixes were normalized.
 		return
-	case compactPreset1M:
-		ensureProviderEnv(p)
-		p.Env[maxContextTokensEnv] = maxContext1M
-		p.Env[autoCompactWindowEnv] = compactWindow1M
+	}
+	if p.Env != nil {
+		delete(p.Env, maxContextTokensEnv)
+		delete(p.Env, autoCompactWindowEnv)
 		delete(p.Env, autoCompactPctEnv)
-	case compactPreset500K:
-		ensureProviderEnv(p)
-		p.Env[maxContextTokensEnv] = maxContext500K
-		p.Env[autoCompactWindowEnv] = compactWindow500K
-		delete(p.Env, autoCompactPctEnv)
-	case compactPreset300K:
-		ensureProviderEnv(p)
-		p.Env[maxContextTokensEnv] = maxContext300K
-		p.Env[autoCompactWindowEnv] = compactWindow300K
-		delete(p.Env, autoCompactPctEnv)
-	case compactPresetDefault:
-		if p.Env != nil {
-			delete(p.Env, maxContextTokensEnv)
-			delete(p.Env, autoCompactWindowEnv)
-			delete(p.Env, autoCompactPctEnv)
-		}
 	}
 	if len(p.Env) == 0 {
 		p.Env = nil
