@@ -332,11 +332,12 @@ func TestPreviewSettingsWithEmbeddedCodexOAuth(t *testing.T) {
 	if settings.FastMode {
 		t.Fatal("FastMode should default off")
 	}
-	if got := settings.Env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]; got != "1000000" {
-		t.Fatalf("GPT OAuth max context = %q, want configured value", got)
-	}
-	if got := settings.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]; got != "900000" {
-		t.Fatalf("GPT OAuth compact window = %q, want configured value", got)
+	// The provider carries a context preset written by an older ccl version; ccl
+	// no longer declares context sizes, so it must not reach the session.
+	for _, key := range []string{"CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_AUTO_COMPACT_WINDOW"} {
+		if got, present := settings.Env[key]; present {
+			t.Fatalf("%s = %q, want it dropped so Claude Code sizes the session", key, got)
+		}
 	}
 	// false must still be present so Claude Code does not keep a prior /fast on.
 	if !strings.Contains(result, `"fastMode": false`) && !strings.Contains(result, `"fastMode":false`) {

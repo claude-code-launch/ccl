@@ -433,7 +433,7 @@ func testProviderWithOldMappings() provider.Provider {
 	}
 }
 
-func TestMapAutoPreservesModernOneMCompactPreset(t *testing.T) {
+func TestMapAutoClearsStaleContextPreset(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
 
@@ -464,12 +464,12 @@ func TestMapAutoPreservesModernOneMCompactPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := updated.Providers["mock"]
-	// Modern Maximum 1M/900K must survive even when [1m] slots are cleaned for unknown models.
-	if p.Env[maxContextTokensEnv] != maxContext1M || p.Env[autoCompactWindowEnv] != compactWindow1M {
-		t.Fatalf("modern 1M/900K preset was rewritten: %+v", p.Env)
-	}
-	if _, ok := p.Env[autoCompactPctEnv]; ok {
-		t.Fatalf("unexpected legacy percentage override: %+v", p.Env)
+	// ccl declares no context size any more, so a preset written by an older
+	// version is cleared and Claude Code sizes the session per slot.
+	for _, key := range []string{maxContextTokensEnv, autoCompactWindowEnv, autoCompactPctEnv} {
+		if value, ok := p.Env[key]; ok {
+			t.Fatalf("stale %s survived map auto: %q", key, value)
+		}
 	}
 }
 

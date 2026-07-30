@@ -60,8 +60,8 @@ const (
 	slotTestCursor        = slotMappingCount
 	slotNextCursor        = slotTestCursor + 1
 	slotBackCursor        = slotNextCursor + 1
-	// Page 2: slots 0..4, compact radios 5..9, Next/Back after.
-	compactRadioCount   = 5
+	// Page 2: slots 0..4, context radios 5..6, Next/Back after.
+	compactRadioCount   = 2
 	oneMCompactStart    = slotMappingCount
 	oneMNextCursor      = oneMCompactStart + compactRadioCount
 	oneMBackCursor      = oneMNextCursor + 1
@@ -69,13 +69,15 @@ const (
 	lowCostProbeModel   = "gpt-5.4-mini"
 )
 
-// compactRadioOrder matches the product mockup Auto Compact radio list.
+// compactRadioOrder is the context sizing choice offered to the user.
+//
+// Claude Code has one default window and a per-slot 1M variant, and it scales its
+// own compaction to whichever a slot uses, so ccl no longer offers intermediate
+// context presets: pick the 1M variant per slot with Extended Context, or keep
+// manual env values.
 var compactRadioOrder = []compactPreset{
 	compactPresetDefault,
-	compactPreset300K,
-	compactPreset500K,
-	compactPreset1M,
-	compactPresetPreserve, // Custom
+	compactPresetPreserve, // Custom (manual env)
 }
 
 type AdvancedConfigModel struct {
@@ -760,9 +762,6 @@ var (
 	reviewSearchOptions  = []string{"", "true", "false"} // Default / On / Off
 	reviewCompactOptions = []compactPreset{
 		compactPresetDefault,
-		compactPreset300K,
-		compactPreset500K,
-		compactPreset1M,
 		compactPresetPreserve,
 	}
 )
@@ -908,6 +907,12 @@ func formatSearchLabel(value string) string {
 }
 
 func formatCompactLabel(preset compactPreset) string {
+	if preset == compactPresetPreserve {
+		return "Custom (manual env)"
+	}
+	if preset == compactPresetDefault {
+		return "Claude default · 1M per slot"
+	}
 	switch preset {
 	case compactPresetDefault:
 		return formatEditableValue("Claude default", false)
@@ -1076,6 +1081,12 @@ func (m *AdvancedConfigModel) selectCompactPreset(radioIdx int) {
 }
 
 func compactRadioLabel(preset compactPreset) string {
+	if preset == compactPresetPreserve {
+		return "Custom — keep the context env set by hand"
+	}
+	if preset == compactPresetDefault {
+		return "Claude Code default — 1M per slot via Extended Context"
+	}
 	switch preset {
 	case compactPresetDefault:
 		return "Claude default"

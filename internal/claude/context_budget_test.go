@@ -9,20 +9,18 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func TestManagedCompactWindowLeavesHeadroom(t *testing.T) {
-	cases := map[int]int{
-		0:         0,
-		272_000:   217_000,
-		400_000:   320_000,
-		1_000_000: 800_000,
-		500:       400,
+func TestContextClassLabel(t *testing.T) {
+	cases := map[int]string{
+		0:         "unknown",
+		128_000:   "200K default",
+		272_000:   "200K default",
+		500_000:   "200K default",
+		900_000:   "1M-class",
+		1_050_000: "1M-class",
 	}
 	for window, want := range cases {
-		if got := ManagedCompactWindow(window); got != want {
-			t.Errorf("ManagedCompactWindow(%d) = %d, want %d", window, got, want)
-		}
-		if window > 0 && ManagedCompactWindow(window) >= window {
-			t.Errorf("ManagedCompactWindow(%d) left no headroom", window)
+		if got := ContextClassLabel(window); got != want {
+			t.Errorf("ContextClassLabel(%d) = %q, want %q", window, got, want)
 		}
 	}
 }
@@ -46,100 +44,118 @@ func codexCatalogServer(t *testing.T, body string) *httptest.Server {
 	return server
 }
 
-func TestResolveManagedContextBudgetUsesSmallestMappedWindow(t *testing.T) {
+func TestAdvertisedContextWindowsPrefersCodexCatalog(t *testing.T) {
 	server := codexCatalogServer(t, `{"models":[
 		{"slug":"gpt-5.6-sol","context_window":272000},
-		{"slug":"gpt-5.6-luna","context_window":128000},
-		{"slug":"unused-model","context_window":16000}
+		{"slug":"big","context_window":1050000}
 	]}`)
 
-	p := provider.Provider{
-		Name:          "gpt-oauth",
-		Type:          "openai_responses",
-		OAuthProvider: "gpt",
-		Endpoint:      server.URL,
-		APIKey:        "session-key",
-		OpusModel:     "gpt-5.6-sol[1m]",
-		HaikuModel:    "gpt-5.6-luna",
+	windows, source := AdvertisedContextWindows(server.URL, "session-key")
+	if source == "" {
+		t.Fatal("no catalog source reported")
 	}
-	budget, ok := ResolveManagedContextBudget(p)
-	if !ok {
-		t.Fatal("expected the backend catalog to manage the context budget")
-	}
-	if budget.Window != 128_000 || budget.Model != "gpt-5.6-luna" {
-		t.Fatalf("budget = %+v, want the smallest mapped window", budget)
-	}
-	if budget.CompactWindow != ManagedCompactWindow(128_000) {
-		t.Fatalf("compact window = %d", budget.CompactWindow)
-	}
-	if budget.Source == "" {
-		t.Fatal("budget source is empty")
+	if windows["gpt-5.6-sol"] != 272_000 || windows["big"] != 1_050_000 {
+		t.Fatalf("windows = %#v", windows)
 	}
 }
 
-func TestResolveManagedContextBudgetSkipsNonOAuthProviders(t *testing.T) {
-	server := codexCatalogServer(t, `{"models":[{"slug":"gpt-5.6-sol","context_window":272000}]}`)
-	p := provider.Provider{
-		Name:      "api-key",
-		Type:      "openai",
-		Endpoint:  server.URL,
-		APIKey:    "sk-test",
-		OpusModel: "gpt-5.6-sol",
+func TestMappedContextClassesDiffer(t *testing.T) {
+	p := provider.Provider{OpusModel: "big[1m]", HaikuModel: "small"}
+	windows := map[string]int{"big": 1_050_000, "small": 272_000}
+	if !MappedContextClassesDiffer(p, windows) {
+		t.Error("1M-class plus 200K-class must be reported as mixed")
 	}
-	if _, ok := ResolveManagedContextBudget(p); ok {
-		t.Fatal("API-key providers must keep the user's preset")
+	if MappedContextClassesDiffer(p, map[string]int{"big": 1_050_000}) {
+		t.Error("a single known window is not a mixed pool")
 	}
-}
-
-func TestResolveManagedContextBudgetIgnoresUnmappedModels(t *testing.T) {
-	server := codexCatalogServer(t, `{"models":[{"slug":"some-other-model","context_window":272000}]}`)
-	p := provider.Provider{
-		OAuthProvider: "gpt",
-		Endpoint:      server.URL,
-		APIKey:        "session-key",
-		OpusModel:     "gpt-5.6-sol",
-	}
-	if _, ok := ResolveManagedContextBudget(p); ok {
-		t.Fatal("a catalog without the mapped model must not produce a budget")
+	if MappedContextClassesDiffer(p, nil) {
+		t.Error("no catalog means nothing to compare")
 	}
 }
 
-func TestApplyManagedContextBudgetOutranksStoredPreset(t *testing.T) {
+func TestApplyContextPolicyDropsCclPresets(t *testing.T) {
+	presets := []map[string]string{
+		{provider.EnvMaxContextTokens: "1000000", provider.EnvAutoCompactWindow: "900000"},
+		{provider.EnvMaxContextTokens: "500000", provider.EnvAutoCompactWindow: "400000"},
+		{provider.EnvMaxContextTokens: "300000", provider.EnvAutoCompactWindow: "200000"},
+		{provider.EnvAutoCompactWindow: "1000000", provider.EnvAutoCompactPct: "90"},
+		{provider.EnvAutoCompactWindow: "1000000"},
+	}
+	for _, preset := range presets {
+		env := map[string]string{"KEEP": "yes"}
+		for key, value := range preset {
+			env[key] = value
+		}
+		if !applyContextPolicy(env, provider.Provider{Name: "p"}) {
+			t.Fatalf("preset %#v was not recognized", preset)
+		}
+		for _, key := range provider.ManagedContextEnvKeys() {
+			if _, present := env[key]; present {
+				t.Errorf("preset %#v left %s behind", preset, key)
+			}
+		}
+		if env["KEEP"] != "yes" {
+			t.Errorf("preset %#v removed unrelated env", preset)
+		}
+	}
+}
+
+func TestApplyContextPolicyKeepsDeliberateValues(t *testing.T) {
+	// Not one of the presets ccl used to write, so it is the user's own number.
 	env := map[string]string{
+		provider.EnvMaxContextTokens:  "1050000",
+		provider.EnvAutoCompactWindow: "840000",
+	}
+	if applyContextPolicy(env, provider.Provider{Name: "p"}) {
+		t.Fatal("a custom value must not be treated as a ccl preset")
+	}
+	if env[provider.EnvMaxContextTokens] != "1050000" || env[provider.EnvAutoCompactWindow] != "840000" {
+		t.Fatalf("custom values were modified: %#v", env)
+	}
+
+	// Manual mode protects even a value that looks like an old preset.
+	manual := map[string]string{
+		provider.EnvContextBudgetMode: provider.ContextBudgetManual,
 		provider.EnvMaxContextTokens:  "1000000",
 		provider.EnvAutoCompactWindow: "900000",
 	}
-	applyManagedContextBudget(env, ManagedContextBudget{Window: 272_000, CompactWindow: 217_000})
-	if env[provider.EnvMaxContextTokens] != "272000" {
-		t.Errorf("max context = %q, want 272000", env[provider.EnvMaxContextTokens])
+	p := provider.Provider{Name: "p", Env: manual}
+	if applyContextPolicy(manual, p) {
+		t.Fatal("manual mode must keep the configured values")
 	}
-	if env[provider.EnvAutoCompactWindow] != "217000" {
-		t.Errorf("compact window = %q, want 217000", env[provider.EnvAutoCompactWindow])
-	}
-
-	// An empty budget must leave a configured preset alone.
-	kept := map[string]string{provider.EnvMaxContextTokens: "500000"}
-	applyManagedContextBudget(kept, ManagedContextBudget{})
-	if kept[provider.EnvMaxContextTokens] != "500000" {
-		t.Errorf("preset was overwritten without a managed window: %q", kept[provider.EnvMaxContextTokens])
+	if manual[provider.EnvMaxContextTokens] != "1000000" {
+		t.Fatalf("manual values were dropped: %#v", manual)
 	}
 }
 
-func TestResolveManagedContextBudgetHonorsManualOverride(t *testing.T) {
-	server := codexCatalogServer(t, `{"models":[{"slug":"gpt-5.6-sol","context_window":272000}]}`)
-	p := provider.Provider{
-		OAuthProvider: "gpt",
-		Endpoint:      server.URL,
-		APIKey:        "session-key",
-		OpusModel:     "gpt-5.6-sol",
-		Env: map[string]string{
-			provider.EnvContextBudgetMode: provider.ContextBudgetManual,
-			provider.EnvMaxContextTokens:  "1050000",
-			provider.EnvAutoCompactWindow: "840000",
+func TestSettingsDoNotDeclareContextByDefault(t *testing.T) {
+	// A provider carrying an old ccl preset must produce a session without any
+	// context env, so Claude Code sizes each slot itself.
+	ctx := &providerContext{
+		provider: provider.Provider{
+			Name:      "gpt-oauth",
+			Type:      "openai_responses",
+			APIKey:    "session-key",
+			OpusModel: "gpt-5.6-sol[1m]",
+			Env: map[string]string{
+				provider.EnvMaxContextTokens:  "1000000",
+				provider.EnvAutoCompactWindow: "900000",
+			},
 		},
+		baseURL: "http://127.0.0.1:1234",
 	}
-	if _, ok := ResolveManagedContextBudget(p); ok {
-		t.Fatal("manual mode must keep the configured window, even above the advertised one")
+	settings := ctx.settings()
+	for _, key := range provider.ManagedContextEnvKeys() {
+		if value, present := settings.Env[key]; present {
+			t.Errorf("%s = %q, want it absent from the settings file", key, value)
+		}
+	}
+	if !ctx.droppedContextPreset {
+		t.Error("dropping the preset was not recorded for the log")
+	}
+	// The [1m] marker is the sizing signal and must survive.
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "gpt-5.6-sol[1m]" {
+		t.Errorf("opus model = %q, want the [1m] marker preserved", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
 }
 
@@ -160,46 +176,6 @@ func TestBuildEnvDropsCclDirectives(t *testing.T) {
 	}
 	if env[provider.EnvMaxContextTokens] != "1050000" {
 		t.Errorf("configured context override was lost: %q", env[provider.EnvMaxContextTokens])
-	}
-}
-
-func TestDeclaredContextWindowSticksToSupportedSizes(t *testing.T) {
-	cases := map[int]int{
-		0:         0,
-		128_000:   128_000, // at or below the default: declared as-is
-		200_000:   200_000,
-		272_000:   200_000, // in between: Claude Code's default is the safe size
-		500_000:   200_000, // the grok-4.5 case
-		900_000:   900_000, // 1M-class
-		1_050_000: 1_050_000,
-	}
-	for advertised, want := range cases {
-		if got := DeclaredContextWindow(advertised); got != want {
-			t.Errorf("DeclaredContextWindow(%d) = %d, want %d", advertised, got, want)
-		}
-	}
-}
-
-func TestResolveManagedContextBudgetDeclaresSupportedWindow(t *testing.T) {
-	server := codexCatalogServer(t, `{"models":[{"slug":"grok-4.5","context_window":500000}]}`)
-	p := provider.Provider{
-		OAuthProvider: "grok",
-		Endpoint:      server.URL,
-		APIKey:        "session-key",
-		OpusModel:     "grok-4.5",
-	}
-	budget, ok := ResolveManagedContextBudget(p)
-	if !ok {
-		t.Fatal("expected a managed budget")
-	}
-	if budget.Advertised != 500_000 {
-		t.Errorf("advertised = %d, want 500000", budget.Advertised)
-	}
-	if budget.Window != 200_000 {
-		t.Errorf("declared window = %d, want the 200K default", budget.Window)
-	}
-	if budget.CompactWindow != ManagedCompactWindow(200_000) {
-		t.Errorf("compact window = %d, want it derived from the declared window", budget.CompactWindow)
 	}
 }
 
@@ -237,85 +213,5 @@ func TestBuildProcessEnvUntouchedWithoutManagedVars(t *testing.T) {
 	env := buildProcessEnv(inherited, settingsJSON{Env: map[string]string{}}, false)
 	if len(env) != 1 || env[0] != "PATH=/usr/bin" {
 		t.Fatalf("env = %#v, want the inherited slice unchanged", env)
-	}
-}
-
-func TestResolveManagedContextBudgetStepsAsideForMixedPools(t *testing.T) {
-	server := codexCatalogServer(t, `{"models":[
-		{"slug":"big-model","context_window":1050000},
-		{"slug":"small-model","context_window":272000}
-	]}`)
-	p := provider.Provider{
-		OAuthProvider: "gpt",
-		Endpoint:      server.URL,
-		APIKey:        "session-key",
-		OpusModel:     "big-model[1m]",
-		HaikuModel:    "small-model",
-	}
-	budget, ok := ResolveManagedContextBudget(p)
-	if !ok {
-		t.Fatal("expected a budget describing the mixed pool")
-	}
-	if !budget.Mixed {
-		t.Fatalf("budget = %+v, want Mixed for a 1M-class plus 200K-class pool", budget)
-	}
-	if budget.Window != 0 || budget.CompactWindow != 0 {
-		t.Fatalf("budget declares %d/%d, want nothing for a mixed pool", budget.Window, budget.CompactWindow)
-	}
-
-	// A stale global preset must be removed, otherwise it would apply to the
-	// small model as well.
-	env := map[string]string{
-		provider.EnvMaxContextTokens:  "1000000",
-		provider.EnvAutoCompactWindow: "900000",
-		"UNRELATED":                   "keep",
-	}
-	applyManagedContextBudget(env, budget)
-	if _, present := env[provider.EnvMaxContextTokens]; present {
-		t.Error("max context override survived a mixed pool")
-	}
-	if _, present := env[provider.EnvAutoCompactWindow]; present {
-		t.Error("compact window override survived a mixed pool")
-	}
-	if env["UNRELATED"] != "keep" {
-		t.Error("unrelated env was dropped")
-	}
-}
-
-func TestResolveManagedContextBudgetKeepsSingleClassPools(t *testing.T) {
-	server := codexCatalogServer(t, `{"models":[
-		{"slug":"big-a","context_window":1050000},
-		{"slug":"big-b","context_window":1000000}
-	]}`)
-	p := provider.Provider{
-		OAuthProvider: "gpt",
-		Endpoint:      server.URL,
-		APIKey:        "session-key",
-		OpusModel:     "big-a[1m]",
-		SonnetModel:   "big-b[1m]",
-	}
-	budget, ok := ResolveManagedContextBudget(p)
-	if !ok {
-		t.Fatal("expected a managed budget")
-	}
-	if budget.Mixed {
-		t.Fatal("both models are 1M-class, so the pool is not mixed")
-	}
-	if budget.Window != 1_000_000 {
-		t.Fatalf("declared window = %d, want the smallest 1M-class window", budget.Window)
-	}
-}
-
-func TestMappedContextClassesDiffer(t *testing.T) {
-	p := provider.Provider{OpusModel: "big[1m]", HaikuModel: "small"}
-	windows := map[string]int{"big": 1_050_000, "small": 272_000}
-	if !MappedContextClassesDiffer(p, windows) {
-		t.Error("1M-class plus 200K-class must be reported as mixed")
-	}
-	if MappedContextClassesDiffer(p, map[string]int{"big": 1_050_000}) {
-		t.Error("a single known window is not a mixed pool")
-	}
-	if MappedContextClassesDiffer(p, nil) {
-		t.Error("no catalog means nothing to compare")
 	}
 }

@@ -490,8 +490,11 @@ func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
 	if !strings.Contains(view, "Extended Context") || !strings.Contains(view, "Auto Compact") {
 		t.Fatalf("expected split Extended Context / Auto Compact sections, got %q", view)
 	}
-	if !strings.Contains(view, "Balanced") || !strings.Contains(view, "500K") {
-		t.Fatalf("expected Balanced 500K radio option, got %q", view)
+	// Only two sizings exist, so no intermediate presets may be offered.
+	for _, removed := range []string{"Balanced", "500K", "300K", "Switch-safe", "Maximum depth"} {
+		if strings.Contains(view, removed) {
+			t.Fatalf("context page still offers the removed preset %q: %q", removed, view)
+		}
 	}
 	if !strings.Contains(view, "1M recommended") {
 		t.Fatalf("expected per-slot 1M recommendation badges, got %q", view)
@@ -532,29 +535,23 @@ func TestCompactPresetRadioSelectsClaudeDefault(t *testing.T) {
 		t.Fatalf("compact summary = %q", got)
 	}
 
-	// Selecting Balanced should keep 1M slots.
-	m.cursor = oneMCompactStart + 2
+	// Selecting Custom keeps the [1m] slots and hands the env back to the user.
+	m.cursor = oneMCompactStart + 1
 	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
-	if m.compactPreset != compactPreset500K {
-		t.Fatalf("compact preset = %v, want Balanced 500K", m.compactPreset)
+	if m.compactPreset != compactPresetPreserve {
+		t.Fatalf("compact preset = %v, want Custom", m.compactPreset)
 	}
 	if !m.oneMSlots["opus"] {
-		t.Fatal("selecting Balanced must not clear [1m] slots")
+		t.Fatal("selecting Custom must not clear [1m] slots")
 	}
 	view := m.View().Content
 	for _, expected := range []string{
-		"Extended Context", "Auto Compact", "Claude default", "Custom", "(●)",
-		"Switch-safe", "300K / 200K",
-		"Balanced", "500K / 400K",
-		"Maximum depth", "1M / 900K",
+		"Extended Context", "Auto Compact", "Claude Code default", "Custom", "(●)",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("page2 view missing %q: %s", expected, view)
 		}
-	}
-	if strings.Contains(view, "%") {
-		t.Fatalf("page2 compact presets must use absolute windows, got %q", view)
 	}
 }
 
@@ -603,7 +600,7 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "(auto: subagent-model)") {
 		t.Fatalf("1M page does not show Subagent: %q", view)
 	}
-	for _, expected := range []string{"Extended Context", "Auto Compact", "Claude default", "Balanced"} {
+	for _, expected := range []string{"Extended Context", "Auto Compact", "Claude Code default", "Custom"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("1M page missing %q: %q", expected, view)
 		}
@@ -624,11 +621,11 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	if p.SubagentModel != "subagent-model[1m]" {
 		t.Fatalf("subagent model = %q, want 1M suffix", p.SubagentModel)
 	}
-	if p.Env[maxContextTokensEnv] != "1000000" {
-		t.Fatalf("max context tokens = %q", p.Env[maxContextTokensEnv])
-	}
-	if p.Env[autoCompactWindowEnv] != "900000" {
-		t.Fatalf("auto compact window = %q", p.Env[autoCompactWindowEnv])
+	// Enabling 1M is expressed by the [1m] marker alone; ccl writes no context env.
+	for _, key := range []string{maxContextTokensEnv, autoCompactWindowEnv} {
+		if value, ok := p.Env[key]; ok {
+			t.Fatalf("%s = %q, want it unset", key, value)
+		}
 	}
 }
 

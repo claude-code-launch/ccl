@@ -220,113 +220,84 @@ func runDoctor(ctx context.Context) error {
 	return nil
 }
 
-// doctorModelContextWindows collects the context window each mapped model
-// advertises. Subscription runtimes only expose windows through the Codex client
-// catalog, so that shape is tried first and the plain OpenAI list second.
-// printDoctorContextBudget reports the context limits the session will run with
-// and where they came from.
+// printDoctorContextBudget reports how this session will be sized.
 //
-// A compact threshold above the real window is silently broken: Claude Code keeps
-// growing the conversation and the upstream rejects the request with
-// context_length_exceeded (surfaced as HTTP 400) before auto-compact ever runs.
-// For subscription providers ccl now derives the limits from the backend catalog,
-// so this section mainly shows which numbers won.
+// ccl declares no context size: Claude Code uses its 200K default, or a 1M-class
+// window for slots carrying the [1m] marker, and scales its own compaction to
+// whichever applies. So this section shows the per-slot sizing, the window each
+// model advertises, and flags the two ways that can go wrong: a [1m] marker on a
+// model whose backend window is far smaller, and leftover manual overrides.
 //
 // runtimeProvider carries the live endpoint/key of the embedded runtime;
-// configured carries the user's ccl config, which owns the compact env.
+// configured carries the user's ccl config.
 func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	doctorSection("Context budget")
 
 	maxContext := parseDoctorTokenEnv(configured.Env[maxContextTokensEnv])
 	compactWindow := parseDoctorTokenEnv(configured.Env[autoCompactWindowEnv])
+	compactPct := strings.TrimSpace(configured.Env[provider.EnvAutoCompactPct])
+	overridden := maxContext > 0 || compactWindow > 0 || compactPct != ""
 	windows, source := claude.AdvertisedContextWindows(runtimeProvider.Endpoint, runtimeProvider.APIKey)
 	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
-	manual := provider.ContextBudgetIsManual(configured)
-	managed := strings.TrimSpace(configured.OAuthProvider) != "" && smallest > 0 && !manual
 
-	oauthproxy.Debugf("doctor context budget provider=%q configured_max_context=%d configured_compact=%d catalog=%q models=%d smallest=%d smallest_model=%q managed=%t",
-		configured.Name, maxContext, compactWindow, source, len(windows), smallest, smallestModel, managed)
+	oauthproxy.Debugf("doctor context budget provider=%q max_context=%d compact_window=%d compact_pct=%q manual=%t catalog=%q models=%d smallest=%d smallest_model=%q",
+		configured.Name, maxContext, compactWindow, compactPct,
+		provider.ContextBudgetIsManual(configured), source, len(windows), smallest, smallestModel)
 
-	mixed := managed && claude.MappedContextClassesDiffer(configured, windows)
-	doctorKV("Mode", contextBudgetModeLabel(configured, managed))
-	switch {
-	case mixed:
-		doctorKV("Managed by", source+" (subscription backend)")
-		doctorKV("Assumed context", "per model (no ccl override)")
-		doctorKV("Auto-compact at", "Claude Code default for each model")
-	case managed:
-		// The launcher overrides the stored preset with these values.
-		declared := claude.DeclaredContextWindow(smallest)
-		doctorKV("Managed by", source+" (subscription backend)")
-		doctorKV("Advertised", formatTokenCount(smallest)+" from "+smallestModel)
-		doctorKV("Assumed context", formatTokenCount(declared))
-		doctorKV("Auto-compact at", formatTokenCount(claude.ManagedCompactWindow(declared)))
-		if declared < smallest {
-			doctorInfo("Claude Code sizes sessions for its 200K default or a 1M-class window, so an in-between window is declared as 200K")
-		}
-	default:
+	oneMSlots := oneMSlotsFromProvider(configured)
+	if overridden {
+		doctorKV("Sizing", "manual override in provider env")
 		doctorKV("Assumed context", doctorTokenLabel(maxContext, "Claude Code default"))
 		doctorKV("Auto-compact at", doctorTokenLabel(compactWindow, "Claude Code default"))
-	}
-	if len(windows) == 0 {
-		doctorInfo("Backend does not advertise context windows; ccl uses the configured preset")
-		return
-	}
-	if !managed {
-		doctorKV("Window source", source)
+		if compactPct != "" {
+			doctorKV("Auto-compact pct", compactPct+"%")
+		}
+	} else {
+		doctorKV("Sizing", "per slot (Claude Code decides; ccl sets no context env)")
+		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
 	}
 
+	// Per-slot sizing is what actually applies, whether or not a catalog is
+	// available: the [1m] marker is the only per-model signal.
 	for _, slot := range provider.SlotModels(configured) {
-		if window, ok := windows[strings.ToLower(slot.Model)]; ok && window > 0 {
-			doctorKV(slot.Slot+" window", fmt.Sprintf("%s (%s)", formatTokenCount(window), slot.Model))
+		sizing := "200K default"
+		if oneMSlots[slot.Slot] {
+			sizing = "1M ([1m])"
 		}
+		advertised := "backend window unknown"
+		if window, ok := windows[strings.ToLower(slot.Model)]; ok && window > 0 {
+			advertised = "backend " + formatTokenCount(window) + ", " + claude.ContextClassLabel(window)
+		}
+		doctorKV(slot.Slot, fmt.Sprintf("%s · %s · %s", slot.Model, sizing, advertised))
 	}
+	if len(windows) == 0 {
+		doctorInfo("Backend does not advertise context windows, so [1m] markers cannot be verified here")
+		return
+	}
+	doctorKV("Window source", source)
 	if unknown > 0 {
 		doctorInfo(fmt.Sprintf("%d mapped model(s) are absent from the catalog; their window is unknown", unknown))
 	}
-	printDoctorOneMConsistency(configured, windows)
-	if smallest == 0 {
-		return
-	}
-	if mixed {
-		doctorWarn("Mapped models span different context classes (200K-class and 1M-class)")
-		doctorHint("The context env is session-wide, so ccl declares nothing: each model keeps Claude Code's own sizing, driven per slot by [1m]")
-		doctorHint("For one global budget per class, split the pool into separate providers (they can share the same OAuth credentials)")
-		return
-	}
-	if managed {
-		doctorOK("Context and compact settings follow the backend; the ccl preset is the fallback")
-		if maxContext > smallest {
-			doctorInfo(fmt.Sprintf("Stored preset (%s) is larger than the advertised window and is ignored",
-				formatTokenCount(maxContext)))
-		}
-		doctorHint(fmt.Sprintf("The advertised window can be a catalog cap rather than the server limit; to aim higher set %s=%s in the provider env",
-			provider.EnvContextBudgetMode, provider.ContextBudgetManual))
-		return
-	}
-	if manual && strings.TrimSpace(configured.OAuthProvider) != "" {
-		doctorWarn(fmt.Sprintf("%s=%s: the configured limits are used as-is and are not checked against the backend",
-			provider.EnvContextBudgetMode, provider.ContextBudgetManual))
-		if smallest > 0 && maxContext > smallest {
-			doctorHint(fmt.Sprintf("Backend advertises %s for %s; if requests fail with context_length_exceeded, that is the real ceiling",
-				formatTokenCount(smallest), smallestModel))
-		}
-	}
 
-	threshold, thresholdLabel := effectiveCompactThreshold(maxContext, compactWindow)
-	if threshold == 0 {
-		doctorOK(fmt.Sprintf("No ccl context override; Claude Code follows the advertised window (smallest %s)", formatTokenCount(smallest)))
+	printDoctorOneMConsistency(configured, windows)
+	if claude.MappedContextClassesDiffer(configured, windows) {
+		doctorInfo("Mapped models span both context classes; that is fine because sizing is per slot, but one global override would not be")
+	}
+	if !overridden {
+		doctorOK("No ccl context override; each slot keeps the sizing Claude Code computes for it")
 		return
 	}
-	if threshold > smallest {
-		doctorErr(fmt.Sprintf("The %s (%s) is above the %s window of %s",
-			thresholdLabel, formatTokenCount(threshold), smallestModel, formatTokenCount(smallest)))
-		doctorHint("Requests are rejected with context_length_exceeded (HTTP 400) before Claude Code auto-compacts")
-		doctorHint("Run `ccl set` → Compact and pick a preset at or below the advertised window")
-		return
+	if smallest > 0 && maxContext > smallest {
+		doctorWarn(fmt.Sprintf("Manual context override %s exceeds the %s window of %s",
+			formatTokenCount(maxContext), smallestModel, formatTokenCount(smallest)))
+		doctorHint("Requests can be rejected with context_length_exceeded (HTTP 400) before Claude Code auto-compacts")
 	}
-	doctorOK(fmt.Sprintf("Compact threshold %s fits the smallest mapped window %s",
-		formatTokenCount(threshold), formatTokenCount(smallest)))
+	if provider.ContextBudgetIsManual(configured) {
+		doctorHint(fmt.Sprintf("%s=%s keeps these values as-is; remove them to let Claude Code size the session",
+			provider.EnvContextBudgetMode, provider.ContextBudgetManual))
+	} else {
+		doctorHint("These values were set manually; ccl keeps them but no longer writes context env itself")
+	}
 }
 
 // printDoctorOneMConsistency checks the [1m] markers against the advertised

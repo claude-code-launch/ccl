@@ -369,9 +369,9 @@ type providerContext struct {
 	baseURL  string
 	useProxy bool
 	oauth    *oauthproxy.Runtime
-	// managedContext holds the context sizing the subscription backend advertises;
-	// zero Window means the configured preset stays in charge.
-	managedContext ManagedContextBudget
+	// droppedContextPreset records that a context preset from an older ccl version
+	// was removed from this session's env.
+	droppedContextPreset bool
 }
 
 // setupProvider starts a proxy if needed and resolves the final model list.
@@ -429,11 +429,6 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 		ctx.cleanup()
 		return nil, err
 	}
-	// Slots are final here, so the advertised window can be resolved for exactly
-	// the models this session will use.
-	if budget, ok := ResolveManagedContextBudget(ctx.provider); ok {
-		ctx.managedContext = budget
-	}
 	return ctx, nil
 }
 
@@ -484,9 +479,9 @@ func (c *providerContext) cleanup() {
 
 func (c *providerContext) settings() settingsJSON {
 	env := buildEnv(c.provider, c.baseURL, c.useProxy)
-	// Applied after the provider Env overrides: for subscription backends the live
-	// catalog outranks a preset the user stored earlier.
-	applyManagedContextBudget(env, c.managedContext)
+	// Applied after the provider Env overrides: a preset an older ccl stored must
+	// not survive into a session Claude Code should size itself.
+	c.droppedContextPreset = applyContextPolicy(env, c.provider)
 	return settingsJSON{
 		Env:                    env,
 		HasCompletedOnboarding: true,
@@ -545,7 +540,7 @@ func Run(p provider.Provider, args []string) error {
 		return fmt.Errorf("create settings file: %w", err)
 	}
 	defer os.Remove(settingsPath)
-	logSessionContextBudget(p, sessionSettings, ctx.managedContext)
+	logSessionContextBudget(p, sessionSettings, ctx.droppedContextPreset)
 
 	fmt.Println("Using provider-specific claude config:", settingsPath)
 
@@ -594,23 +589,30 @@ func Run(p provider.Provider, args []string) error {
 // told it could grow further than the backend allows, and nothing else records
 // which numbers were in effect. Compare these against `ccl doctor` →
 // "Context budget", which reads the window the backend advertises.
-func logSessionContextBudget(p provider.Provider, settings settingsJSON, budget ManagedContextBudget) {
+func logSessionContextBudget(p provider.Provider, settings settingsJSON, droppedPreset bool) {
 	if !oauthproxy.DebugEnabled() {
 		return
 	}
-	slots := provider.SlotModels(p)
-	mapped := make([]string, 0, len(slots))
-	for _, slot := range slots {
-		mapped = append(mapped, slot.Slot+"="+slot.Model)
+	// The [1m] suffix is what decides the session sizing, so log the raw slot
+	// values rather than the stripped model ids.
+	mapped := make([]string, 0, 5)
+	for _, slot := range []struct{ name, model string }{
+		{"opus", p.OpusModel},
+		{"sonnet", p.SonnetModel},
+		{"haiku", p.HaikuModel},
+		{"custom", p.CustomModelID},
+		{"subagent", p.SubagentModel},
+	} {
+		if strings.TrimSpace(slot.model) != "" {
+			mapped = append(mapped, slot.name+"="+slot.model)
+		}
 	}
-	oauthproxy.Debugf("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q auto_compact_pct=%q advertised_window=%d declared_window=%d managed_from=%q catalog=%q configured_max_context=%q configured_compact=%q effort=%q max_output=%q slots=[%s]",
+	oauthproxy.Debugf("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q auto_compact_pct=%q dropped_ccl_preset=%t manual=%t effort=%q max_output=%q slots=[%s]",
 		p.Name, p.OAuthProvider,
 		settings.Env[provider.EnvMaxContextTokens],
 		settings.Env[provider.EnvAutoCompactWindow],
 		settings.Env[provider.EnvAutoCompactPct],
-		budget.Advertised, budget.Window, budget.Model, budget.Source,
-		p.Env[provider.EnvMaxContextTokens],
-		p.Env[provider.EnvAutoCompactWindow],
+		droppedPreset, provider.ContextBudgetIsManual(p),
 		settings.Env["CLAUDE_CODE_EFFORT_LEVEL"],
 		settings.Env[MaxOutputTokensEnv],
 		strings.Join(mapped, " "))
