@@ -198,3 +198,79 @@ func TestReviewFitsCommonTerminalHeights(t *testing.T) {
 		}
 	}
 }
+
+func TestPage2BlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
+	p := provider.Provider{
+		Type:        "openai_responses",
+		Endpoint:    "https://example.test/v1",
+		OpusModel:   "small-window",
+		SonnetModel: "big-window",
+		HaikuModel:  "unknown-window",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 2
+	m.modelContextWindows = map[string]int{
+		"small-window": 272_000,
+		"big-window":   1_050_000,
+	}
+
+	view := m.View().Content
+	if !strings.Contains(view, "backend 272K") || !strings.Contains(view, "no 1M") {
+		t.Fatalf("expected the Opus row to explain why 1M is unavailable: %q", view)
+	}
+
+	// Opus: 1M must not be selectable.
+	m.cursor = 0
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.oneMSlots["opus"] {
+		t.Fatal("1M was enabled for a model whose backend window is 272K")
+	}
+
+	// Sonnet: a 1M-class window stays selectable.
+	m.cursor = 1
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.oneMSlots["sonnet"] {
+		t.Fatal("1M must remain selectable for a 1M-class model")
+	}
+
+	// Unknown window: the catalog is advisory, so keep it editable.
+	m.cursor = 2
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.oneMSlots["haiku"] {
+		t.Fatal("1M must stay editable when the window is unknown")
+	}
+
+	// An existing marker on a blocked slot can still be cleared.
+	m.oneMSlots["opus"] = true
+	m.cursor = 0
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.oneMSlots["opus"] {
+		t.Fatal("a stale [1m] marker on a blocked slot must be removable")
+	}
+}
+
+func TestPage2DefaultsToClaudeAutoCompact(t *testing.T) {
+	// A provider carrying the old Switch-safe preset must open on Claude default,
+	// because ccl no longer writes context env at all.
+	p := provider.Provider{
+		Type:     "openai_responses",
+		Endpoint: "https://example.test/v1",
+		Env: map[string]string{
+			maxContextTokensEnv:  maxContext300K,
+			autoCompactWindowEnv: compactWindow300K,
+		},
+	}
+	m := NewAdvancedConfigModel(&p)
+	if m.compactPreset != compactPresetDefault {
+		t.Fatalf("compact preset = %v, want Claude default", m.compactPreset)
+	}
+	m.page = 2
+	view := m.View().Content
+	if !strings.Contains(view, "(●)") || !strings.Contains(view, "Claude Code default") {
+		t.Fatalf("Auto Compact should default to Claude Code default: %q", view)
+	}
+}

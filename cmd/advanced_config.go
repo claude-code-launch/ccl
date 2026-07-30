@@ -683,6 +683,26 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 //	purple      = editable values, always wrapped as ‹ value ›
 //	blue        = current focus / primary action
 //	yellow      = [1M] badges
+//
+// oneMSlotBlocked reports that the backend advertises a window well below 1M for
+// this slot's model, so the 1M variant must not be offered: it would only make
+// Claude Code size the session (and its compaction) for a window the backend
+// does not have, and the request is rejected before compaction runs.
+//
+// Unknown windows stay editable — the catalog is advisory and often absent.
+func (m *AdvancedConfigModel) oneMSlotBlocked(modelVal string) bool {
+	window, ok := m.modelContextWindows[stripOneMSuffix(modelVal)]
+	return ok && window > 0 && !protocol.ContextWindowSuggests1M(window)
+}
+
+// slotModelForIndex returns the model configured in the page-2 row order.
+func (m *AdvancedConfigModel) slotModelForIndex(idx int) string {
+	if m.p == nil || idx < 0 || idx >= slotMappingCount {
+		return ""
+	}
+	return []string{m.p.OpusModel, m.p.SonnetModel, m.p.HaikuModel, m.p.CustomModelID, m.p.SubagentModel}[idx]
+}
+
 func (m *AdvancedConfigModel) canEditFastMode() bool {
 	return m.p != nil && supportsFastMode(m.p.OAuthProvider)
 }
@@ -1605,6 +1625,12 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < slotMappingCount {
 					// Extended context only — compact preset is independent.
 					slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.cursor]
+					// Turning 1M on is refused when the backend window rules it out;
+					// turning an existing marker off stays possible.
+					if !m.oneMSlots[slot] && m.oneMSlotBlocked(m.slotModelForIndex(m.cursor)) {
+						setDebugf("page2 one_m blocked slot=%s model=%q", slot, m.slotModelForIndex(m.cursor))
+						return m, nil
+					}
 					if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
 						return m, nil
 					}
@@ -1988,15 +2014,24 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 		renderContextRow := func(idx int, label, modelVal string) {
 			slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[idx]
+			blocked := m.oneMSlotBlocked(modelVal)
 			box := "[ ]"
 			if m.oneMSlots[slotKey] {
 				box = "[x]"
 			}
+			if blocked && !m.oneMSlots[slotKey] {
+				box = "[-]"
+			}
 
-			// Editable slot control: purple label/checkbox when idle, blue when focused.
+			// Editable slot control: purple label/checkbox when idle, blue when
+			// focused, gray when the backend window rules 1M out.
 			prefix := "  "
 			boxStyled := purpleText.Render(box)
 			labelStyled := purpleText.Render(fmt.Sprintf("%-10s", label))
+			if blocked {
+				boxStyled = grayText.Render(box)
+				labelStyled = grayText.Render(fmt.Sprintf("%-10s", label))
+			}
 			if m.cursor == idx {
 				prefix = selectedStyle.Render("> ")
 				boxStyled = selectedStyle.Render(box)
@@ -2014,7 +2049,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 			}
 
 			capLabel := grayText.Render("Standard/unknown")
-			if m.oneMSlots[slotKey] {
+			if blocked {
+				window := m.modelContextWindows[stripOneMSuffix(modelVal)]
+				capLabel = grayText.Render(fmt.Sprintf(locale.T("后端 %s · 无 1M", "backend %s · no 1M"), formatTokenCount(window)))
+			} else if m.oneMSlots[slotKey] {
 				capLabel = lightning
 			} else if recommendedOneMModel(modelVal) {
 				capLabel = availableStyle.Render(locale.T("建议 1M", "1M recommended"))
