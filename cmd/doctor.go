@@ -250,9 +250,14 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	doctorKV("Mode", contextBudgetModeLabel(configured, managed))
 	if managed {
 		// The launcher overrides the stored preset with these values.
+		declared := claude.DeclaredContextWindow(smallest)
 		doctorKV("Managed by", source+" (subscription backend)")
-		doctorKV("Assumed context", formatTokenCount(smallest)+" from "+smallestModel)
-		doctorKV("Auto-compact at", formatTokenCount(claude.ManagedCompactWindow(smallest)))
+		doctorKV("Advertised", formatTokenCount(smallest)+" from "+smallestModel)
+		doctorKV("Assumed context", formatTokenCount(declared))
+		doctorKV("Auto-compact at", formatTokenCount(claude.ManagedCompactWindow(declared)))
+		if declared < smallest {
+			doctorInfo("Claude Code sizes sessions for its 200K default or a 1M-class window, so an in-between window is declared as 200K")
+		}
 	} else {
 		doctorKV("Assumed context", doctorTokenLabel(maxContext, "Claude Code default"))
 		doctorKV("Auto-compact at", doctorTokenLabel(compactWindow, "Claude Code default"))

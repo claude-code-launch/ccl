@@ -31,7 +31,20 @@ const (
 	// ContextBudgetManual is the EnvContextBudgetMode value that disables
 	// backend-driven context management.
 	ContextBudgetManual = "manual"
+
+	// EnvAutoCompactPct is Claude Code's percentage-based auto-compact threshold.
+	// It only ever lowers the trigger point, and Claude Code has repeatedly
+	// ignored it when it arrives through the settings file, so ccl also exports it
+	// to the child process environment.
+	EnvAutoCompactPct = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
 )
+
+// ManagedContextEnvKeys are the context-sizing variables ccl owns. They are
+// exported to the Claude Code process as well as written to the settings file,
+// because the settings-file channel has proven unreliable for them.
+func ManagedContextEnvKeys() []string {
+	return []string{EnvMaxContextTokens, EnvAutoCompactWindow, EnvAutoCompactPct}
+}
 
 // ContextBudgetIsManual reports whether the provider opted out of backend-driven
 // context management.

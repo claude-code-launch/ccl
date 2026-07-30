@@ -15,6 +15,38 @@ import (
 // with context_length_exceeded and no compaction ever runs.
 const managedContextHeadroom = 20
 
+const (
+	// claudeDefaultContextWindow is the window Claude Code assumes for a model it
+	// does not recognize, which is every model behind a gateway.
+	claudeDefaultContextWindow = 200_000
+	// oneMClassContextWindow is the smallest window treated as 1M-class. Claude
+	// Code effectively supports two sizes, its 200K default and a 1M-class window
+	// selected per slot with the [1m] marker; declaring a size in between for a
+	// gateway model is honored inconsistently (the status line, the compact buffer
+	// and the trigger point disagree), so ccl does not ask for one.
+	oneMClassContextWindow = 900_000
+)
+
+// declaredContextWindow maps an advertised window onto a size Claude Code handles
+// predictably: itself when it is 1M-class or at most the default, and the 200K
+// default for anything in between.
+//
+// A 500K model is the awkward case this exists for: claiming 500K risks the
+// mismatched-buffer behaviour, while 200K is always sized correctly and simply
+// leaves capacity unused.
+func DeclaredContextWindow(advertised int) int { return declaredContextWindow(advertised) }
+
+func declaredContextWindow(advertised int) int {
+	switch {
+	case advertised <= 0:
+		return 0
+	case advertised >= oneMClassContextWindow, advertised <= claudeDefaultContextWindow:
+		return advertised
+	default:
+		return claudeDefaultContextWindow
+	}
+}
+
 // ManagedContextBudget is the context sizing a subscription backend reports for
 // the models mapped in a session.
 //
@@ -23,7 +55,10 @@ const managedContextHeadroom = 20
 // OAuth providers ccl follows the advertised value instead of a preset the user
 // picked once.
 type ManagedContextBudget struct {
-	// Window is the smallest context window advertised across the mapped slots.
+	// Advertised is the smallest context window advertised across the mapped slots.
+	Advertised int
+	// Window is the size handed to Claude Code, which is Advertised reduced to a
+	// size Claude Code sizes sessions for predictably.
 	Window int
 	// CompactWindow is the auto-compact threshold derived from Window.
 	CompactWindow int
@@ -77,13 +112,14 @@ func ResolveManagedContextBudget(p provider.Provider) (ManagedContextBudget, boo
 		if !ok || window <= 0 {
 			continue
 		}
-		if budget.Window == 0 || window < budget.Window {
-			budget.Window, budget.Model = window, slot.Model
+		if budget.Advertised == 0 || window < budget.Advertised {
+			budget.Advertised, budget.Model = window, slot.Model
 		}
 	}
-	if budget.Window == 0 {
+	if budget.Advertised == 0 {
 		return ManagedContextBudget{}, false
 	}
+	budget.Window = declaredContextWindow(budget.Advertised)
 	budget.CompactWindow = ManagedCompactWindow(budget.Window)
 	return budget, true
 }

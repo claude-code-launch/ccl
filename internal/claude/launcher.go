@@ -224,19 +224,47 @@ func isProxyTransportEnv(key string) bool {
 }
 
 // buildProcessEnv prevents ambient Anthropic credentials from overriding the
-// per-session endpoint and bearer token used by the embedded proxy.
+// per-session endpoint and bearer token used by the embedded proxy, and exports
+// the context-sizing variables ccl manages.
+//
+// Those are also written to the settings file, but Claude Code has been reported
+// to ignore auto-compact settings that only arrive that way, honoring them only
+// when they are present in the environment. Exporting them costs nothing and
+// removes that failure mode.
 func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) []string {
-	if !useProxy {
+	exported := make(map[string]string, 4)
+	for _, key := range provider.ManagedContextEnvKeys() {
+		if value := strings.TrimSpace(settings.Env[key]); value != "" {
+			exported[key] = value
+		}
+	}
+	if !useProxy && len(exported) == 0 {
 		return inherited
 	}
 
-	env := make([]string, 0, len(inherited)+2)
+	env := make([]string, 0, len(inherited)+len(exported)+2)
 	for _, entry := range inherited {
 		key, _, ok := strings.Cut(entry, "=")
-		if ok && isProxyTransportEnv(key) {
+		if !ok {
+			env = append(env, entry)
+			continue
+		}
+		if useProxy && isProxyTransportEnv(key) {
+			continue
+		}
+		// A ccl-managed value replaces whatever the shell had.
+		if _, managed := exported[key]; managed {
 			continue
 		}
 		env = append(env, entry)
+	}
+	for _, key := range provider.ManagedContextEnvKeys() {
+		if value, ok := exported[key]; ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	if !useProxy {
+		return env
 	}
 	if value := settings.Env["ANTHROPIC_BASE_URL"]; value != "" {
 		env = append(env, "ANTHROPIC_BASE_URL="+value)
@@ -575,11 +603,12 @@ func logSessionContextBudget(p provider.Provider, settings settingsJSON, budget 
 	for _, slot := range slots {
 		mapped = append(mapped, slot.Slot+"="+slot.Model)
 	}
-	oauthproxy.Debugf("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q managed_window=%d managed_from=%q catalog=%q configured_max_context=%q configured_compact=%q effort=%q max_output=%q slots=[%s]",
+	oauthproxy.Debugf("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q auto_compact_pct=%q advertised_window=%d declared_window=%d managed_from=%q catalog=%q configured_max_context=%q configured_compact=%q effort=%q max_output=%q slots=[%s]",
 		p.Name, p.OAuthProvider,
 		settings.Env[provider.EnvMaxContextTokens],
 		settings.Env[provider.EnvAutoCompactWindow],
-		budget.Window, budget.Model, budget.Source,
+		settings.Env[provider.EnvAutoCompactPct],
+		budget.Advertised, budget.Window, budget.Model, budget.Source,
 		p.Env[provider.EnvMaxContextTokens],
 		p.Env[provider.EnvAutoCompactWindow],
 		settings.Env["CLAUDE_CODE_EFFORT_LEVEL"],

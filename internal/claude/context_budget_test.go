@@ -3,6 +3,7 @@ package claude
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -159,5 +160,82 @@ func TestBuildEnvDropsCclDirectives(t *testing.T) {
 	}
 	if env[provider.EnvMaxContextTokens] != "1050000" {
 		t.Errorf("configured context override was lost: %q", env[provider.EnvMaxContextTokens])
+	}
+}
+
+func TestDeclaredContextWindowSticksToSupportedSizes(t *testing.T) {
+	cases := map[int]int{
+		0:         0,
+		128_000:   128_000, // at or below the default: declared as-is
+		200_000:   200_000,
+		272_000:   200_000, // in between: Claude Code's default is the safe size
+		500_000:   200_000, // the grok-4.5 case
+		900_000:   900_000, // 1M-class
+		1_050_000: 1_050_000,
+	}
+	for advertised, want := range cases {
+		if got := DeclaredContextWindow(advertised); got != want {
+			t.Errorf("DeclaredContextWindow(%d) = %d, want %d", advertised, got, want)
+		}
+	}
+}
+
+func TestResolveManagedContextBudgetDeclaresSupportedWindow(t *testing.T) {
+	server := codexCatalogServer(t, `{"models":[{"slug":"grok-4.5","context_window":500000}]}`)
+	p := provider.Provider{
+		OAuthProvider: "grok",
+		Endpoint:      server.URL,
+		APIKey:        "session-key",
+		OpusModel:     "grok-4.5",
+	}
+	budget, ok := ResolveManagedContextBudget(p)
+	if !ok {
+		t.Fatal("expected a managed budget")
+	}
+	if budget.Advertised != 500_000 {
+		t.Errorf("advertised = %d, want 500000", budget.Advertised)
+	}
+	if budget.Window != 200_000 {
+		t.Errorf("declared window = %d, want the 200K default", budget.Window)
+	}
+	if budget.CompactWindow != ManagedCompactWindow(200_000) {
+		t.Errorf("compact window = %d, want it derived from the declared window", budget.CompactWindow)
+	}
+}
+
+func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
+	settings := settingsJSON{Env: map[string]string{
+		provider.EnvMaxContextTokens:  "1050000",
+		provider.EnvAutoCompactWindow: "840000",
+		provider.EnvAutoCompactPct:    "70",
+	}}
+	inherited := []string{"PATH=/usr/bin", provider.EnvAutoCompactPct + "=10", "HOME=/root"}
+
+	env := buildProcessEnv(inherited, settings, false)
+	values := map[string]string{}
+	seen := map[string]int{}
+	for _, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		values[key] = value
+		seen[key]++
+	}
+	if values[provider.EnvMaxContextTokens] != "1050000" ||
+		values[provider.EnvAutoCompactWindow] != "840000" {
+		t.Fatalf("managed context vars were not exported: %#v", values)
+	}
+	// A ccl-managed value must replace the ambient one, not duplicate it.
+	if values[provider.EnvAutoCompactPct] != "70" || seen[provider.EnvAutoCompactPct] != 1 {
+		t.Fatalf("pct override = %q (%d entries), want a single managed value", values[provider.EnvAutoCompactPct], seen[provider.EnvAutoCompactPct])
+	}
+	if values["PATH"] != "/usr/bin" || values["HOME"] != "/root" {
+		t.Fatalf("inherited environment was damaged: %#v", values)
+	}
+}
+
+func TestBuildProcessEnvUntouchedWithoutManagedVars(t *testing.T) {
+	inherited := []string{"PATH=/usr/bin"}
+	env := buildProcessEnv(inherited, settingsJSON{Env: map[string]string{}}, false)
+	if len(env) != 1 || env[0] != "PATH=/usr/bin" {
+		t.Fatalf("env = %#v, want the inherited slice unchanged", env)
 	}
 }
