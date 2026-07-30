@@ -21,7 +21,7 @@ func newDebugCommand() *cobra.Command {
 		Long: `Toggle runtime diagnostics for every Claude Code session launched by ccl.
 
 Each session writes its own log next to the configured path, named after the
-settings file ccl generates for it, e.g. /tmp/ccl-debug-claude_9f2c1b7d4e05.log
+settings file ccl generates for it, e.g. ~/.ccl/logs/ccl-debug-claude_9f2c1b7d4e05.log
 (base path overridable with CCL_DEBUG_LOG). The exact path is printed when the
 session ends.
 
@@ -64,7 +64,7 @@ func runDebug(out io.Writer, args []string) error {
 		if cfg.DebugMode {
 			printDebugLogLocation(out)
 		} else {
-			fmt.Fprintln(out, "Enable with: ccl debug on  (one log per session next to /tmp/ccl-debug.log; CCL_DEBUG_LOG overrides)")
+			fmt.Fprintln(out, "Enable with: ccl debug on  (one log per session in ~/.ccl/logs; CCL_DEBUG_LOG overrides)")
 		}
 		return nil
 	}

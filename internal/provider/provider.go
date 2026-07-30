@@ -148,7 +148,7 @@ type Config struct {
 	BypassMode bool `yaml:"bypass_mode,omitempty" mapstructure:"bypass_mode,omitempty"`
 	// DebugMode enables ccl runtime diagnostics for ccl-launched sessions:
 	// runtime startup, upstream HTTP status, OAuth refresh, request metadata.
-	// Logs to /tmp/ccl-debug.log (override with CCL_DEBUG_LOG). It never logs
+	// Logs to ~/.ccl/logs (override with CCL_DEBUG_LOG). It never logs
 	// credentials, refresh tokens, or request/response bodies.
 	DebugMode  bool                 `yaml:"debug_mode,omitempty" mapstructure:"debug_mode,omitempty"`
 	Providers  map[string]Provider  `yaml:"providers" mapstructure:"providers"`

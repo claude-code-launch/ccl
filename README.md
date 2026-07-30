@@ -178,7 +178,7 @@ ccl bypass off      # 关闭
 |------|------|
 | `ccl` / `ccl …` | 用当前 provider 启动 Claude Code（其余参数透传） |
 | `ccl bypass [on\|off]` | 启动时自动加 `--dangerously-skip-permissions`（原 `auto`） |
-| `ccl debug [on\|off]` | 运行时诊断日志（默认 `/tmp/ccl-debug.log`） |
+| `ccl debug [on\|off]` | 运行时诊断日志（默认 `~/.ccl/logs/`，每会话一个文件） |
 | `ccl lang [zh\|en]` | TUI / 终端显示语言 |
 | `ccl version` | 打印版本 |
 | `ccl update` | 更新到最新版本 |
@@ -275,11 +275,11 @@ ccl bypass off      # 关闭
 
 ```bash
 ccl debug          # 查看状态
-ccl debug on       # 开启，默认写 /tmp/ccl-debug.log
+ccl debug on       # 开启，默认写 ~/.ccl/logs/ccl-debug-<session>.log
 ccl debug off      # 关闭
 ```
 
-`debug` 是全局开关，写入 `~/.ccl/config.yaml` 的 `debug_mode`。开启后，所有由 `ccl` 拉起的 Claude Code 会话会把运行时诊断写入 `/tmp/ccl-debug.log`（可用 `CCL_DEBUG_LOG=/path/file.log` 覆盖）。日志包含 runtime 启动信息、上游 401/429/5xx/stream 错误、OAuth refresh/cooldown 事件、会话模型与设置数量等元数据；不会写入 access token、refresh token、Authorization header、API key 或请求/响应正文。
+`debug` 是全局开关，写入 `~/.ccl/config.yaml` 的 `debug_mode`。开启后，每个由 `ccl` 拉起的 Claude Code 会话会把运行时诊断写入 `~/.ccl/logs/ccl-debug-<session>.log`（基础路径可用 `CCL_DEBUG_LOG=/path/file.log` 覆盖），会话结束时会打印该文件路径。日志包含 runtime 启动信息、上游 401/429/5xx/stream 错误、OAuth refresh/cooldown 事件、会话模型与设置数量等元数据；不会写入 access token、refresh token、Authorization header、API key 或请求/响应正文。
 
 ### `ccl oauth` — 登录订阅账号
 

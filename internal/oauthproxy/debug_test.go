@@ -131,3 +131,54 @@ func TestDebugFilterKeepsContextLimitFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveDebugLogPathDefaultsToCclLogDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows home lookup
+	t.Setenv("CCL_DEBUG_LOG", "")
+
+	want := filepath.Join(home, ".ccl", "logs", "ccl-debug.log")
+	if got := ResolveDebugLogPath(); got != want {
+		t.Fatalf("ResolveDebugLogPath() = %q, want %q", got, want)
+	}
+	if got := SessionDebugLogPath("claude_1"); got != filepath.Join(home, ".ccl", "logs", "ccl-debug-claude_1.log") {
+		t.Fatalf("session path = %q", got)
+	}
+	// An explicit override still wins.
+	t.Setenv("CCL_DEBUG_LOG", "/var/log/elsewhere.log")
+	if got := ResolveDebugLogPath(); got != "/var/log/elsewhere.log" {
+		t.Fatalf("override ignored: %q", got)
+	}
+}
+
+func TestSetDebugCreatesTheLogDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CCL_DEBUG_LOG", "")
+	t.Cleanup(func() { SetDebug(false, "") })
+
+	path := ResolveDebugLogPath()
+	SetDebug(true, path)
+	if !DebugEnabled() {
+		t.Fatal("debug did not enable; the log directory was probably not created")
+	}
+	Debugf("hello")
+	SetDebug(false, "")
+
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("log directory was not created: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Errorf("log directory mode = %o, want 700: diagnostics must not be world-readable", mode)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !bytes.Contains(data, []byte("hello")) {
+		t.Fatalf("log content = %q", data)
+	}
+}

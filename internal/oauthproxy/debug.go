@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// defaultDebugLogPath is the on-disk destination for ccl debug diagnostics.
-// It can be overridden with the CCL_DEBUG_LOG environment variable.
-const defaultDebugLogPath = "/tmp/ccl-debug.log"
+// defaultDebugLogName is the base file name for ccl diagnostics inside LogDir.
+// The full path can be overridden with the CCL_DEBUG_LOG environment variable.
+const defaultDebugLogName = "ccl-debug.log"
 
 var (
 	debugStateMu sync.RWMutex
@@ -104,6 +104,15 @@ func SetDebug(enabled bool, path string) {
 		_ = debugFile.Close()
 		debugFile = nil
 	}
+	// The log directory is ccl's own and may not exist yet; 0o700 keeps
+	// diagnostics readable only by the user, unlike a shared temp directory.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			debugEnabled = false
+			debugLogPath = ""
+			return
+		}
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		// Fall back to disabled state rather than crashing the launcher.
@@ -116,13 +125,31 @@ func SetDebug(enabled bool, path string) {
 	debugFile = f
 }
 
-// ResolveDebugLogPath returns the configured debug log destination, honoring
-// the CCL_DEBUG_LOG override before the default /tmp/ccl-debug.log.
+// LogDir is ~/.ccl/logs, where ccl keeps its diagnostics.
+//
+// Logs belong with the rest of ccl's state rather than in the system temp
+// directory: /tmp is world-readable, cleared on a schedule the user does not
+// control, and shared with every other tool on the machine.
+func LogDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".ccl", "logs"), nil
+}
+
+// ResolveDebugLogPath returns the configured debug log destination, honoring the
+// CCL_DEBUG_LOG override before ~/.ccl/logs/ccl-debug.log.
 func ResolveDebugLogPath() string {
 	if v := strings.TrimSpace(os.Getenv("CCL_DEBUG_LOG")); v != "" {
 		return v
 	}
-	return defaultDebugLogPath
+	dir, err := LogDir()
+	if err != nil {
+		// Without a home directory there is nowhere better than the temp dir.
+		return filepath.Join(os.TempDir(), defaultDebugLogName)
+	}
+	return filepath.Join(dir, defaultDebugLogName)
 }
 
 // SessionDebugLogPath returns a per-session log path derived from the configured

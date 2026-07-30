@@ -49,7 +49,7 @@ for discovery and bulk checks. Claude Code actually uses the slot mappings
 
 Note: root "ccl status" is cloud sync status (see "ccl cloud status"), not this command.
 For live request failures enable "ccl debug on" and check the log path printed
-when the Claude session ends (default /tmp/ccl-debug.log).
+when the Claude session ends (default ~/.ccl/logs/ccl-debug-<session>.log).
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor(cmd.Context())

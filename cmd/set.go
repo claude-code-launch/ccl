@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	// 🔥 引入 ccl 统一的国际化组件
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
@@ -261,7 +263,16 @@ func setDebugf(format string, args ...any) {
 		path = os.Getenv("CCL_DEBUG_LOG")
 	}
 	if path == "" {
-		path = "/tmp/ccl-set-debug.log"
+		dir, err := oauthproxy.LogDir()
+		if err != nil {
+			return
+		}
+		path = filepath.Join(dir, "ccl-set-debug.log")
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return
+		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
