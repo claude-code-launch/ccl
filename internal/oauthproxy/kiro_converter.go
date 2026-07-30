@@ -79,6 +79,7 @@ type kiroConvertedRequest struct {
 	correctedMedia  int
 	droppedToolUses int
 	droppedToolRuns int
+	emptyToolRuns   int
 	truncatedTexts  int
 	droppedText     int
 	largestText     int
@@ -100,7 +101,16 @@ type kiroContent struct {
 	toolResults []any
 	toolUses    []any
 	toolNames   []string
+	// emptyResults counts tool results that arrived with no content at all.
+	emptyResults int
 }
+
+// kiroEmptyToolResultText stands in for a tool result that carried no content.
+//
+// Forwarding an empty string makes a tool that legitimately produced no output
+// indistinguishable from a result that was lost on the way, and the model then
+// reports the tooling as broken instead of continuing.
+const kiroEmptyToolResultText = "(no output)"
 
 func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	var request kiroAnthropicRequest
@@ -158,11 +168,13 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	}
 
 	historicalToolNames := make(map[string]bool)
+	emptyToolRuns := 0
 	for _, message := range messages[:len(messages)-1] {
 		content, err := parseKiroContent(message.Content, toolNameMap)
 		if err != nil {
 			return nil, err
 		}
+		emptyToolRuns += content.emptyResults
 		switch strings.ToLower(strings.TrimSpace(message.Role)) {
 		case "user":
 			userMessage := map[string]any{
@@ -204,6 +216,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	emptyToolRuns += currentContent.emptyResults
 	for name := range historicalToolNames {
 		if declaredTools[name] {
 			continue
@@ -279,6 +292,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 		correctedMedia:  correctedMedia,
 		droppedToolUses: droppedToolUses,
 		droppedToolRuns: droppedToolRuns,
+		emptyToolRuns:   emptyToolRuns,
 		truncatedTexts:  textStats.truncated,
 		droppedText:     textStats.droppedBytes,
 		largestText:     textStats.largestBytes,
@@ -595,6 +609,10 @@ func parseKiroContent(raw json.RawMessage, nameMap map[string]string) (kiroConte
 				continue
 			}
 			resultText, resultImages := extractKiroToolResult(block["content"])
+			if resultText == "" && len(resultImages) == 0 {
+				resultText = kiroEmptyToolResultText
+				result.emptyResults++
+			}
 			result.images = append(result.images, resultImages...)
 			isError, _ := block["is_error"].(bool)
 			status := "success"

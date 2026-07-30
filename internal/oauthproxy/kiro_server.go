@@ -270,9 +270,12 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 			converted.inlineMedia, converted.droppedMedia, converted.dedupedMedia,
 			converted.resizedMedia, converted.correctedMedia, kiroMaxInlineMediaSegments)
 	}
-	if converted.droppedToolUses > 0 || converted.droppedToolRuns > 0 {
-		Debugf("kiro tool pairing normalized dropped_uses=%d dropped_results=%d",
-			converted.droppedToolUses, converted.droppedToolRuns)
+	if converted.droppedToolUses > 0 || converted.droppedToolRuns > 0 || converted.emptyToolRuns > 0 {
+		// dropped_results > 0 means the model will not see those tool outputs at
+		// all, which it reports as the tooling being broken; empty_results are
+		// forwarded with a placeholder instead of an empty string.
+		Debugf("kiro tool pairing normalized dropped_uses=%d dropped_results=%d empty_results=%d",
+			converted.droppedToolUses, converted.droppedToolRuns, converted.emptyToolRuns)
 	}
 	if converted.truncatedTexts > 0 {
 		Debugf("kiro content fields truncated fields=%d dropped_bytes=%d largest_original_bytes=%d limit=%d",
