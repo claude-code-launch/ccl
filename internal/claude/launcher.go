@@ -202,6 +202,20 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	return env
 }
 
+// suppressedProcessEnvKey reports whether an inherited key is one ccl owns
+// through the settings file, honoring Windows' case-insensitive names.
+func suppressedProcessEnvKey(suppressed map[string]struct{}, key string) (string, bool) {
+	if _, ok := suppressed[key]; ok {
+		return key, true
+	}
+	for candidate := range suppressed {
+		if sameEnvKey(candidate, key) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
 func sameEnvKey(left, right string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(left, right)
@@ -232,14 +246,24 @@ func isProxyTransportEnv(key string) bool {
 // when they are present in the environment. Exporting them costs nothing and
 // removes that failure mode.
 func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) []string {
+	// The settings file is authoritative for everything ccl configures, so an
+	// inherited copy of one of those keys is dropped rather than left to compete
+	// with it. The context keys are dropped too, even though ccl no longer writes
+	// them: a value exported in the user's shell would otherwise silently reinstate
+	// the session-wide window that ccl deliberately stopped declaring. ccl's own
+	// CCL_* variables, and everything unrelated, are inherited untouched.
+	suppressed := make(map[string]struct{}, len(settings.Env)+4)
+	for key := range settings.Env {
+		suppressed[key] = struct{}{}
+	}
+	for _, key := range provider.ManagedContextEnvKeys() {
+		suppressed[key] = struct{}{}
+	}
 	exported := make(map[string]string, 4)
 	for _, key := range provider.ManagedContextEnvKeys() {
 		if value := strings.TrimSpace(settings.Env[key]); value != "" {
 			exported[key] = value
 		}
-	}
-	if !useProxy && len(exported) == 0 {
-		return inherited
 	}
 
 	env := make([]string, 0, len(inherited)+len(exported)+2)
@@ -252,12 +276,14 @@ func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) [
 		if useProxy && isProxyTransportEnv(key) {
 			continue
 		}
-		// A ccl-managed value replaces whatever the shell had.
-		if _, managed := exported[key]; managed {
+		if _, drop := suppressedProcessEnvKey(suppressed, key); drop {
+			oauthproxy.Debugf("launcher ignores inherited %s: the settings file is authoritative", key)
 			continue
 		}
 		env = append(env, entry)
 	}
+	// Claude Code has been reported to ignore auto-compact settings that arrive
+	// only through the settings file, so the ones ccl does set are also exported.
 	for _, key := range provider.ManagedContextEnvKeys() {
 		if value, ok := exported[key]; ok {
 			env = append(env, key+"="+value)

@@ -297,6 +297,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	if claude.MappedContextClassesDiffer(configured, windows) {
 		doctorInfo("Mapped models span both context classes; that is fine because sizing is per slot, but one global override would not be")
 	}
+	printDoctorIgnoredContextEnv()
 	if !overridden {
 		doctorOK("No ccl context override; each slot keeps the sizing Claude Code computes for it")
 		return
@@ -360,6 +361,19 @@ func smallestMappedWindow(p provider.Provider, windows map[string]int) (smallest
 		}
 	}
 	return smallest, model, unknown
+}
+
+// printDoctorIgnoredContextEnv names context variables exported in the shell.
+//
+// ccl no longer passes those through, so a value left over from an older
+// workaround has no effect. Saying so is the difference between "my export does
+// nothing" being a mystery and being expected.
+func printDoctorIgnoredContextEnv() {
+	for _, key := range provider.ManagedContextEnvKeys() {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			doctorInfo(fmt.Sprintf("%s=%s is set in your shell and is ignored: ccl passes only its own variables to Claude Code", key, value))
+		}
+	}
 }
 
 func parseDoctorTokenEnv(value string) int {

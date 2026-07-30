@@ -179,6 +179,49 @@ func TestBuildEnvDropsCclDirectives(t *testing.T) {
 	}
 }
 
+func TestBuildProcessEnvDropsInheritedSettingsKeys(t *testing.T) {
+	// ccl writes no context env any more, so an ambient value would silently
+	// reinstate the session-wide window this policy removed.
+	settings := settingsJSON{Env: map[string]string{
+		MaxOutputTokensEnv:  "32000",
+		"ANTHROPIC_API_KEY": "sk-from-ccl",
+	}}
+	inherited := []string{
+		"PATH=/usr/bin",
+		"HTTPS_PROXY=http://corp:8080",
+		provider.EnvAutoCompactWindow + "=900000",
+		provider.EnvMaxContextTokens + "=1000000",
+		provider.EnvAutoCompactPct + "=90",
+		MaxOutputTokensEnv + "=8000",
+		"ANTHROPIC_API_KEY=sk-from-shell",
+		"CCL_DEBUG_LOG=/tmp/mine.log",
+	}
+
+	values := map[string]string{}
+	for _, entry := range buildProcessEnv(inherited, settings, false) {
+		key, value, _ := strings.Cut(entry, "=")
+		values[key] = value
+	}
+	for _, dropped := range []string{
+		provider.EnvAutoCompactWindow,
+		provider.EnvMaxContextTokens,
+		provider.EnvAutoCompactPct,
+		MaxOutputTokensEnv,
+		"ANTHROPIC_API_KEY",
+	} {
+		if value, present := values[dropped]; present {
+			t.Errorf("inherited %s=%q reached the session; the settings file is authoritative", dropped, value)
+		}
+	}
+	// ccl's own variables and unrelated environment stay.
+	if values["CCL_DEBUG_LOG"] != "/tmp/mine.log" {
+		t.Errorf("ccl's own variable was dropped: %#v", values)
+	}
+	if values["PATH"] != "/usr/bin" || values["HTTPS_PROXY"] != "http://corp:8080" {
+		t.Errorf("unrelated environment was damaged: %#v", values)
+	}
+}
+
 func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 	settings := settingsJSON{Env: map[string]string{
 		provider.EnvMaxContextTokens:  "1050000",
@@ -208,10 +251,10 @@ func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 	}
 }
 
-func TestBuildProcessEnvUntouchedWithoutManagedVars(t *testing.T) {
+func TestBuildProcessEnvKeepsUnrelatedEnvironment(t *testing.T) {
 	inherited := []string{"PATH=/usr/bin"}
 	env := buildProcessEnv(inherited, settingsJSON{Env: map[string]string{}}, false)
 	if len(env) != 1 || env[0] != "PATH=/usr/bin" {
-		t.Fatalf("env = %#v, want the inherited slice unchanged", env)
+		t.Fatalf("env = %#v, want the inherited entry kept", env)
 	}
 }
