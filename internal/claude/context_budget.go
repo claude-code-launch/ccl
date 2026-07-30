@@ -36,6 +36,19 @@ const (
 // leaves capacity unused.
 func DeclaredContextWindow(advertised int) int { return declaredContextWindow(advertised) }
 
+// MappedContextClassesDiffer reports whether the provider's mapped models fall
+// into more than one context class, which is when no session-wide context value
+// can be correct for all of them.
+func MappedContextClassesDiffer(p provider.Provider, windows map[string]int) bool {
+	classes := make(map[int]struct{}, 2)
+	for _, slot := range provider.SlotModels(p) {
+		if window, ok := windows[strings.ToLower(slot.Model)]; ok && window > 0 {
+			classes[contextClass(window)] = struct{}{}
+		}
+	}
+	return len(classes) > 1
+}
+
 func declaredContextWindow(advertised int) int {
 	switch {
 	case advertised <= 0:
@@ -58,14 +71,28 @@ type ManagedContextBudget struct {
 	// Advertised is the smallest context window advertised across the mapped slots.
 	Advertised int
 	// Window is the size handed to Claude Code, which is Advertised reduced to a
-	// size Claude Code sizes sessions for predictably.
+	// size Claude Code sizes sessions for predictably. Zero means ccl declares
+	// nothing and Claude Code applies its own per-model sizing.
 	Window int
 	// CompactWindow is the auto-compact threshold derived from Window.
 	CompactWindow int
-	// Model is the mapped model that Window came from.
+	// Model is the mapped model that Advertised came from.
 	Model string
 	// Source names the catalog the window was read from.
 	Source string
+	// Mixed reports that the mapped models fall into more than one context class.
+	// The context env is session-global, so no single value can be right for all
+	// of them and ccl declares nothing instead.
+	Mixed bool
+}
+
+// contextClass buckets an advertised window into the two sizes Claude Code sizes
+// sessions for.
+func contextClass(window int) int {
+	if window >= oneMClassContextWindow {
+		return oneMClassContextWindow
+	}
+	return claudeDefaultContextWindow
 }
 
 // ManagedCompactWindow derives the auto-compact threshold for an advertised
@@ -107,17 +134,28 @@ func ResolveManagedContextBudget(p provider.Provider) (ManagedContextBudget, boo
 		return ManagedContextBudget{}, false
 	}
 	budget := ManagedContextBudget{Source: source}
+	classes := make(map[int]struct{}, 2)
 	for _, slot := range provider.SlotModels(p) {
 		window, ok := windows[strings.ToLower(slot.Model)]
 		if !ok || window <= 0 {
 			continue
 		}
+		classes[contextClass(window)] = struct{}{}
 		if budget.Advertised == 0 || window < budget.Advertised {
 			budget.Advertised, budget.Model = window, slot.Model
 		}
 	}
 	if budget.Advertised == 0 {
 		return ManagedContextBudget{}, false
+	}
+	// The context env applies to the whole session while the [1m] marker is
+	// per slot. When the mapped models span both classes, any global number is
+	// wrong for one of them: too large and the small model's requests are
+	// rejected, too small and the large model is throttled. Claude Code's own
+	// per-model sizing is at least self-consistent, so step aside.
+	if len(classes) > 1 {
+		budget.Mixed = true
+		return budget, true
 	}
 	budget.Window = declaredContextWindow(budget.Advertised)
 	budget.CompactWindow = ManagedCompactWindow(budget.Window)
@@ -161,7 +199,17 @@ func AdvertisedContextWindows(endpoint, apiKey string) (map[string]int, string) 
 // the backend advertises. It runs after the provider Env overrides so a stale
 // stored preset cannot outrank the live catalog.
 func applyManagedContextBudget(env map[string]string, budget ManagedContextBudget) {
-	if env == nil || budget.Window <= 0 {
+	if env == nil {
+		return
+	}
+	if budget.Mixed {
+		// A stored global preset would apply to every slot, including the models it
+		// does not fit, so drop it and let Claude Code size each model itself.
+		delete(env, provider.EnvMaxContextTokens)
+		delete(env, provider.EnvAutoCompactWindow)
+		return
+	}
+	if budget.Window <= 0 {
 		return
 	}
 	env[provider.EnvMaxContextTokens] = strconv.Itoa(budget.Window)

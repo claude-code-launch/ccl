@@ -239,3 +239,83 @@ func TestBuildProcessEnvUntouchedWithoutManagedVars(t *testing.T) {
 		t.Fatalf("env = %#v, want the inherited slice unchanged", env)
 	}
 }
+
+func TestResolveManagedContextBudgetStepsAsideForMixedPools(t *testing.T) {
+	server := codexCatalogServer(t, `{"models":[
+		{"slug":"big-model","context_window":1050000},
+		{"slug":"small-model","context_window":272000}
+	]}`)
+	p := provider.Provider{
+		OAuthProvider: "gpt",
+		Endpoint:      server.URL,
+		APIKey:        "session-key",
+		OpusModel:     "big-model[1m]",
+		HaikuModel:    "small-model",
+	}
+	budget, ok := ResolveManagedContextBudget(p)
+	if !ok {
+		t.Fatal("expected a budget describing the mixed pool")
+	}
+	if !budget.Mixed {
+		t.Fatalf("budget = %+v, want Mixed for a 1M-class plus 200K-class pool", budget)
+	}
+	if budget.Window != 0 || budget.CompactWindow != 0 {
+		t.Fatalf("budget declares %d/%d, want nothing for a mixed pool", budget.Window, budget.CompactWindow)
+	}
+
+	// A stale global preset must be removed, otherwise it would apply to the
+	// small model as well.
+	env := map[string]string{
+		provider.EnvMaxContextTokens:  "1000000",
+		provider.EnvAutoCompactWindow: "900000",
+		"UNRELATED":                   "keep",
+	}
+	applyManagedContextBudget(env, budget)
+	if _, present := env[provider.EnvMaxContextTokens]; present {
+		t.Error("max context override survived a mixed pool")
+	}
+	if _, present := env[provider.EnvAutoCompactWindow]; present {
+		t.Error("compact window override survived a mixed pool")
+	}
+	if env["UNRELATED"] != "keep" {
+		t.Error("unrelated env was dropped")
+	}
+}
+
+func TestResolveManagedContextBudgetKeepsSingleClassPools(t *testing.T) {
+	server := codexCatalogServer(t, `{"models":[
+		{"slug":"big-a","context_window":1050000},
+		{"slug":"big-b","context_window":1000000}
+	]}`)
+	p := provider.Provider{
+		OAuthProvider: "gpt",
+		Endpoint:      server.URL,
+		APIKey:        "session-key",
+		OpusModel:     "big-a[1m]",
+		SonnetModel:   "big-b[1m]",
+	}
+	budget, ok := ResolveManagedContextBudget(p)
+	if !ok {
+		t.Fatal("expected a managed budget")
+	}
+	if budget.Mixed {
+		t.Fatal("both models are 1M-class, so the pool is not mixed")
+	}
+	if budget.Window != 1_000_000 {
+		t.Fatalf("declared window = %d, want the smallest 1M-class window", budget.Window)
+	}
+}
+
+func TestMappedContextClassesDiffer(t *testing.T) {
+	p := provider.Provider{OpusModel: "big[1m]", HaikuModel: "small"}
+	windows := map[string]int{"big": 1_050_000, "small": 272_000}
+	if !MappedContextClassesDiffer(p, windows) {
+		t.Error("1M-class plus 200K-class must be reported as mixed")
+	}
+	if MappedContextClassesDiffer(p, map[string]int{"big": 1_050_000}) {
+		t.Error("a single known window is not a mixed pool")
+	}
+	if MappedContextClassesDiffer(p, nil) {
+		t.Error("no catalog means nothing to compare")
+	}
+}

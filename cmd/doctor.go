@@ -247,8 +247,14 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	oauthproxy.Debugf("doctor context budget provider=%q configured_max_context=%d configured_compact=%d catalog=%q models=%d smallest=%d smallest_model=%q managed=%t",
 		configured.Name, maxContext, compactWindow, source, len(windows), smallest, smallestModel, managed)
 
+	mixed := managed && claude.MappedContextClassesDiffer(configured, windows)
 	doctorKV("Mode", contextBudgetModeLabel(configured, managed))
-	if managed {
+	switch {
+	case mixed:
+		doctorKV("Managed by", source+" (subscription backend)")
+		doctorKV("Assumed context", "per model (no ccl override)")
+		doctorKV("Auto-compact at", "Claude Code default for each model")
+	case managed:
 		// The launcher overrides the stored preset with these values.
 		declared := claude.DeclaredContextWindow(smallest)
 		doctorKV("Managed by", source+" (subscription backend)")
@@ -258,7 +264,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 		if declared < smallest {
 			doctorInfo("Claude Code sizes sessions for its 200K default or a 1M-class window, so an in-between window is declared as 200K")
 		}
-	} else {
+	default:
 		doctorKV("Assumed context", doctorTokenLabel(maxContext, "Claude Code default"))
 		doctorKV("Auto-compact at", doctorTokenLabel(compactWindow, "Claude Code default"))
 	}
@@ -280,6 +286,12 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	}
 	printDoctorOneMConsistency(configured, windows)
 	if smallest == 0 {
+		return
+	}
+	if mixed {
+		doctorWarn("Mapped models span different context classes (200K-class and 1M-class)")
+		doctorHint("The context env is session-wide, so ccl declares nothing: each model keeps Claude Code's own sizing, driven per slot by [1m]")
+		doctorHint("For one global budget per class, split the pool into separate providers (they can share the same OAuth credentials)")
 		return
 	}
 	if managed {
