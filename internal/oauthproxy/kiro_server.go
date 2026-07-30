@@ -270,9 +270,12 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 			converted.inlineMedia, converted.droppedMedia, converted.dedupedMedia,
 			converted.resizedMedia, converted.correctedMedia, kiroMaxInlineMediaSegments)
 	}
-	if converted.droppedToolUses > 0 || converted.droppedToolRuns > 0 {
-		Debugf("kiro tool pairing normalized dropped_uses=%d dropped_results=%d",
-			converted.droppedToolUses, converted.droppedToolRuns)
+	if converted.droppedToolUses > 0 || converted.droppedToolRuns > 0 || converted.emptyToolRuns > 0 {
+		// dropped_results > 0 means the model will not see those tool outputs at
+		// all, which it reports as the tooling being broken; empty_results are
+		// forwarded with a placeholder instead of an empty string.
+		Debugf("kiro tool pairing normalized dropped_uses=%d dropped_results=%d empty_results=%d",
+			converted.droppedToolUses, converted.droppedToolRuns, converted.emptyToolRuns)
 	}
 	if converted.truncatedTexts > 0 {
 		Debugf("kiro content fields truncated fields=%d dropped_bytes=%d largest_original_bytes=%d limit=%d",
@@ -422,15 +425,18 @@ func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConve
 	}
 	var lastErr error
 	var rateLimitErr error
+	otherFailure := false
 	for _, candidate := range credentials {
 		credential, err := s.pool.usableCredential(ctx, candidate, false)
 		if err != nil {
 			lastErr = err
+			otherFailure = true
 			continue
 		}
 		response, err := s.doUpstreamRequest(ctx, converted, credential)
 		if err != nil {
 			lastErr = err
+			otherFailure = true
 			continue
 		}
 		if response.StatusCode == http.StatusUnauthorized {
@@ -441,11 +447,13 @@ func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConve
 			if refreshErr != nil {
 				lastErr = fmt.Errorf("%w (credential refresh failed: %v)",
 					&kiroUpstreamError{status: http.StatusUnauthorized, body: unauthorized}, refreshErr)
+				otherFailure = true
 				continue
 			}
 			response, err = s.doUpstreamRequest(ctx, converted, refreshed)
 			if err != nil {
 				lastErr = err
+				otherFailure = true
 				continue
 			}
 		}
@@ -458,12 +466,16 @@ func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConve
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
 			rateLimitErr = upstreamErr
+		} else {
+			otherFailure = true
 		}
 		lastErr = upstreamErr
 	}
-	// A rate limit is the retryable outcome, so it wins over whatever the last
-	// credential happened to fail with.
-	if rateLimitErr != nil {
+	// A rate limit is the retryable outcome, so report it when it is the only
+	// thing that went wrong. If another credential failed for a reason waiting
+	// cannot fix, that error is the useful one and it also stops the backoff from
+	// burning its full budget.
+	if rateLimitErr != nil && !otherFailure {
 		return nil, rateLimitErr
 	}
 	if lastErr == nil {

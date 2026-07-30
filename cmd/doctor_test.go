@@ -28,18 +28,6 @@ func TestModelVerificationSummary(t *testing.T) {
 	}
 }
 
-func TestEffectiveCompactThresholdPrefersAbsoluteWindow(t *testing.T) {
-	if got, label := effectiveCompactThreshold(1_000_000, 900_000); got != 900_000 || label == "" {
-		t.Fatalf("threshold = %d (%q), want the auto-compact window", got, label)
-	}
-	if got, _ := effectiveCompactThreshold(500_000, 0); got != 500_000 {
-		t.Fatalf("threshold = %d, want the assumed context size", got)
-	}
-	if got, label := effectiveCompactThreshold(0, 0); got != 0 || label != "" {
-		t.Fatalf("threshold = %d (%q), want no override", got, label)
-	}
-}
-
 func TestSmallestMappedWindowCountsUnknownModels(t *testing.T) {
 	p := provider.Provider{
 		OpusModel:   "gpt-5.6-sol[1m]",

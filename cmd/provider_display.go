@@ -77,7 +77,7 @@ func backendManagedContextNote(p provider.Provider) string {
 	if provider.ContextBudgetIsManual(p) {
 		return " · manual override"
 	}
-	return " · backend-managed (preset is fallback)"
+	return " · per slot (Claude Code sizes the session)"
 }
 
 func providerOneMSummary(p provider.Provider) string {

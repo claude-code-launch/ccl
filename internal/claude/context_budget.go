@@ -2,6 +2,7 @@ package claude
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -84,20 +85,40 @@ func AdvertisedContextWindows(endpoint, apiKey string) (map[string]int, string) 
 		{"Codex client catalog", protocol.GetCodexClientModelInfos},
 		{"OpenAI /models", protocol.GetOpenAIModelInfos},
 	}
-	for _, source := range sources {
-		infos, err := source.fetch(endpoint, apiKey)
-		if err != nil {
-			oauthproxy.Debugf("context window catalog %q failed: %v", source.label, err)
-			continue
-		}
-		windows := make(map[string]int, len(infos))
-		for _, info := range infos {
-			if info.ContextWindow > 0 {
-				windows[strings.ToLower(info.ID)] = info.ContextWindow
+	// Probe both shapes at once: sequentially this costs two request timeouts on
+	// every gateway that serves only one of them, which is a visible stall in
+	// `ccl doctor` and in the config TUI.
+	type result struct {
+		windows map[string]int
+		label   string
+	}
+	results := make([]result, len(sources))
+	var wait sync.WaitGroup
+	for index, source := range sources {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			infos, err := source.fetch(endpoint, apiKey)
+			if err != nil {
+				oauthproxy.Debugf("context window catalog %q failed: %v", source.label, err)
+				return
 			}
-		}
-		if len(windows) > 0 {
-			return windows, source.label
+			windows := make(map[string]int, len(infos))
+			for _, info := range infos {
+				if info.ContextWindow > 0 {
+					windows[strings.ToLower(info.ID)] = info.ContextWindow
+				}
+			}
+			if len(windows) > 0 {
+				results[index] = result{windows: windows, label: source.label}
+			}
+		}()
+	}
+	wait.Wait()
+	// Source order still decides the winner, so the Codex catalog keeps priority.
+	for _, candidate := range results {
+		if len(candidate.windows) > 0 {
+			return candidate.windows, candidate.label
 		}
 	}
 	return nil, ""

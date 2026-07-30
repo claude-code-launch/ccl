@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
@@ -691,8 +692,19 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 //
 // Unknown windows stay editable — the catalog is advisory and often absent.
 func (m *AdvancedConfigModel) oneMSlotBlocked(modelVal string) bool {
-	window, ok := m.modelContextWindows[stripOneMSuffix(modelVal)]
-	return ok && window > 0 && !protocol.ContextWindowSuggests1M(window)
+	window, ok := m.advertisedWindow(modelVal)
+	return ok && !protocol.ContextWindowSuggests1M(window)
+}
+
+// advertisedWindow looks up the window the backend reports for a slot model.
+// The catalog is keyed by lowercased model id, so gateways serving mixed-case ids
+// (GLM-4.6, Qwen3-Coder) must not fall through this check.
+func (m *AdvancedConfigModel) advertisedWindow(modelVal string) (int, bool) {
+	window, ok := m.modelContextWindows[strings.ToLower(stripOneMSuffix(modelVal))]
+	if !ok || window <= 0 {
+		return 0, false
+	}
+	return window, true
 }
 
 // slotModelForIndex returns the model configured in the page-2 row order.
@@ -776,13 +788,14 @@ func (m *AdvancedConfigModel) skipDisabledPage4Cursor(direction int) {
 		m.cursor = m.page4ToolsCursor()
 		return
 	}
-	// Move to the row above Max Output when there is one (Protocol/Fast),
-	// otherwise there is nothing above it and Tools is the nearest live row.
+	// Move to the row above Max Output when there is one (Protocol/Fast).
 	if above := m.page4Base() - 1; above >= 0 {
 		m.cursor = above
 		return
 	}
-	m.cursor = m.page4ToolsCursor()
+	// Max Output is the first row: wrap to the end instead of bouncing back to
+	// Tools, which would make Back unreachable by keyboard.
+	m.cursor = m.page4MaxCursor()
 }
 
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
@@ -1105,27 +1118,29 @@ func (m *AdvancedConfigModel) selectCompactPreset(radioIdx int) {
 	}
 	m.compactPreset = compactRadioOrder[radioIdx]
 	m.compactState = compactConfigState{preset: m.compactPreset}
+	// Custom promises the hand-set context env survives; the launcher only honors
+	// that promise when the provider opts out of ccl's context policy.
+	if m.p == nil {
+		return
+	}
+	if m.compactPreset == compactPresetPreserve {
+		ensureProviderEnvMap(m.p)
+		m.p.Env[provider.EnvContextBudgetMode] = provider.ContextBudgetManual
+		return
+	}
+	if m.p.Env != nil {
+		delete(m.p.Env, provider.EnvContextBudgetMode)
+		if len(m.p.Env) == 0 {
+			m.p.Env = nil
+		}
+	}
 }
 
 func compactRadioLabel(preset compactPreset) string {
 	if preset == compactPresetPreserve {
 		return "Custom — keep the context env set by hand"
 	}
-	if preset == compactPresetDefault {
-		return "Claude Code default — 1M per slot via Extended Context"
-	}
-	switch preset {
-	case compactPresetDefault:
-		return "Claude default"
-	case compactPreset300K:
-		return "Switch-safe     300K / 200K"
-	case compactPreset500K:
-		return "Balanced        500K / 400K"
-	case compactPreset1M:
-		return "Maximum depth     1M / 900K"
-	default:
-		return "Custom"
-	}
+	return "Claude Code default — 1M per slot via Extended Context"
 }
 
 // syncOneMForSameModels prompts-free: when a slot toggles [1m], apply the same
@@ -1792,8 +1807,15 @@ func renderModelFetchProgress(progress, frame int, oauth bool) string {
 // reports the intent as a message instead of mutating the model from the view.
 type focusCredentialFieldMsg struct{ cursor int }
 
-// credentialFieldLabels maps a page-0 cursor position onto its rendered label.
-var credentialFieldLabels = map[int]string{0: "Endpoint URL", 1: "API Key"}
+// credentialFields maps the page-0 cursor positions onto their rendered labels,
+// in render order.
+var credentialFields = []struct {
+	cursor int
+	label  string
+}{
+	{cursor: 0, label: "Endpoint URL"},
+	{cursor: 1, label: "API Key"},
+}
 
 // credentialFieldAtLine resolves a clicked screen row to a credential input.
 //
@@ -1807,10 +1829,13 @@ func credentialFieldAtLine(lines []string, y int) (int, bool) {
 		if row < 0 || row >= len(lines) {
 			continue
 		}
-		for cursor, label := range credentialFieldLabels {
-			// Labels survive styling as plain substrings, so no ANSI stripping.
-			if strings.Contains(lines[row], label) {
-				return cursor, true
+		// The label must start the row (after the cursor prefix and the panel
+		// border), so prose that merely mentions "API Key" cannot steal focus.
+		text := strings.TrimLeft(ansi.Strip(lines[row]), " │|>")
+		text = strings.TrimSpace(text)
+		for _, field := range credentialFields {
+			if strings.HasPrefix(text, field.label) {
+				return field.cursor, true
 			}
 		}
 	}
@@ -2053,8 +2078,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// Layout matches the product mockup: checkbox matrix + radio list.
 		body.WriteString(m.renderPageHeader(locale.T("上下文与自动压缩", "Context & Compact"), "Context"))
 		body.WriteString(grayText.Render(locale.T(
-			"[1m] 按槽位；压缩为 Provider 全局 · 同名模型切换会同步",
-			"[1m] per-slot; compact is provider-wide · same model syncs",
+			"[1m] 按槽位生效 · 同名模型切换会同步 · 压缩阈值由 Claude Code 自行决定",
+			"[1m] is per slot · same model syncs · Claude Code decides the compact threshold",
 		)) + "\n\n")
 
 		body.WriteString(titleStyle.Render("Extended Context") + "\n")
@@ -2097,13 +2122,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 			capLabel := grayText.Render("Standard/unknown")
 			if blocked {
-				window := m.modelContextWindows[stripOneMSuffix(modelVal)]
+				window, _ := m.advertisedWindow(modelVal)
 				capLabel = grayText.Render(fmt.Sprintf(locale.T("后端 %s · 无 1M", "backend %s · no 1M"), formatTokenCount(window)))
 			} else if m.oneMSlots[slotKey] {
 				capLabel = lightning
 			} else if recommendedOneMModel(modelVal) {
 				capLabel = availableStyle.Render(locale.T("建议 1M", "1M recommended"))
-			} else if window, ok := m.modelContextWindows[stripOneMSuffix(modelVal)]; ok && protocol.ContextWindowSuggests1M(window) {
+			} else if window, ok := m.advertisedWindow(modelVal); ok && protocol.ContextWindowSuggests1M(window) {
 				capLabel = availableStyle.Render("1M reported")
 			}
 
