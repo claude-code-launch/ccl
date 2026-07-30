@@ -3,6 +3,7 @@ package cmd
 import (
 	"testing"
 
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -69,4 +70,30 @@ func TestFormatTokenCountIsReadableAndExact(t *testing.T) {
 			t.Errorf("formatTokenCount(%d) = %q, want %q", tokens, got, want)
 		}
 	}
+}
+
+func TestPrintDoctorOneMConsistencyFlagsOversizedMarkers(t *testing.T) {
+	// The check is output-only; assert the decision inputs it depends on, so a
+	// [1m] slot whose backend window is small is recognizable.
+	p := provider.Provider{
+		OpusModel:   "gpt-5.6-sol[1m]",
+		SonnetModel: "claude-sonnet-4-6[1m]",
+		HaikuModel:  "gpt-5.6-luna",
+	}
+	slots := oneMSlotsFromProvider(p)
+	if !slots["opus"] || !slots["sonnet"] || slots["haiku"] {
+		t.Fatalf("one-M slots = %#v", slots)
+	}
+	windows := map[string]int{
+		"gpt-5.6-sol":       272_000,
+		"claude-sonnet-4-6": 1_000_000,
+	}
+	if protocol.ContextWindowSuggests1M(windows["gpt-5.6-sol"]) {
+		t.Error("272K must not count as a 1M-class window")
+	}
+	if !protocol.ContextWindowSuggests1M(windows["claude-sonnet-4-6"]) {
+		t.Error("1M must count as a 1M-class window")
+	}
+	// Must not panic or warn when no catalog is available.
+	printDoctorOneMConsistency(p, nil)
 }

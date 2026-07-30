@@ -273,6 +273,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	if unknown > 0 {
 		doctorInfo(fmt.Sprintf("%d mapped model(s) are absent from the catalog; their window is unknown", unknown))
 	}
+	printDoctorOneMConsistency(configured, windows)
 	if smallest == 0 {
 		return
 	}
@@ -309,6 +310,37 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	}
 	doctorOK(fmt.Sprintf("Compact threshold %s fits the smallest mapped window %s",
 		formatTokenCount(threshold), formatTokenCount(smallest)))
+}
+
+// printDoctorOneMConsistency checks the [1m] markers against the advertised
+// windows.
+//
+// The suffix is how Claude Code is told a slot runs the 1M variant of a model: it
+// sizes the session for a 1M window and scales its auto-compact buffer to it, so
+// a [1m] marker on a model whose backend window is far smaller makes Claude Code
+// compact much too late and the upstream rejects the turn first. The suffix is
+// only an Anthropic capability signal — it never widens a third-party window.
+func printDoctorOneMConsistency(p provider.Provider, windows map[string]int) {
+	if len(windows) == 0 {
+		return
+	}
+	oneMSlots := oneMSlotsFromProvider(p)
+	if len(oneMSlots) == 0 {
+		return
+	}
+	for _, slot := range provider.SlotModels(p) {
+		if !oneMSlots[slot.Slot] {
+			continue
+		}
+		window, ok := windows[strings.ToLower(slot.Model)]
+		if !ok || window <= 0 || protocol.ContextWindowSuggests1M(window) {
+			continue
+		}
+		doctorWarn(fmt.Sprintf("%s is marked [1m] but %s advertises only %s",
+			slot.Slot, slot.Model, formatTokenCount(window)))
+		doctorHint("Claude Code sizes the session (and its compact buffer) for 1M, so it compacts after the backend already refuses the request")
+		doctorHint("Clear the Extended Context checkbox for that slot in `ccl set`, or confirm the backend really accepts 1M")
+	}
 }
 
 // contextBudgetModeLabel explains who owns the context limits for this provider.
