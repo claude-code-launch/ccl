@@ -237,7 +237,14 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	compactWindow := parseDoctorTokenEnv(configured.Env[autoCompactWindowEnv])
 	compactPct := strings.TrimSpace(configured.Env[provider.EnvAutoCompactPct])
 	overridden := maxContext > 0 || compactWindow > 0 || compactPct != ""
-	windows, source := claude.AdvertisedContextWindows(runtimeProvider.Endpoint, runtimeProvider.APIKey)
+	// Never probe with an unset endpoint: NormalizeOpenAIModelsURL falls back to
+	// api.openai.com, which would ship this provider's key to OpenAI. Anthropic
+	// gateways do not serve this catalog either.
+	var windows map[string]int
+	var source string
+	if endpoint := strings.TrimSpace(runtimeProvider.Endpoint); endpoint != "" && !provider.IsAnthropicType(runtimeProvider.Type) {
+		windows, source = claude.AdvertisedContextWindows(endpoint, runtimeProvider.APIKey)
+	}
 	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
 
 	oauthproxy.Debugf("doctor context budget provider=%q max_context=%d compact_window=%d compact_pct=%q manual=%t catalog=%q models=%d smallest=%d smallest_model=%q",
@@ -245,7 +252,14 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 		provider.ContextBudgetIsManual(configured), source, len(windows), smallest, smallestModel)
 
 	oneMSlots := oneMSlotsFromProvider(configured)
-	if overridden {
+	// A value matching one of the presets older ccl versions wrote is cleared at
+	// launch, so it must not be reported as something the user chose.
+	stale := provider.IsCclContextPreset(configured.Env) && !provider.ContextBudgetIsManual(configured)
+	if overridden && stale {
+		doctorKV("Sizing", "per slot (a preset from an older ccl version is ignored and cleared)")
+		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
+		overridden = false
+	} else if overridden {
 		doctorKV("Sizing", "manual override in provider env")
 		doctorKV("Assumed context", doctorTokenLabel(maxContext, "Claude Code default"))
 		doctorKV("Auto-compact at", doctorTokenLabel(compactWindow, "Claude Code default"))
@@ -329,34 +343,6 @@ func printDoctorOneMConsistency(p provider.Provider, windows map[string]int) {
 		doctorHint("Claude Code sizes the session (and its compact buffer) for 1M, so it compacts after the backend already refuses the request")
 		doctorHint("Clear the Extended Context checkbox for that slot in `ccl set`, or confirm the backend really accepts 1M")
 	}
-}
-
-// contextBudgetModeLabel explains who owns the context limits for this provider.
-func contextBudgetModeLabel(p provider.Provider, managed bool) string {
-	switch {
-	case provider.ContextBudgetIsManual(p):
-		return "manual (" + provider.EnvContextBudgetMode + "=" + provider.ContextBudgetManual + ")"
-	case managed:
-		return "auto (backend-managed)"
-	case strings.TrimSpace(p.OAuthProvider) != "":
-		return "auto (no advertised window; using the configured preset)"
-	default:
-		return "configured preset"
-	}
-}
-
-// effectiveCompactThreshold reports the token count Claude Code will actually
-// grow to, and a label for it. The absolute auto-compact window wins when set;
-// otherwise the assumed context size governs. Zero means ccl set no override and
-// Claude Code follows its own defaults.
-func effectiveCompactThreshold(maxContext, compactWindow int) (int, string) {
-	if compactWindow > 0 {
-		return compactWindow, "auto-compact threshold"
-	}
-	if maxContext > 0 {
-		return maxContext, "assumed context size"
-	}
-	return 0, ""
 }
 
 // smallestMappedWindow returns the smallest advertised context window across the

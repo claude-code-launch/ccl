@@ -510,8 +510,13 @@ func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
 	if allConfiguredModelsRecommendOneM(p) {
 		t.Fatal("mixed unknown models should not all-recommend 1M")
 	}
-	if !strings.Contains(view, "provider-wide") && !strings.Contains(view, "Provider 全局") {
-		t.Fatalf("expected independence note for context vs compact, got %q", view)
+	// The hint must say sizing is per slot and that Claude Code owns the compact
+	// threshold; ccl no longer has a provider-wide compact budget to explain.
+	if !strings.Contains(view, "per slot") && !strings.Contains(view, "按槽位") {
+		t.Fatalf("expected the per-slot sizing note, got %q", view)
+	}
+	if strings.Contains(view, "provider-wide") || strings.Contains(view, "Provider 全局") {
+		t.Fatalf("hint still claims a provider-wide compact budget: %q", view)
 	}
 }
 

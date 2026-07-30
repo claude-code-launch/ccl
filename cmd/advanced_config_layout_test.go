@@ -164,14 +164,17 @@ func TestPage4UpFromToolsSkipsDisabledMaxOutput(t *testing.T) {
 	m.cursor = m.page4ToolsCursor()
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
 	m = next.(*AdvancedConfigModel)
-	// Max Output is managed upstream for Codex, so moving up must not park on it.
+	// Max Output is managed upstream for Codex, so moving up must skip it. With
+	// Protocol and Fast both absent it is the first row, so the cursor wraps to the
+	// end rather than bouncing back to Tools, which would trap the user.
 	if m.cursor == m.page4MaxOutCursor() {
 		t.Fatalf("up from Tools landed on the disabled Max Output row %d", m.cursor)
 	}
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
-	m = next.(*AdvancedConfigModel)
-	if m.cursor == m.page4MaxOutCursor() {
-		t.Fatalf("down landed on the disabled Max Output row %d", m.cursor)
+	if m.cursor == m.page4ToolsCursor() {
+		t.Fatalf("up from Tools did not move: cursor %d", m.cursor)
+	}
+	if m.page4Base() == 0 && m.cursor != m.page4MaxCursor() {
+		t.Fatalf("up from the first row landed on %d, want the last row %d", m.cursor, m.page4MaxCursor())
 	}
 }
 
@@ -292,23 +295,28 @@ func TestCredentialsPageResolvesClickToField(t *testing.T) {
 	lines := strings.Split(view.Content, "\n")
 
 	// Every field is reachable by clicking its label row and the value row below it.
-	for cursor, label := range credentialFieldLabels {
+	for _, field := range credentialFields {
 		labelRow := -1
 		for i, line := range lines {
-			if strings.Contains(line, label) {
+			if strings.Contains(line, field.label) {
 				labelRow = i
 				break
 			}
 		}
 		if labelRow < 0 {
-			t.Fatalf("label %q is not on the credentials page", label)
+			t.Fatalf("label %q is not on the credentials page", field.label)
 		}
 		for _, row := range []int{labelRow, labelRow + 1} {
 			got, ok := credentialFieldAtLine(lines, row)
-			if !ok || got != cursor {
-				t.Fatalf("click on row %d resolved to (%d, %t), want cursor %d", row, got, ok, cursor)
+			if !ok || got != field.cursor {
+				t.Fatalf("click on row %d resolved to (%d, %t), want cursor %d", row, got, ok, field.cursor)
 			}
 		}
+	}
+
+	// Prose that merely mentions a label must not steal focus.
+	if _, ok := credentialFieldAtLine([]string{"  detection uses the API Key you entered"}, 0); ok {
+		t.Fatal("a hint mentioning \"API Key\" resolved to the field")
 	}
 
 	// A click far away from any field must be ignored rather than stealing focus.
@@ -341,5 +349,48 @@ func TestOAuthCredentialsPageLeavesMouseAlone(t *testing.T) {
 	m.height = 30
 	if view := m.View(); view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
 		t.Fatal("OAuth credentials page must not capture the mouse")
+	}
+}
+
+func TestPage2BlocksOneMForMixedCaseModelIDs(t *testing.T) {
+	// The catalog is keyed by lowercased model id; a gateway serving mixed-case ids
+	// must not slip past the check.
+	p := provider.Provider{
+		Type:      "openai",
+		Endpoint:  "https://example.test/v1",
+		OpusModel: "GLM-4.6",
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.page = 2
+	m.modelContextWindows = map[string]int{"glm-4.6": 200_000}
+
+	if !m.oneMSlotBlocked("GLM-4.6") {
+		t.Fatal("a 200K model must block 1M regardless of id casing")
+	}
+	m.cursor = 0
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if m.oneMSlots["opus"] {
+		t.Fatal("1M was enabled for a 200K model with a mixed-case id")
+	}
+}
+
+func TestSelectingCustomCompactOptsOutOfContextPolicy(t *testing.T) {
+	// Custom promises hand-set context env survives, which only holds when the
+	// provider opts out of ccl's context policy.
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
+	m := NewAdvancedConfigModel(&p)
+
+	m.selectCompactPreset(1) // Custom
+	if m.compactPreset != compactPresetPreserve {
+		t.Fatalf("compact preset = %v, want Custom", m.compactPreset)
+	}
+	if !provider.ContextBudgetIsManual(*m.p) {
+		t.Fatalf("Custom did not opt out of the context policy: %#v", m.p.Env)
+	}
+
+	m.selectCompactPreset(0) // Claude Code default
+	if provider.ContextBudgetIsManual(*m.p) {
+		t.Fatalf("the default choice must not keep the opt-out: %#v", m.p.Env)
 	}
 }
