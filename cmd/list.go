@@ -21,9 +21,11 @@ func newProviderListCommand(use string) *cobra.Command {
 		Short: "List registered providers",
 		Long: `List providers from ~/.ccl/config.yaml.
 
-Single-account OAuth providers that already belong to an auth group are hidden
-by default so group pools stay readable. Use -a/--all for full model pools and
-slot details.
+A single-account OAuth provider whose credential already belongs to an auth
+group is never listed: the group's own provider represents it. -a/--all does not
+change that, it switches the table for a detailed view with full model pools and
+slot details. To see what a group is made of, use ccl oauth group ls, or read
+~/.ccl/config.yaml.
 
 Examples:
   ccl ls
@@ -39,7 +41,7 @@ Examples:
 			return printProviders(cmd.OutOrStdout(), cfg, showAll, "No providers added yet. Use 'ccl set' to add one.", "Registered providers:")
 		},
 	}
-	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Show detailed providers with full model pools")
+	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Detailed view with full model pools (does not reveal auth group members)")
 	return cmd
 }
 

@@ -19,4 +19,10 @@ var versionCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
+
+	// Setting Version makes cobra handle --version itself. Without it the flag
+	// is unknown, and because FParseErrWhitelist.UnknownFlags is enabled it
+	// would be dropped silently and the root RunE would launch a session.
+	rootCmd.Version = Version
+	rootCmd.SetVersionTemplate("ccl version {{.Version}}\n")
 }

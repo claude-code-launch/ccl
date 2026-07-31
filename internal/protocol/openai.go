@@ -97,7 +97,7 @@ func fetchModelsPayload(url, apiKey string, out any) error {
 		return errors.New(resp.Status)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("解析响应失败: %w", err)
+		return fmt.Errorf("decode models response: %w", err)
 	}
 	return nil
 }

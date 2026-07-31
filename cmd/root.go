@@ -78,7 +78,10 @@ func Execute() {
 
 func isCclCommand(arg string) bool {
 	switch arg {
-	case "help", "completion", "-h", "--help":
+	// --version asks about ccl, so it cannot fall through to Claude Code: that
+	// path starts a real session. -v is deliberately not listed, because Claude
+	// Code may use it and `ccl -v` should keep reaching it.
+	case "help", "completion", "-h", "--help", "--version":
 		return true
 	}
 

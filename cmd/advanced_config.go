@@ -127,8 +127,6 @@ type AdvancedConfigModel struct {
 	modelTestID       uint64
 	modelTestCanceled bool
 
-	// Page 3
-
 	// Page 4
 	IsActiveChosen bool
 	manualConfig   bool
@@ -247,6 +245,20 @@ func (m *AdvancedConfigModel) page0BackCursor() int {
 func (m *AdvancedConfigModel) page0MaxCursor() int {
 	return m.page0BackCursor()
 }
+
+// textInputHasKeyboard 表示当前按键会被某个文本输入框消费。条件与本文件末尾
+// 的输入路由保持一致：page 0 的光标停在 Endpoint/API Key 上，或 page 1 的
+// 筛选框聚焦。OAuth provider 在 page 0 没有可编辑字段，因此不算。
+func (m *AdvancedConfigModel) textInputHasKeyboard() bool {
+	if m.page == 0 && !m.usesOAuth() {
+		return m.cursor == 0 || m.cursor == 1
+	}
+	return m.page == 1 && m.filterInput.Focused()
+}
+
+// vimNavAliases 是导航键的单字母别名。它们同时是合法的输入字符，因此在文本
+// 输入框拥有键盘时必须让位，否则用户打不出这些字母。方向键没有这个歧义。
+var vimNavAliases = map[string]bool{"q": true, "h": true, "j": true, "k": true, "l": true}
 
 // NewAdvancedConfigModelAtPage1 creates a model starting at page 1 (slot mapping)
 // with a pre-populated model pool, skipping the credential page.
@@ -1375,7 +1387,15 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, modelAvailabilityTickCmd(msg.testID)
 
 	case tea.KeyMsg:
-		switch msg.String() {
+		// 文本输入框拥有键盘时，单字母导航别名让位给输入本身：把它们清空，
+		// 下面两个 switch 都不会匹配，按键最终落到文件末尾的输入路由。
+		// ctrl+c 与方向键不受影响，esc 仍由各页自行处理。
+		key := msg.String()
+		if vimNavAliases[key] && m.textInputHasKeyboard() {
+			key = ""
+		}
+
+		switch key {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		}
@@ -1396,7 +1416,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		switch msg.String() {
+		switch key {
 		case "esc":
 			if m.page == 1 && m.filterInput.Focused() {
 				m.filterInput.Blur()
@@ -2166,15 +2186,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(renderBottomButtons(m.page, m.cursor, oneMNextCursor, oneMBackCursor))
 		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 按钮", "enter toggle · ↑↓ move · ←→ buttons")))
 
-	case 3:
-		// Effort configuration was removed from ccl set. Jump to review if reached.
-		m.page = 4
-		m.cursor = m.page4InitialCursor()
-		body.WriteString(grayText.Render(locale.T(
-			"Reasoning Effort 已改由 Claude Code 管理（/effort、--effort）…",
-			"Reasoning Effort is managed by Claude Code (/effort, --effort)…",
-		)) + "\n")
-
 	case 4:
 		// ==================== PAGE 4: editable configuration summary ====================
 		// Compact when the terminal cannot fit the full review (header+border ~29 lines with Fast).
@@ -2344,6 +2355,17 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 
 		body.WriteString(grayText.Render(locale.T("↑↓ 选择 · ←→ 切换清理选项 · enter 确认 · esc 返回", "↑↓ Select · ←→ Toggle cleanup · enter confirm · esc back")))
+
+	default:
+		// No page navigates here — page 3 was the removed Reasoning Effort step.
+		// Rendering something diagnosable beats a blank frame if that ever
+		// changes: View must stay pure, so it cannot redirect the way the old
+		// page-3 arm did (it assigned m.page from inside the renderer).
+		body.WriteString(m.renderPageHeader(locale.T("未知页面", "Unknown page"), "?"))
+		body.WriteString(grayText.Render(fmt.Sprintf(locale.T(
+			"页面 %d 没有对应视图，按 esc 返回。",
+			"page %d has no view; press esc to go back.",
+		), m.page)))
 	}
 
 	panelStyle := windowStyle.Width(m.panelWidth())

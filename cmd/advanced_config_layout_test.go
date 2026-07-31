@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -392,5 +393,161 @@ func TestSelectingCustomCompactOptsOutOfContextPolicy(t *testing.T) {
 	m.selectCompactPreset(0) // Claude Code default
 	if provider.ContextBudgetIsManual(*m.p) {
 		t.Fatalf("the default choice must not keep the opt-out: %#v", m.p.Env)
+	}
+}
+
+// typeKey builds the KeyPressMsg a terminal sends for a printable character.
+func typeKey(r rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)})
+}
+
+// quits reports whether cmd is the quit command, by identity rather than by
+// running it: a key that reaches a text input comes back as the cursor's blink
+// cmd, which blocks for the whole blink interval when called.
+func quits(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	return reflect.ValueOf(cmd).Pointer() == reflect.ValueOf(tea.Cmd(tea.Quit)).Pointer()
+}
+
+func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
+	// "q" quit and the vim aliases are also ordinary characters. While a text
+	// input owns the keyboard they must be typed, not obeyed: an API key
+	// containing "q", or filtering for "qwen"/"kimi", used to quit the TUI or
+	// silently move the cursor and insert the letter at the same time.
+	for _, tc := range []struct {
+		name   string
+		cursor int
+		field  func(*AdvancedConfigModel) string
+	}{
+		{"endpoint", 0, func(m *AdvancedConfigModel) string { return m.urlInput.Value() }},
+		{"api key", 1, func(m *AdvancedConfigModel) string { return m.keyInput.Value() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, r := range []rune{'q', 'k', 'j', 'h', 'l'} {
+				p := provider.Provider{Type: "openai"}
+				m := NewAdvancedConfigModel(&p)
+				m.page = 0
+				m.cursor = tc.cursor
+
+				next, cmd := m.Update(typeKey(r))
+				m = next.(*AdvancedConfigModel)
+
+				if quits(cmd) {
+					t.Fatalf("typing %q into the %s quit the TUI", r, tc.name)
+				}
+				if m.cursor != tc.cursor {
+					t.Fatalf("typing %q moved the cursor %d -> %d", r, tc.cursor, m.cursor)
+				}
+				if got := tc.field(m); got != string(r) {
+					t.Fatalf("%s = %q after typing %q, want the character inserted", tc.name, got, r)
+				}
+			}
+		})
+	}
+}
+
+func TestSlotFilterTypesLettersThatAreAlsoShortcuts(t *testing.T) {
+	// The slot picker navigates with j/k, but only until the filter is focused:
+	// there, "kimi" has to be typeable. Arrow keys stay unambiguous.
+	p := provider.Provider{Type: "openai"}
+	m := NewAdvancedConfigModelAtPage1(&p, []string{"kimi-k2", "qwen3-coder", "glm-4.6"})
+	m.cursor = 0
+	m.filterInput.Focus()
+
+	for _, r := range "kimi" {
+		next, cmd := m.Update(typeKey(r))
+		m = next.(*AdvancedConfigModel)
+		if quits(cmd) {
+			t.Fatalf("typing %q into the slot filter quit the TUI", r)
+		}
+	}
+	if got := m.filterInput.Value(); got != "kimi" {
+		t.Fatalf("filter = %q, want %q", got, "kimi")
+	}
+	if len(m.filteredPool) != 1 || m.filteredPool[0] != "kimi-k2" {
+		t.Fatalf("filtered pool = %v, want only kimi-k2", m.filteredPool)
+	}
+
+	// The list still moves with the arrow keys while the filter has focus.
+	m.filterInput.SetValue("")
+	m.updateFilteredPool()
+	m.slotListCursor = 0
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	m = next.(*AdvancedConfigModel)
+	if m.slotListCursor != 1 {
+		t.Fatalf("slot list cursor = %d after ↓, want 1", m.slotListCursor)
+	}
+}
+
+func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
+	// The shortcut must keep working on buttons and for OAuth providers, whose
+	// credentials page has no editable field at all.
+	for _, tc := range []struct {
+		name   string
+		p      provider.Provider
+		cursor int
+	}{
+		{"api key provider, cursor on a button", provider.Provider{Type: "openai"}, 2},
+		{"oauth provider", provider.Provider{Type: "openai", OAuthProvider: "codex"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewAdvancedConfigModel(&tc.p)
+			m.page = 0
+			m.cursor = tc.cursor
+			if _, cmd := m.Update(typeKey('q')); !quits(cmd) {
+				t.Fatal("q no longer quits")
+			}
+		})
+	}
+}
+
+func TestViewDoesNotMutateTheModel(t *testing.T) {
+	// View is a renderer: bubbletea may call it without a following Update, so
+	// state changed here makes the frame and the model disagree. Page 3 (the
+	// removed Reasoning Effort step) used to assign m.page and m.cursor from
+	// inside View to bounce the user to the review page.
+	for _, page := range []int{0, 1, 2, 3, 4, 5, 99} {
+		p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", Model: "model-a,model-b"}
+		m := NewAdvancedConfigModel(&p)
+		m.page = page
+		m.cursor = 1
+		m.width = 100
+		m.height = 30
+
+		beforePage, beforeCursor := m.page, m.cursor
+		view := m.View()
+
+		if m.page != beforePage || m.cursor != beforeCursor {
+			t.Fatalf("View() on page %d moved the model to page=%d cursor=%d", page, m.page, m.cursor)
+		}
+		if strings.TrimSpace(view.Content) == "" {
+			t.Fatalf("View() on page %d rendered a blank frame", page)
+		}
+	}
+}
+
+func TestNoNavigationReachesTheRemovedEffortPage(t *testing.T) {
+	// goBack is the only path that decrements the page, so it is the only way a
+	// caller could land on the removed page 3. Page 4 must skip straight to 2.
+	for _, from := range []int{1, 2, 4, 5} {
+		p := provider.Provider{Type: "openai"}
+		m := NewAdvancedConfigModel(&p)
+		m.page = from
+		m.goBack()
+		if m.page == 3 {
+			t.Fatalf("goBack from page %d landed on the removed effort page", from)
+		}
+	}
+
+	// The visible step numbering has no slot for it either.
+	p := provider.Provider{Type: "openai"}
+	m := NewAdvancedConfigModel(&p)
+	for _, page := range []int{0, 1, 2, 4, 5} {
+		m.page = page
+		if step := m.workflowStep(); step < 1 || step > 5 {
+			t.Fatalf("page %d maps to workflow step %d, outside 1..5", page, step)
+		}
 	}
 }

@@ -120,13 +120,11 @@ func runDoctor(ctx context.Context) error {
 	// 2. Check Claude CLI
 	claudeInstalled := IsInstalled()
 	if !claudeInstalled {
+		// Report it, do not fix it: doctor is a diagnostic, so it must not
+		// download and run an installer as a side effect of being asked for a
+		// health report. `ccl install` and launching a session both offer that.
 		doctorErr("Claude Code CLI: not installed or not in PATH")
-		// Prompt to install automatically
-		err := AutoInstall()
-		if err != nil {
-			doctorErr(fmt.Sprintf("Auto-installation failed: %v", err))
-			doctorHint("Install manually: https://code.claude.com/")
-		}
+		doctorHint("Run `ccl` to be offered the installer, or install manually: https://code.claude.com/")
 	} else {
 		claudePath, _ := exec.LookPath("claude")
 		doctorOK("Claude Code CLI: " + claudePath)

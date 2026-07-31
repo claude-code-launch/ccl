@@ -470,7 +470,7 @@ func classifyModelProbeResult(candidate modelProbeCandidate, result modelListDet
 
 func fetchCandidateModelsForDetection(candidate modelProbeCandidate, apiKey string) (modelListDetection, error) {
 	if strings.TrimSpace(apiKey) == "" {
-		return modelListDetection{}, fmt.Errorf("api key 不能为空")
+		return modelListDetection{}, errors.New(locale.T("api key 不能为空", "api key is empty"))
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, candidate.modelsURL, nil)
 	if err != nil {
@@ -672,7 +672,7 @@ func parseModelListForDetection(body []byte) (modelListDetection, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
-		return modelListDetection{}, fmt.Errorf("解析响应失败: %w", err)
+		return modelListDetection{}, fmt.Errorf("%s: %w", locale.T("解析响应失败", "decode models response"), err)
 	}
 
 	models := make([]string, 0, len(response.Data))

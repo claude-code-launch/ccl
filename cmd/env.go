@@ -30,10 +30,12 @@ List all variables:
 
 Delete a variable:
   ccl env rm KEY
+  ccl env rm KEY -y        # skip the confirmation
   ccl provider env rm KEY
 
 Rename a variable:
   ccl env mv OLD_KEY NEW_KEY
+  ccl env mv OLD_KEY NEW_KEY -y   # overwrite an existing key
   ccl provider env mv OLD_KEY NEW_KEY
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -132,17 +134,22 @@ func runEnvList() error {
 
 // newEnvRemoveCommand deletes an environment variable.
 func newEnvRemoveCommand() *cobra.Command {
-	return &cobra.Command{
+	// Per command, not package level: newEnvCommand is built twice, once for
+	// `ccl env` and once for `ccl provider env`.
+	yes := false
+	cmd := &cobra.Command{
 		Use:   "rm KEY",
 		Short: "Delete an environment variable",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runEnvRemove(args[0])
+			return runEnvRemove(args[0], yes)
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Delete without confirmation")
+	return cmd
 }
 
-func runEnvRemove(arg string) error {
+func runEnvRemove(arg string, force bool) error {
 	key := strings.TrimSpace(arg)
 	if key == "" {
 		return fmt.Errorf("key cannot be empty")
@@ -165,11 +172,8 @@ func runEnvRemove(arg string) error {
 		return fmt.Errorf("key %q not found in %q", key, cfg.ActiveProvider)
 	}
 
-	fmt.Printf(locale.T("确定要删除 %s 吗？(y/N): ", "Delete %s? (y/N): "), key)
-	var confirmStr string
-	fmt.Scanln(&confirmStr)
-	confirmStr = strings.ToLower(strings.TrimSpace(confirmStr))
-	if confirmStr != "y" && confirmStr != "yes" {
+	prompt := fmt.Sprintf(locale.T("确定要删除 %s 吗？(y/N): ", "Delete %s? (y/N): "), key)
+	if !confirmed(prompt, force) {
 		fmt.Println(locale.T("已取消。", "Cancelled."))
 		return nil
 	}
@@ -186,17 +190,20 @@ func runEnvRemove(arg string) error {
 
 // newEnvMoveCommand renames an environment variable.
 func newEnvMoveCommand() *cobra.Command {
-	return &cobra.Command{
+	yes := false
+	cmd := &cobra.Command{
 		Use:   "mv OLD_KEY NEW_KEY",
 		Short: "Rename an environment variable",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runEnvMove(args[0], args[1])
+			return runEnvMove(args[0], args[1], yes)
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Overwrite an existing key without confirmation")
+	return cmd
 }
 
-func runEnvMove(oldArg, newArg string) error {
+func runEnvMove(oldArg, newArg string, force bool) error {
 	oldKey := strings.TrimSpace(oldArg)
 	newKey := strings.TrimSpace(newArg)
 	if oldKey == "" || newKey == "" {
@@ -226,11 +233,8 @@ func runEnvMove(oldArg, newArg string) error {
 	}
 
 	if _, exists := p.Env[newKey]; exists {
-		fmt.Printf(locale.T("键 %s 已存在，是否覆盖？(y/N): ", "Key %s already exists. Overwrite? (y/N): "), newKey)
-		var confirmStr string
-		fmt.Scanln(&confirmStr)
-		confirmStr = strings.ToLower(strings.TrimSpace(confirmStr))
-		if confirmStr != "y" && confirmStr != "yes" {
+		prompt := fmt.Sprintf(locale.T("键 %s 已存在，是否覆盖？(y/N): ", "Key %s already exists. Overwrite? (y/N): "), newKey)
+		if !confirmed(prompt, force) {
 			fmt.Println(locale.T("已取消。", "Cancelled."))
 			return nil
 		}

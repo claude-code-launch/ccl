@@ -31,7 +31,7 @@ func GetAnthropicModels(baseURL, key string) (string, error) {
 // the official x-api-key header or a Bearer token used by some routers.
 func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) {
 	if key == "" {
-		return "", fmt.Errorf("api key 不能为空")
+		return "", errors.New("api key is empty")
 	}
 	modelsURL := NormalizeAnthropicModelsURL(baseURL)
 
@@ -42,7 +42,7 @@ func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) 
 		nil,
 	)
 	if err != nil {
-		return "", fmt.Errorf("创建请求失败: %w", err)
+		return "", fmt.Errorf("build models request: %w", err)
 	}
 
 	if strings.EqualFold(authStyle, "bearer") {
@@ -66,7 +66,7 @@ func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) 
 	var result AnthropicModelResponse
 	err = json.NewDecoder(resp.Body).Decode(&result)
 	if err != nil {
-		return "", fmt.Errorf("解析响应失败: %w", err)
+		return "", fmt.Errorf("decode models response: %w", err)
 	}
 
 	models := make([]string, 0, len(result.Data))

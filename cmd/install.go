@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/claude-code-launch/ccl/internal/locale"
 )
 
@@ -121,16 +122,41 @@ func RunInstallerScript() error {
 	return nil
 }
 
+var errInstallNeedsTerminal = errors.New(
+	"claude is not installed and stdin is not a terminal, so the installer was not run. " +
+		"Install it manually (https://code.claude.com/) or run ccl from a terminal to be prompted")
+
+// checkInstallConsent interprets the answer to the "(Y/n)" install prompt and
+// returns nil only when the installer may run. The prompt defaults to yes,
+// which is only a safe default when a person is there to see it: with no
+// terminal an empty answer is EOF, not consent, and treating it as yes would
+// download and execute an installer unattended.
+func checkInstallConsent(answer string, stdinIsTerminal bool) error {
+	if !stdinIsTerminal {
+		return errInstallNeedsTerminal
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "n", "no":
+		return errors.New("installation cancelled. You can install it manually by referring to https://code.claude.com/")
+	default:
+		return nil
+	}
+}
+
 // AutoInstall attempts to install Claude CLI globally via official script.
 // It uses curl/bash on macOS/Linux and powershell on Windows.
 func AutoInstall() error {
-	fmt.Println("Claude Code is not installed.")
-	fmt.Print(locale.T("是否自动安装？(Y/n): ", "Automatically install? (Y/n): "))
-	var confirmStr string
-	fmt.Scanln(&confirmStr)
-	confirmStr = strings.ToLower(strings.TrimSpace(confirmStr))
-	if confirmStr == "n" || confirmStr == "no" {
-		return fmt.Errorf("installation cancelled. You can install it manually by referring to https://code.claude.com/")
+	stdinIsTerminal := term.IsTerminal(os.Stdin.Fd())
+
+	var answer string
+	if stdinIsTerminal {
+		fmt.Println("Claude Code is not installed.")
+		fmt.Print(locale.T("是否自动安装？(Y/n): ", "Automatically install? (Y/n): "))
+		_, _ = fmt.Scanln(&answer)
+	}
+
+	if err := checkInstallConsent(answer, stdinIsTerminal); err != nil {
+		return err
 	}
 
 	if err := RunInstallerScript(); err != nil {

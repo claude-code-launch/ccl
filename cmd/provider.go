@@ -67,36 +67,47 @@ func newProviderPreviewCommand(use string) *cobra.Command {
 }
 
 func newProviderCopyCommand(use string) *cobra.Command {
-	return &cobra.Command{
+	// Declared per command because each constructor is called twice: once for
+	// the root shortcut and once under `ccl provider`.
+	yes := false
+	cmd := &cobra.Command{
 		Use:   use,
 		Short: "Copy a provider configuration",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runProviderCopy(args[0], args[1])
+			return runProviderCopy(args[0], args[1], yes)
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Overwrite an existing target without confirmation")
+	return cmd
 }
 
 func newProviderRemoveCommand(use string) *cobra.Command {
-	return &cobra.Command{
+	yes := false
+	cmd := &cobra.Command{
 		Use:   use,
 		Short: "Delete a provider configuration",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runProviderRemove(args[0])
+			return runProviderRemove(args[0], yes)
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Delete without confirmation")
+	return cmd
 }
 
 func newProviderMoveCommand(use string) *cobra.Command {
-	return &cobra.Command{
+	yes := false
+	cmd := &cobra.Command{
 		Use:   use,
 		Short: "Rename a provider configuration",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runProviderMove(args[0], args[1])
+			return runProviderMove(args[0], args[1], yes)
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Overwrite an existing target without confirmation")
+	return cmd
 }
 
 func runProviderUse(name string) error {
@@ -120,7 +131,22 @@ func runProviderUse(name string) error {
 	return nil
 }
 
-func runProviderCopy(sourceName, targetName string) error {
+// confirmed prints prompt and reports whether the answer was an explicit yes.
+// force skips the prompt. Anything else — including EOF, which is what an
+// unanswered prompt yields when stdin is not a terminal — counts as no, so a
+// scripted invocation without --yes declines instead of destroying anything.
+func confirmed(prompt string, force bool) bool {
+	if force {
+		return true
+	}
+	fmt.Print(prompt)
+	var answer string
+	_, _ = fmt.Scanln(&answer)
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes"
+}
+
+func runProviderCopy(sourceName, targetName string, force bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -142,11 +168,8 @@ func runProviderCopy(sourceName, targetName string) error {
 	}
 
 	if _, exists := cfg.Providers[target]; exists {
-		fmt.Print(locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target))
-		var answer string
-		fmt.Scanln(&answer)
-		answer = strings.ToLower(strings.TrimSpace(answer))
-		if answer != "y" && answer != "yes" {
+		prompt := locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target)
+		if !confirmed(prompt, force) {
 			fmt.Println(locale.T("已取消复制。", "Copy cancelled."))
 			return nil
 		}
@@ -162,7 +185,7 @@ func runProviderCopy(sourceName, targetName string) error {
 	return nil
 }
 
-func runProviderRemove(name string) error {
+func runProviderRemove(name string, force bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -177,11 +200,8 @@ func runProviderRemove(name string) error {
 		return fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found in configuration"), targetName)
 	}
 
-	fmt.Print(locale.Tf("确定要删除 Provider %q？(y/N): ", "Are you sure you want to delete provider %q? (y/N): ", targetName))
-	var answer string
-	fmt.Scanln(&answer)
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	if answer != "y" && answer != "yes" {
+	prompt := locale.Tf("确定要删除 Provider %q？(y/N): ", "Are you sure you want to delete provider %q? (y/N): ", targetName)
+	if !confirmed(prompt, force) {
 		fmt.Println(locale.T("已取消删除。", "Deletion cancelled."))
 		return nil
 	}
@@ -211,7 +231,7 @@ func runProviderRemove(name string) error {
 	return nil
 }
 
-func runProviderMove(sourceName, targetName string) error {
+func runProviderMove(sourceName, targetName string, force bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -233,11 +253,8 @@ func runProviderMove(sourceName, targetName string) error {
 	}
 
 	if _, exists := cfg.Providers[target]; exists {
-		fmt.Print(locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target))
-		var answer string
-		fmt.Scanln(&answer)
-		answer = strings.ToLower(strings.TrimSpace(answer))
-		if answer != "y" && answer != "yes" {
+		prompt := locale.Tf("Provider %q 已存在，是否覆盖？(y/N): ", "Provider %q already exists. Overwrite? (y/N): ", target)
+		if !confirmed(prompt, force) {
 			fmt.Println(locale.T("已取消重命名。", "Rename cancelled."))
 			return nil
 		}
