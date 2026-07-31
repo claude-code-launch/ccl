@@ -1,0 +1,83 @@
+cmd/list.go
+  s_fa15a2b8da25ae::t_fbafbf205dfc64 24-28
+  s_fa15a2b8da25ae::t_1136861dd34ecd 44
+cmd/doctor.go
+  s_fa15a2b8da25ae::t_aae264268f0117 123-125
+  s_fa15a2b8da25ae::t_088a2fbb2f466c 127
+cmd/provider.go
+  s_fa15a2b8da25ae::t_446e162a73ef6a 256-257
+  s_fa15a2b8da25ae::t_ff94d6be34fbb3 234
+  s_fa15a2b8da25ae::t_0047c73b082733 171-172
+  s_fa15a2b8da25ae::t_df1ac8d6a822af 70-73,78,81-82
+  s_fa15a2b8da25ae::t_fde8a17c36d8bd 86-87,92,95-96
+  s_fa15a2b8da25ae::t_598c0b103c537f 188
+  s_fa15a2b8da25ae::t_24bd352bbf13e8 100-101,106,109-110
+  s_fa15a2b8da25ae::t_21dade1f25a1b3 203-204
+  s_fa15a2b8da25ae::t_c3361fd68b852f 134-149
+cmd/lang_cmd.go
+  s_fa15a2b8da25ae::t_c0d245cb8a94c6 4,7,10,16-59,61,65-69,76,78,81-82,85,88-99,101-112,114,117,121-123,128-156
+  s_fa15a2b8da25ae::t_003dd263dac17e 6
+internal/protocol/anthropic.go
+  s_fa15a2b8da25ae::t_fdb524d1f44092 45
+  s_fa15a2b8da25ae::t_1bb70a4279da10 69
+  s_fa15a2b8da25ae::t_34fdcb747bb94e 34
+cmd/advanced_config.go
+  s_fa15a2b8da25ae::t_0bb9ce1fa89060 2358-2368
+  s_fa15a2b8da25ae::t_c6c5b7b34d3b38 1419
+  s_fa15a2b8da25ae::t_476a5be1b46f7b 249-262
+  s_fa15a2b8da25ae::t_b45ca7ab40f053 1390-1398
+cmd/install_test.go
+  s_fa15a2b8da25ae::t_904b4f58509928 1-43
+cmd/provider_force_test.go
+  s_fa15a2b8da25ae::t_a772b2cdccc40c 1-7,9-99,101,108,117,123-125
+  s_fa15a2b8da25ae::t_551d20d22f614a 100,102-107,109-116,118-122
+  s_fa15a2b8da25ae::t_f66689f04153b2 126-225
+  s_fa15a2b8da25ae::t_5ae925802680f5 8
+cmd/root_test.go
+  s_fa15a2b8da25ae::t_46ae9544af2fe5 1-43
+cmd/env.go
+  s_fa15a2b8da25ae::t_75c111b6664694 175-176
+  s_fa15a2b8da25ae::t_c2587515a481fe 137-140,145,148-149,152
+  s_fa15a2b8da25ae::t_291c3c00565993 193-194,199,202-203,206
+  s_fa15a2b8da25ae::t_97ecf5cd2a6e3c 33,38
+  s_fa15a2b8da25ae::t_c36967b0047b21 236-237
+cmd/lang_cmd_test.go
+  s_fa15a2b8da25ae::t_f682f3c042f7c4 1-131
+cmd/advanced_config_layout_test.go
+  s_fa15a2b8da25ae::t_0b9ef1573bbb52 404-406,411
+  s_fa15a2b8da25ae::t_070852415ec446 505-553
+  s_fa15a2b8da25ae::t_d294d190975722 4
+  s_fa15a2b8da25ae::t_3174fdb1946ab2 398-403,407-410,412-504
+internal/protocol/openai.go
+  s_fa15a2b8da25ae::t_d8cc958e473875 100
+cmd/set.go
+  s_fa15a2b8da25ae::t_5e6acd1e4e7021 675
+  s_fa15a2b8da25ae::t_dfca74a2cd044a 473
+cmd/root.go
+  s_fa15a2b8da25ae::t_33cc928f4774be 81-84
+cmd/version.go
+  s_fa15a2b8da25ae::t_18dd39a5963675 22-27
+cmd/install.go
+  s_fa15a2b8da25ae::t_f8ed75cd97af71 14
+  s_fa15a2b8da25ae::t_cf533b4014561d 125-128,135,137-139,141,143-145,149-157,159
+  s_fa15a2b8da25ae::t_52ea686ebbd632 129-134,136,140,142
+  s_fa15a2b8da25ae::t_f0f2f06f6b7c7f 158
+internal/protocol/no_chinese_strings_test.go
+  s_fa15a2b8da25ae::t_f359eaa0c84ab6 1-75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "e4233260aa672e80824fb6fd3370c8f13fb372e7",
+  "prompts": {},
+  "sessions": {
+    "s_fa15a2b8da25ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "666cccda-d301-4ea0-bc04-c6d9de593ab2",
+        "model": "claude-opus-5"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
