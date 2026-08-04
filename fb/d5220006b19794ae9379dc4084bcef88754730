@@ -1,0 +1,19 @@
+.github/workflows/release.yml
+  s_f30ce75bbbaa39::t_8af6c3ad78c449 38-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "fbd5220006b19794ae9379dc4084bcef88754730",
+  "prompts": {},
+  "sessions": {
+    "s_f30ce75bbbaa39": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "46b6f5c9-bab7-4f3c-8091-28cd6804617c",
+        "model": "Kimi-K3"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
