@@ -35,8 +35,19 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
-          cache: true
-          cache-dependency-path: go.sum
+          # 不用 setup-go 自带缓存：它的 key 与 main CI 相同，CI 先存后这里
+          # “not saving cache”，6 平台的编译产物永远进不了缓存
+          cache: false
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ccl-release-${{ runner.os }}-go-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ccl-release-${{ runner.os }}-go-
 
       - name: Build Binaries
         env:
