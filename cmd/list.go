@@ -94,7 +94,7 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 			mark,
 			name,
 			providerKindLabel(p),
-			provider.ProtocolLabel(p.Type),
+			provider.ProtocolLabelForProvider(p),
 			providerAuthLabel(p),
 			providerEffortSummary(p),
 			providerOneMShortSummary(p),
@@ -115,7 +115,7 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 		p := cfg.Providers[name]
 		fmt.Fprintf(out, "%s %s\n", mark, name)
 		fmt.Fprintf(out, "    Kind     : %s\n", providerKindLabel(p))
-		fmt.Fprintf(out, "    Type     : %s\n", provider.ProtocolLabel(p.Type))
+		fmt.Fprintf(out, "    Type     : %s\n", provider.ProtocolLabelForProvider(p))
 		fmt.Fprintf(out, "    Auth     : %s\n", providerAuthLabel(p))
 		if p.AuthGroup != "" {
 			fmt.Fprintf(out, "    Group    : %s (%d account(s))\n", p.AuthGroup, len(p.OAuthAccountCredentials))
@@ -128,9 +128,9 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 		fmt.Fprintf(out, "    Fast     : %s\n", providerFastSummary(p))
 		fmt.Fprintf(out, "    Context  : %s\n", providerOneMSummary(p))
 		fmt.Fprintf(out, "    Models   : %s\n", formatModelCount(p.Model))
-		fmt.Fprintf(out, "    Slots    : %s\n", formatSlotSummaryLong(p))
+		fmt.Fprintf(out, "    Slot IDs : %s\n", formatSlotSummaryLong(p))
 		if p.Model != "" {
-			fmt.Fprintf(out, "    Pool     : %s\n", p.Model)
+			fmt.Fprintf(out, "    Pool IDs : %s\n", p.Model)
 		}
 		if i < len(names)-1 {
 			fmt.Fprintln(out)

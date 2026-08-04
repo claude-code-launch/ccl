@@ -100,7 +100,7 @@ func AdvertisedContextWindows(endpoint, apiKey string) (map[string]int, string) 
 			defer wait.Done()
 			infos, err := source.fetch(endpoint, apiKey)
 			if err != nil {
-				oauthproxy.Debugf("context window catalog %q failed: %v", source.label, err)
+				oauthproxy.LogWarnf("context window catalog %q failed: %v", source.label, err)
 				return
 			}
 			windows := make(map[string]int, len(infos))

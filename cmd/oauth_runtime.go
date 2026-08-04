@@ -32,6 +32,9 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, *oauthproxy
 		}
 		p.Endpoint = runtime.Endpoint()
 		p.APIKey = runtime.APIKey()
+		if strings.TrimSpace(p.Model) == "" && len(runtime.Models()) > 0 {
+			p.Model = strings.Join(runtime.Models(), ",")
+		}
 		return p, runtime, runtime.Stop, nil
 	}
 

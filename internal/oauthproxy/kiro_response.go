@@ -98,34 +98,36 @@ type kiroToolUseBlockStart struct {
 	Input map[string]any `json:"input"`
 }
 
-type kiroAnthropicAssembler struct {
-	request         *kiroConvertedRequest
-	writer          http.ResponseWriter
-	flusher         http.Flusher
-	messageID       string
-	blocks          []kiroResponseBlock
-	buffers         []*kiroBlockBuffer
-	eventBuffer     bytes.Buffer
-	encoder         *json.Encoder
-	activeIndex     int
-	activeType      string
-	outputTokens    int
-	contextTokens   int
-	hasToolUse      bool
-	tools           map[string]*kiroToolAccumulator
-	creditUsage     float64
-	creditUnit      string
-	creditPlural    string
-	stopReason      string
-	started         bool
-	finished        bool
-	nativeReasoning bool
-	inlineState     string
-	inlineBuffer    string
+type anthropicResponseAssembler struct {
+	request          *anthropicAdapterRequest
+	writer           http.ResponseWriter
+	flusher          http.Flusher
+	messageID        string
+	blocks           []kiroResponseBlock
+	buffers          []*kiroBlockBuffer
+	eventBuffer      bytes.Buffer
+	encoder          *json.Encoder
+	activeIndex      int
+	activeType       string
+	outputTokens     int
+	contextTokens    int
+	cacheReadTokens  int
+	cacheWriteTokens int
+	hasToolUse       bool
+	tools            map[string]*kiroToolAccumulator
+	creditUsage      float64
+	creditUnit       string
+	creditPlural     string
+	stopReason       string
+	started          bool
+	finished         bool
+	nativeReasoning  bool
+	inlineState      string
+	inlineBuffer     string
 }
 
-func newKiroAnthropicAssembler(request *kiroConvertedRequest, writer http.ResponseWriter) *kiroAnthropicAssembler {
-	assembler := &kiroAnthropicAssembler{
+func newAnthropicResponseAssembler(request *anthropicAdapterRequest, writer http.ResponseWriter) *anthropicResponseAssembler {
+	assembler := &anthropicResponseAssembler{
 		request:     request,
 		writer:      writer,
 		messageID:   "msg_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
@@ -141,7 +143,7 @@ func newKiroAnthropicAssembler(request *kiroConvertedRequest, writer http.Respon
 
 // appendBlock registers a new content block and its accumulation buffer, keeping
 // both slices index-aligned.
-func (a *kiroAnthropicAssembler) appendBlock(block kiroResponseBlock) int {
+func (a *anthropicResponseAssembler) appendBlock(block kiroResponseBlock) int {
 	index := len(a.blocks)
 	a.blocks = append(a.blocks, block)
 	a.buffers = append(a.buffers, &kiroBlockBuffer{})
@@ -150,7 +152,7 @@ func (a *kiroAnthropicAssembler) appendBlock(block kiroResponseBlock) int {
 
 // contentBlocks materializes the accumulated text/thinking into a copy of the
 // block list. Call it only when a full response body is needed.
-func (a *kiroAnthropicAssembler) contentBlocks() []kiroResponseBlock {
+func (a *anthropicResponseAssembler) contentBlocks() []kiroResponseBlock {
 	blocks := make([]kiroResponseBlock, len(a.blocks))
 	copy(blocks, a.blocks)
 	for index := range blocks {
@@ -167,7 +169,7 @@ func (a *kiroAnthropicAssembler) contentBlocks() []kiroResponseBlock {
 	return blocks
 }
 
-func (a *kiroAnthropicAssembler) start() error {
+func (a *anthropicResponseAssembler) start() error {
 	if a.started {
 		return nil
 	}
@@ -192,7 +194,7 @@ func (a *kiroAnthropicAssembler) start() error {
 	})
 }
 
-func (a *kiroAnthropicAssembler) process(frame *kiroEventFrame) error {
+func (a *anthropicResponseAssembler) process(frame *kiroEventFrame) error {
 	messageType := frame.headers[":message-type"]
 	switch messageType {
 	case "", "event":
@@ -212,7 +214,7 @@ func (a *kiroAnthropicAssembler) process(frame *kiroEventFrame) error {
 	}
 }
 
-func (a *kiroAnthropicAssembler) processEvent(eventType string, payload []byte) error {
+func (a *anthropicResponseAssembler) processEvent(eventType string, payload []byte) error {
 	switch eventType {
 	case "assistantResponseEvent":
 		var event struct {
@@ -305,7 +307,7 @@ func (a *kiroAnthropicAssembler) processEvent(eventType string, payload []byte) 
 			return err
 		}
 		if event.ContextUsagePercentage > 0 {
-			a.contextTokens = int(event.ContextUsagePercentage / 100 * float64(kiroContextWindow(a.request.model)))
+			a.contextTokens = int(event.ContextUsagePercentage / 100 * float64(kiroContextWindow(a.request.upstreamModel)))
 			if event.ContextUsagePercentage >= 100 {
 				a.stopReason = "model_context_window_exceeded"
 			}
@@ -326,7 +328,7 @@ func (a *kiroAnthropicAssembler) processEvent(eventType string, payload []byte) 
 	return nil
 }
 
-func (a *kiroAnthropicAssembler) addAssistantContent(content string) error {
+func (a *anthropicResponseAssembler) addAssistantContent(content string) error {
 	if !a.request.thinkingEnabled || a.nativeReasoning || a.inlineState == "done" {
 		return a.addText(content)
 	}
@@ -371,7 +373,7 @@ func (a *kiroAnthropicAssembler) addAssistantContent(content string) error {
 	}
 }
 
-func (a *kiroAnthropicAssembler) flushInlineContent() error {
+func (a *anthropicResponseAssembler) flushInlineContent() error {
 	if a.inlineBuffer == "" {
 		return nil
 	}
@@ -403,7 +405,7 @@ func partialKiroTagSuffix(content, tag string) int {
 	return 0
 }
 
-func (a *kiroAnthropicAssembler) addText(text string) error {
+func (a *anthropicResponseAssembler) addText(text string) error {
 	if text == "" {
 		return nil
 	}
@@ -412,7 +414,7 @@ func (a *kiroAnthropicAssembler) addText(text string) error {
 		return err
 	}
 	a.buffers[index].text.WriteString(text)
-	a.outputTokens += estimateKiroTokens(text)
+	a.outputTokens += estimateApproxTokens(text)
 	return a.emit("content_block_delta", kiroBlockDeltaEvent{
 		Type:  "content_block_delta",
 		Index: index,
@@ -420,7 +422,7 @@ func (a *kiroAnthropicAssembler) addText(text string) error {
 	})
 }
 
-func (a *kiroAnthropicAssembler) addThinking(thinking string) error {
+func (a *anthropicResponseAssembler) addThinking(thinking string) error {
 	if thinking == "" {
 		return nil
 	}
@@ -429,7 +431,7 @@ func (a *kiroAnthropicAssembler) addThinking(thinking string) error {
 		return err
 	}
 	a.buffers[index].thinking.WriteString(thinking)
-	a.outputTokens += estimateKiroTokens(thinking)
+	a.outputTokens += estimateApproxTokens(thinking)
 	return a.emit("content_block_delta", kiroBlockDeltaEvent{
 		Type:  "content_block_delta",
 		Index: index,
@@ -437,7 +439,7 @@ func (a *kiroAnthropicAssembler) addThinking(thinking string) error {
 	})
 }
 
-func (a *kiroAnthropicAssembler) addToolUse(id, name, partialJSON string) error {
+func (a *anthropicResponseAssembler) addToolUse(id, name, partialJSON string) error {
 	if err := a.closeActive(); err != nil {
 		return err
 	}
@@ -452,7 +454,7 @@ func (a *kiroAnthropicAssembler) addToolUse(id, name, partialJSON string) error 
 	}
 	index := a.appendBlock(kiroResponseBlock{Type: "tool_use", ID: id, Name: name, Input: &input})
 	a.hasToolUse = true
-	a.outputTokens += estimateKiroTokens(partialJSON)
+	a.outputTokens += estimateApproxTokens(partialJSON)
 	if err := a.emit("content_block_start", kiroBlockStartEvent{
 		Type:  "content_block_start",
 		Index: index,
@@ -475,7 +477,7 @@ func (a *kiroAnthropicAssembler) addToolUse(id, name, partialJSON string) error 
 	return a.emit("content_block_stop", kiroBlockIndexEvent{Type: "content_block_stop", Index: index})
 }
 
-func (a *kiroAnthropicAssembler) ensureBlock(blockType string) (int, error) {
+func (a *anthropicResponseAssembler) ensureBlock(blockType string) (int, error) {
 	if a.activeType == blockType && a.activeIndex >= 0 {
 		return a.activeIndex, nil
 	}
@@ -499,7 +501,7 @@ func (a *kiroAnthropicAssembler) ensureBlock(blockType string) (int, error) {
 	return index, nil
 }
 
-func (a *kiroAnthropicAssembler) closeActive() error {
+func (a *anthropicResponseAssembler) closeActive() error {
 	if a.activeIndex < 0 {
 		return nil
 	}
@@ -507,7 +509,10 @@ func (a *kiroAnthropicAssembler) closeActive() error {
 	if a.activeType == "thinking" {
 		signature := a.blocks[index].Signature
 		if signature == "" {
-			signature = "kiro"
+			signature = strings.TrimSpace(a.request.thinkingSignature)
+			if signature == "" {
+				signature = "kiro"
+			}
 			a.blocks[index].Signature = signature
 		}
 		if err := a.emit("content_block_delta", kiroBlockDeltaEvent{
@@ -523,7 +528,7 @@ func (a *kiroAnthropicAssembler) closeActive() error {
 	return a.emit("content_block_stop", kiroBlockIndexEvent{Type: "content_block_stop", Index: index})
 }
 
-func (a *kiroAnthropicAssembler) finish() error {
+func (a *anthropicResponseAssembler) finish() error {
 	if a.finished {
 		return nil
 	}
@@ -565,7 +570,7 @@ func (a *kiroAnthropicAssembler) finish() error {
 }
 
 // resolvedStopReason reports the Anthropic stop reason for the assembled turn.
-func (a *kiroAnthropicAssembler) resolvedStopReason() string {
+func (a *anthropicResponseAssembler) resolvedStopReason() string {
 	if a.stopReason != "" {
 		return a.stopReason
 	}
@@ -575,7 +580,7 @@ func (a *kiroAnthropicAssembler) resolvedStopReason() string {
 	return "end_turn"
 }
 
-func (a *kiroAnthropicAssembler) response() map[string]any {
+func (a *anthropicResponseAssembler) response() map[string]any {
 	return map[string]any{
 		"id":            a.messageID,
 		"type":          "message",
@@ -591,7 +596,7 @@ func (a *kiroAnthropicAssembler) response() map[string]any {
 // tokenTotals returns the input/output token counts for this turn, using the
 // same fields the Anthropic usage object reports so the session summary matches
 // what was actually billed against the account.
-func (a *kiroAnthropicAssembler) tokenTotals() (input, output int) {
+func (a *anthropicResponseAssembler) tokenTotals() (input, output int) {
 	input = a.request.inputTokens
 	if a.contextTokens > 0 {
 		input = a.contextTokens
@@ -599,13 +604,13 @@ func (a *kiroAnthropicAssembler) tokenTotals() (input, output int) {
 	return input, a.outputTokens
 }
 
-func (a *kiroAnthropicAssembler) usage() map[string]any {
+func (a *anthropicResponseAssembler) usage() map[string]any {
 	inputTokens, outputTokens := a.tokenTotals()
 	usage := map[string]any{
 		"input_tokens":                inputTokens,
 		"output_tokens":               outputTokens,
-		"cache_creation_input_tokens": 0,
-		"cache_read_input_tokens":     0,
+		"cache_creation_input_tokens": a.cacheWriteTokens,
+		"cache_read_input_tokens":     a.cacheReadTokens,
 	}
 	if a.creditUnit != "" {
 		usage["credit_usage"] = a.creditUsage
@@ -615,7 +620,7 @@ func (a *kiroAnthropicAssembler) usage() map[string]any {
 	return usage
 }
 
-func (a *kiroAnthropicAssembler) emit(event string, data any) error {
+func (a *anthropicResponseAssembler) emit(event string, data any) error {
 	if a.writer == nil {
 		return nil
 	}
@@ -639,7 +644,7 @@ func (a *kiroAnthropicAssembler) emit(event string, data any) error {
 	return nil
 }
 
-func processKiroEventStream(reader io.Reader, assembler *kiroAnthropicAssembler) error {
+func processKiroEventStream(reader io.Reader, assembler *anthropicResponseAssembler) error {
 	// Frames are read in two small chunks (prelude, then remainder), so reading
 	// straight from the network body would cost two syscalls per frame.
 	buffered := bufio.NewReaderSize(reader, kiroEventReadBufferSize)

@@ -338,7 +338,7 @@ func enforceKiroContentBudget(body map[string]any, protectedHistoryPrefix, limit
 		if container == nil || len(value) <= 1_024 {
 			break
 		}
-		valueTokens := max(estimateKiroTokens(value), 1)
+		valueTokens := max(estimateApproxTokens(value), 1)
 		targetTokens := max(256, valueTokens-(stats.finalTokens-limit)-1_024)
 		target := max(1_024, len(value)*targetTokens/valueTokens)
 		truncated, dropped := truncateKiroText(value, target)
@@ -382,11 +382,11 @@ func estimateKiroContentTokens(body map[string]any) int {
 	state, _ := body["conversationState"].(map[string]any)
 	total := 0
 	addText := func(value string) {
-		total += estimateKiroTokens(value)
+		total += estimateApproxTokens(value)
 	}
 	addJSON := func(value any) {
 		raw, _ := json.Marshal(value)
-		total += estimateKiroTokensBytes(raw)
+		total += estimateApproxTokensBytes(raw)
 	}
 	addMessage := func(kind string, message map[string]any) {
 		addText(metadataString(message, "content"))

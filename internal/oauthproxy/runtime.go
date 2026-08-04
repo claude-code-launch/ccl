@@ -59,6 +59,7 @@ type Runtime struct {
 	httpServer      *http.Server
 	listAuths       func() []*coreauth.Auth
 	responsesCompat *responsesCompatibilityProxy
+	copilotGateway  *copilotGateway
 	cancel          context.CancelFunc
 	done            chan struct{}
 	runErr          chan error
@@ -66,6 +67,9 @@ type Runtime struct {
 	configPath      string
 	runtimeDir      string
 	restoreLogs     func()
+	models          []string
+	modelNames      map[string]string
+	ownsLog         bool
 	stopOnce        sync.Once
 	// usage accumulates per-model token totals for this runtime. It is never nil:
 	// StartProvider always installs one, even when the backend cannot report
@@ -80,6 +84,29 @@ func (r *Runtime) Usage() *UsageTracker {
 		return nil
 	}
 	return r.usage
+}
+
+// Models returns the authoritative upstream catalog captured when the runtime
+// started. It avoids treating compatibility-layer built-ins as provider models.
+func (r *Runtime) Models() []string {
+	if r == nil {
+		return nil
+	}
+	return append([]string(nil), r.models...)
+}
+
+// ModelDisplayNames returns the provider catalog's human-facing labels keyed
+// by technical model ID. Direct adapters may expose these labels as UI aliases
+// when they also resolve each alias back to the ID before the upstream request.
+func (r *Runtime) ModelDisplayNames() map[string]string {
+	if r == nil || len(r.modelNames) == 0 {
+		return nil
+	}
+	names := make(map[string]string, len(r.modelNames))
+	for id, name := range r.modelNames {
+		names[id] = name
+	}
+	return names
 }
 
 type UpstreamProtocol string
@@ -421,16 +448,25 @@ func Start(parent context.Context, providerName string) (*Runtime, error) {
 // Invalid Codex paths such as …/codex/v1 are rejected before routing so they
 // cannot fall through to the plain Responses path and hit …/codex/v1/responses.
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
+	_, ownsLog, logErr := EnsureSessionLog("runtime")
+	if logErr != nil {
+		return nil, fmt.Errorf("open provider runtime log: %w", logErr)
+	}
 	runtime, err := startProvider(parent, options)
 	if err != nil {
 		// Successful starts are logged by each start function; failures were only
 		// visible to the caller, which made a session that never launched look
 		// like an empty log.
-		Debugf("runtime start failed oauth=%q protocol=%q endpoint=%q credentials=%d error=%v",
+		LogErrorf("runtime start failed oauth=%q protocol=%q endpoint=%q credentials=%d error=%v",
 			options.OAuthProvider, options.Protocol, options.Endpoint,
 			len(options.OAuthAccountCredentials), err)
+		if ownsLog {
+			CloseLog()
+		}
+		return nil, err
 	}
-	return runtime, err
+	runtime.ownsLog = ownsLog
+	return runtime, nil
 }
 
 func startProvider(parent context.Context, options StartOptions) (*Runtime, error) {
@@ -485,6 +521,12 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 	if backend == ProviderKiro {
 		return startKiroOAuthWithFiles(parent, modelSpec, credentialFiles, restrictToFiles, resolver)
 	}
+	if backend == ProviderCopilot {
+		return startCopilotOAuthWithFiles(parent, modelSpec, credentialFiles, restrictToFiles, resolver)
+	}
+	if backend == ProviderQoder {
+		return startQoderOAuthWithFiles(parent, modelSpec, credentialFiles, restrictToFiles, resolver)
+	}
 	found, err := hasCredentials(authDir, backend, credentialFiles, restrictToFiles)
 	if err != nil {
 		return nil, err
@@ -531,7 +573,7 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 	if resolver != nil {
 		runtime.watchCredentialGroup(authDir, store)
 	}
-	Debugf("runtime start oauth provider=%s backend=%s protocol=openai port=%d credential_files=%d restricted=%t model_count=%d",
+	LogInfof("runtime start oauth provider=%s backend=%s protocol=openai port=%d credential_files=%d restricted=%t model_count=%d",
 		providerName, backend, port, len(credentialFiles), restrictToFiles, len(aliases))
 	return runtime, nil
 }
@@ -579,7 +621,7 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 	if err != nil {
 		return nil, err
 	}
-	Debugf("runtime start openai_chat endpoint=%q port=%d model_count=%d", endpoint, port, len(models))
+	LogInfof("runtime start openai_chat endpoint=%q port=%d model_count=%d", endpoint, port, len(models))
 	return proxyRuntime, nil
 }
 
@@ -676,7 +718,7 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 	if codexIdentity {
 		mode = "codex_responses"
 	}
-	Debugf("runtime start %s endpoint=%q port=%d model_count=%d max_output_tokens=%d", mode, endpoint, port, len(models), maxOutputTokens)
+	LogInfof("runtime start %s endpoint=%q port=%d model_count=%d max_output_tokens=%d", mode, endpoint, port, len(models), maxOutputTokens)
 	return proxyRuntime, nil
 }
 
@@ -979,7 +1021,7 @@ func (r *Runtime) watchCredentialGroup(authDir string, store *providerTokenStore
 	if err != nil {
 		// Without a baseline the first readable snapshot looks like a change and
 		// triggers one reload. Surface the reason instead of dropping it.
-		Debugf("credential group watch could not take an initial snapshot: %v", err)
+		LogWarnf("credential group watch could not take an initial snapshot: %v", err)
 	}
 	go func() {
 		ticker := time.NewTicker(credentialGroupPollInterval)
@@ -991,14 +1033,14 @@ func (r *Runtime) watchCredentialGroup(authDir string, store *providerTokenStore
 			case <-ticker.C:
 				snapshot, err := credentialGroupSnapshot(authDir, store)
 				if err != nil {
-					Debugf("credential group watch snapshot failed: %v", err)
+					LogWarnf("credential group watch snapshot failed: %v", err)
 					continue
 				}
 				if snapshot == lastSnapshot {
 					continue
 				}
 				if err := r.reloadCredentials(); err != nil {
-					Debugf("credential group watch reload failed: %v", err)
+					LogErrorf("credential group watch reload failed: %v", err)
 					continue
 				}
 				lastSnapshot = snapshot
@@ -1054,8 +1096,8 @@ func silenceSDKLogs() func() {
 	sdkLogState.Lock()
 	if sdkLogState.users == 0 {
 		sdkLogState.previousLevel = log.GetLevel()
-		if DebugEnabled() {
-			// Debug mode keeps the noisy CLIProxyAPI logrus stream but funnels it
+		if LogEnabled() {
+			// File logging keeps the noisy CLIProxyAPI logrus stream but funnels it
 			// through debugFilterWriter: only diagnostic-looking lines survive,
 			// and any line carrying a credential marker is dropped entirely.
 			log.SetOutput(newDebugFilterWriter())
@@ -1152,7 +1194,7 @@ func hasCredentials(authDir, backend string, credentialFiles []string, restrictT
 			Disabled bool   `json:"disabled"`
 		}
 		if err := json.Unmarshal(data, &metadata); err != nil {
-			Debugf("skip malformed credential file %s: %v", entry.Name(), err)
+			LogWarnf("skip malformed credential file %s: %v", entry.Name(), err)
 			continue
 		}
 		if !metadata.Disabled && strings.EqualFold(strings.TrimSpace(metadata.Type), backend) {
@@ -1170,11 +1212,11 @@ func (r *Runtime) ListAuths() []*coreauth.Auth {
 	if r == nil {
 		return nil
 	}
-	if r.coreManager != nil {
-		return r.coreManager.List()
-	}
 	if r.listAuths != nil {
 		return r.listAuths()
+	}
+	if r.coreManager != nil {
+		return r.coreManager.List()
 	}
 	return nil
 }
@@ -1205,8 +1247,11 @@ func (r *Runtime) Stop() {
 		}
 		stopped := waitClosed(r.done, runtimeStopTimeout)
 		defer func() {
-			Debugf("runtime stop endpoint=%q clean_exit=%t duration=%s",
+			LogInfof("runtime stop endpoint=%q clean_exit=%t duration=%s",
 				r.endpoint, stopped, time.Since(stopStarted).Round(time.Millisecond))
+			if r.ownsLog {
+				CloseLog()
+			}
 		}()
 		// Force Shutdown only when Run did not exit cleanly in time.
 		if !stopped && (r.service != nil || r.httpServer != nil) {
@@ -1229,6 +1274,9 @@ func (r *Runtime) Stop() {
 		}
 		if r.responsesCompat != nil {
 			r.responsesCompat.Stop()
+		}
+		if r.copilotGateway != nil {
+			r.copilotGateway.Stop()
 		}
 		_ = os.Remove(r.configPath)
 		if r.runtimeDir != "" {

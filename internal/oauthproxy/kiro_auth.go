@@ -511,7 +511,7 @@ func hydrateKiroPortalLoginMetadata(ctx context.Context, client *http.Client, me
 	catalog := newKiroModelCatalog(nil)
 	session, attempted, err := catalog.bootstrapPortalSession(ctx, &kiroService{client: client}, credential)
 	if !attempted || err != nil {
-		Debugf("kiro portal login metadata hydration attempted=%t error=%v", attempted, err)
+		LogWarnf("kiro portal login metadata hydration attempted=%t error=%v", attempted, err)
 		return
 	}
 	if session.csrfToken != "" {

@@ -71,6 +71,32 @@ func TestGetAnthropicModelsNormalizesV1Endpoint(t *testing.T) {
 	}
 }
 
+func TestGetAnthropicModelInfosIncludesCatalogMetadata(t *testing.T) {
+	rate := 0.5
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Fatalf("missing bearer authorization header")
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"qmodel","display_name":"Qwen Max","max_input_tokens":1000000,"max_output_tokens":32768,"rate_multiplier":0.5,"rate_unit":"credits","is_new":true,"promotion_available":true}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	infos, err := protocol.GetAnthropicModelInfosWithAuth(server.URL, "test-key", "bearer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("model infos = %#v", infos)
+	}
+	got := infos[0]
+	if got.ID != "qmodel" || got.DisplayName != "Qwen Max" || got.ContextWindow != 1000000 || got.MaxOutputTokens != 32768 {
+		t.Fatalf("model info = %#v", got)
+	}
+	if got.RateMultiplier == nil || *got.RateMultiplier != rate || got.RateUnit != "credits" || !got.IsNew || !got.PromotionAvailable {
+		t.Fatalf("catalog extensions = %#v", got)
+	}
+}
+
 func TestNormalizeVersionedURLs(t *testing.T) {
 	tests := []struct {
 		name string

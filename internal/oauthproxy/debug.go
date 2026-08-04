@@ -1,30 +1,46 @@
 package oauthproxy
 
 import (
+	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	stdlog "log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 )
 
-// defaultDebugLogName is the base file name for ccl diagnostics inside LogDir.
-// The full path can be overridden with the CCL_DEBUG_LOG environment variable.
-const defaultDebugLogName = "ccl-debug.log"
+// defaultLogName is the base name for ccl's per-session runtime logs. The full
+// base path can be overridden with CCL_LOG_FILE (CCL_DEBUG_LOG remains a
+// compatibility fallback for existing scripts).
+const defaultLogName = "ccl-debug.log"
+
+// LogLevel is ccl's persisted representation of the standard slog levels.
+// "off" disables file logging entirely.
+type LogLevel string
+
+const (
+	LogLevelOff   LogLevel = "off"
+	LogLevelDebug LogLevel = "debug"
+	LogLevelInfo  LogLevel = "info"
+	LogLevelWarn  LogLevel = "warn"
+	LogLevelError LogLevel = "error"
+)
 
 var (
-	debugStateMu sync.RWMutex
-	debugEnabled bool
-	debugLogPath string
-	debugFile    *os.File
+	logStateMu sync.RWMutex
+	logLevel   = LogLevelOff
+	logPath    string
+	logFile    *os.File
+	logger     = slog.New(slog.NewTextHandler(io.Discard, nil))
 )
 
 // sensitiveMarkers identifies log lines that likely carry credentials. The
-// whole line is dropped to avoid leaking refresh tokens, access tokens, API
-// keys, or Authorization headers into the debug log.
+// whole line is dropped from third-party logger output to avoid leaking refresh
+// tokens, access tokens, API keys, or Authorization headers into ccl's log.
 var sensitiveMarkers = []string{
 	"refresh_token",
 	"refresh token",
@@ -40,9 +56,9 @@ var sensitiveMarkers = []string{
 	"token=",
 }
 
-// interestingMarkers identifies log lines worth keeping: upstream errors, rate
-// limiting, OAuth refresh/cooldown, and stream failures. Everything else from
-// the noisy CLIProxyAPI logrus stream is dropped.
+// interestingMarkers identifies logrus output worth preserving. CLIProxyAPI is
+// noisy, so routine progress remains suppressed; retained lines keep an
+// explicit logrus WARN/ERROR severity when one is present.
 var interestingMarkers = []string{
 	"refresh",
 	"cooldown",
@@ -63,9 +79,6 @@ var interestingMarkers = []string{
 	"tryrefresh",
 	"error",
 	"fail",
-	// Context-limit rejections. Upstream reports them as a plain 400, which none
-	// of the status markers above match, so they would otherwise be dropped from
-	// the log even though they are one of the most common session failures.
 	"context_length",
 	"context length",
 	"context window",
@@ -75,61 +88,101 @@ var interestingMarkers = []string{
 	"invalid_request",
 }
 
-// SetDebug enables or disables runtime diagnostics at the package level. When
-// enabling, the given path (or the resolved default/override) is opened in
-// append mode; when disabling, any open file is closed so the log stops
-// growing and prior content is preserved.
-func SetDebug(enabled bool, path string) {
-	debugStateMu.Lock()
-	defer debugStateMu.Unlock()
+// ParseLogLevel accepts ccl's standard logging levels.
+func ParseLogLevel(raw string) (LogLevel, bool) {
+	switch LogLevel(strings.ToLower(strings.TrimSpace(raw))) {
+	case LogLevelOff:
+		return LogLevelOff, true
+	case LogLevelDebug:
+		return LogLevelDebug, true
+	case LogLevelInfo:
+		return LogLevelInfo, true
+	case LogLevelWarn, "warning":
+		return LogLevelWarn, true
+	case LogLevelError:
+		return LogLevelError, true
+	default:
+		return LogLevelOff, false
+	}
+}
 
-	if !enabled {
-		if debugFile != nil {
-			_ = debugFile.Close()
-			debugFile = nil
-		}
-		debugEnabled = false
-		debugLogPath = ""
-		return
+func (level LogLevel) slogLevel() slog.Level {
+	switch level {
+	case LogLevelDebug:
+		return slog.LevelDebug
+	case LogLevelWarn:
+		return slog.LevelWarn
+	case LogLevelError:
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// ConfigureLogLevel records the logging threshold without creating a shared
+// file. A Claude session or temporary provider runtime opens its own sink when
+// it starts.
+func ConfigureLogLevel(level LogLevel) {
+	logStateMu.Lock()
+	defer logStateMu.Unlock()
+	closeLogSinkLocked()
+	logLevel = level
+}
+
+func closeLogSinkLocked() {
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
+	logPath = ""
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// SetLogLevel opens ccl's current per-session log sink. A level of "off"
+// disables logging; all other levels use Go's standard slog text handler.
+// File-system failures are returned instead of silently disabling diagnostics.
+func SetLogLevel(level LogLevel, path string) error {
+	logStateMu.Lock()
+	defer logStateMu.Unlock()
+
+	if level == LogLevelOff {
+		closeLogSinkLocked()
+		logLevel = LogLevelOff
+		return nil
 	}
 
 	if strings.TrimSpace(path) == "" {
-		path = ResolveDebugLogPath()
+		path = ResolveLogTemplatePath()
 	}
-	if debugFile != nil && debugLogPath == path {
-		debugEnabled = true
-		return
+	if logFile != nil && logPath == path && logLevel == level {
+		return nil
 	}
-	if debugFile != nil {
-		_ = debugFile.Close()
-		debugFile = nil
-	}
-	// The log directory is ccl's own and may not exist yet; 0o700 keeps
-	// diagnostics readable only by the user, unlike a shared temp directory.
+	closeLogSinkLocked()
+	logLevel = level
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			debugEnabled = false
-			debugLogPath = ""
-			return
+			return fmt.Errorf("create log directory %s: %w", dir, err)
 		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		// Fall back to disabled state rather than crashing the launcher.
-		debugEnabled = false
-		debugLogPath = ""
-		return
+		return fmt.Errorf("open log file %s: %w", path, err)
 	}
-	debugEnabled = true
-	debugLogPath = path
-	debugFile = f
+	logPath = path
+	logFile = f
+	logger = slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level.slogLevel()}))
+	return nil
+}
+
+// CloseLog closes the active session file while preserving the configured
+// threshold for the next session.
+func CloseLog() {
+	logStateMu.Lock()
+	defer logStateMu.Unlock()
+	closeLogSinkLocked()
 }
 
 // LogDir is ~/.ccl/logs, where ccl keeps its diagnostics.
-//
-// Logs belong with the rest of ccl's state rather than in the system temp
-// directory: /tmp is world-readable, cleared on a schedule the user does not
-// control, and shared with every other tool on the machine.
 func LogDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -138,30 +191,56 @@ func LogDir() (string, error) {
 	return filepath.Join(home, ".ccl", "logs"), nil
 }
 
-// ResolveDebugLogPath returns the configured debug log destination, honoring the
-// CCL_DEBUG_LOG override before ~/.ccl/logs/ccl-debug.log.
-func ResolveDebugLogPath() string {
+// ResolveLogTemplatePath returns the filename template used to derive each
+// suffixed session log. The template itself is never opened by ccl.
+func ResolveLogTemplatePath() string {
+	if v := strings.TrimSpace(os.Getenv("CCL_LOG_FILE")); v != "" {
+		return v
+	}
 	if v := strings.TrimSpace(os.Getenv("CCL_DEBUG_LOG")); v != "" {
 		return v
 	}
 	dir, err := LogDir()
 	if err != nil {
-		// Without a home directory there is nowhere better than the temp dir.
-		return filepath.Join(os.TempDir(), defaultDebugLogName)
+		return filepath.Join(os.TempDir(), defaultLogName)
 	}
-	return filepath.Join(dir, defaultDebugLogName)
+	return filepath.Join(dir, defaultLogName)
 }
 
-// SessionDebugLogPath returns a per-session log path derived from the configured
-// destination by appending the session name to its base name.
-//
-// One shared file interleaves every session, which makes a single run impossible
-// to read back: the runtime, the upstream errors and the launcher lines of
-// different sessions end up mixed together. Sessions are named after the settings
-// file ccl generates for them, so the log sits next to it.
-func SessionDebugLogPath(session string) string {
-	base := ResolveDebugLogPath()
-	session = sanitizeDebugSessionName(session)
+// LogConfigured reports whether a session should open a log file.
+func LogConfigured() bool {
+	logStateMu.RLock()
+	defer logStateMu.RUnlock()
+	return logLevel != LogLevelOff
+}
+
+// LogEnabled reports whether ccl's current session file is active.
+func LogEnabled() bool {
+	logStateMu.RLock()
+	defer logStateMu.RUnlock()
+	return logLevel != LogLevelOff && logFile != nil
+}
+
+// CurrentLogLevel reports the active logging threshold.
+func CurrentLogLevel() LogLevel {
+	logStateMu.RLock()
+	defer logStateMu.RUnlock()
+	return logLevel
+}
+
+// LogFilePath reports the active session log path, or an empty string when off.
+func LogFilePath() string {
+	logStateMu.RLock()
+	defer logStateMu.RUnlock()
+	return logPath
+}
+
+// SessionLogPath derives one log file per temporary Claude session from the
+// configured base path. Keeping the session name in the filename lets all
+// logger levels write together without interleaving unrelated Claude sessions.
+func SessionLogPath(session string) string {
+	base := ResolveLogTemplatePath()
+	session = sanitizeLogSessionName(session)
 	if session == "" {
 		return base
 	}
@@ -169,8 +248,26 @@ func SessionDebugLogPath(session string) string {
 	return strings.TrimSuffix(base, extension) + "-" + session + extension
 }
 
-// sanitizeDebugSessionName keeps only characters that are safe in a file name.
-func sanitizeDebugSessionName(session string) string {
+// EnsureSessionLog opens a uniquely named file for a temporary runtime when a
+// caller has not already opened the surrounding Claude session's file. owned
+// tells the runtime whether it must close the sink during teardown.
+func EnsureSessionLog(prefix string) (path string, owned bool, err error) {
+	if !LogConfigured() || LogEnabled() {
+		return LogFilePath(), false, nil
+	}
+	var random [6]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", false, fmt.Errorf("generate log session name: %w", err)
+	}
+	session := fmt.Sprintf("%s_%x", sanitizeLogSessionName(prefix), random)
+	path = SessionLogPath(session)
+	if err := SetLogLevel(CurrentLogLevel(), path); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
+}
+
+func sanitizeLogSessionName(session string) string {
 	var builder strings.Builder
 	for _, char := range strings.TrimSpace(session) {
 		switch {
@@ -183,41 +280,68 @@ func sanitizeDebugSessionName(session string) string {
 	return strings.Trim(builder.String(), ".-_")
 }
 
-// DebugEnabled reports whether diagnostics are currently active.
-func DebugEnabled() bool {
-	debugStateMu.RLock()
-	defer debugStateMu.RUnlock()
-	return debugEnabled
+// LogDebugEnabled reports whether DEBUG entries are collected. HTTP payloads
+// are deliberately DEBUG only because they can contain full prompts, tools, and
+// user-provided secrets.
+func LogDebugEnabled() bool {
+	return CurrentLogLevel() == LogLevelDebug
 }
 
-// DebugLogPath returns the active debug log path (empty when disabled).
-func DebugLogPath() string {
-	debugStateMu.RLock()
-	defer debugStateMu.RUnlock()
-	return debugLogPath
+func logf(level slog.Level, format string, args ...any) {
+	logMessage(level, fmt.Sprintf(format, args...))
 }
 
-// Debugf writes a single timestamped line to the debug log when enabled. It is
-// a no-op when disabled; callers pass only non-sensitive fields.
-func Debugf(format string, args ...any) {
-	debugStateMu.RLock()
-	enabled := debugEnabled
-	f := debugFile
-	debugStateMu.RUnlock()
-	if !enabled || f == nil {
+func logMessage(level slog.Level, message string) {
+	logStateMu.RLock()
+	l := logger
+	logStateMu.RUnlock()
+	ctx := context.Background()
+	if !l.Enabled(ctx, level) {
 		return
 	}
-	_, _ = fmt.Fprintf(f, "%s ", time.Now().Format(time.RFC3339Nano))
-	_, _ = fmt.Fprintf(f, format, args...)
-	_, _ = fmt.Fprintln(f)
+	l.Log(ctx, level, message)
 }
 
-// debugPrefixWriter funnels a component's log output into the ccl debug log,
-// tagged with the component name and screened for credentials.
-//
-// Unlike debugFilterWriter it keeps every line: it is used for components whose
-// output is already low volume and always diagnostic, such as the reverse-proxy
-// error log, which was previously discarded entirely.
+// LogInfof writes a normal runtime event. Existing ccl diagnostics use this
+// level so `ccl log on` is useful without exposing request payloads.
+func LogInfof(format string, args ...any) { logf(slog.LevelInfo, format, args...) }
+
+// LogDebugf writes sensitive or high-volume detail visible only with
+// `ccl log --level debug`.
+func LogDebugf(format string, args ...any) { logf(slog.LevelDebug, format, args...) }
+
+// LogWarnf and LogErrorf are available for callers that can classify an event.
+func LogWarnf(format string, args ...any)  { logf(slog.LevelWarn, format, args...) }
+func LogErrorf(format string, args ...any) { logf(slog.LevelError, format, args...) }
+
+// LogUpstreamStatusf classifies HTTP status records consistently. Successful
+// per-request records are DEBUG; client failures are WARN; server failures are
+// ERROR.
+func LogUpstreamStatusf(status int, format string, args ...any) {
+	switch {
+	case status >= 500:
+		LogErrorf(format, args...)
+	case status >= 400:
+		LogWarnf(format, args...)
+	default:
+		LogDebugf(format, args...)
+	}
+}
+
+// DebugHTTPBody writes an explicitly debug-level HTTP payload. Callers must
+// never pass headers because they can contain credentials.
+func DebugHTTPBody(label string, body []byte) {
+	if !LogDebugEnabled() {
+		return
+	}
+	LogDebugf("http payload begin label=%q bytes=%d", label, len(body))
+	LogDebugf("http payload data label=%q data=%s", label, body)
+	LogDebugf("http payload end label=%q", label)
+}
+
+// debugPrefixWriter funnels a component's low-volume output into ccl's slog
+// file. ReverseProxy requires a standard-library *log.Logger, so this adapter
+// is intentionally kept at the boundary.
 type debugPrefixWriter struct{ prefix string }
 
 func (w debugPrefixWriter) Write(p []byte) (int, error) {
@@ -231,18 +355,14 @@ func (w debugPrefixWriter) Write(p []byte) (int, error) {
 			return len(p), nil
 		}
 	}
-	Debugf("[%s] %s", w.prefix, line)
+	LogErrorf("[%s] %s", w.prefix, line)
 	return len(p), nil
 }
 
-// newComponentLogger returns a logger whose lines land in the ccl debug log. It
-// is a no-op sink while debugging is disabled.
 func newComponentLogger(prefix string) *stdlog.Logger {
 	return stdlog.New(debugPrefixWriter{prefix: prefix}, "", 0)
 }
 
-// debugLineIsInteresting reports whether an already-lowercased CLIProxyAPI log
-// line carries a diagnostic worth keeping.
 func debugLineIsInteresting(lower string) bool {
 	for _, marker := range interestingMarkers {
 		if strings.Contains(lower, marker) {
@@ -252,10 +372,8 @@ func debugLineIsInteresting(lower string) bool {
 	return false
 }
 
-// debugFilterWriter is an io.Writer that screens CLIProxyAPI logrus output
-// before it reaches the debug file: drop lines carrying secrets, keep only
-// lines that look like useful diagnostics, write the survivors with a prefix
-// so they are distinguishable from ccl's own Debugf lines.
+// debugFilterWriter screens noisy CLIProxyAPI logrus output before it reaches
+// ccl's slog sink and maps explicit logrus severities onto slog.
 type debugFilterWriter struct{}
 
 func (debugFilterWriter) Write(p []byte) (int, error) {
@@ -270,10 +388,16 @@ func (debugFilterWriter) Write(p []byte) (int, error) {
 		}
 	}
 	if debugLineIsInteresting(lower) {
-		Debugf("[cpa] %s", line)
+		switch {
+		case strings.Contains(lower, "level=error"), strings.Contains(lower, "level=fatal"), strings.Contains(lower, "level=panic"):
+			LogErrorf("[cpa] %s", line)
+		case strings.Contains(lower, "level=warn"), strings.Contains(lower, "level=warning"):
+			LogWarnf("[cpa] %s", line)
+		default:
+			LogInfof("[cpa] %s", line)
+		}
 	}
 	return len(p), nil
 }
 
-// newDebugFilterWriter returns a debug-screening writer for logrus output.
 func newDebugFilterWriter() io.Writer { return debugFilterWriter{} }

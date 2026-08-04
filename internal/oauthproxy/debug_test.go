@@ -8,48 +8,114 @@ import (
 	"testing"
 )
 
-func TestSetDebugWritesAndDisables(t *testing.T) {
+func TestSetLogLevelWritesAndDisables(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "dbg.log")
-	// Start from disabled state.
-	SetDebug(false, "")
+	path := filepath.Join(dir, "ccl.log")
+	SetLogLevel(LogLevelOff, "")
 
-	SetDebug(true, path)
-	if !DebugEnabled() {
-		t.Fatal("expected debug enabled after SetDebug(true)")
+	SetLogLevel(LogLevelInfo, path)
+	if !LogEnabled() || CurrentLogLevel() != LogLevelInfo {
+		t.Fatalf("log state = enabled:%t level:%s", LogEnabled(), CurrentLogLevel())
 	}
-	Debugf("runtime start provider=chatgpt backend=codex port=1234")
+	LogInfof("runtime start provider=chatgpt backend=codex port=1234")
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	if !strings.Contains(string(data), "runtime start provider=chatgpt") {
-		t.Fatalf("log missing line: %s", data)
-	}
-	if strings.Contains(strings.ToLower(string(data)), "token") && strings.Contains(string(data), "token=") {
-		// "provider=chatgpt" contains no secret; ensure no token= leaked.
-		t.Fatalf("log unexpectedly contains token=: %s", data)
+	if !strings.Contains(string(data), "level=INFO") || !strings.Contains(string(data), "runtime start provider=chatgpt") {
+		t.Fatalf("unexpected slog entry: %s", data)
 	}
 
-	SetDebug(false, "")
-	if DebugEnabled() {
-		t.Fatal("expected debug disabled after SetDebug(false)")
+	SetLogLevel(LogLevelOff, "")
+	if LogEnabled() {
+		t.Fatal("expected log disabled after off")
 	}
 	sizeBefore := len(data)
-	Debugf("should not write")
+	LogInfof("should not write")
 	data2, _ := os.ReadFile(path)
 	if len(data2) != sizeBefore {
 		t.Fatalf("log grew after disable: before=%d after=%d", sizeBefore, len(data2))
 	}
 }
 
+func TestConfigureLogLevelDoesNotCreateSharedFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CCL_LOG_FILE", "")
+	ConfigureLogLevel(LogLevelInfo)
+	t.Cleanup(func() { _ = SetLogLevel(LogLevelOff, "") })
+	if !LogConfigured() || LogEnabled() {
+		t.Fatalf("configured=%t enabled=%t", LogConfigured(), LogEnabled())
+	}
+	if _, err := os.Stat(ResolveLogTemplatePath()); !os.IsNotExist(err) {
+		t.Fatalf("configuration created shared file: %v", err)
+	}
+}
+
+func TestEnsureSessionLogCreatesOnlySuffixedRuntimeFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CCL_LOG_FILE", "")
+	ConfigureLogLevel(LogLevelInfo)
+	t.Cleanup(func() { _ = SetLogLevel(LogLevelOff, "") })
+	path, owned, err := EnsureSessionLog("runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owned || !LogEnabled() || !strings.Contains(filepath.Base(path), "ccl-debug-runtime_") {
+		t.Fatalf("path=%q owned=%t enabled=%t", path, owned, LogEnabled())
+	}
+	if _, err := os.Stat(ResolveLogTemplatePath()); !os.IsNotExist(err) {
+		t.Fatalf("session logging created the unsuffixed template: %v", err)
+	}
+	CloseLog()
+	if LogEnabled() || !LogConfigured() {
+		t.Fatalf("after close: enabled=%t configured=%t", LogEnabled(), LogConfigured())
+	}
+}
+
+func TestSetLogLevelReportsFileFailure(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetLogLevel(LogLevelInfo, filepath.Join(blocker, "session.log")); err == nil {
+		t.Fatal("expected log path error")
+	}
+	if LogEnabled() {
+		t.Fatal("failed sink should not be active")
+	}
+}
+
+func TestExplicitLogSeverity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "severity.log")
+	if err := SetLogLevel(LogLevelDebug, path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetLogLevel(LogLevelOff, "") })
+	LogInfof("failed wording stays explicitly info")
+	LogUpstreamStatusf(403, "status=%d", 403)
+	LogUpstreamStatusf(503, "status=%d", 503)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"level=INFO msg=\"failed wording stays explicitly info\"", "level=WARN msg=\"status=403\"", "level=ERROR msg=\"status=503\""} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in log:\n%s", want, text)
+		}
+	}
+}
+
 func TestDebugFilterWriterDropsSecretsKeepsDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "filter.log")
-	SetDebug(false, "")
-	SetDebug(true, path)
-	t.Cleanup(func() { SetDebug(false, "") })
+	SetLogLevel(LogLevelOff, "")
+	SetLogLevel(LogLevelInfo, path)
+	t.Cleanup(func() { SetLogLevel(LogLevelOff, "") })
 
 	w := newDebugFilterWriter()
 	cases := map[string]bool{
@@ -63,8 +129,7 @@ func TestDebugFilterWriterDropsSecretsKeepsDiagnostics(t *testing.T) {
 		"some routine progress line about nothing":          false,
 	}
 	for line := range cases {
-		_, err := w.Write([]byte(line))
-		if err != nil {
+		if _, err := w.Write([]byte(line)); err != nil {
 			t.Fatalf("write %q: %v", line, err)
 		}
 	}
@@ -72,12 +137,22 @@ func TestDebugFilterWriterDropsSecretsKeepsDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	got := string(data)
+	got := strings.ToLower(string(data))
 	for line, wantKept := range cases {
-		// filterWriter trims surrounding whitespace from each logrus line and
-		// prefixes it with "[cpa] "; match on the trimmed, lowercased text.
-		probe := strings.TrimSpace(strings.ToLower(line))
-		contains := strings.Contains(strings.ToLower(got), probe)
+		probe := strings.ToLower(line)
+		if wantKept {
+			switch {
+			case strings.Contains(probe, "token refreshed"):
+				probe = "token refreshed"
+			case strings.Contains(probe, "429 too many requests"):
+				probe = "429 too many requests"
+			case strings.Contains(probe, "refresh failed"):
+				probe = "refresh failed"
+			case strings.Contains(probe, "cooldown active"):
+				probe = "cooldown active"
+			}
+		}
+		contains := strings.Contains(got, probe)
 		if wantKept && !contains {
 			t.Fatalf("expected kept line missing: %q\nlog:\n%s", line, got)
 		}
@@ -87,41 +162,43 @@ func TestDebugFilterWriterDropsSecretsKeepsDiagnostics(t *testing.T) {
 	}
 }
 
-func TestDebugfNoOpWhenDisabled(t *testing.T) {
-	SetDebug(false, "")
+func TestLogInfofNoOpWhenDisabled(t *testing.T) {
+	SetLogLevel(LogLevelOff, "")
 	var buf bytes.Buffer
-	// Debugf must not panic or write when disabled.
-	Debugf("ignored provider=%s", "chatgpt")
+	LogInfof("ignored provider=%s", "chatgpt")
 	if buf.Len() != 0 {
 		t.Fatalf("unexpected output: %q", buf.String())
 	}
 }
 
-func TestSessionDebugLogPathIsDerivedFromBase(t *testing.T) {
-	t.Setenv("CCL_DEBUG_LOG", "/var/log/ccl/debug.log")
-	if got, want := SessionDebugLogPath("claude_9f2c1b7d"), "/var/log/ccl/debug-claude_9f2c1b7d.log"; got != want {
-		t.Fatalf("SessionDebugLogPath = %q, want %q", got, want)
-	}
-	// Unsafe characters must never reach the file system.
-	if got, want := SessionDebugLogPath("../../etc/passwd"), "/var/log/ccl/debug-etcpasswd.log"; got != want {
-		t.Fatalf("sanitized path = %q, want %q", got, want)
-	}
-	// Without a usable session name the shared base path stays in use.
-	if got := SessionDebugLogPath("  "); got != "/var/log/ccl/debug.log" {
-		t.Fatalf("empty session path = %q", got)
-	}
-}
+func TestDebugHTTPBodyRequiresDebugLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "payload.log")
+	SetLogLevel(LogLevelOff, "")
+	t.Cleanup(func() { SetLogLevel(LogLevelOff, "") })
 
-func TestSessionDebugLogPathWithoutExtension(t *testing.T) {
-	t.Setenv("CCL_DEBUG_LOG", "/tmp/ccl-debug")
-	if got, want := SessionDebugLogPath("claude_1"), "/tmp/ccl-debug-claude_1"; got != want {
-		t.Fatalf("SessionDebugLogPath = %q, want %q", got, want)
+	SetLogLevel(LogLevelInfo, path)
+	DebugHTTPBody("request", []byte(`{"input":"not logged"}`))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if strings.Contains(string(data), "not logged") {
+		t.Fatalf("payload was logged at info: %s", data)
+	}
+
+	SetLogLevel(LogLevelDebug, path)
+	DebugHTTPBody("request", []byte(`{"input":"logged"}`))
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read debug log: %v", err)
+	}
+	if !strings.Contains(string(data), "level=DEBUG") || !strings.Contains(string(data), "logged") {
+		t.Fatalf("payload missing at debug: %s", data)
 	}
 }
 
 func TestDebugFilterKeepsContextLimitFailures(t *testing.T) {
-	// A context-window rejection arrives as a plain 400 with no status marker the
-	// other rules match, so it must be recognized on its own.
 	for _, line := range []string{
 		`{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}`,
 		"request_too_large: prompt is too large for this model",
@@ -132,47 +209,54 @@ func TestDebugFilterKeepsContextLimitFailures(t *testing.T) {
 	}
 }
 
-func TestResolveDebugLogPathDefaultsToCclLogDir(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // Windows home lookup
-	t.Setenv("CCL_DEBUG_LOG", "")
-
-	want := filepath.Join(home, ".ccl", "logs", "ccl-debug.log")
-	if got := ResolveDebugLogPath(); got != want {
-		t.Fatalf("ResolveDebugLogPath() = %q, want %q", got, want)
-	}
-	if got := SessionDebugLogPath("claude_1"); got != filepath.Join(home, ".ccl", "logs", "ccl-debug-claude_1.log") {
-		t.Fatalf("session path = %q", got)
-	}
-	// An explicit override still wins.
-	t.Setenv("CCL_DEBUG_LOG", "/var/log/elsewhere.log")
-	if got := ResolveDebugLogPath(); got != "/var/log/elsewhere.log" {
-		t.Fatalf("override ignored: %q", got)
-	}
-}
-
-func TestSetDebugCreatesTheLogDirectory(t *testing.T) {
+func TestResolveLogTemplatePathDefaultsAndOverrides(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("CCL_LOG_FILE", "")
 	t.Setenv("CCL_DEBUG_LOG", "")
-	t.Cleanup(func() { SetDebug(false, "") })
 
-	path := ResolveDebugLogPath()
-	SetDebug(true, path)
-	if !DebugEnabled() {
-		t.Fatal("debug did not enable; the log directory was probably not created")
+	want := filepath.Join(home, ".ccl", "logs", "ccl-debug.log")
+	if got := ResolveLogTemplatePath(); got != want {
+		t.Fatalf("ResolveLogTemplatePath = %q, want %q", got, want)
 	}
-	Debugf("hello")
-	SetDebug(false, "")
+	t.Setenv("CCL_LOG_FILE", "/var/log/elsewhere.log")
+	if got := ResolveLogTemplatePath(); got != "/var/log/elsewhere.log" {
+		t.Fatalf("CCL_LOG_FILE override ignored: %q", got)
+	}
+}
+
+func TestSessionLogPathIsDerivedFromBase(t *testing.T) {
+	t.Setenv("CCL_LOG_FILE", "/var/log/ccl/debug.log")
+	if got, want := SessionLogPath("claude_9f2c1b7d"), "/var/log/ccl/debug-claude_9f2c1b7d.log"; got != want {
+		t.Fatalf("SessionLogPath = %q, want %q", got, want)
+	}
+	if got, want := SessionLogPath("../../etc/passwd"), "/var/log/ccl/debug-etcpasswd.log"; got != want {
+		t.Fatalf("sanitized session path = %q, want %q", got, want)
+	}
+}
+
+func TestSetLogLevelCreatesTheLogDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CCL_LOG_FILE", "")
+	t.Cleanup(func() { SetLogLevel(LogLevelOff, "") })
+
+	path := ResolveLogTemplatePath()
+	SetLogLevel(LogLevelInfo, path)
+	if !LogEnabled() {
+		t.Fatal("log did not enable; the log directory was probably not created")
+	}
+	LogInfof("hello")
+	SetLogLevel(LogLevelOff, "")
 
 	info, err := os.Stat(filepath.Dir(path))
 	if err != nil {
 		t.Fatalf("log directory was not created: %v", err)
 	}
 	if mode := info.Mode().Perm(); mode != 0o700 {
-		t.Errorf("log directory mode = %o, want 700: diagnostics must not be world-readable", mode)
+		t.Errorf("log directory mode = %o, want 700", mode)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -180,5 +264,17 @@ func TestSetDebugCreatesTheLogDirectory(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("hello")) {
 		t.Fatalf("log content = %q", data)
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	for raw, want := range map[string]LogLevel{
+		"off": LogLevelOff, "debug": LogLevelDebug, "info": LogLevelInfo,
+		"warn": LogLevelWarn, "warning": LogLevelWarn, "error": LogLevelError,
+	} {
+		got, ok := ParseLogLevel(raw)
+		if !ok || got != want {
+			t.Errorf("ParseLogLevel(%q) = %q, %t; want %q, true", raw, got, ok, want)
+		}
 	}
 }

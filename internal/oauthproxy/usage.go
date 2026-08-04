@@ -123,7 +123,7 @@ func (p cpaUsagePlugin) HandleUsage(_ context.Context, record cpausage.Record) {
 }
 
 // FormatUsageSummary renders one line per model plus a total line, in the style
-// of the existing "[ccl debug] session ended" line: a single fixed prefix,
+// of the existing "[ccl log] session ended" line: a single fixed prefix,
 // printed unconditionally rather than gated behind the debug toggle, because
 // this is usage information for the user, not a diagnostic.
 //

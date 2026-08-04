@@ -71,6 +71,7 @@ func Load() (*provider.Config, error) {
 	if err != nil {
 		// If the config file does not exist, return an empty initialized config
 		if os.IsNotExist(err) {
+			cfg.LogLevel = "off"
 			return cfg, nil
 		}
 		return cfg, err
@@ -81,13 +82,32 @@ func Load() (*provider.Config, error) {
 		return cfg, err
 	}
 
+	// Migrate the old boolean debug switch to the standard logging threshold.
+	// The old `verbose` setting represented request-body tracing, which now maps
+	// directly to slog's DEBUG level. Saving once removes both legacy fields.
+	dirty := false
+	if strings.TrimSpace(cfg.LogLevel) == "" && cfg.DebugMode {
+		if cfg.DebugVerbose {
+			cfg.LogLevel = "debug"
+		} else {
+			cfg.LogLevel = "info"
+		}
+		cfg.DebugMode = false
+		cfg.DebugVerbose = false
+		dirty = true
+	}
+	// File logging is opt-in. Keep the default explicit in the loaded config so
+	// every caller observes "off" instead of having to interpret an empty value.
+	if strings.TrimSpace(cfg.LogLevel) == "" {
+		cfg.LogLevel = "off"
+	}
+
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]provider.Provider)
 	}
 	if cfg.AuthGroups == nil {
 		cfg.AuthGroups = make(map[string]provider.AuthGroup)
 	}
-	dirty := false
 	for name, p := range cfg.Providers {
 		changed := false
 		if p.OAuthProvider == "" {
@@ -98,7 +118,7 @@ func Load() (*provider.Config, error) {
 		}
 		// OAuth backends have a fixed runtime protocol. Older configs may still
 		// carry a mismatched type from the removed `ccl auth --protocol` flag.
-		if fixed, ok := provider.FixedOAuthProtocol(p.OAuthProvider); ok && p.Type != fixed {
+		if fixed, ok := provider.OAuthRuntimeType(p.OAuthProvider); ok && p.Type != fixed {
 			p.Type = fixed
 			changed = true
 		}

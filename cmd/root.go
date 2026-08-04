@@ -26,7 +26,7 @@ Common commands:
   ccl oauth group / sync      Multi-account pools and credential cleanup
   ccl doctor                  Environment + provider + CPA account health
   ccl cloud login|push|pull   Encrypted multi-remote config sync
-  ccl debug on|off            Runtime diagnostics (log path printed when a session ends)
+  ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)
 
 Compatibility aliases still work for older scripts:
   ccl auth ...        → ccl oauth ...
@@ -42,6 +42,8 @@ to Claude Code (for example: ccl resume, ccl -p "hello").
 }
 
 func Execute() {
+	configureLogging()
+
 	if len(os.Args) > 1 {
 		firstArg := os.Args[1]
 
@@ -74,6 +76,16 @@ func Execute() {
 		}
 		os.Exit(1)
 	}
+}
+
+// configureLogging makes the persisted threshold available without opening a
+// shared file. A Claude session or temporary provider runtime opens its own.
+func configureLogging() {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	oauthproxy.ConfigureLogLevel(configuredLogLevel(cfg.LogLevel))
 }
 
 func isCclCommand(arg string) bool {
@@ -115,18 +127,15 @@ func runClaude(args []string) error {
 		return fmt.Errorf("load ccl config for launcher options: %w", err)
 	}
 
-	// Establish the runtime debug sink before the embedded CPA starts so its
-	// logrus funnel and startup Debugf see the enabled state. Bypass mode and
-	// debug are independent global toggles persisted in config.yaml.
-	oauthproxy.SetDebug(cfg.DebugMode, oauthproxy.ResolveDebugLogPath())
+	// Record the configured threshold; claude.Run opens the uniquely named file
+	// before its embedded runtime starts.
+	level := configuredLogLevel(cfg.LogLevel)
+	oauthproxy.ConfigureLogLevel(level)
 
 	err = claude.Run(p, applyBypassMode(args, cfg.BypassMode))
-	if cfg.DebugMode {
-		logPath := oauthproxy.DebugLogPath()
-		if logPath == "" {
-			logPath = oauthproxy.ResolveDebugLogPath()
-		}
-		fmt.Fprintf(os.Stderr, "\n[ccl debug] session ended · log: %s\n", logPath)
+	if logPath := oauthproxy.LogFilePath(); logPath != "" {
+		fmt.Fprintf(os.Stderr, "\n[ccl log] run finished · file: %s\n", logPath)
+		oauthproxy.CloseLog()
 	}
 	return err
 }

@@ -28,10 +28,10 @@ type CredentialInfo struct {
 	StatusMessage string
 }
 
-// ImportCredential validates an existing CPA-compatible auth JSON, normalizes
+// ImportCredential validates an existing ccl-supported auth JSON, normalizes
 // its backend type and filename, and stores an independent 0600 copy in
-// ~/.ccl/auth. providerHint is only needed to distinguish GPT from Copilot,
-// which intentionally share CPA's "codex" backend.
+// ~/.ccl/auth. providerHint can disambiguate legacy aliases, but cannot change
+// one backend into another.
 func ImportCredential(sourcePath, providerHint string) (CredentialInfo, string, error) {
 	sourcePath = strings.TrimSpace(sourcePath)
 	if sourcePath == "" {
@@ -192,8 +192,12 @@ func credentialQuotaExceeded(metadata map[string]any) bool {
 
 func normalizeCredentialBackend(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy, ProviderCopilot:
+	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy:
 		return ProviderCodex, nil
+	case ProviderCopilot:
+		return ProviderCopilot, nil
+	case ProviderQoder:
+		return ProviderQoder, nil
 	case backendXAI, ProviderGrok:
 		return backendXAI, nil
 	case "antigravity", ProviderGemini:
@@ -216,11 +220,19 @@ func publicProviderForBackend(backend, hint string) (string, error) {
 		switch hint {
 		case "", ProviderChatGPT, ProviderChatGPTLegacy:
 			return ProviderChatGPT, nil
-		case ProviderCopilot:
-			return ProviderCopilot, nil
 		default:
 			return "", fmt.Errorf("credential provider hint %q is incompatible with codex backend", hint)
 		}
+	case ProviderCopilot:
+		if hint != "" && hint != ProviderCopilot {
+			return "", fmt.Errorf("credential provider hint %q is incompatible with copilot backend", hint)
+		}
+		return ProviderCopilot, nil
+	case ProviderQoder:
+		if hint != "" && hint != ProviderQoder {
+			return "", fmt.Errorf("credential provider hint %q is incompatible with qoder backend", hint)
+		}
+		return ProviderQoder, nil
 	case backendXAI:
 		if hint != "" && hint != ProviderGrok {
 			return "", fmt.Errorf("credential provider hint %q is incompatible with xai backend", hint)
@@ -252,7 +264,7 @@ func publicProviderForBackend(backend, hint string) (string, error) {
 }
 
 func credentialIdentity(metadata map[string]any, raw []byte) string {
-	keys := []string{"email", "sub", "subject", "account_id", "profile_arn", "client_id", "project_id", "device_id"}
+	keys := []string{"email", "login", "user_id", "sub", "subject", "account_id", "profile_arn", "client_id", "project_id", "device_id"}
 	rawType, _ := metadata["type"].(string)
 	if strings.EqualFold(strings.TrimSpace(rawType), ProviderKiro) {
 		// Builder ID and Social profile ARNs are shared placeholders, so they

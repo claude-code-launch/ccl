@@ -26,52 +26,62 @@ var (
 	kiroLegacyModelPattern = regexp.MustCompile(`(?i)^claude-([0-9]+)-([0-9]+)-(sonnet|opus|haiku)(?:-[0-9]{8})?(?:-thinking|-latest)?$`)
 )
 
-type kiroAnthropicRequest struct {
-	Model        string                 `json:"model"`
-	MaxTokens    int                    `json:"max_tokens"`
-	Messages     []kiroAnthropicMessage `json:"messages"`
-	Stream       bool                   `json:"stream"`
-	System       json.RawMessage        `json:"system"`
-	Tools        []kiroAnthropicTool    `json:"tools"`
-	ToolChoice   json.RawMessage        `json:"tool_choice"`
-	Thinking     *kiroAnthropicThinking `json:"thinking"`
-	OutputConfig *kiroAnthropicOutput   `json:"output_config"`
-	Metadata     *kiroAnthropicMetadata `json:"metadata"`
+type anthropicMessagesRequest struct {
+	Model        string                    `json:"model"`
+	MaxTokens    int                       `json:"max_tokens"`
+	Messages     []anthropicMessage        `json:"messages"`
+	Stream       bool                      `json:"stream"`
+	System       json.RawMessage           `json:"system"`
+	Tools        []anthropicTool           `json:"tools"`
+	ToolChoice   json.RawMessage           `json:"tool_choice"`
+	Thinking     *anthropicThinking        `json:"thinking"`
+	OutputConfig *anthropicOutput          `json:"output_config"`
+	Metadata     *anthropicRequestMetadata `json:"metadata"`
 }
 
-type kiroAnthropicMessage struct {
+type anthropicMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
 }
 
-type kiroAnthropicTool struct {
+type anthropicTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-type kiroAnthropicThinking struct {
+type anthropicThinking struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens"`
 }
 
-type kiroAnthropicOutput struct {
+type anthropicOutput struct {
 	Effort string `json:"effort"`
 }
 
-type kiroAnthropicMetadata struct {
+type anthropicRequestMetadata struct {
 	UserID string `json:"user_id"`
 }
 
-type kiroConvertedRequest struct {
-	body            map[string]any
-	model           string
+// anthropicAdapterRequest is the client-facing state shared by direct
+// Anthropic-compatible adapters. Upstream-specific converted requests embed it.
+type anthropicAdapterRequest struct {
+	upstreamModel   string
 	clientModel     string
 	stream          bool
 	thinkingEnabled bool
-	maxTokens       int
-	inputTokens     int
-	toolNameMap     map[string]string
+	// thinkingSignature identifies synthetic reasoning signatures emitted by
+	// direct adapters when the upstream does not provide an Anthropic signature.
+	thinkingSignature string
+	maxTokens         int
+	inputTokens       int
+	toolNameMap       map[string]string
+}
+
+type kiroConvertedRequest struct {
+	anthropicAdapterRequest
+	body            map[string]any
+	model           string
 	inlineMedia     int
 	droppedMedia    int
 	dedupedMedia    int
@@ -113,7 +123,7 @@ type kiroContent struct {
 const kiroEmptyToolResultText = "(no output)"
 
 func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
-	var request kiroAnthropicRequest
+	var request anthropicMessagesRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, fmt.Errorf("invalid Anthropic Messages request: %w", err)
 	}
@@ -277,14 +287,17 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	}
 	inlineMedia = countKiroInlineMedia(conversationState)
 	return &kiroConvertedRequest{
+		anthropicAdapterRequest: anthropicAdapterRequest{
+			upstreamModel:   model,
+			clientModel:     request.Model,
+			stream:          request.Stream,
+			thinkingEnabled: thinkingEnabled,
+			maxTokens:       request.MaxTokens,
+			inputTokens:     estimateApproxTokensBytes(raw),
+			toolNameMap:     toolNameMap,
+		},
 		body:            body,
 		model:           model,
-		clientModel:     request.Model,
-		stream:          request.Stream,
-		thinkingEnabled: thinkingEnabled,
-		maxTokens:       request.MaxTokens,
-		inputTokens:     estimateKiroTokensBytes(raw),
-		toolNameMap:     toolNameMap,
 		inlineMedia:     inlineMedia,
 		droppedMedia:    droppedMedia,
 		dedupedMedia:    dedupedMedia,
@@ -396,7 +409,7 @@ func extractKiroSystem(raw json.RawMessage) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-func kiroThinkingPrefix(thinking *kiroAnthropicThinking, output *kiroAnthropicOutput) string {
+func kiroThinkingPrefix(thinking *anthropicThinking, output *anthropicOutput) string {
 	if thinking == nil {
 		return ""
 	}
@@ -417,7 +430,7 @@ func kiroThinkingPrefix(thinking *kiroAnthropicThinking, output *kiroAnthropicOu
 	return "<thinking_mode>enabled</thinking_mode><max_thinking_length>" + strconv.Itoa(budget) + "</max_thinking_length>"
 }
 
-func kiroReasoningFields(request *kiroAnthropicRequest, model string) map[string]any {
+func kiroReasoningFields(request *anthropicMessagesRequest, model string) map[string]any {
 	if request.Thinking != nil && strings.EqualFold(request.Thinking.Type, "disabled") {
 		return nil
 	}
@@ -459,7 +472,7 @@ func normalizeKiroEffort(effort string) string {
 	}
 }
 
-func convertKiroTools(input []kiroAnthropicTool, nameMap map[string]string) ([]any, map[string]bool, error) {
+func convertKiroTools(input []anthropicTool, nameMap map[string]string) ([]any, map[string]bool, error) {
 	tools := make([]any, 0, len(input))
 	declared := make(map[string]bool, len(input))
 	for _, tool := range input {
@@ -702,7 +715,7 @@ func kiroImageFromBlock(block map[string]any) any {
 	}
 }
 
-func kiroConversationID(metadata *kiroAnthropicMetadata) string {
+func kiroConversationID(metadata *anthropicRequestMetadata) string {
 	if metadata != nil {
 		if match := kiroSessionUUIDPattern.FindStringSubmatch(metadata.UserID); len(match) == 2 {
 			return match[1]
@@ -743,19 +756,19 @@ func kiroEnvironmentState() map[string]any {
 	}
 }
 
-// estimateKiroTokens approximates the token count of text as one token per four
+// estimateApproxTokens approximates the token count of text as one token per four
 // runes. Counting runes in place keeps this allocation-free, which matters both
 // for whole request bodies and for the per-delta calls on the streaming path.
-func estimateKiroTokens(text string) int {
+func estimateApproxTokens(text string) int {
 	if text == "" {
 		return 0
 	}
 	return (utf8.RuneCountInString(text) + 3) / 4
 }
 
-// estimateKiroTokensBytes is estimateKiroTokens without forcing a []byte to
+// estimateApproxTokensBytes is estimateApproxTokens without forcing a []byte to
 // string copy of the payload.
-func estimateKiroTokensBytes(raw []byte) int {
+func estimateApproxTokensBytes(raw []byte) int {
 	if len(raw) == 0 {
 		return 0
 	}

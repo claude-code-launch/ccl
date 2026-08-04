@@ -50,7 +50,7 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  oauth", "  bypass", "  debug", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
+	for _, want := range []string{"  oauth", "  bypass", "  log", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
@@ -261,7 +261,7 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"* beta", "Endpoint : https://example.com/v1", "Models   : 4", "Pool     : pool-a,pool-b,pool-c,pool-d"} {
+	for _, want := range []string{"* beta", "Endpoint : https://example.com/v1", "Models   : 4", "Pool IDs : pool-a,pool-b,pool-c,pool-d"} {
 		if !contains(out, want) {
 			t.Fatalf("expected detailed output to contain %q, got:\n%s", want, out)
 		}

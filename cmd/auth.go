@@ -26,7 +26,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:     "oauth <gpt|gemini|grok|copilot|kimi|kiro|claude> [alias]",
+		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|claude> [alias]",
 		Aliases: []string{"auth"},
 		Short:   "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers and manage OAuth credentials.
@@ -35,7 +35,7 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|copilot|kimi|kiro|claude
+  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|claude
 
 Subcommands:
 
@@ -46,7 +46,8 @@ Subcommands:
 Notes:
   - Alias "auth" still works: ccl auth gpt
   - Legacy "chatgpt" is accepted and normalized to "gpt"
-  - Fast mode (gpt/copilot): Claude /fast or ccl set Review & Apply
+  - Fast mode (gpt): Claude /fast or ccl set Review & Apply
+  - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
   - Flags: --no-browser, --callback-port, --kiro-auth
 `,
@@ -65,7 +66,7 @@ Notes:
 // Claude Code fastMode toggle (Codex Responses backends only).
 func supportsFastMode(providerName string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy, oauthproxy.ProviderCopilot:
+	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy:
 		return true
 	default:
 		return false
@@ -79,7 +80,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	}
 	// OAuth backends have a fixed runtime protocol. StartProvider ignores any
 	// Type override when OAuthProvider is set, so always persist the real path.
-	protocolType := fixedOAuthProtocol(target)
+	protocolType := oauthRuntimeType(target)
 
 	var alias string
 	if len(args) > 1 {
@@ -117,8 +118,8 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 		return fmt.Errorf("load ccl config: %w", err)
 	}
 	p, targetExists := cfg.Providers[providerName]
-	// GPT and Copilot share the Codex backend; only GPT migrates the
-	// legacy "codex" OAuth provider alias when no explicit alias is used.
+	// GPT migrates the legacy "codex" OAuth provider alias when no explicit
+	// alias is used. Copilot is a separate GitHub backend.
 	if target == oauthproxy.ProviderChatGPT && alias == "" {
 		if legacy, exists := cfg.Providers[oauthproxy.ProviderCodex]; exists && strings.EqualFold(strings.TrimSpace(legacy.OAuthProvider), oauthproxy.ProviderCodex) {
 			if !targetExists {
@@ -136,7 +137,11 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 
 	fmt.Fprintf(out, "Authenticated %s as provider %q and switched active provider.\n", target, providerName)
 	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
-	fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
+	if target == oauthproxy.ProviderCopilot {
+		fmt.Fprintln(out, "Protocol: automatic (Responses / Chat Completions / Anthropic Messages per model)")
+	} else {
+		fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
+	}
 	if supportsFastMode(target) {
 		fmt.Fprintf(out, "Fast: %s (toggle with /fast or ccl set Review & Apply)\n", providerFastSummary(p))
 	}
@@ -149,7 +154,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 func configureOAuthProvider(p provider.Provider, name, oauthProvider, credentialFile string) provider.Provider {
 	backend, _ := oauthproxy.BackendProvider(oauthProvider)
 	p.Name = name
-	p.Type = fixedOAuthProtocol(oauthProvider)
+	p.Type = oauthRuntimeType(oauthProvider)
 	p.Endpoint = "oauth://" + backend
 	p.APIKey = ""
 	p.AnthropicAuth = ""
@@ -165,17 +170,13 @@ func configureOAuthProvider(p provider.Provider, name, oauthProvider, credential
 	return p
 }
 
-// fixedOAuthProtocol is the protocol label persisted for each subscription backend.
-// ChatGPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → Chat; Kiro/Claude → Anthropic.
-func fixedOAuthProtocol(providerName string) string {
-	switch providerName {
-	case oauthproxy.ProviderGemini, oauthproxy.ProviderGrok, oauthproxy.ProviderKimi:
-		return "openai"
-	case oauthproxy.ProviderKiro, oauthproxy.ProviderClaude:
-		return "anthropic"
-	default:
-		return "openai_responses"
+// oauthRuntimeType is the internal compatibility type persisted for each
+// subscription backend. Copilot's real upstream protocol remains per-model.
+func oauthRuntimeType(providerName string) string {
+	if runtimeType, ok := provider.OAuthRuntimeType(providerName); ok {
+		return runtimeType
 	}
+	return "openai_responses"
 }
 
 // isReservedProviderName blocks aliases that would collide with canonical
@@ -186,6 +187,7 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderGemini, "antigravity",
 		oauthproxy.ProviderGrok, "xai",
 		oauthproxy.ProviderCopilot,
+		oauthproxy.ProviderQoder,
 		oauthproxy.ProviderKimi,
 		oauthproxy.ProviderKiro,
 		oauthproxy.ProviderClaude:

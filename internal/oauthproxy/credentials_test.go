@@ -57,18 +57,47 @@ func TestImportCredentialCreatesCanonicalIndependentCopy(t *testing.T) {
 	}
 }
 
-func TestImportCredentialUsesCopilotHintForCodexBackend(t *testing.T) {
+func TestImportCredentialKeepsCopilotAsDistinctBackend(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	source := filepath.Join(t.TempDir(), "github-device.json")
-	if err := os.WriteFile(source, []byte(`{"type":"codex","access_token":"secret","email":"dev@example.com"}`), 0o600); err != nil {
+	if err := os.WriteFile(source, []byte(`{"type":"copilot","github_token":"secret","login":"octocat"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	credential, _, err := ImportCredential(source, "copilot")
+	credential, _, err := ImportCredential(source, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if credential.OAuthProvider != "copilot" || credential.Backend != "codex" {
+	if credential.OAuthProvider != "copilot" || credential.Backend != "copilot" {
 		t.Fatalf("credential = %+v", credential)
+	}
+	if credential.FileName != "copilot-octocat.json" {
+		t.Fatalf("credential filename = %q", credential.FileName)
+	}
+}
+
+func TestImportCredentialKeepsQoderAsDirectBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	source := filepath.Join(t.TempDir(), "qoder.json")
+	if err := os.WriteFile(source, []byte(`{"type":"qoder","access_token":"secret","refresh_token":"refresh","user_id":"user-1","machine_id":"machine-1","email":"qoder@example.com"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credential, _, err := ImportCredential(source, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.OAuthProvider != ProviderQoder || credential.Backend != ProviderQoder || credential.FileName != "qoder-qoder@example.com.json" {
+		t.Fatalf("credential = %+v", credential)
+	}
+}
+
+func TestImportCredentialRejectsCopilotHintForCodexBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	source := filepath.Join(t.TempDir(), "codex.json")
+	if err := os.WriteFile(source, []byte(`{"type":"codex","access_token":"secret"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ImportCredential(source, "copilot"); err == nil {
+		t.Fatal("Codex credential should not be importable as Copilot")
 	}
 }
 

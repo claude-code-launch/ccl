@@ -44,27 +44,54 @@ func providerEffortSummary(p provider.Provider) string {
 }
 
 // providerFastSummary reports the Codex fastMode state for display. Only Codex
-// Responses OAuth backends (gpt/copilot) honour it; other providers show
+// Responses OAuth backends (gpt) honour it; other providers show
 // "off" regardless of the stored flag.
 func providerFastSummary(p provider.Provider) string {
-	if p.FastMode && (strings.EqualFold(p.OAuthProvider, "gpt") || strings.EqualFold(p.OAuthProvider, "chatgpt") || strings.EqualFold(p.OAuthProvider, "copilot")) {
+	if p.FastMode && (strings.EqualFold(p.OAuthProvider, "gpt") || strings.EqualFold(p.OAuthProvider, "chatgpt")) {
 		return "on"
 	}
 	return "off"
 }
 
 func subagentMappingDisplay(p provider.Provider) string {
+	return subagentMappingDisplayWithNames(p, nil)
+}
+
+func subagentMappingDisplayWithNames(p provider.Provider, names map[string]string) string {
 	if model := strings.TrimSpace(p.SubagentModel); model != "" {
-		return model
+		return providerCatalogModelLabel(model, names)
 	}
 	if model, ok := p.Env[claude.SubagentModelEnv]; ok && strings.TrimSpace(model) != "" {
-		return fmt.Sprintf("(env: %s)", strings.TrimSpace(model))
+		return fmt.Sprintf("(env: %s)", providerCatalogModelLabel(strings.TrimSpace(model), names))
 	}
 	effective := strings.TrimSpace(claude.ResolveRuntimeSettings(p).SubagentModel)
 	if effective == "" {
 		return "(auto)"
 	}
-	return fmt.Sprintf("(auto: %s)", effective)
+	return fmt.Sprintf("(auto: %s)", providerCatalogModelLabel(effective, names))
+}
+
+func providerCatalogModelLabel(model string, names map[string]string) string {
+	technical := strings.TrimSpace(model)
+	base := stripOneMSuffix(technical)
+	if base == "" {
+		return technical
+	}
+	display := ""
+	for id, name := range names {
+		if strings.EqualFold(strings.TrimSpace(id), base) {
+			display = strings.TrimSpace(name)
+			break
+		}
+	}
+	if display == "" || strings.EqualFold(display, base) {
+		return technical
+	}
+	label := display + " (" + base + ")"
+	if base != technical {
+		label += " · 1M"
+	}
+	return label
 }
 
 // backendManagedContextNote marks the compact/context summary of subscription

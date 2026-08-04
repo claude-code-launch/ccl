@@ -7,6 +7,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 
@@ -22,6 +23,8 @@ type mapOptions struct {
 	custom   string
 	subagent string
 }
+
+var fetchMappingCatalog = fetchMappingCatalogFromProvider
 
 func newMapCommand(use string) *cobra.Command {
 	opts := &mapOptions{}
@@ -59,11 +62,11 @@ Examples:
 			return runMapTUI(args)
 		},
 	}
-	cmd.Flags().StringVar(&opts.opus, "opus", "", "Model for Opus slot")
-	cmd.Flags().StringVar(&opts.sonnet, "sonnet", "", "Model for Sonnet slot")
-	cmd.Flags().StringVar(&opts.haiku, "haiku", "", "Model for Haiku slot")
-	cmd.Flags().StringVar(&opts.custom, "custom", "", "Model for Custom slot")
-	cmd.Flags().StringVar(&opts.subagent, "subagent", "", "Model for Claude Code subagents (empty uses automatic selection)")
+	cmd.Flags().StringVar(&opts.opus, "opus", "", "Model ID for Opus slot")
+	cmd.Flags().StringVar(&opts.sonnet, "sonnet", "", "Model ID for Sonnet slot")
+	cmd.Flags().StringVar(&opts.haiku, "haiku", "", "Model ID for Haiku slot")
+	cmd.Flags().StringVar(&opts.custom, "custom", "", "Model ID for Custom slot")
+	cmd.Flags().StringVar(&opts.subagent, "subagent", "", "Model ID for Claude Code subagents (empty uses automatic selection)")
 	return cmd
 }
 
@@ -112,19 +115,19 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 
 	fmt.Printf("✓ Updated slot mapping for provider %q:\n", providerName)
 	if cmd.Flags().Changed("opus") {
-		fmt.Printf("  Opus   -> %s\n", p.OpusModel)
+		fmt.Printf("  Opus ID     -> %s\n", p.OpusModel)
 	}
 	if cmd.Flags().Changed("sonnet") {
-		fmt.Printf("  Sonnet -> %s\n", p.SonnetModel)
+		fmt.Printf("  Sonnet ID   -> %s\n", p.SonnetModel)
 	}
 	if cmd.Flags().Changed("haiku") {
-		fmt.Printf("  Haiku  -> %s\n", p.HaikuModel)
+		fmt.Printf("  Haiku ID    -> %s\n", p.HaikuModel)
 	}
 	if cmd.Flags().Changed("custom") {
-		fmt.Printf("  Custom -> %s\n", p.CustomModelID)
+		fmt.Printf("  Custom ID   -> %s\n", p.CustomModelID)
 	}
 	if cmd.Flags().Changed("subagent") {
-		fmt.Printf("  Subagent -> %s\n", subagentMappingDisplay(p))
+		fmt.Printf("  Subagent ID -> %s\n", subagentMappingDisplay(p))
 	}
 
 	return nil
@@ -149,12 +152,13 @@ func runMapAuto(ctx context.Context, args []string) error {
 
 	fmt.Printf("Fetching available models for %q...\n", providerName)
 
-	models := fetchModelsForProvider(p)
-	if len(models) == 0 {
-		return fmt.Errorf("no models found from provider")
+	runtimeProvider, models, metadata, cleanup, err := fetchMappingCatalog(ctx, p)
+	if err != nil {
+		return fmt.Errorf("discover models for provider %q: %w", providerName, err)
 	}
+	defer cleanup()
 
-	availableSet := testModelsConcurrently(ctx, models, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
+	availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, runtimeProvider.Type, runtimeProvider.AnthropicAuth)
 	available, unavailable := classifyModels(models, availableSet)
 
 	if len(available) == 0 {
@@ -207,7 +211,7 @@ func runMapAuto(ctx context.Context, args []string) error {
 	fmt.Printf("\n✓ Auto-mapped slots for provider %q:\n", providerName)
 	for _, s := range slots {
 		if *s.ptr != "" {
-			fmt.Printf("  %-6s -> %s\n", s.name, *s.ptr)
+			fmt.Printf("  %-6s -> %s\n", s.name, mappedModelOutputLabel(*s.ptr, metadata))
 		} else {
 			fmt.Printf("  %-6s -> (unset)\n", s.name)
 		}
@@ -260,17 +264,13 @@ func runMapTUI(args []string) error {
 		return fmt.Errorf("provider %q not found", providerName)
 	}
 
-	// Pre-fetch model pool
-	modelPool := parseModelList(p.Model)
-	if len(modelPool) == 0 {
-		modelPool = fetchModelsForProvider(p)
-	}
-	if len(modelPool) == 0 {
-		return fmt.Errorf("no models available - configure models first with 'ccl set'")
+	modelPool, metadata, err := modelCatalogForMapping(context.Background(), p)
+	if err != nil {
+		return fmt.Errorf("discover models for provider %q: %w", providerName, err)
 	}
 
 	// Launch TUI at page 1
-	m := NewAdvancedConfigModelAtPage1(&p, modelPool)
+	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, modelPool, metadata)
 	program := tea.NewProgram(m)
 	finalModel, err := program.Run()
 	if err != nil {
@@ -290,7 +290,7 @@ func runMapTUI(args []string) error {
 	fmt.Printf("\n✓ Slot mapping saved for provider %q:\n", providerName)
 	printSlot := func(label, val string) {
 		if val != "" {
-			fmt.Printf("  %-9s -> %s\n", label, val)
+			fmt.Printf("  %-9s -> %s\n", label, mappedModelOutputLabel(val, metadata))
 		} else {
 			fmt.Printf("  %-9s -> (unset)\n", label)
 		}
@@ -299,9 +299,93 @@ func runMapTUI(args []string) error {
 	printSlot("Sonnet", p.SonnetModel)
 	printSlot("Haiku", p.HaikuModel)
 	printSlot("Custom", p.CustomModelID)
-	printSlot("Subagent", subagentMappingDisplay(p))
+	if strings.TrimSpace(p.SubagentModel) != "" {
+		printSlot("Subagent", p.SubagentModel)
+	} else {
+		printSlot("Subagent", subagentMappingDisplay(p))
+	}
 
 	return nil
+}
+
+func mappedModelOutputLabel(model string, metadata map[string]protocol.ModelInfo) string {
+	model = strings.TrimSpace(model)
+	base := stripOneMSuffix(model)
+	if base == "" || strings.HasPrefix(base, "(") {
+		return model
+	}
+	label := modelReportLabel(base, metadata)
+	if base != model {
+		label += " · 1M"
+	}
+	return label
+}
+
+// modelPoolForMapping prefers an explicitly configured pool. OAuth providers
+// with an empty pool discover their live account catalog through the same
+// embedded runtime used for normal Claude sessions, so `ccl map` never
+// requires a preceding `ccl set`.
+func modelPoolForMapping(ctx context.Context, p provider.Provider) ([]string, error) {
+	models, _, err := modelCatalogForMapping(ctx, p)
+	return models, err
+}
+
+func modelCatalogForMapping(ctx context.Context, p provider.Provider) ([]string, map[string]protocol.ModelInfo, error) {
+	if configured := parseModelList(p.Model); len(configured) > 0 {
+		if strings.TrimSpace(p.OAuthProvider) == "" {
+			return configured, nil, nil
+		}
+		_, _, metadata, cleanup, err := fetchMappingCatalog(ctx, p)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer cleanup()
+		return configured, metadata, nil
+	}
+	_, models, metadata, cleanup, err := fetchMappingCatalog(ctx, p)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+	if len(models) == 0 {
+		return nil, nil, fmt.Errorf("provider returned no models")
+	}
+	return models, metadata, nil
+}
+
+// fetchMappingCatalogFromProvider returns a provider endpoint suitable for
+// live probes plus its authoritative model IDs. OAuth endpoints such as
+// oauth://qoder are descriptors rather than HTTP URLs, so they must first be
+// resolved to the embedded loopback runtime.
+func fetchMappingCatalogFromProvider(_ context.Context, p provider.Provider) (provider.Provider, []string, map[string]protocol.ModelInfo, func(), error) {
+	nop := func() {}
+	if strings.TrimSpace(p.OAuthProvider) == "" {
+		infos := fetchModelInfosForProvider(p)
+		models := modelIDs(infos)
+		if len(models) == 0 {
+			return p, nil, nil, nop, fmt.Errorf("no models found from provider")
+		}
+		return p, models, indexModelInfos(infos), nop, nil
+	}
+
+	runtimeProvider, runtime, cleanup, err := prepareProviderRuntime(p)
+	if err != nil {
+		return provider.Provider{}, nil, nil, nop, err
+	}
+	infos := fetchModelInfosForProvider(runtimeProvider)
+	metadata := indexModelInfos(infos)
+	models := runtime.Models()
+	if len(models) == 0 {
+		models = modelIDs(infos)
+	}
+	if len(models) == 0 {
+		models = parseModelList(runtimeProvider.Model)
+	}
+	if len(models) == 0 {
+		cleanup()
+		return provider.Provider{}, nil, nil, nop, fmt.Errorf("OAuth runtime returned no models")
+	}
+	return runtimeProvider, models, metadata, cleanup, nil
 }
 
 // resolveProviderName returns provider name from args or active provider.

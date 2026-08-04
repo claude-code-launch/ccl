@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/spf13/cobra"
 )
 
@@ -37,23 +38,30 @@ func runModels(ctx context.Context, showAll bool) error {
 	if err != nil {
 		return err
 	}
-	p, _, cleanup, err := prepareProviderRuntime(p)
+	p, runtime, cleanup, err := prepareProviderRuntime(p)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
+	catalog := fetchModelInfosForProvider(p)
 	modelsStr := p.Model
 	source := "configured model pool"
 	if showAll || modelsStr == "" {
-		fetched := fetchModelsForProvider(p)
+		fetched := modelIDs(catalog)
+		if len(fetched) == 0 {
+			fetched = runtime.Models()
+		}
+		if len(fetched) == 0 {
+			fetched = fetchModelsForProvider(p)
+		}
 		if len(fetched) == 0 {
 			if modelsStr == "" || showAll {
 				return fmt.Errorf("no models found from provider")
 			}
 		} else {
 			modelsStr = strings.Join(fetched, ",")
-			source = "provider API"
+			source = "provider catalog"
 		}
 	}
 
@@ -69,9 +77,29 @@ func runModels(ctx context.Context, showAll bool) error {
 	availableSet := testModelsConcurrently(ctx, modelList, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
 	available, unavailable := classifyModels(modelList, availableSet)
 	fmt.Println()
-	printModelReport(available, unavailable)
+	printModelReportWithMetadata(available, unavailable, indexModelInfos(catalog))
 
 	return nil
+}
+
+func modelIDs(infos []protocol.ModelInfo) []string {
+	ids := make([]string, 0, len(infos))
+	for _, info := range infos {
+		if id := strings.TrimSpace(info.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func indexModelInfos(infos []protocol.ModelInfo) map[string]protocol.ModelInfo {
+	indexed := make(map[string]protocol.ModelInfo, len(infos))
+	for _, info := range infos {
+		if id := strings.TrimSpace(info.ID); id != "" {
+			indexed[strings.ToLower(id)] = info
+		}
+	}
+	return indexed
 }
 
 func init() {

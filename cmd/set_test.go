@@ -826,6 +826,23 @@ func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
 	}
 }
 
+func TestParseModelListForDetectionPreservesDisplayMetadata(t *testing.T) {
+	result, err := parseModelListForDetection([]byte(`{"data":[{"id":"qmodel_38max","display_name":"Qwen3.8-Max","max_input_tokens":1000000,"max_output_tokens":32768,"rate_multiplier":0.5,"rate_unit":"credits","is_new":true,"promotion_available":true}],"has_more":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.models != "qmodel_38max" || len(result.modelInfos) != 1 {
+		t.Fatalf("detection result = %+v", result)
+	}
+	info := result.modelInfos[0]
+	if info.DisplayName != "Qwen3.8-Max" || info.ContextWindow != 1000000 || info.MaxOutputTokens != 32768 {
+		t.Fatalf("model info = %+v", info)
+	}
+	if info.RateMultiplier == nil || *info.RateMultiplier != 0.5 || !info.IsNew || !info.PromotionAvailable {
+		t.Fatalf("display extensions = %+v", info)
+	}
+}
+
 func TestSlotModelAvailabilityTestCanBeCanceled(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
 	m := NewAdvancedConfigModelAtPage1(&p, []string{"model-a"})

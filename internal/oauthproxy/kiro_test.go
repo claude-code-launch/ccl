@@ -596,12 +596,15 @@ func TestKiroEventStreamFrameDecoder(t *testing.T) {
 
 func TestKiroInlineThinkingIsConvertedToAnthropicBlock(t *testing.T) {
 	request := &kiroConvertedRequest{
-		clientModel:     "claude-haiku-4-5",
-		model:           "claude-haiku-4.5",
-		thinkingEnabled: true,
-		inputTokens:     1,
+		anthropicAdapterRequest: anthropicAdapterRequest{
+			upstreamModel:   "claude-haiku-4.5",
+			clientModel:     "claude-haiku-4-5",
+			thinkingEnabled: true,
+			inputTokens:     1,
+		},
+		model: "claude-haiku-4.5",
 	}
-	assembler := newKiroAnthropicAssembler(request, nil)
+	assembler := newAnthropicResponseAssembler(&request.anthropicAdapterRequest, nil)
 	for _, content := range []string{"<think", "ing>plan", "</thinking>answer"} {
 		payload, _ := json.Marshal(map[string]any{"content": content})
 		if err := assembler.processEvent("assistantResponseEvent", payload); err != nil {
@@ -648,12 +651,15 @@ func TestKiroContextWindowMatchesAdvertisedPortalModels(t *testing.T) {
 
 func TestKiroNonStreamingToolResponseKeepsEmptyInput(t *testing.T) {
 	request := &kiroConvertedRequest{
-		clientModel: "claude-sonnet-4-6",
-		model:       "claude-sonnet-4.6",
-		inputTokens: 1,
-		toolNameMap: map[string]string{},
+		anthropicAdapterRequest: anthropicAdapterRequest{
+			upstreamModel: "claude-sonnet-4.6",
+			clientModel:   "claude-sonnet-4-6",
+			inputTokens:   1,
+			toolNameMap:   map[string]string{},
+		},
+		model: "claude-sonnet-4.6",
 	}
-	assembler := newKiroAnthropicAssembler(request, nil)
+	assembler := newAnthropicResponseAssembler(&request.anthropicAdapterRequest, nil)
 	payload, _ := json.Marshal(map[string]any{
 		"name":      "NoArgs",
 		"toolUseId": "toolu_empty",
@@ -969,14 +975,14 @@ func TestReadKiroInboundBodyRejectsOversizeWithoutSilentJSONTruncation(t *testin
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(strings.Repeat("x", 65)))
 	request.ContentLength = -1 // Exercise streaming/chunked bodies through MaxBytesReader.
-	_, err := readKiroInboundBody(httptest.NewRecorder(), request, 64)
+	_, err := readAnthropicInboundBody(httptest.NewRecorder(), request, 64)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 64 bytes limit") {
 		t.Fatalf("oversize error = %v", err)
 	}
 
 	valid := []byte(`{"model":"claude-sonnet-5","messages":[]}`)
 	request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(valid))
-	got, err := readKiroInboundBody(httptest.NewRecorder(), request, int64(len(valid)))
+	got, err := readAnthropicInboundBody(httptest.NewRecorder(), request, int64(len(valid)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1578,7 +1584,7 @@ func encodeKiroTestHeader(name, value string) []byte {
 }
 
 func TestKiroAssemblerTokenTotalsUsesContextOverride(t *testing.T) {
-	assembler := newKiroAnthropicAssembler(&kiroConvertedRequest{inputTokens: 50}, nil)
+	assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 50}, nil)
 	assembler.outputTokens = 30
 	if input, output := assembler.tokenTotals(); input != 50 || output != 30 {
 		t.Fatalf("tokenTotals() = (%d, %d), want (50, 30)", input, output)
@@ -1593,7 +1599,7 @@ func TestKiroAssemblerTokenTotalsUsesContextOverride(t *testing.T) {
 }
 
 func TestKiroAssemblerUsageMatchesTokenTotals(t *testing.T) {
-	assembler := newKiroAnthropicAssembler(&kiroConvertedRequest{inputTokens: 12}, nil)
+	assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 12}, nil)
 	assembler.outputTokens = 7
 	usage := assembler.usage()
 	if usage["input_tokens"] != 12 || usage["output_tokens"] != 7 {
@@ -1604,11 +1610,14 @@ func TestKiroAssemblerUsageMatchesTokenTotals(t *testing.T) {
 func TestKiroServiceRecordKiroUsageKeyedByClientModel(t *testing.T) {
 	service := &kiroService{usage: NewUsageTracker()}
 	converted := &kiroConvertedRequest{
-		model:       "claude-sonnet-4-6",
-		clientModel: "claude-sonnet-4-6[1m]",
-		inputTokens: 100,
+		anthropicAdapterRequest: anthropicAdapterRequest{
+			upstreamModel: "claude-sonnet-4-6",
+			clientModel:   "claude-sonnet-4-6[1m]",
+			inputTokens:   100,
+		},
+		model: "claude-sonnet-4-6",
 	}
-	assembler := newKiroAnthropicAssembler(converted, nil)
+	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
 	assembler.outputTokens = 40
 
 	service.recordKiroUsage(converted, assembler)
@@ -1628,8 +1637,8 @@ func TestKiroServiceRecordKiroUsageKeyedByClientModel(t *testing.T) {
 
 func TestKiroServiceRecordKiroUsageNilTrackerIsNoop(t *testing.T) {
 	service := &kiroService{}
-	converted := &kiroConvertedRequest{clientModel: "claude-sonnet-4-6", inputTokens: 10}
-	assembler := newKiroAnthropicAssembler(converted, nil)
+	converted := &kiroConvertedRequest{anthropicAdapterRequest: anthropicAdapterRequest{clientModel: "claude-sonnet-4-6", inputTokens: 10}}
+	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
 	// Must not panic when the service has no usage tracker.
 	service.recordKiroUsage(converted, assembler)
 }

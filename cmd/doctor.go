@@ -48,8 +48,8 @@ for discovery and bulk checks. Claude Code actually uses the slot mappings
 (Opus/Sonnet/Haiku/Custom/Subagent). An empty pool with filled slots is normal.
 
 Note: root "ccl status" is cloud sync status (see "ccl cloud status"), not this command.
-For live request failures enable "ccl debug on" and check the log path printed
-when the Claude session ends (default ~/.ccl/logs/ccl-debug-<session>.log).
+For live request failures enable "ccl log on" and check the session log file
+when the Claude session ends (default ~/.ccl/logs/ccl-debug-claude_<id>.log).
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor(cmd.Context())
@@ -163,6 +163,7 @@ func runDoctor(ctx context.Context) error {
 
 	configuredProvider := p
 	if !groupValid {
+		printProviderModelMappings(p, nil)
 		printDoctorGroupHealth(cfg, p, nil)
 		doctorHint("Run `ccl oauth sync` to reconcile group members with ~/.ccl/auth.")
 		return nil
@@ -170,6 +171,7 @@ func runDoctor(ctx context.Context) error {
 
 	p, runtime, cleanup, err := prepareProviderRuntime(p)
 	if err != nil {
+		printProviderModelMappings(configuredProvider, nil)
 		if configuredProvider.AuthGroup != "" || configuredProvider.OAuthProvider != "" {
 			printDoctorGroupHealth(cfg, configuredProvider, nil)
 		}
@@ -181,7 +183,9 @@ func runDoctor(ctx context.Context) error {
 	if configuredProvider.AuthGroup != "" || configuredProvider.OAuthProvider != "" {
 		printDoctorGroupHealth(cfg, configuredProvider, runtime)
 	}
-	printDoctorContextBudget(p, configuredProvider)
+	modelNames := runtime.ModelDisplayNames()
+	printProviderModelMappings(configuredProvider, modelNames)
+	printDoctorContextBudget(p, configuredProvider, modelNames)
 
 	// 5. Test Endpoint reachability and API Authentication key
 	if p.Endpoint != "" {
@@ -228,7 +232,7 @@ func runDoctor(ctx context.Context) error {
 //
 // runtimeProvider carries the live endpoint/key of the embedded runtime;
 // configured carries the user's ccl config.
-func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
+func printDoctorContextBudget(runtimeProvider, configured provider.Provider, modelNames map[string]string) {
 	doctorSection("Context budget")
 
 	maxContext := parseDoctorTokenEnv(configured.Env[maxContextTokensEnv])
@@ -245,7 +249,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	}
 	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
 
-	oauthproxy.Debugf("doctor context budget provider=%q max_context=%d compact_window=%d compact_pct=%q manual=%t catalog=%q models=%d smallest=%d smallest_model=%q",
+	oauthproxy.LogDebugf("doctor context budget provider=%q max_context=%d compact_window=%d compact_pct=%q manual=%t catalog=%q models=%d smallest=%d smallest_model=%q",
 		configured.Name, maxContext, compactWindow, compactPct,
 		provider.ContextBudgetIsManual(configured), source, len(windows), smallest, smallestModel)
 
@@ -280,7 +284,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 		if window, ok := windows[strings.ToLower(slot.Model)]; ok && window > 0 {
 			advertised = "backend " + formatTokenCount(window) + ", " + claude.ContextClassLabel(window)
 		}
-		doctorKV(slot.Slot, fmt.Sprintf("%s · %s · %s", slot.Model, sizing, advertised))
+		doctorKV(slot.Slot, fmt.Sprintf("%s · %s · %s", providerCatalogModelLabel(slot.Model, modelNames), sizing, advertised))
 	}
 	if len(windows) == 0 {
 		doctorInfo("Backend does not advertise context windows, so [1m] markers cannot be verified here")
@@ -302,7 +306,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider) {
 	}
 	if smallest > 0 && maxContext > smallest {
 		doctorWarn(fmt.Sprintf("Manual context override %s exceeds the %s window of %s",
-			formatTokenCount(maxContext), smallestModel, formatTokenCount(smallest)))
+			formatTokenCount(maxContext), providerCatalogModelLabel(smallestModel, modelNames), formatTokenCount(smallest)))
 		doctorHint("Requests can be rejected with context_length_exceeded (HTTP 400) before Claude Code auto-compacts")
 	}
 	if provider.ContextBudgetIsManual(configured) {
@@ -999,7 +1003,7 @@ func metadataStringPresent(metadata map[string]any, key string) bool {
 
 func printDoctorProviderIdentity(p provider.Provider) {
 	doctorKV("Kind", providerKindLabel(p))
-	doctorKV("Protocol", provider.ProtocolLabel(p.Type))
+	doctorKV("Protocol", provider.ProtocolLabelForProvider(p))
 	doctorKV("Auth", providerAuthLabel(p))
 }
 
@@ -1035,7 +1039,6 @@ func printDoctorProviderDetails(p provider.Provider) {
 	doctorKV("Max Output", providerMaxOutputSummary(p))
 	doctorKV("Tools", providerToolsSummary(p))
 	doctorKV("Tool Search", providerToolSearchSummary(p))
-	printProviderModelMappings(p)
 }
 
 func doctorConfiguredSlotCount(p provider.Provider) int {
@@ -1109,16 +1112,16 @@ func providerToolSearchSummary(p provider.Provider) string {
 	}
 }
 
-func printProviderModelMappings(p provider.Provider) {
+func printProviderModelMappings(p provider.Provider, modelNames map[string]string) {
 	mappings := []struct {
 		label string
 		model string
 	}{
-		{"Opus", p.OpusModel},
-		{"Sonnet", p.SonnetModel},
-		{"Haiku", p.HaikuModel},
-		{"Custom", p.CustomModelID},
-		{"Subagent", subagentMappingDisplay(p)},
+		{"Opus", providerCatalogModelLabel(p.OpusModel, modelNames)},
+		{"Sonnet", providerCatalogModelLabel(p.SonnetModel, modelNames)},
+		{"Haiku", providerCatalogModelLabel(p.HaikuModel, modelNames)},
+		{"Custom", providerCatalogModelLabel(p.CustomModelID, modelNames)},
+		{"Subagent", subagentMappingDisplayWithNames(p, modelNames)},
 	}
 
 	fmt.Println(grayText.Render("  Slot mappings"))
@@ -1133,10 +1136,14 @@ func printProviderModelMappings(p provider.Provider) {
 
 // printModelReport displays the complete availability report for `ccl models`.
 func printModelReport(available, unavailable []string) {
+	printModelReportWithMetadata(available, unavailable, nil)
+}
+
+func printModelReportWithMetadata(available, unavailable []string, metadata map[string]protocol.ModelInfo) {
 	if len(available) > 0 {
 		fmt.Printf("Available (%d)\n", len(available))
 		for _, m := range available {
-			fmt.Printf("  ✓ %s\n", m)
+			fmt.Printf("  ✓ %s\n", modelReportLabel(m, metadata))
 		}
 	}
 
@@ -1146,11 +1153,36 @@ func printModelReport(available, unavailable []string) {
 		}
 		fmt.Printf("Unavailable (%d)\n", len(unavailable))
 		for _, m := range unavailable {
-			fmt.Printf("  ✗ %s\n", m)
+			fmt.Printf("  ✗ %s\n", modelReportLabel(m, metadata))
 		}
 	}
 
 	fmt.Printf("\nSummary: %s\n", modelVerificationSummary(available, unavailable))
+}
+
+func modelReportLabel(id string, metadata map[string]protocol.ModelInfo) string {
+	info, ok := metadata[strings.ToLower(strings.TrimSpace(id))]
+	if !ok {
+		return id
+	}
+	displayName := strings.TrimSpace(info.DisplayName)
+	label := id
+	if displayName != "" {
+		label = displayName
+		if !strings.EqualFold(displayName, id) {
+			label += " (" + id + ")"
+		}
+	}
+	if info.RateMultiplier != nil {
+		label += " · " + strconv.FormatFloat(*info.RateMultiplier, 'f', -1, 64) + "x"
+	}
+	if info.IsNew {
+		label += " · new"
+	}
+	if info.PromotionAvailable {
+		label += " · off-peak discount"
+	}
+	return label
 }
 
 func RootCmd() *cobra.Command {

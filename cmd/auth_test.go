@@ -15,7 +15,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func TestFixedOAuthProtocolDefaults(t *testing.T) {
+func TestOAuthRuntimeTypeDefaults(t *testing.T) {
 	tests := []struct {
 		provider string
 		want     string
@@ -25,13 +25,14 @@ func TestFixedOAuthProtocolDefaults(t *testing.T) {
 		{oauthproxy.ProviderGrok, "openai"},
 		{oauthproxy.ProviderKimi, "openai"},
 		{oauthproxy.ProviderKiro, "anthropic"},
+		{oauthproxy.ProviderQoder, "anthropic"},
 		{oauthproxy.ProviderClaude, "anthropic"},
 		{oauthproxy.ProviderCopilot, "openai_responses"},
 	}
 	for _, test := range tests {
-		got := fixedOAuthProtocol(test.provider)
+		got := oauthRuntimeType(test.provider)
 		if got != test.want {
-			t.Fatalf("fixedOAuthProtocol(%q) = %q; want %q", test.provider, got, test.want)
+			t.Fatalf("oauthRuntimeType(%q) = %q; want %q", test.provider, got, test.want)
 		}
 	}
 }
@@ -313,14 +314,14 @@ func TestRunAuthGrokPreservesExistingSlotPins(t *testing.T) {
 	}
 }
 
-func TestRunAuthCopilotUsesCodexResponsesBackend(t *testing.T) {
+func TestRunAuthCopilotUsesIndependentBackend(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
 	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
 		if target != oauthproxy.ProviderCopilot {
 			t.Fatalf("login target = %q, want copilot", target)
 		}
-		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-copilot@example.com.json"}, nil
+		return oauthproxy.LoginResult{Provider: target, Backend: "copilot", Path: "copilot-copilot@example.com.json"}, nil
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
@@ -335,8 +336,36 @@ func TestRunAuthCopilotUsesCodexResponsesBackend(t *testing.T) {
 	if !ok {
 		t.Fatalf("no copilot provider gh: %+v", cfg.Providers)
 	}
-	if p.Type != "openai_responses" || p.Endpoint != "oauth://codex" || p.OAuthProvider != "copilot" {
+	if p.Type != "openai_responses" || p.Endpoint != "oauth://copilot" || p.OAuthProvider != "copilot" {
 		t.Fatalf("Copilot provider = %+v", p)
+	}
+}
+
+func TestRunAuthQoderUsesDirectAnthropicRuntime(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		if target != oauthproxy.ProviderQoder {
+			t.Fatalf("login target = %q, want qoder", target)
+		}
+		return oauthproxy.LoginResult{Provider: target, Backend: "qoder", Path: "qoder-user@example.com.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	var output bytes.Buffer
+	if err := runAuth(context.Background(), &output, []string{"qoder", "qd"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Providers["qd"]
+	if p.Type != "anthropic" || p.Endpoint != "oauth://qoder" || p.OAuthProvider != "qoder" || p.OAuthAccountCredential != "qoder-user@example.com.json" {
+		t.Fatalf("Qoder provider = %+v", p)
+	}
+	if !strings.Contains(output.String(), "Protocol: anthropic") {
+		t.Fatalf("login output = %q", output.String())
 	}
 }
 
@@ -369,7 +398,7 @@ func TestRunAuthCopilotWithoutAliasDerivesName(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
 	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-copilot@example.com.json"}, nil
+		return oauthproxy.LoginResult{Provider: target, Backend: "copilot", Path: "copilot-copilot@example.com.json"}, nil
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
@@ -544,8 +573,8 @@ func TestProviderFastSummary(t *testing.T) {
 	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "gpt"}); got != "on" {
 		t.Fatalf("gpt fast = %q, want on", got)
 	}
-	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "copilot"}); got != "on" {
-		t.Fatalf("copilot fast = %q, want on", got)
+	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "copilot"}); got != "off" {
+		t.Fatalf("copilot fast = %q, want off", got)
 	}
 	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "gemini"}); got != "off" {
 		t.Fatalf("gemini fast = %q, want off", got)

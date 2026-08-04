@@ -112,6 +112,10 @@ func defaultSubagentModel(p provider.Provider) string {
 
 // buildEnv constructs the env-var overrides for a settings file.
 func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]string {
+	return buildEnvWithModelNames(p, baseURL, useProxy, nil)
+}
+
+func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, names map[string]string) map[string]string {
 	env := make(map[string]string)
 
 	if baseURL != "" {
@@ -133,25 +137,30 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	}
 
 	// 1. Custom model option shown as the persistent "Custom model" row in /model.
-	// Technical IDs may keep the [1m] suffix; *_NAME is display-only.
+	// Direct runtimes can provide a readable request alias while keeping the
+	// technical ID in ccl's persisted mapping.
 	if p.CustomModelID != "" {
-		env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = p.CustomModelID
-		env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = modelDisplayName(p.CustomModelID)
-		env["CLAUDE_CODE_MODEL_ID"] = p.CustomModelID
+		requestModel := catalogModelRequestName(p.CustomModelID, names)
+		env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = requestModel
+		env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = catalogModelDisplayName(p.CustomModelID, names)
+		if requestModel != strings.TrimSpace(p.CustomModelID) {
+			env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"] = "Custom provider model"
+		}
+		env["CLAUDE_CODE_MODEL_ID"] = requestModel
 	}
 
 	// 2. Explicit tier model overrides (user-specified)
 	if p.OpusModel != "" {
-		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = p.OpusModel
-		env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] = modelDisplayName(p.OpusModel)
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = catalogModelRequestName(p.OpusModel, names)
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] = catalogModelDisplayName(p.OpusModel, names)
 	}
 	if p.SonnetModel != "" {
-		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = p.SonnetModel
-		env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"] = modelDisplayName(p.SonnetModel)
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = catalogModelRequestName(p.SonnetModel, names)
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"] = catalogModelDisplayName(p.SonnetModel, names)
 	}
 	if p.HaikuModel != "" {
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = p.HaikuModel
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = modelDisplayName(p.HaikuModel)
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = catalogModelRequestName(p.HaikuModel, names)
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = catalogModelDisplayName(p.HaikuModel, names)
 	}
 
 	// 3. Effort level; empty means ccl leaves Claude's own setting in control.
@@ -162,7 +171,7 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	// 4. Model pool routing (auto-assign tiers from comma-separated list)
 	// Only used as fallback when explicit tier models aren't set
 	if p.Model != "" && (p.OpusModel == "" || p.SonnetModel == "" || p.HaikuModel == "") {
-		applyModelEnv(env, p.Model)
+		applyModelEnvWithNames(env, p.Model, names)
 	}
 
 	// Gateway discovery & traffic reduction (always enabled for multi-model setups)
@@ -176,7 +185,7 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	// below can override every default.
 	runtimeSettings := ResolveRuntimeSettings(p)
 	if runtimeSettings.SubagentModel != "" {
-		env[SubagentModelEnv] = runtimeSettings.SubagentModel
+		env[SubagentModelEnv] = catalogModelRequestName(runtimeSettings.SubagentModel, names)
 	}
 	env[ToolUseConcurrencyEnv] = runtimeSettings.ToolUseConcurrency
 	env[ToolSearchEnv] = runtimeSettings.ToolSearch
@@ -187,6 +196,10 @@ func buildEnv(p provider.Provider, baseURL string, useProxy bool) map[string]str
 	for k, v := range p.Env {
 		env[k] = v
 	}
+	// Advanced provider env can contain legacy technical model IDs. Normalize
+	// every request-bearing model variable after applying those overrides so a
+	// Qoder ID cannot leak back into Claude's title or /model UI.
+	rewriteCatalogModelEnvAliases(env, names)
 	// ccl directives are not Claude Code variables.
 	removeEnvKey(env, provider.EnvContextBudgetMode)
 	if useProxy {
@@ -277,7 +290,7 @@ func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) [
 			continue
 		}
 		if _, drop := suppressedProcessEnvKey(suppressed, key); drop {
-			oauthproxy.Debugf("launcher ignores inherited %s: the settings file is authoritative", key)
+			oauthproxy.LogDebugf("launcher ignores inherited %s: the settings file is authoritative", key)
 			continue
 		}
 		env = append(env, entry)
@@ -305,6 +318,10 @@ func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) [
 // A comma-separated model spec enables per-tier gateway routing;
 // a single name fills every missing tier and ANTHROPIC_MODEL with that model.
 func applyModelEnv(env map[string]string, modelSpec string) {
+	applyModelEnvWithNames(env, modelSpec, nil)
+}
+
+func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[string]string) {
 	setIfEmpty := func(key, value string) {
 		if value == "" {
 			return
@@ -316,12 +333,13 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 
 	if !strings.Contains(modelSpec, ",") {
 		model := strings.TrimSpace(modelSpec)
-		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL", model)
-		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", modelDisplayName(model))
-		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL", model)
-		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", modelDisplayName(model))
-		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
-		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", modelDisplayName(model))
+		requestModel := catalogModelRequestName(model, names)
+		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL", requestModel)
+		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", catalogModelDisplayName(model, names))
+		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL", requestModel)
+		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", catalogModelDisplayName(model, names))
+		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL", requestModel)
+		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", catalogModelDisplayName(model, names))
 		setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 		return
 	}
@@ -335,12 +353,12 @@ func applyModelEnv(env map[string]string, modelSpec string) {
 	setIfEmpty("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
 
 	for _, kv := range []struct{ k, v string }{
-		{"ANTHROPIC_DEFAULT_OPUS_MODEL", opus},
-		{"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", modelDisplayName(opus)},
-		{"ANTHROPIC_DEFAULT_SONNET_MODEL", sonnet},
-		{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", modelDisplayName(sonnet)},
-		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku},
-		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", modelDisplayName(haiku)},
+		{"ANTHROPIC_DEFAULT_OPUS_MODEL", catalogModelRequestName(opus, names)},
+		{"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", catalogModelDisplayName(opus, names)},
+		{"ANTHROPIC_DEFAULT_SONNET_MODEL", catalogModelRequestName(sonnet, names)},
+		{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", catalogModelDisplayName(sonnet, names)},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", catalogModelRequestName(haiku, names)},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", catalogModelDisplayName(haiku, names)},
 	} {
 		setIfEmpty(kv.k, kv.v)
 	}
@@ -395,6 +413,9 @@ type providerContext struct {
 	baseURL  string
 	useProxy bool
 	oauth    *oauthproxy.Runtime
+	// modelNames carries provider catalog labels used by Claude Code's UI and
+	// request aliases; the direct adapter resolves aliases to technical IDs.
+	modelNames map[string]string
 	// droppedContextPreset records that a context preset from an older ccl version
 	// was removed from this session's env.
 	droppedContextPreset bool
@@ -443,8 +464,12 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 			return nil, fmt.Errorf("start embedded provider runtime: %w", err)
 		}
 		ctx.oauth = runtime
+		ctx.modelNames = runtime.ModelDisplayNames()
 		providerCopy.Endpoint = runtime.Endpoint()
 		providerCopy.APIKey = runtime.APIKey()
+		if strings.TrimSpace(providerCopy.Model) == "" && len(runtime.Models()) > 0 {
+			providerCopy.Model = strings.Join(runtime.Models(), ",")
+		}
 		ctx.provider = providerCopy
 		ctx.baseURL = runtime.ClaudeBaseURL()
 	} else {
@@ -504,15 +529,15 @@ func (c *providerContext) cleanup() {
 }
 
 func (c *providerContext) settings() settingsJSON {
-	env := buildEnv(c.provider, c.baseURL, c.useProxy)
+	env := buildEnvWithModelNames(c.provider, c.baseURL, c.useProxy, c.modelNames)
 	// Applied after the provider Env overrides: a preset an older ccl stored must
 	// not survive into a session Claude Code should size itself.
 	c.droppedContextPreset = applyContextPolicy(env, c.provider)
 	return settingsJSON{
 		Env:                    env,
 		HasCompletedOnboarding: true,
-		Model:                  c.provider.CustomModelID,
-		ModelOverrides:         c.provider.ModelOverrides,
+		Model:                  catalogModelRequestName(c.provider.CustomModelID, c.modelNames),
+		ModelOverrides:         catalogModelOverrides(c.provider.ModelOverrides, c.modelNames),
 		FastMode:               c.provider.FastMode,
 	}
 }
@@ -540,21 +565,23 @@ func PreviewSettings(p provider.Provider) string {
 func Run(p provider.Provider, args []string) error {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
-		oauthproxy.Debugf("claude CLI not found in PATH: %v", err)
+		oauthproxy.LogErrorf("claude CLI not found in PATH: %v", err)
 		return fmt.Errorf("claude CLI not found in PATH (install with: npm install -g @anthropic-ai/claude-code): %w", err)
 	}
 
-	// Give this session its own debug log before the embedded runtime starts, so
-	// every line (runtime startup included) belongs to one readable file.
+	// Give this temporary Claude session one slog file before the embedded runtime
+	// begins. All INFO/WARN/ERROR/DEBUG records for this session share that file.
 	session := newSessionName()
-	if oauthproxy.DebugEnabled() {
-		oauthproxy.SetDebug(true, oauthproxy.SessionDebugLogPath(session))
-		oauthproxy.Debugf("session start name=%q provider=%q oauth=%q", session, p.Name, p.OAuthProvider)
+	if oauthproxy.LogConfigured() {
+		if err := oauthproxy.SetLogLevel(oauthproxy.CurrentLogLevel(), oauthproxy.SessionLogPath(session)); err != nil {
+			return fmt.Errorf("open session log: %w", err)
+		}
+		oauthproxy.LogInfof("session start name=%q provider=%q oauth=%q", session, p.Name, p.OAuthProvider)
 	}
 
 	ctx, err := setupProvider(p)
 	if err != nil {
-		oauthproxy.Debugf("session setup failed name=%q provider=%q oauth=%q error=%v", session, p.Name, p.OAuthProvider, err)
+		oauthproxy.LogErrorf("session setup failed name=%q provider=%q oauth=%q error=%v", session, p.Name, p.OAuthProvider, err)
 		return err
 	}
 	defer ctx.cleanup()
@@ -562,7 +589,7 @@ func Run(p provider.Provider, args []string) error {
 	sessionSettings := ctx.settings()
 	settingsPath, err := writeSettingsFile(sessionSettings, session)
 	if err != nil {
-		oauthproxy.Debugf("session settings write failed name=%q error=%v", session, err)
+		oauthproxy.LogErrorf("session settings write failed name=%q error=%v", session, err)
 		return fmt.Errorf("create settings file: %w", err)
 	}
 	defer os.Remove(settingsPath)
@@ -595,10 +622,10 @@ func Run(p provider.Provider, args []string) error {
 		fmt.Fprintln(os.Stderr, "\n"+summary)
 	}
 
-	// Approximate session metadata for the debug log. These are ccl-side counts,
+	// Approximate session metadata for the session log. These are ccl-side counts,
 	// not the real upstream request size, and never include credentials or
 	// request bodies. Useful to correlate with upstream errors logged by CPA.
-	if oauthproxy.DebugEnabled() {
+	if oauthproxy.LogEnabled() {
 		spec := provider.RuntimeModelSpec(p)
 		modelCount := 0
 		if spec != "" {
@@ -608,8 +635,8 @@ func Run(p provider.Provider, args []string) error {
 		if runErr != nil {
 			outcome = runErr.Error()
 		}
-		oauthproxy.Debugf("launcher exit provider=%q oauth=%q protocol=%q base=%q use_proxy=%t model_count=%d env_override=%d custom_model=%q fast=%t outcome=%s duration=%s",
-			p.Name, p.OAuthProvider, provider.ProtocolLabel(p.Type), ctx.baseURL,
+		oauthproxy.LogInfof("launcher exit provider=%q oauth=%q protocol=%q base=%q use_proxy=%t model_count=%d env_override=%d custom_model=%q fast=%t outcome=%s duration=%s",
+			p.Name, p.OAuthProvider, provider.ProtocolLabelForProvider(p), ctx.baseURL,
 			ctx.useProxy, modelCount, len(p.Env), p.CustomModelID, p.FastMode,
 			outcome, time.Since(start).Round(time.Millisecond))
 	}
@@ -636,7 +663,7 @@ func usageSnapshot(runtime *oauthproxy.Runtime) []oauthproxy.UsageModelTotals {
 // which numbers were in effect. Compare these against `ccl doctor` →
 // "Context budget", which reads the window the backend advertises.
 func logSessionContextBudget(p provider.Provider, settings settingsJSON, droppedPreset bool) {
-	if !oauthproxy.DebugEnabled() {
+	if !oauthproxy.LogEnabled() {
 		return
 	}
 	// The [1m] suffix is what decides the session sizing, so log the raw slot
@@ -653,7 +680,7 @@ func logSessionContextBudget(p provider.Provider, settings settingsJSON, dropped
 			mapped = append(mapped, slot.name+"="+slot.model)
 		}
 	}
-	oauthproxy.Debugf("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q auto_compact_pct=%q dropped_ccl_preset=%t manual=%t effort=%q max_output=%q slots=[%s]",
+	oauthproxy.LogInfof("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q auto_compact_pct=%q dropped_ccl_preset=%t manual=%t effort=%q max_output=%q slots=[%s]",
 		p.Name, p.OAuthProvider,
 		settings.Env[provider.EnvMaxContextTokens],
 		settings.Env[provider.EnvAutoCompactWindow],
@@ -679,4 +706,87 @@ func modelDisplayName(model string) string {
 		return base + " (1M)"
 	}
 	return model
+}
+
+func catalogModelDisplayName(model string, names map[string]string) string {
+	technical := strings.TrimSpace(model)
+	if technical == "" {
+		return ""
+	}
+	base := technical
+	for strings.HasSuffix(base, "[1m]") {
+		base = strings.TrimSpace(strings.TrimSuffix(base, "[1m]"))
+	}
+	display := ""
+	for id, name := range names {
+		if strings.EqualFold(strings.TrimSpace(id), base) {
+			display = strings.TrimSpace(name)
+			break
+		}
+	}
+	if display == "" {
+		return modelDisplayName(technical)
+	}
+	if base != technical {
+		return display + " (1M)"
+	}
+	return display
+}
+
+// catalogModelRequestName gives Claude Code a readable model alias while the
+// provider config retains the stable technical ID. Direct runtimes that expose
+// names must resolve this alias back to the technical ID before calling their
+// upstream API.
+func catalogModelRequestName(model string, names map[string]string) string {
+	technical := strings.TrimSpace(model)
+	if technical == "" {
+		return ""
+	}
+	base := technical
+	for strings.HasSuffix(base, "[1m]") {
+		base = strings.TrimSpace(strings.TrimSuffix(base, "[1m]"))
+	}
+	for id, name := range names {
+		if strings.EqualFold(strings.TrimSpace(id), base) {
+			if display := strings.TrimSpace(name); display != "" {
+				if base != technical {
+					return display + "[1m]"
+				}
+				return display
+			}
+		}
+	}
+	return technical
+}
+
+func rewriteCatalogModelEnvAliases(env map[string]string, names map[string]string) {
+	if len(names) == 0 {
+		return
+	}
+	for _, key := range []string{
+		"ANTHROPIC_MODEL",
+		"ANTHROPIC_SMALL_FAST_MODEL",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_FABLE_MODEL",
+		"CLAUDE_CODE_MODEL_ID",
+		SubagentModelEnv,
+	} {
+		if value := strings.TrimSpace(env[key]); value != "" {
+			env[key] = catalogModelRequestName(value, names)
+		}
+	}
+}
+
+func catalogModelOverrides(overrides, names map[string]string) map[string]string {
+	if len(overrides) == 0 {
+		return overrides
+	}
+	mapped := make(map[string]string, len(overrides))
+	for key, value := range overrides {
+		mapped[key] = catalogModelRequestName(value, names)
+	}
+	return mapped
 }

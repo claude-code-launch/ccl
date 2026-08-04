@@ -84,6 +84,10 @@ var compactRadioOrder = []compactPreset{
 type AdvancedConfigModel struct {
 	p         *provider.Provider
 	modelPool []string
+	// modelDisplayMetadata is keyed by lower-case model ID. It affects search
+	// and rendering only; slot values and provider.Model always retain the
+	// upstream ID required for requests.
+	modelDisplayMetadata map[string]protocol.ModelInfo
 	// modelContextWindows stores advisory context_window values from /models
 	// catalogs (keyed by model id). Zero/missing means unknown — never treat as
 	// a hard guarantee of 1M support.
@@ -160,6 +164,7 @@ type modelFetchDoneMsg struct {
 	anthropicAuth       string
 	discoveredModelsRaw string
 	contextWindows      map[string]int
+	modelInfos          []protocol.ModelInfo
 	err                 error
 }
 
@@ -184,21 +189,22 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 
 	compactState := compactStateFromProvider(*p)
 	m := &AdvancedConfigModel{
-		p:                   p,
-		oneMSlots:           make(map[string]bool),
-		modelContextWindows: make(map[string]int),
-		compactPreset:       compactState.preset,
-		compactState:        compactState,
-		probeEndpoint:       p.Endpoint,
-		probeAPIKey:         p.APIKey,
-		page:                0,
-		cursor:              0,
-		urlInput:            ui,
-		keyInput:            ki,
-		filterInput:         fi,
-		IsActiveChosen:      true,
-		clearStaleSlots:     true,
-		modelAvailability:   make(map[string]modelAvailability),
+		p:                    p,
+		oneMSlots:            make(map[string]bool),
+		modelContextWindows:  make(map[string]int),
+		modelDisplayMetadata: make(map[string]protocol.ModelInfo),
+		compactPreset:        compactState.preset,
+		compactState:         compactState,
+		probeEndpoint:        p.Endpoint,
+		probeAPIKey:          p.APIKey,
+		page:                 0,
+		cursor:               0,
+		urlInput:             ui,
+		keyInput:             ki,
+		filterInput:          fi,
+		IsActiveChosen:       true,
+		clearStaleSlots:      true,
+		modelAvailability:    make(map[string]modelAvailability),
 	}
 
 	cleanAndPopulate := func(modelStr *string, slotKey string) {
@@ -263,10 +269,19 @@ var vimNavAliases = map[string]bool{"q": true, "h": true, "j": true, "k": true, 
 // NewAdvancedConfigModelAtPage1 creates a model starting at page 1 (slot mapping)
 // with a pre-populated model pool, skipping the credential page.
 func NewAdvancedConfigModelAtPage1(p *provider.Provider, modelPool []string) *AdvancedConfigModel {
+	return NewAdvancedConfigModelAtPage1WithMetadata(p, modelPool, nil)
+}
+
+// NewAdvancedConfigModelAtPage1WithMetadata opens the slot mapper with rich
+// catalog labels while keeping modelPool IDs as the selectable and persisted
+// values.
+func NewAdvancedConfigModelAtPage1WithMetadata(p *provider.Provider, modelPool []string, metadata map[string]protocol.ModelInfo) *AdvancedConfigModel {
 	m := NewAdvancedConfigModel(p)
 	m.page = 1
 	m.cursor = slotNextCursor
 	m.modelPool = modelPool
+	m.modelDisplayMetadata = copyModelInfoIndex(metadata)
+	m.modelContextWindows = contextWindowsFromModelInfos(m.modelDisplayMetadata)
 	m.urlInput.Blur()
 	m.keyInput.Blur()
 	return m
@@ -313,6 +328,7 @@ func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 			anthropicAuth:       result.anthropicAuth,
 			discoveredModelsRaw: result.models,
 			contextWindows:      windows,
+			modelInfos:          result.modelInfos,
 			err:                 result.err,
 		}
 	}
@@ -390,7 +406,7 @@ func (m *AdvancedConfigModel) availabilitySmokeTestModel() string {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "gpt", "chatgpt", "codex", "copilot":
+	case "gpt", "chatgpt", "codex":
 		return lowCostProbeModel
 	default:
 		return ""
@@ -422,7 +438,8 @@ func (m *AdvancedConfigModel) updateFilteredPool() {
 	} else {
 		m.filteredPool = []string{}
 		for _, mod := range m.modelPool {
-			if strings.Contains(strings.ToLower(mod), q) {
+			searchable := strings.ToLower(mod + " " + m.modelDisplayLabel(mod))
+			if strings.Contains(searchable, q) {
 				m.filteredPool = append(m.filteredPool, mod)
 			}
 		}
@@ -435,6 +452,45 @@ func (m *AdvancedConfigModel) updateFilteredPool() {
 	if len(m.filteredPool) > 0 && m.slotListCursor >= len(m.filteredPool) {
 		m.slotListCursor = len(m.filteredPool) - 1
 	}
+}
+
+func copyModelInfoIndex(metadata map[string]protocol.ModelInfo) map[string]protocol.ModelInfo {
+	copied := make(map[string]protocol.ModelInfo, len(metadata))
+	for id, info := range metadata {
+		copied[strings.ToLower(strings.TrimSpace(id))] = info
+	}
+	return copied
+}
+
+func contextWindowsFromModelInfos(metadata map[string]protocol.ModelInfo) map[string]int {
+	windows := make(map[string]int, len(metadata))
+	for id, info := range metadata {
+		if info.ContextWindow > 0 {
+			windows[strings.ToLower(strings.TrimSpace(id))] = info.ContextWindow
+		}
+	}
+	return windows
+}
+
+func (m *AdvancedConfigModel) modelDisplayLabel(id string) string {
+	return modelReportLabel(stripOneMSuffix(id), m.modelDisplayMetadata)
+}
+
+func (m *AdvancedConfigModel) subagentDisplayLabel() string {
+	if m.p == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(m.p.SubagentModel); model != "" {
+		return m.modelDisplayLabel(model)
+	}
+	if model, ok := m.p.Env[claude.SubagentModelEnv]; ok && strings.TrimSpace(model) != "" {
+		return fmt.Sprintf("(env: %s)", m.modelDisplayLabel(strings.TrimSpace(model)))
+	}
+	effective := strings.TrimSpace(claude.ResolveRuntimeSettings(*m.p).SubagentModel)
+	if effective == "" {
+		return "(auto)"
+	}
+	return fmt.Sprintf("(auto: %s)", m.modelDisplayLabel(effective))
 }
 
 func reorderModelsByAvailability(models []string, statuses map[string]modelAvailability) []string {
@@ -621,7 +677,7 @@ func (m *AdvancedConfigModel) applyStaleSlotPolicy() {
 // 实时获取/检测协议名称
 func (m *AdvancedConfigModel) getProtocol() string {
 	if m.p.Type != "" {
-		return provider.ProtocolLabel(m.p.Type)
+		return provider.ProtocolLabelForProvider(*m.p)
 	}
 	if strings.Contains(strings.ToLower(m.urlInput.Value()), "anthropic") {
 		return "anthropic"
@@ -1362,6 +1418,12 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.contextWindows != nil {
 			m.modelContextWindows = msg.contextWindows
 		}
+		m.modelDisplayMetadata = indexModelInfos(msg.modelInfos)
+		for id, window := range contextWindowsFromModelInfos(m.modelDisplayMetadata) {
+			if _, exists := m.modelContextWindows[id]; !exists {
+				m.modelContextWindows[id] = window
+			}
+		}
 		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.detectedEndpoint, msg.err)
 
 	case modelAvailabilityDoneMsg:
@@ -1897,16 +1959,17 @@ func (m *AdvancedConfigModel) renderStepProgress() string {
 }
 
 func renderReviewModelMapping(label, model string, oneM bool) string {
+	const modelDisplayWidth = 52
 	display := stripOneMSuffix(model)
 	if strings.TrimSpace(display) == "" {
 		// Keep auto subagent labels intact.
 		display = strings.TrimSpace(model)
 	}
-	plain := truncateMiddle(display, 36)
+	plain := truncateMiddle(display, modelDisplayWidth)
 	if strings.TrimSpace(plain) == "" {
 		plain = locale.T("(未设置)", "(unset)")
 	}
-	padded := padDisplay(plain, 36)
+	padded := padDisplay(plain, modelDisplayWidth)
 	value := availableStyle.Render(padded)
 	if strings.TrimSpace(display) == "" {
 		value = grayText.Render(padded)
@@ -2022,11 +2085,11 @@ func (m *AdvancedConfigModel) View() tea.View {
 				}
 				body.WriteString(fmt.Sprintf("%s%s – %s\n", prefix, labelStr, modelStr))
 			}
-			renderRow(0, "Opus", m.p.OpusModel)
-			renderRow(1, "Sonnet", m.p.SonnetModel)
-			renderRow(2, "Haiku", m.p.HaikuModel)
-			renderRow(3, "Custom", m.p.CustomModelID)
-			renderRow(4, "Subagent", subagentMappingDisplay(*m.p))
+			renderRow(0, "Opus", m.modelDisplayLabel(m.p.OpusModel))
+			renderRow(1, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel))
+			renderRow(2, "Haiku", m.modelDisplayLabel(m.p.HaikuModel))
+			renderRow(3, "Custom", m.modelDisplayLabel(m.p.CustomModelID))
+			renderRow(4, "Subagent", m.subagentDisplayLabel())
 
 			testPrefix := "  "
 			testLabel := locale.T("测试模型可用性", "Test model availability")
@@ -2076,14 +2139,18 @@ func (m *AdvancedConfigModel) View() tea.View {
 			for i := start; i < end; i++ {
 				mod := m.filteredPool[i]
 				prefix := "   "
-				line := grayText.Render(mod)
+				display := mod
+				if stringInSlice(mod, m.modelPool) {
+					display = m.modelDisplayLabel(mod)
+				}
+				line := grayText.Render(display)
 				status := ""
 				if stringInSlice(mod, m.modelPool) {
 					status = "  " + m.availabilityLabel(mod)
 				}
 				if i == m.slotListCursor {
 					prefix = selectedStyle.Render(" > ")
-					line = selectedStyle.Render(mod)
+					line = selectedStyle.Render(display)
 				}
 				body.WriteString(prefix + line + status + "\n")
 			}
@@ -2132,7 +2199,9 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 			displayModel := stripOneMSuffix(modelVal)
 			if displayModel == "" && slotKey == "subagent" {
-				displayModel = subagentMappingDisplay(*m.p)
+				displayModel = m.subagentDisplayLabel()
+			} else if displayModel != "" {
+				displayModel = m.modelDisplayLabel(displayModel)
 			}
 			// Model IDs are facts for this page (chosen earlier) — keep cyan/read-only.
 			modelPart := availableStyle.Render(displayModel)
@@ -2235,11 +2304,11 @@ func (m *AdvancedConfigModel) View() tea.View {
 
 		// Model Mapping (read-only, cyan + [1M] badge)
 		body.WriteString(sectionGap + titleStyle.Render("Model Mapping") + "\n")
-		body.WriteString(renderReviewModelMapping("Opus", m.p.OpusModel, m.oneMSlots["opus"]))
-		body.WriteString(renderReviewModelMapping("Sonnet", m.p.SonnetModel, m.oneMSlots["sonnet"]))
-		body.WriteString(renderReviewModelMapping("Haiku", m.p.HaikuModel, m.oneMSlots["haiku"]))
-		body.WriteString(renderReviewModelMapping("Custom", m.p.CustomModelID, m.oneMSlots["custom"]))
-		body.WriteString(renderReviewModelMapping("Subagent", subagentMappingDisplay(*m.p), m.oneMSlots["subagent"]))
+		body.WriteString(renderReviewModelMapping("Opus", m.modelDisplayLabel(m.p.OpusModel), m.oneMSlots["opus"]))
+		body.WriteString(renderReviewModelMapping("Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.oneMSlots["sonnet"]))
+		body.WriteString(renderReviewModelMapping("Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.oneMSlots["haiku"]))
+		body.WriteString(renderReviewModelMapping("Custom", m.modelDisplayLabel(m.p.CustomModelID), m.oneMSlots["custom"]))
+		body.WriteString(renderReviewModelMapping("Subagent", m.subagentDisplayLabel(), m.oneMSlots["subagent"]))
 
 		// Runtime (editable with ‹ ›)
 		body.WriteString(sectionGap + titleStyle.Render("Runtime") + "\n")

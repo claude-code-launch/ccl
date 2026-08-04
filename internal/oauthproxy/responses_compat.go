@@ -82,15 +82,19 @@ func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequ
 			// max_output_tokens or Codex identity), so record it.
 			if identity != nil {
 				if err := normalizeCodexRequestIdentity(request.Out, *identity); err != nil {
-					Debugf("responses proxy codex identity rewrite failed path=%q error=%v", request.Out.URL.Path, err)
+					LogErrorf("responses proxy codex identity rewrite failed path=%q error=%v", request.Out.URL.Path, err)
 				}
 			} else if err := sanitizePlainResponsesRequest(request.Out, maxOutputTokens); err != nil {
-				Debugf("responses proxy plain rewrite failed path=%q error=%v", request.Out.URL.Path, err)
+				LogErrorf("responses proxy plain rewrite failed path=%q error=%v", request.Out.URL.Path, err)
 			}
 			request.SetURL(target)
 			request.Out.Host = target.Host
+			traceResponsesRequest(request.Out)
 		},
-		ModifyResponse: normalizeCompletedOnlyResponses,
+		ModifyResponse: func(response *http.Response) error {
+			traceResponsesResponse(response)
+			return normalizeCompletedOnlyResponses(response)
+		},
 		// Transport failures used to be discarded, so an unreachable upstream
 		// surfaced in Claude Code as a bare "Network error" with an empty log.
 		ErrorLog: newComponentLogger("responses-proxy"),
@@ -102,16 +106,60 @@ func startResponsesCompatibilityProxy(targetEndpoint string, identity *codexRequ
 		done:            make(chan struct{}),
 		maxOutputTokens: maxOutputTokens,
 	}
-	Debugf("responses proxy start endpoint=%q target=%q codex_identity=%t max_output_tokens=%d",
+	LogInfof("responses proxy start endpoint=%q target=%q codex_identity=%t max_output_tokens=%d",
 		compat.endpoint, target.Redacted(), identity != nil, maxOutputTokens)
 	go func() {
 		err := server.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			Debugf("responses proxy stopped endpoint=%q error=%v", compat.endpoint, err)
+			LogErrorf("responses proxy stopped endpoint=%q error=%v", compat.endpoint, err)
 		}
 		close(compat.done)
 	}()
 	return compat, nil
+}
+
+// traceResponsesRequest records the final Responses request after ccl has
+// injected Codex metadata. Payloads are deliberately behind an explicit opt-in
+// because a compact request carries the complete conversation and tool output.
+func traceResponsesRequest(request *http.Request) {
+	if request == nil {
+		return
+	}
+	LogDebugf("responses proxy request method=%q path=%q content_length=%d", request.Method, request.URL.Path, request.ContentLength)
+	if !LogDebugEnabled() || request.Body == nil {
+		return
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		LogErrorf("responses proxy request payload read failed path=%q error=%v", request.URL.Path, err)
+		return
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	DebugHTTPBody("responses request "+request.Method+" "+request.URL.Path, body)
+}
+
+// traceResponsesResponse records upstream status for every response and the
+// complete body for non-success responses when payload tracing is explicitly
+// enabled. Successful Responses streams are intentionally not copied into the
+// log: their payload can be arbitrarily large and is not needed to explain a
+// rejected compact request.
+func traceResponsesResponse(response *http.Response) {
+	if response == nil {
+		return
+	}
+	LogUpstreamStatusf(response.StatusCode, "responses proxy response status=%d content_length=%d content_type=%q", response.StatusCode, response.ContentLength, response.Header.Get("Content-Type"))
+	if !LogDebugEnabled() || response.StatusCode < http.StatusBadRequest || response.Body == nil {
+		return
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		LogErrorf("responses proxy response payload read failed status=%d error=%v", response.StatusCode, err)
+		return
+	}
+	_ = response.Body.Close()
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	DebugHTTPBody(fmt.Sprintf("responses response status=%d", response.StatusCode), body)
 }
 
 func normalizeCodexRequestIdentity(request *http.Request, identity codexRequestIdentity) error {

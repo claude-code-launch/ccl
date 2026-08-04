@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -85,6 +86,46 @@ func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
 	}
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
 		t.Fatalf("legacy config should be moved, stat err=%v", err)
+	}
+}
+
+func TestLoadMigratesLegacyDebugConfigToLogLevel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".ccl")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(path, []byte("debug_mode: true\ndebug_verbose: true\nproviders: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "debug" || cfg.DebugMode || cfg.DebugVerbose {
+		t.Fatalf("migrated config = level:%q mode:%t verbose:%t", cfg.LogLevel, cfg.DebugMode, cfg.DebugVerbose)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "log_level: debug") || strings.Contains(string(data), "debug_mode") || strings.Contains(string(data), "debug_verbose") {
+		t.Fatalf("legacy fields were not rewritten:\n%s", data)
+	}
+}
+
+func TestLoadDefaultsLogLevelToOff(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "off" {
+		t.Fatalf("default LogLevel = %q, want off", cfg.LogLevel)
 	}
 }
 

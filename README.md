@@ -69,6 +69,7 @@ ccl oauth gpt        # GPT / Codex (OpenAI 订阅)
 ccl oauth gemini     # Google Gemini
 ccl oauth grok       # xAI Grok
 ccl oauth copilot    # GitHub Copilot
+ccl oauth qoder      # Qoder 浏览器 OAuth（不需要 Qoder CLI）
 ccl oauth kimi       # Kimi / Moonshot
 ccl oauth kiro       # Kiro Portal（Google / GitHub）
 ccl oauth claude     # Anthropic Claude 订阅
@@ -150,7 +151,7 @@ ccl bypass off      # 关闭
    用 `ccl set` / `ccl map` 手动指定后，对应档位以手动为准。
 
 2. **协议翻译与流式代理**  
-   OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一暴露本机 `/v1/messages`。通用转换内嵌 CLIProxyAPI Go SDK；Kiro 由 ccl 直接转换 Amazon Q 请求和 AWS EventStream；Anthropic 兼容网关保持直连。
+   OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一暴露本机 `/v1/messages`。通用转换内嵌 CLIProxyAPI Go SDK；Kiro 由 ccl 直接转换 Amazon Q 请求和 AWS EventStream；Qoder 由 ccl 直接完成 COSY 签名、请求编码和 SSE 转换；Anthropic 兼容网关保持直连。
 
 3. **交互式 TUI 配置**  
    全屏向导配置 endpoint、协议、模型槽位、上下文压缩等；支持中文 / English（`ccl lang`）。
@@ -162,7 +163,7 @@ ccl bypass off      # 关闭
    配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
 
 6. **订阅 OAuth 一键接入**  
-   `gpt` / `gemini` / `grok` / `copilot` / `kimi` / `kiro` / `claude`，支持多账号别名；token 会在运行时刷新。
+   `gpt` / `gemini` / `grok` / `copilot` / `qoder` / `kimi` / `kiro` / `claude`，支持多账号别名；token 会在运行时刷新。
 
 ---
 
@@ -178,7 +179,7 @@ ccl bypass off      # 关闭
 |------|------|
 | `ccl` / `ccl …` | 用当前 provider 启动 Claude Code（其余参数透传） |
 | `ccl bypass [on\|off]` | 启动时自动加 `--dangerously-skip-permissions`（原 `auto`） |
-| `ccl debug [on\|off]` | 运行时诊断日志（默认 `~/.ccl/logs/`，每会话一个文件） |
+| `ccl log [on\|off]` / `ccl log --level <level>` | 会话级运行时日志（默认关闭；开启后每个会话独立文件） |
 | `ccl lang [zh\|en]` | TUI / 终端显示语言 |
 | `ccl version` | 打印版本 |
 | `ccl update` | 更新到最新版本 |
@@ -198,7 +199,7 @@ ccl bypass off      # 关闭
 | `ccl models` | 列出模型并做可用性检测 |
 | `ccl env …` | 管理 provider 级环境变量 |
 | `ccl preview` | 预览将注入 Claude Code 的 settings JSON |
-| `ccl doctor` | 环境检查 + provider 状态/连通性；OAuth/group 显示 CPA **runtime** 健康（含额度标记） |
+| `ccl doctor` | 环境检查 + provider 状态/连通性；OAuth/group 显示实际 **runtime** 健康（含额度标记） |
 | `ccl provider …` | 上述 provider 子命令的命名空间形式（`set/ls/use/cp/mv/rm/map/models/env/preview`） |
 
 > `ccl ls` 的 `KIND` 为 `normal` 或 `group`；已加入 group 的单账号 provider 默认隐藏。
@@ -207,8 +208,8 @@ ccl bypass off      # 关闭
 
 | 命令 | 作用 |
 |------|------|
-| `ccl oauth <gpt\|gemini\|grok\|copilot\|kimi\|kiro\|claude> [alias]` | 浏览器 / 设备码登录订阅（别名：`ccl auth …`） |
-| `ccl oauth import <file\|dir>` | 导入已有 CPA 凭据 JSON（目录只扫一层） |
+| `ccl oauth <gpt\|gemini\|grok\|copilot\|qoder\|kimi\|kiro\|claude> [alias]` | 浏览器 / 设备码登录订阅（别名：`ccl auth …`） |
+| `ccl oauth import <file\|dir>` | 导入已有 ccl 支持的凭据 JSON（目录只扫一层） |
 | `ccl oauth group [name]` | 创建 / 编辑同 backend 多账号组（TUI 全选数量） |
 | `ccl oauth group ls\|cp\|mv\|rm …` | 列出 / 复制 / 重命名 / 删除 group |
 | `ccl oauth sync`（别名 `ccl sync`） | 对账并**默认删除** disabled/unavailable 凭据；`--keep-invalid` 只报告；`--clean-quota` 也删额度用尽 |
@@ -271,15 +272,22 @@ ccl bypass off      # 关闭
 
 > 旧版命令 `ccl auto` / 字段 `auto_mode` 已更名为 `ccl bypass` / `bypass_mode`。
 
-### `ccl debug` — 运行时诊断日志
+### `ccl log` — 会话级运行时日志
 
 ```bash
-ccl debug          # 查看状态
-ccl debug on       # 开启，默认写 ~/.ccl/logs/ccl-debug-<session>.log
-ccl debug off      # 关闭
+ccl log                  # 查看状态
+ccl log on               # 开启，默认 INFO 级别
+ccl log --level debug    # DEBUG：额外记录最终请求与失败响应正文
+ccl log --level warn     # 只记录 WARN 及以上
+ccl log --level error    # 只记录 ERROR
+ccl log off              # 关闭
 ```
 
-`debug` 是全局开关，写入 `~/.ccl/config.yaml` 的 `debug_mode`。开启后，每个由 `ccl` 拉起的 Claude Code 会话会把运行时诊断写入 `~/.ccl/logs/ccl-debug-<session>.log`（基础路径可用 `CCL_DEBUG_LOG=/path/file.log` 覆盖），会话结束时会打印该文件路径。日志包含 runtime 启动信息、上游 401/429/5xx/stream 错误、OAuth refresh/cooldown 事件、会话模型与设置数量等元数据；不会写入 access token、refresh token、Authorization header、API key 或请求/响应正文。
+`log` 默认关闭，只有显式执行 `ccl log on` 或 `ccl log --level <level>` 后才记录。它是全局阈值设置，写入 `~/.ccl/config.yaml` 的 `log_level`。`ccl log on` 本身不会创建共享的 `ccl-debug.log`；每个由 `ccl` 拉起的 Claude Code 临时会话或独立 provider runtime 才会获得一个带后缀的日志文件，Claude 会话默认命名为 `~/.ccl/logs/ccl-debug-claude_<id>.log`。一个会话内的全部日志级别都写入同一文件。可用 `CCL_LOG_FILE=/path/file.log` 覆盖文件名模板（实际文件仍会加入会话后缀）。日志由 Go 标准库 `slog` 输出，带时间戳、级别和消息；运行结束时会打印 Claude 会话的实际文件路径。
+
+`INFO`（`ccl log on` 的默认值）记录 runtime 启动/退出、模型路由、OAuth refresh 与上下文设置；4xx/cooldown 按 `WARN`、5xx/代理故障按 `ERROR` 记录，成功的逐请求状态只在 `DEBUG` 出现。日志不会记录 access token、refresh token、Authorization header 或 API key。`DEBUG` 对 Responses 兼容层、Copilot 和 Kiro 直接运行时额外记录最终上游请求体与失败响应体；CPA 管理的其他 OAuth backend 只保证请求元数据和筛选后的内部诊断。payload 可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
+
+旧的 `debug_mode`/`debug_verbose` 配置会在读取时迁移；DEBUG 的命令入口统一为 `ccl log --level debug`，不保留 `ccl debug verbose`。
 
 ### `ccl oauth` — 登录订阅账号
 
@@ -288,6 +296,7 @@ ccl oauth gpt
 ccl oauth gemini
 ccl oauth grok
 ccl oauth copilot
+ccl oauth qoder
 ccl oauth kimi
 ccl oauth kiro
 ccl oauth claude
@@ -305,7 +314,8 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 | provider | backend | 协议 | 登录方式 |
 | --- | --- | --- | --- |
 | `gpt` | codex | `openai(responses)` | OpenAI OAuth 回调 |
-| `copilot` | codex | `openai(responses)` | GitHub device-code |
+| `copilot` | copilot | 自动选择 `responses` / `chat` / `messages` | GitHub device-code |
+| `qoder` | qoder | `anthropic` | Qoder 浏览器 PKCE device flow |
 | `gemini` | antigravity | `openai(chat)` | Google/Antigravity OAuth |
 | `grok` | xai | `openai(chat)` | xAI device-code |
 | `kimi` | kimi | `openai(chat)` | Kimi/Moonshot device-code |
@@ -335,7 +345,9 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
   - Sonnet → `claude-sonnet-4-6`
   - Haiku → `claude-haiku-4-5`
 - 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。
-- **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` / `copilot` 有意义：可在 `ccl set` 的「核对并应用 / Review & Apply」页编辑，也可在 Claude Code 内用 `/fast` 开关。
+- **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：可在 `ccl set` 的「核对并应用 / Review & Apply」页编辑，也可在 Claude Code 内用 `/fast` 开关。
+- **Copilot** 使用独立的 GitHub OAuth 凭据和 `api.githubcopilot.com`；登录写盘前会验证账号确实拥有可用的 Copilot 模型。启动时读取账号实际模型目录，并根据每个模型声明的端点选择 Responses、Chat Completions 或 Anthropic Messages；该目录是 `ccl models --all` 的权威来源，不会混入本地兼容层的内建模型。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `copilot(auto)`。
+- **Qoder** 完全由 ccl 直接接入：`ccl oauth qoder` 打开 Qoder 授权页并轮询 OAuth token；运行时直接刷新 token、读取账号模型目录、生成 COSY 签名、编码请求并把 Qoder SSE 转换为 Anthropic Messages。不会调用、探测或读取 `qodercli`，系统无需安装 Qoder CLI。模型目录由账号实时返回；`ccl models` 会显示 Qoder 展示名、内部模型 ID、Credit 倍率以及 New / 错峰优惠标记。暂时无法读取目录时使用最小兼容目录启动。
 
 `ccl oauth kiro` 默认打开 Kiro Portal，通过 PKCE 登录 Google / GitHub 账号；这样运行时和
 Web Portal `ListAvailableModels` 使用同一身份，可返回该账号完整的模型及 Credit 倍率。
@@ -363,13 +375,16 @@ Smithy RPCv2 CBOR `ListAvailableModels`，返回实际模型、描述、Credit �
 ```bash
 ccl oauth import ~/xai-haiboyuwen@icloud.com.json
 ccl oauth import ~/auth-backup          # 只读取目录第一层的 *.json，不递归
-ccl oauth import ~/codex.json --provider copilot
+ccl oauth import ~/copilot.json
+ccl oauth import ~/qoder.json
 ccl oauth import ~/.aws/sso/cache/kiro-auth-token.json
 ```
 
-- 导入前会验证 JSON 和 CPA backend 类型。
+- 导入前会验证 JSON 和 ccl runtime backend 类型。
 - ccl 不依赖源文件名，会按凭据身份生成规范名称（例如 `xai-user@example.com.json`），并在 `~/.ccl/auth/` 保存一份权限为 `0600` 的独立副本。
-- `codex` 文件默认识别为 `gpt`；如果它来自 GitHub Copilot device flow，使用 `--provider copilot`。
+- `codex` 文件识别为 `gpt`；Copilot 文件必须是独立的 `type: "copilot"` 凭据，不能再把 Codex/OpenAI token 伪装成 Copilot token。
+- Qoder 文件使用独立的 `type: "qoder"` 凭据，至少包含 `access_token`、`user_id` 与 `machine_id`；有 `refresh_token` 时运行时自动续期。
+- 若曾使用旧版 `ccl oauth copilot`（它实际写入的是 Codex/OpenAI 凭据），升级后请重新运行 `ccl oauth copilot` 完成一次真正的 GitHub 授权；旧 token 不会被自动复用。
 - Kiro IDE 的 `kiro-auth-token.json` 可直接导入；camelCase token 字段会自动规范化。
 - 导入后自动刷新账号 provider。手动向 `~/.ccl/auth/` 移入、移出或删除 JSON 后，可运行：
 
@@ -407,14 +422,14 @@ ccl use grok-pool
 
 设计边界：
 
-- 一个 group 只接受相同 JSON `type`（CPA backend）的授权。Grok、GPT、Gemini 等模型目录不同，不混在同一组；编辑已有 group 时沿用原类型，新建且存在多种类型时由选择页决定。
+- 一个 group 只接受相同 JSON `type`（runtime backend）的授权。Grok、GPT、Gemini 等模型目录不同，不混在同一组；编辑已有 group 时沿用原类型，新建且存在多种类型时由选择页决定。
 - group 保存规范凭据文件名的引用，不复制 token；新 provider 默认与组名相同（`ccl oauth group gg` → provider `gg`）。`ccl` 通过 `authGroup` 字段识别类型，不依赖名称前缀；也可用 `--provider-name` 或 `ccl mv` 改名。
 - `--members` 接受 provider 名或 `~/.ccl/auth` 下的凭据文件名（basename），不是裸邮箱。
 - 模型池和 Opus/Sonnet/Haiku/Custom 映射保存在对应 group provider 上，组成员只负责提供不同 token。
-- CPA 默认对可用成员进行 round-robin，并能在失败、限流或配额冷却时换到其他成员。
-- 编辑 group 或执行 `ccl oauth sync` 后不需要重新 `ccl use`。下一次启动会直接读取最新成员；正在运行的 group 会话也会检测成员清单及授权文件变化并让 CPA 重新加载，后续请求使用新账号池（已经在途的请求不会迁移）。
+- 对应 runtime 会对可用成员做轮转，并在失败、限流或配额冷却时换到其他成员。
+- 编辑 group 或执行 `ccl oauth sync` 后不需要重新 `ccl use`。下一次启动会直接读取最新成员；支持热加载的运行时会检测成员清单及授权文件变化并重新加载，后续请求使用新账号池（已经在途的请求不会迁移）。
 - `ccl ls` / `ccl ls --all` 的 `KIND` 列会显示 `normal` 或 `group`，并隐藏已经加入任意 group 的单账号 provider，只保留 group 与未入组账号。
-- `ccl doctor` 会检查 group 定义、成员文件、JSON `type`；OAuth/group 还会启动嵌入式 CPA，用 `coreManager.List()` 显示 runtime 健康（healthy / invalid / quota）。额度用尽会写回 `~/.ccl/auth` 的 JSON 标记，后续 round-robin 自动跳过。
+- `ccl doctor` 会检查 group 定义、成员文件、JSON `type`；OAuth/group 还会启动实际 provider runtime，并在 backend 支持时显示账号健康（healthy / invalid / quota）。额度用尽标记由支持该能力的 backend 写回 `~/.ccl/auth`，后续轮转自动跳过。
 - `ccl set <group-provider>` 可以像普通 provider 一样配置共享模型映射、上下文/Compact 和运行参数；账号成员仍通过 `ccl oauth group <组名>` 管理。
 
 #### 端到端加密云同步
@@ -569,6 +584,8 @@ ccl map --custom gpt-5.1 my-provider
 ccl map --subagent gpt-5.4-mini
 ```
 
+OAuth provider 不需要先运行 `ccl set`：`ccl map` / `ccl map auto` 会临时启动对应 OAuth runtime，并直接使用账号的实时模型目录。选择器显示上游展示名、内部 ID、倍率与活动标记，但槽位中只保存请求所需的内部 ID；临时 endpoint 和会话 key 不会写入配置。
+
 ### `ccl models` / `ccl doctor` / `ccl preview`
 
 ```bash
@@ -577,6 +594,8 @@ ccl models --all        # 查看并测试 provider 全部模型
 ccl doctor              # 环境 + provider 状态 + 连通性
 ccl preview             # 预览将注入 Claude Code 的 settings JSON
 ```
+
+模型目录带有展示元数据时，输出优先显示易读名称，同时保留配置请求所需的内部模型 ID；倍率和活动标记直接来自本次上游目录，不使用本地硬编码。
 
 ### `ccl env` — 环境变量
 
@@ -653,7 +672,7 @@ auth_groups:
 
 - `type: openai`（显示 `openai(chat)`）：经 CLIProxyAPI 转到上游 Chat Completions。
 - `type: openai_responses`（显示 `openai(responses)`）：经 SDK 走 Responses API；Codex 路径默认选 Responses，可在核对页切换。
-- `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用 ccl 的本机 Messages → Amazon Q 适配器。
+- `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用本机 Messages → Amazon Q 适配器；`oauthProvider: qoder` 使用本机 Messages → Qoder 直接适配器。
 - `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
 - `authGroup`：引用 `auth_groups` 中的动态账号池；成员列表不会重复写入 provider。
 - `bypass_mode`：全局是否自动附加 `--dangerously-skip-permissions`。
@@ -742,7 +761,7 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 │   ├── auth_sync.go           # auth 目录与配置同步
 │   ├── cloud_sync.go          # iCloud/Google Drive 登录、恢复密钥与同步命令
 │   ├── bypass.go              # ccl bypass（权限旁路开关）
-│   ├── debug.go               # ccl debug（运行时诊断日志开关）
+│   ├── log.go                 # ccl log（统一 slog 日志配置）
 │   ├── provider.go            # provider 子命令
 │   ├── env.go                 # 环境变量管理
 │   ├── set.go                 # set 命令
@@ -764,7 +783,7 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 │   ├── config/                # yaml 配置读写
 │   ├── locale/                # 多语言
 │   ├── modelrouting/          # 档位启发式映射
-│   ├── oauthproxy/            # OAuth 登录、CLIProxyAPI 与 Kiro Messages 运行时
+│   ├── oauthproxy/            # OAuth 登录、CLIProxyAPI、Kiro/Qoder Messages 运行时
 │   ├── protocol/              # endpoint 规范化与探测
 │   └── provider/              # Provider / Config 结构
 └── main.go
@@ -774,4 +793,4 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 
 ## 开源许可
 
-MIT。CLIProxyAPI SDK、kiro.rs 参考实现的第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+MIT。CLIProxyAPI SDK、Kiro/Qoder 参考实现的第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

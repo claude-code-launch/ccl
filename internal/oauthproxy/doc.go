@@ -3,7 +3,8 @@
 // Production traffic for openai / openai_responses / OAuth providers goes
 // through this package only. Claude Code talks to a loopback Anthropic
 // Messages endpoint. Most providers use embedded CLIProxyAPI; Kiro uses ccl's
-// direct Messages-to-Amazon-Q adapter and AWS EventStream decoder.
+// direct Messages-to-Amazon-Q adapter and AWS EventStream decoder; Qoder uses
+// ccl's direct OAuth/COSY/SSE adapter and never invokes Qoder CLI.
 //
 // # Compatibility boundary with CLIProxyAPI
 //
@@ -53,12 +54,28 @@
 //     MarkResult and clears the SDK registry's longer 401/429 side effects.
 //     Kiro has an independent direct adapter and does not use this policy.
 //
+//  7. GitHub Copilot direct gateway (copilot_runtime.go)
+//     Copilot does not use CLIProxyAPI OAuth credentials. ccl authenticates
+//     with GitHub, discovers the account's authoritative model catalog, and
+//     routes each model to its advertised Chat, Responses, or Messages
+//     endpoint before the local compatibility layer. Do not add synthetic
+//     request identity headers without testing the real Copilot API: they can
+//     change model visibility or entitlement decisions.
+//
+//  8. Qoder direct runtime (qoder_*.go)
+//     Qoder browser OAuth, refresh, COSY signing, WAF body encoding, model
+//     discovery, and Anthropic Messages translation all run in this process.
+//     The upstream request's session_type="qodercli" is a protocol identity
+//     field only; do not replace the direct runtime with a qodercli subprocess.
+//
 // When upgrading CLIProxyAPI, run at least:
 //
 //	go test ./internal/oauthproxy ./internal/claude ./cmd
 //
-// and manually exercise ccl oauth gpt, ccl oauth kiro, an openai_responses
-// API-key provider, and a plain openai(chat) provider with streaming + tool calls.
+// and manually exercise ccl oauth gpt, ccl oauth copilot, ccl oauth qoder,
+// ccl oauth kiro, an
+// openai_responses API-key provider, and a plain openai(chat) provider with
+// streaming + tool calls.
 //
 // Note: dedicated Codex bases still set Originator to embeddedCodexOriginator
 // ("codex_cli_rs") for custom API-key Codex endpoints. That is independent of

@@ -238,7 +238,7 @@ func (s *kiroService) availableModels(ctx context.Context) ([]kiroAvailableModel
 			if result.pending.hasCache {
 				mergeKiroAvailableModels(merged, result.pending.cached.models)
 				successes++
-				Debugf("kiro model discovery uses stale cache credential=%q error=%v", result.pending.credential.fileName, result.err)
+				LogWarnf("kiro model discovery uses stale cache credential=%q error=%v", result.pending.credential.fileName, result.err)
 				continue
 			}
 			discoveryErrors = append(discoveryErrors, fmt.Errorf("%s: %w", result.pending.credential.fileName, result.err))
@@ -371,10 +371,10 @@ func (c *kiroModelCatalog) fetchCredentialModels(ctx context.Context, service *k
 func (c *kiroModelCatalog) fetchCredentialModelsWithToken(ctx context.Context, service *kiroService, credential *kiroCredential) ([]kiroAvailableModel, error) {
 	if models, attempted, err := c.fetchPortalModels(ctx, service, credential); attempted {
 		if err == nil {
-			Debugf("kiro web portal model discovery credential=%q model_count=%d", credential.fileName, len(models))
+			LogInfof("kiro web portal model discovery credential=%q model_count=%d", credential.fileName, len(models))
 			return models, nil
 		}
-		Debugf("kiro web portal model discovery fallback credential=%q error=%v", credential.fileName, err)
+		LogWarnf("kiro web portal model discovery fallback credential=%q error=%v", credential.fileName, err)
 	}
 
 	regions := kiroRESTRegionCandidates(credential)
@@ -382,7 +382,7 @@ func (c *kiroModelCatalog) fetchCredentialModelsWithToken(ctx context.Context, s
 	for index, region := range regions {
 		models, err := c.requestAvailableModels(ctx, service, credential, region)
 		if err == nil {
-			Debugf("kiro model discovery credential=%q region=%q model_count=%d", credential.fileName, region, len(models))
+			LogInfof("kiro model discovery credential=%q region=%q model_count=%d", credential.fileName, region, len(models))
 			return models, nil
 		}
 		lastErr = err

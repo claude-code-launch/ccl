@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -255,33 +254,7 @@ func SetCMD() *cobra.Command {
 }
 
 func setDebugf(format string, args ...any) {
-	if os.Getenv("CCL_SET_DEBUG") == "" && os.Getenv("CCL_DEBUG") == "" {
-		return
-	}
-	path := os.Getenv("CCL_SET_DEBUG_LOG")
-	if path == "" {
-		path = os.Getenv("CCL_DEBUG_LOG")
-	}
-	if path == "" {
-		dir, err := oauthproxy.LogDir()
-		if err != nil {
-			return
-		}
-		path = filepath.Join(dir, "ccl-set-debug.log")
-	}
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return
-		}
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = fmt.Fprintf(f, "%s ", time.Now().Format(time.RFC3339Nano))
-	_, _ = fmt.Fprintf(f, format, args...)
-	_, _ = fmt.Fprintln(f)
+	oauthproxy.LogDebugf(format, args...)
 }
 
 func countCSV(csv string) int {
@@ -327,6 +300,7 @@ func detectProtocolAndModels(endpoint, apiKey string) (string, string, error) {
 type protocolDetectionResult struct {
 	protocol      string
 	models        string
+	modelInfos    []protocol.ModelInfo
 	baseURL       string
 	anthropicAuth string
 	err           error
@@ -396,8 +370,9 @@ const (
 )
 
 type modelListDetection struct {
-	models string
-	shape  modelListShape
+	models     string
+	modelInfos []protocol.ModelInfo
+	shape      modelListShape
 }
 
 type modelProbeAuth string
@@ -450,19 +425,19 @@ func classifyModelProbeResult(candidate modelProbeCandidate, result modelListDet
 			auth = anthropicAuthBearer
 		}
 		setDebugf("detect selected anthropic auth=%s model_count=%d shape=%q probe=%s base_url=%q", auth, countCSV(result.models), result.shape, candidate.name, candidate.baseURL)
-		return protocolDetectionResult{protocol: "anthropic", models: result.models, baseURL: candidate.baseURL, anthropicAuth: auth}, true
+		return protocolDetectionResult{protocol: "anthropic", models: result.models, modelInfos: result.modelInfos, baseURL: candidate.baseURL, anthropicAuth: auth}, true
 	}
 
 	if result.shape == modelListShapeOpenAI || candidate.expect == modelProbeExpectOpenAI {
 		setDebugf("detect selected openai family model_count=%d shape=%q probe=%s base_url=%q", countCSV(result.models), result.shape, candidate.name, candidate.baseURL)
-		return protocolDetectionResult{protocol: "openai", models: result.models, baseURL: candidate.baseURL}, true
+		return protocolDetectionResult{protocol: "openai", models: result.models, modelInfos: result.modelInfos, baseURL: candidate.baseURL}, true
 	}
 	if result.shape == modelListShapeUnknown && candidate.expect == modelProbeExpectAnthropic {
 		auth := anthropicAuthXAPIKey
 		if candidate.auth == modelProbeAuthBearer {
 			auth = anthropicAuthBearer
 		}
-		return protocolDetectionResult{protocol: "anthropic", models: result.models, baseURL: candidate.baseURL, anthropicAuth: auth}, true
+		return protocolDetectionResult{protocol: "anthropic", models: result.models, modelInfos: result.modelInfos, baseURL: candidate.baseURL, anthropicAuth: auth}, true
 	}
 
 	return protocolDetectionResult{}, false
@@ -668,7 +643,16 @@ func debugBodyPreview(body []byte, max int) string {
 func parseModelListForDetection(body []byte) (modelListDetection, error) {
 	var response struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                 string   `json:"id"`
+			Name               string   `json:"name"`
+			DisplayName        string   `json:"display_name"`
+			ContextWindow      int      `json:"context_window"`
+			MaxInputTokens     int      `json:"max_input_tokens"`
+			MaxOutputTokens    int      `json:"max_output_tokens"`
+			RateMultiplier     *float64 `json:"rate_multiplier"`
+			RateUnit           string   `json:"rate_unit"`
+			IsNew              bool     `json:"is_new"`
+			PromotionAvailable bool     `json:"promotion_available"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -676,15 +660,30 @@ func parseModelListForDetection(body []byte) (modelListDetection, error) {
 	}
 
 	models := make([]string, 0, len(response.Data))
+	infos := make([]protocol.ModelInfo, 0, len(response.Data))
 	for _, item := range response.Data {
 		if item.ID != "" {
 			models = append(models, item.ID)
+			displayName := strings.TrimSpace(item.DisplayName)
+			if displayName == "" {
+				displayName = strings.TrimSpace(item.Name)
+			}
+			contextWindow := item.MaxInputTokens
+			if contextWindow == 0 {
+				contextWindow = item.ContextWindow
+			}
+			infos = append(infos, protocol.ModelInfo{
+				ID: item.ID, DisplayName: displayName, ContextWindow: contextWindow,
+				MaxOutputTokens: item.MaxOutputTokens, RateMultiplier: item.RateMultiplier,
+				RateUnit: item.RateUnit, IsNew: item.IsNew, PromotionAvailable: item.PromotionAvailable,
+			})
 		}
 	}
 
 	return modelListDetection{
-		models: strings.Join(models, ","),
-		shape:  inferModelListShape(body),
+		models:     strings.Join(models, ","),
+		modelInfos: infos,
+		shape:      inferModelListShape(body),
 	}, nil
 }
 

@@ -322,10 +322,10 @@ func (p *kiroCredentialPool) usableCredential(ctx context.Context, credential *k
 		return nil, fmt.Errorf("Kiro credential %s has no refresh token", latest.fileName)
 	}
 	if err := p.refreshCredential(ctx, latest); err != nil {
-		Debugf("kiro credential refresh failed credential=%q forced=%t error=%v", latest.fileName, forceRefresh, err)
+		LogErrorf("kiro credential refresh failed credential=%q forced=%t error=%v", latest.fileName, forceRefresh, err)
 		return nil, err
 	}
-	Debugf("kiro credential refreshed credential=%q forced=%t", latest.fileName, forceRefresh)
+	LogInfof("kiro credential refreshed credential=%q forced=%t", latest.fileName, forceRefresh)
 	// The file was just rewritten: read it back directly so a coarse filesystem
 	// timestamp can never hand back the pre-refresh token.
 	p.cache.invalidate(latest.path)

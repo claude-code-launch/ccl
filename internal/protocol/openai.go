@@ -14,8 +14,14 @@ import (
 // ContextWindow is advisory only — third-party catalogs are often wrong or
 // missing; callers must not treat a reported 1M window as a guarantee.
 type ModelInfo struct {
-	ID            string
-	ContextWindow int
+	ID                 string
+	DisplayName        string
+	ContextWindow      int
+	MaxOutputTokens    int
+	RateMultiplier     *float64
+	RateUnit           string
+	IsNew              bool
+	PromotionAvailable bool
 }
 
 // ModelResponse is the OpenAI-compatible /models list payload.
@@ -120,6 +126,7 @@ func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 		}
 		models = append(models, ModelInfo{
 			ID:            m.Id,
+			DisplayName:   strings.TrimSpace(m.Name),
 			ContextWindow: window,
 		})
 	}

@@ -11,15 +11,24 @@ func parseModelList(modelStr string) []string {
 }
 
 func fetchModelsForProvider(p provider.Provider) []string {
-	var modelsStr string
+	infos := fetchModelInfosForProvider(p)
+	models := make([]string, 0, len(infos))
+	for _, info := range infos {
+		models = append(models, info.ID)
+	}
+	return models
+}
+
+func fetchModelInfosForProvider(p provider.Provider) []protocol.ModelInfo {
+	var infos []protocol.ModelInfo
 	var err error
 	if provider.IsOpenAICompatibleType(p.Type) {
-		modelsStr, err = protocol.GetOpenAIModels(p.Endpoint, p.APIKey)
+		infos, err = protocol.GetOpenAIModelInfos(p.Endpoint, p.APIKey)
 	} else {
-		modelsStr, err = protocol.GetAnthropicModelsWithAuth(p.Endpoint, p.APIKey, p.AnthropicAuth)
+		infos, err = protocol.GetAnthropicModelInfosWithAuth(p.Endpoint, p.APIKey, p.AnthropicAuth)
 	}
-	if err != nil || modelsStr == "" {
+	if err != nil {
 		return nil
 	}
-	return parseModelList(modelsStr)
+	return infos
 }

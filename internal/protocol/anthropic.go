@@ -12,15 +12,23 @@ import (
 
 // AnthropicModelResponse is the Anthropic-compatible /v1/models list payload.
 type AnthropicModelResponse struct {
-	Data []struct {
-		CreatedAt   time.Time `json:"created_at"`
-		DisplayName string    `json:"display_name"`
-		Id          string    `json:"id"`
-		Type        string    `json:"type"`
-	} `json:"data"`
-	FirstId string `json:"firstId"`
-	HasMore bool   `json:"hasMore"`
-	LastId  string `json:"lastId"`
+	Data    []AnthropicModel `json:"data"`
+	FirstId string           `json:"firstId"`
+	HasMore bool             `json:"hasMore"`
+	LastId  string           `json:"lastId"`
+}
+
+type AnthropicModel struct {
+	CreatedAt          time.Time `json:"created_at"`
+	DisplayName        string    `json:"display_name"`
+	ID                 string    `json:"id"`
+	Type               string    `json:"type"`
+	MaxInputTokens     int       `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens    int       `json:"max_output_tokens,omitempty"`
+	RateMultiplier     *float64  `json:"rate_multiplier,omitempty"`
+	RateUnit           string    `json:"rate_unit,omitempty"`
+	IsNew              bool      `json:"is_new,omitempty"`
+	PromotionAvailable bool      `json:"promotion_available,omitempty"`
 }
 
 func GetAnthropicModels(baseURL, key string) (string, error) {
@@ -30,8 +38,23 @@ func GetAnthropicModels(baseURL, key string) (string, error) {
 // GetAnthropicModelsWithAuth fetches Anthropic-compatible models using either
 // the official x-api-key header or a Bearer token used by some routers.
 func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) {
+	infos, err := GetAnthropicModelInfosWithAuth(baseURL, key, authStyle)
+	if err != nil {
+		return "", err
+	}
+	models := make([]string, 0, len(infos))
+	for _, info := range infos {
+		models = append(models, info.ID)
+	}
+	return strings.Join(models, ","), nil
+}
+
+// GetAnthropicModelInfosWithAuth fetches model IDs and optional display,
+// token-limit, rate, and catalog badge metadata from an Anthropic-compatible
+// /v1/models endpoint. Unknown extension fields remain safely ignored.
+func GetAnthropicModelInfosWithAuth(baseURL, key, authStyle string) ([]ModelInfo, error) {
 	if key == "" {
-		return "", errors.New("api key is empty")
+		return nil, errors.New("api key is empty")
 	}
 	modelsURL := NormalizeAnthropicModelsURL(baseURL)
 
@@ -42,7 +65,7 @@ func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) 
 		nil,
 	)
 	if err != nil {
-		return "", fmt.Errorf("build models request: %w", err)
+		return nil, fmt.Errorf("build models request: %w", err)
 	}
 
 	if strings.EqualFold(authStyle, "bearer") {
@@ -56,25 +79,34 @@ func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) 
 	httpClient := &http.Client{Timeout: 15 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", errors.New(resp.Status)
+		return nil, errors.New(resp.Status)
 	}
 
 	var result AnthropicModelResponse
 	err = json.NewDecoder(resp.Body).Decode(&result)
 	if err != nil {
-		return "", fmt.Errorf("decode models response: %w", err)
+		return nil, fmt.Errorf("decode models response: %w", err)
 	}
 
-	models := make([]string, 0, len(result.Data))
+	models := make([]ModelInfo, 0, len(result.Data))
 	for _, m := range result.Data {
-		if m.Id != "" {
-			models = append(models, m.Id)
+		if m.ID != "" {
+			models = append(models, ModelInfo{
+				ID:                 m.ID,
+				DisplayName:        m.DisplayName,
+				ContextWindow:      m.MaxInputTokens,
+				MaxOutputTokens:    m.MaxOutputTokens,
+				RateMultiplier:     m.RateMultiplier,
+				RateUnit:           m.RateUnit,
+				IsNew:              m.IsNew,
+				PromotionAvailable: m.PromotionAvailable,
+			})
 		}
 	}
 
-	return strings.Join(models, ","), nil
+	return models, nil
 }

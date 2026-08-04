@@ -258,3 +258,56 @@ func TestBuildProcessEnvKeepsUnrelatedEnvironment(t *testing.T) {
 		t.Fatalf("env = %#v, want the inherited entry kept", env)
 	}
 }
+
+func TestBuildEnvUsesProviderCatalogDisplayNames(t *testing.T) {
+	p := provider.Provider{
+		Type:          "anthropic",
+		OpusModel:     "cmodel[1m]",
+		SonnetModel:   "kmodel_latest",
+		HaikuModel:    "gm51model",
+		CustomModelID: "dfmodel",
+		Env: map[string]string{
+			"ANTHROPIC_MODEL": "cmodel[1m]",
+			SubagentModelEnv:  "dfmodel",
+		},
+	}
+	env := buildEnvWithModelNames(p, "https://example.test", false, map[string]string{
+		"cmodel":        "Cantus",
+		"kmodel_latest": "Kimi-K3",
+		"gm51model":     "GLM-5.2",
+		"dfmodel":       "DeepSeek-V4-Flash",
+	})
+
+	want := map[string]string{
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":              "Cantus[1m]",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":         "Cantus (1M)",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":            "Kimi-K3",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":       "Kimi-K3",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":             "GLM-5.2",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":        "GLM-5.2",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION":             "DeepSeek-V4-Flash",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":        "DeepSeek-V4-Flash",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Custom provider model",
+		"CLAUDE_CODE_MODEL_ID":                      "DeepSeek-V4-Flash",
+		SubagentModelEnv:                            "DeepSeek-V4-Flash",
+		"ANTHROPIC_MODEL":                           "Cantus[1m]",
+	}
+	for key, expected := range want {
+		if env[key] != expected {
+			t.Errorf("%s = %q, want %q", key, env[key], expected)
+		}
+	}
+}
+
+func TestCatalogModelOverridesUseRequestAliases(t *testing.T) {
+	overrides := catalogModelOverrides(map[string]string{
+		"claude-opus": "cmodel[1m]",
+		"claude-fast": "dfmodel",
+	}, map[string]string{
+		"cmodel":  "Cantus",
+		"dfmodel": "DeepSeek-V4-Flash",
+	})
+	if overrides["claude-opus"] != "Cantus[1m]" || overrides["claude-fast"] != "DeepSeek-V4-Flash" {
+		t.Fatalf("model overrides = %#v", overrides)
+	}
+}

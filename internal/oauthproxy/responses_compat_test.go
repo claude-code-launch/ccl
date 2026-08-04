@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -224,5 +225,52 @@ func TestPlainResponsesProxyInjectsMaxOutputTokens(t *testing.T) {
 	}
 	if _, ok := got["client_metadata"]; ok {
 		t.Fatalf("client_metadata should be stripped: %+v", got)
+	}
+}
+
+func TestResponsesProxyTracesFinalRequestAndErrorPayloadWhenOptedIn(t *testing.T) {
+	dir := t.TempDir()
+	logPath := dir + "/payload.log"
+	SetLogLevel(LogLevelOff, "")
+	SetLogLevel(LogLevelDebug, logPath)
+	t.Cleanup(func() { SetLogLevel(LogLevelOff, "") })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"context_length_exceeded","message":"too large"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	compat, err := startResponsesCompatibilityProxy(upstream.URL, nil, 0)
+	if err != nil {
+		t.Fatalf("startResponsesCompatibilityProxy: %v", err)
+	}
+	t.Cleanup(compat.Stop)
+
+	req, err := http.NewRequest(http.MethodPost, compat.endpoint+"/responses", strings.NewReader(`{"model":"gpt-test","input":"compact me"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	trace := string(data)
+	for _, want := range []string{
+		"compact me",
+		"context_length_exceeded",
+		"responses proxy response status=400",
+	} {
+		if !strings.Contains(trace, want) {
+			t.Errorf("trace missing %q:\n%s", want, trace)
+		}
 	}
 }

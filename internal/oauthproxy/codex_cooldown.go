@@ -87,7 +87,7 @@ func (h *cclCooldownHook) OnResult(ctx context.Context, result coreauth.Result) 
 	}
 	_, _ = h.manager.Update(updateCtx, auth)
 	clearOverriddenRegistryCooldown(result)
-	Debugf("ccl upstream cooldown provider=%q status=%d model=%q duration=%s",
+	LogWarnf("ccl upstream cooldown provider=%q status=%d model=%q duration=%s",
 		result.Provider, result.Error.HTTPStatus, result.Model, cooldown)
 }
 

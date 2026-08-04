@@ -33,6 +33,17 @@ func TestProtocolLabel(t *testing.T) {
 	}
 }
 
+func TestProtocolLabelForCopilotShowsAutomaticRouting(t *testing.T) {
+	p := provider.Provider{Type: "openai_responses", OAuthProvider: "copilot"}
+	if got := provider.ProtocolLabelForProvider(p); got != "copilot(auto)" {
+		t.Fatalf("ProtocolLabelForProvider() = %q", got)
+	}
+	p.OAuthProvider = "gpt"
+	if got := provider.ProtocolLabelForProvider(p); got != "openai(responses)" {
+		t.Fatalf("non-Copilot label = %q", got)
+	}
+}
+
 func TestInferOAuthProvider(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -47,7 +58,8 @@ func TestInferOAuthProvider(t *testing.T) {
 		{name: "Gemini public backend", providerName: "google-account", endpoint: "oauth://gemini", want: "gemini"},
 		{name: "Grok xAI backend", providerName: "grok", endpoint: "oauth://xai", want: "grok"},
 		{name: "Grok renamed provider", providerName: "my-account", endpoint: "oauth://xai", want: "grok"},
-		{name: "Copilot shares codex backend", providerName: "copilot", endpoint: "oauth://codex", want: "gpt"},
+		{name: "Copilot backend", providerName: "copilot", endpoint: "oauth://copilot", want: "copilot"},
+		{name: "Qoder backend", providerName: "qoder-work", endpoint: "oauth://qoder", want: "qoder"},
 		{name: "Kimi backend", providerName: "kimi", endpoint: "oauth://kimi", want: "kimi"},
 		{name: "Kiro backend", providerName: "kiro-work", endpoint: "oauth://kiro", want: "kiro"},
 		{name: "Claude backend", providerName: "claude", endpoint: "oauth://claude", want: "claude"},
@@ -120,40 +132,44 @@ func TestIsAnthropicType(t *testing.T) {
 	}
 }
 
-func TestFixedOAuthProtocol(t *testing.T) {
-	got, ok := provider.FixedOAuthProtocol("gpt")
+func TestOAuthRuntimeType(t *testing.T) {
+	got, ok := provider.OAuthRuntimeType("gpt")
 	if !ok || got != "openai_responses" {
 		t.Fatalf("gpt = %q %v", got, ok)
 	}
-	got, ok = provider.FixedOAuthProtocol("chatgpt")
+	got, ok = provider.OAuthRuntimeType("chatgpt")
 	if !ok || got != "openai_responses" {
 		t.Fatalf("chatgpt = %q %v", got, ok)
 	}
-	got, ok = provider.FixedOAuthProtocol("copilot")
+	got, ok = provider.OAuthRuntimeType("copilot")
 	if !ok || got != "openai_responses" {
 		t.Fatalf("copilot = %q %v", got, ok)
 	}
-	got, ok = provider.FixedOAuthProtocol("gemini")
+	got, ok = provider.OAuthRuntimeType("qoder")
+	if !ok || got != "anthropic" {
+		t.Fatalf("qoder = %q %v", got, ok)
+	}
+	got, ok = provider.OAuthRuntimeType("gemini")
 	if !ok || got != "openai" {
 		t.Fatalf("gemini = %q %v", got, ok)
 	}
-	got, ok = provider.FixedOAuthProtocol("grok")
+	got, ok = provider.OAuthRuntimeType("grok")
 	if !ok || got != "openai" {
 		t.Fatalf("grok = %q %v", got, ok)
 	}
-	got, ok = provider.FixedOAuthProtocol("kimi")
+	got, ok = provider.OAuthRuntimeType("kimi")
 	if !ok || got != "openai" {
 		t.Fatalf("kimi = %q %v", got, ok)
 	}
-	got, ok = provider.FixedOAuthProtocol("claude")
+	got, ok = provider.OAuthRuntimeType("claude")
 	if !ok || got != "anthropic" {
 		t.Fatalf("claude = %q %v", got, ok)
 	}
-	got, ok = provider.FixedOAuthProtocol("kiro")
+	got, ok = provider.OAuthRuntimeType("kiro")
 	if !ok || got != "anthropic" {
 		t.Fatalf("kiro = %q %v", got, ok)
 	}
-	if _, ok := provider.FixedOAuthProtocol(""); ok {
+	if _, ok := provider.OAuthRuntimeType(""); ok {
 		t.Fatal("empty should not fix")
 	}
 }

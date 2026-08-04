@@ -58,7 +58,7 @@ Examples:
 			return runAuthGroupEdit(cmd.OutOrStdout(), args[0], opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.oauthProvider, "provider", "", "OAuth backend for a new group (gpt, gemini, grok, copilot, kimi, kiro, claude)")
+	cmd.Flags().StringVar(&opts.oauthProvider, "provider", "", "OAuth backend for a new group (gpt, gemini, grok, copilot, qoder, kimi, kiro, claude)")
 	cmd.Flags().StringVar(&opts.members, "members", "", "Comma-separated provider names or credential filenames (non-interactive)")
 	cmd.Flags().StringVar(&opts.providerName, "provider-name", "", "Provider name exposed to ccl use (default: group name)")
 	removeCmd := &cobra.Command{
@@ -518,7 +518,7 @@ func applyCredentialProviderAliases(credentials []oauthproxy.CredentialInfo, cfg
 
 func inferGroupProvider(name string, credentials []oauthproxy.CredentialInfo) string {
 	lower := strings.ToLower(name)
-	for _, candidate := range []string{"grok", "gemini", "copilot", "kimi", "kiro", "claude", "gpt"} {
+	for _, candidate := range []string{"grok", "gemini", "copilot", "qoder", "kimi", "kiro", "claude", "gpt"} {
 		if strings.Contains(lower, candidate) {
 			return candidate
 		}

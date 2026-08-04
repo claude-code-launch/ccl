@@ -108,7 +108,7 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
-	// values are gpt, gemini, grok, copilot, kimi, kiro, and claude. The legacy chatgpt
+	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, and claude. The legacy chatgpt
 	// codex value remains readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
@@ -135,8 +135,8 @@ type Provider struct {
 	// FastMode mirrors the Claude Code settings.json fastMode flag, the same
 	// toggle flipped by the `/fast` slash command. It routes ChatGPT/Codex
 	// subscription accounts through Codex's faster responses (≈1.5x speed) at
-	// the cost of higher usage; only meaningful for OpenAI Responses OAuth
-	// backends (gpt/copilot). Empty/zero leaves Claude Code's own setting.
+	// the cost of higher usage; only meaningful for the GPT/Codex Responses
+	// OAuth backend. Empty/zero leaves Claude Code's own setting.
 	FastMode bool `yaml:"fastMode,omitempty" mapstructure:"fastMode,omitempty"`
 }
 
@@ -146,13 +146,15 @@ type Config struct {
 	// BypassMode automatically passes --dangerously-skip-permissions to Claude
 	// Code for every ccl-launched session. It is a global launcher setting.
 	BypassMode bool `yaml:"bypass_mode,omitempty" mapstructure:"bypass_mode,omitempty"`
-	// DebugMode enables ccl runtime diagnostics for ccl-launched sessions:
-	// runtime startup, upstream HTTP status, OAuth refresh, request metadata.
-	// Logs to ~/.ccl/logs (override with CCL_DEBUG_LOG). It never logs
-	// credentials, refresh tokens, or request/response bodies.
-	DebugMode  bool                 `yaml:"debug_mode,omitempty" mapstructure:"debug_mode,omitempty"`
-	Providers  map[string]Provider  `yaml:"providers" mapstructure:"providers"`
-	AuthGroups map[string]AuthGroup `yaml:"auth_groups,omitempty" mapstructure:"auth_groups,omitempty"`
+	// LogLevel is the threshold for ccl's per-session slog files: debug, info,
+	// warn, error, or off. Config loading normalizes an omitted value to off.
+	LogLevel string `yaml:"log_level,omitempty" mapstructure:"log_level,omitempty"`
+	// DebugMode and DebugVerbose remain readable only to migrate configurations
+	// written before `ccl debug` was renamed to `ccl log`.
+	DebugMode    bool                 `yaml:"debug_mode,omitempty" mapstructure:"debug_mode,omitempty"`
+	DebugVerbose bool                 `yaml:"debug_verbose,omitempty" mapstructure:"debug_verbose,omitempty"`
+	Providers    map[string]Provider  `yaml:"providers" mapstructure:"providers"`
+	AuthGroups   map[string]AuthGroup `yaml:"auth_groups,omitempty" mapstructure:"auth_groups,omitempty"`
 }
 
 // AuthGroup is a homogeneous pool of OAuth credentials. Credentials contains
@@ -163,16 +165,17 @@ type AuthGroup struct {
 	Credentials   []string `yaml:"credentials" mapstructure:"credentials"`
 }
 
-// FixedOAuthProtocol returns the public protocol label ccl persists for an
-// OAuth backend. GPT/Codex/Copilot → Responses; Gemini/Grok/Kimi → OpenAI
-// Chat; Kiro/Claude → Anthropic. ok is false when oauthProvider is empty or unknown.
-func FixedOAuthProtocol(oauthProvider string) (string, bool) {
+// OAuthRuntimeType returns the internal compatibility type ccl persists for an
+// OAuth backend. Copilot is represented by openai_responses for local dispatch,
+// but its actual upstream protocol is selected per model. ok is false when the
+// backend is empty or unknown.
+func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
 	case "gpt", "chatgpt", "codex", "copilot":
 		return "openai_responses", true
 	case "gemini", "grok", "kimi":
 		return "openai", true
-	case "kiro", "claude":
+	case "kiro", "qoder", "claude":
 		return "anthropic", true
 	default:
 		return "", false
@@ -201,6 +204,10 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "gpt"
 	case "antigravity", "gemini":
 		return "gemini"
+	case "copilot":
+		return "copilot"
+	case "qoder":
+		return "qoder"
 	case "xai", "grok":
 		return "grok"
 	case "kimi":
@@ -295,4 +302,13 @@ func ProtocolLabel(providerType string) string {
 	default:
 		return "openai(chat)"
 	}
+}
+
+// ProtocolLabelForProvider reports the user-facing protocol, including OAuth
+// backends whose real behavior cannot be inferred from the internal Type field.
+func ProtocolLabelForProvider(p Provider) string {
+	if strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "copilot") {
+		return "copilot(auto)"
+	}
+	return ProtocolLabel(p.Type)
 }

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -103,14 +104,14 @@ func TestMaxOutputEditableForChatGPTOAuthAndManagedForCodexAndKiro(t *testing.T)
 		t.Fatal("legacy chatgpt OAuth alias should allow client max output editing")
 	}
 
-	copilot := providerFrom("copilot", "oauth://codex", "openai_responses")
+	copilot := providerFrom("copilot", "oauth://copilot", "openai_responses")
 	copilot.OAuthProvider = "copilot"
 	m = NewAdvancedConfigModel(&copilot)
 	if !m.maxOutputUpstreamManaged() {
 		t.Fatal("Copilot OAuth should treat max output as upstream-managed")
 	}
-	if m.availabilitySmokeTestModel() != lowCostProbeModel {
-		t.Fatalf("Copilot smoke model = %q, want %q", m.availabilitySmokeTestModel(), lowCostProbeModel)
+	if m.availabilitySmokeTestModel() != "" {
+		t.Fatalf("Copilot should use its discovered model catalog, got smoke model %q", m.availabilitySmokeTestModel())
 	}
 
 	gemini := providerFrom("gemini", "oauth://gemini", "openai")
@@ -478,6 +479,63 @@ func TestSlotFilterTypesLettersThatAreAlsoShortcuts(t *testing.T) {
 	m = next.(*AdvancedConfigModel)
 	if m.slotListCursor != 1 {
 		t.Fatalf("slot list cursor = %d after ↓, want 1", m.slotListCursor)
+	}
+}
+
+func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
+	p := provider.Provider{Type: "anthropic", SubagentModel: "dfmodel"}
+	rate := 0.5
+	flashRate := 0.1
+	metadata := indexModelInfos([]protocol.ModelInfo{
+		{
+			ID: "qmodel_38max", DisplayName: "Qwen3.8-Max", ContextWindow: 1_000_000, RateMultiplier: &rate,
+			IsNew: true, PromotionAvailable: true,
+		},
+		{ID: "dfmodel", DisplayName: "DeepSeek-V4-Flash", ContextWindow: 1_000_000, RateMultiplier: &flashRate, IsNew: true},
+	})
+	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, []string{"qmodel_38max", "dfmodel"}, metadata)
+	m.cursor = 0
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	view := m.View().Content
+	for _, want := range []string{"Qwen3.8-Max", "qmodel_38max", "0.5x", "new", "off-peak discount"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("model picker missing %q: %q", want, view)
+		}
+	}
+
+	// Filtering by the friendly name still keeps the internal ID as the list
+	// value selected and persisted into the slot.
+	m.filterInput.SetValue("Qwen3.8")
+	m.updateFilteredPool()
+	if len(m.filteredPool) != 1 || m.filteredPool[0] != "qmodel_38max" {
+		t.Fatalf("filtered model IDs = %v", m.filteredPool)
+	}
+	m.slotListCursor = 0
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if p.OpusModel != "qmodel_38max" {
+		t.Fatalf("saved Opus model = %q, want internal ID", p.OpusModel)
+	}
+	if strings.Contains(p.OpusModel, "Qwen3.8-Max") {
+		t.Fatalf("display label leaked into slot mapping: %q", p.OpusModel)
+	}
+
+	// Every later page must use the same display projection. The underlying
+	// values remain IDs for context checks and persistence.
+	for _, page := range []int{1, 2, 4} {
+		m.page = page
+		m.filterInput.Blur()
+		view = m.View().Content
+		for _, want := range []string{"Qwen3.8-Max", "DeepSeek-V4-Flash"} {
+			if !strings.Contains(view, want) {
+				t.Fatalf("page %d missing friendly model %q: %q", page, want, view)
+			}
+		}
+		if page == 2 && !strings.Contains(view, "1M reported") {
+			t.Fatalf("context page did not use catalog context window: %q", view)
+		}
 	}
 }
 

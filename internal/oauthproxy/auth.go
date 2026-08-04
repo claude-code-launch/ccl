@@ -20,14 +20,12 @@ const (
 	ProviderChatGPTLegacy = "chatgpt"
 	ProviderGrok          = "grok"
 	ProviderCopilot       = "copilot"
+	ProviderQoder         = "qoder"
 	ProviderKimi          = "kimi"
 	ProviderKiro          = "kiro"
 	ProviderClaude        = "claude"
 	// backendXAI is the CLIProxyAPI authenticator provider key for xAI/Grok.
 	backendXAI = "xai"
-	// codexLoginModeMetadata mirrors CLIProxyAPI's sdk/auth LoginOptions key.
-	codexLoginModeMetadataKey = "codex_login_mode"
-	codexLoginModeDevice      = "device"
 )
 
 type LoginOptions struct {
@@ -81,6 +79,12 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 	if target == ProviderKiro {
 		return loginKiro(ctx, authDir, opts)
 	}
+	if target == ProviderCopilot {
+		return loginCopilot(ctx, authDir, opts)
+	}
+	if target == ProviderQoder {
+		return loginQoder(ctx, authDir, opts)
+	}
 	_, authenticator, err := authenticatorFor(target)
 	if err != nil {
 		return LoginResult{}, err
@@ -96,16 +100,6 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 		CallbackPort: opts.CallbackPort,
 		Prompt:       promptLine,
 	}
-	// GitHub Copilot logins through ChatGPT share the Codex backend but use the
-	// OpenAI device-code flow (GitHub-backed) instead of the OAuth redirect flow.
-	if target == ProviderCopilot {
-		if sdkOpts.Metadata == nil {
-			sdkOpts.Metadata = map[string]string{}
-		}
-		sdkOpts.Metadata[codexLoginModeMetadataKey] = codexLoginModeDevice
-		sdkOpts.CallbackPort = 0 // device flow has no local callback
-	}
-
 	record, path, err := manager.Login(ctx, backend, cfg, sdkOpts)
 	if err != nil {
 		return LoginResult{}, err
@@ -120,25 +114,28 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 // ValidateLoginProvider returns the canonical public OAuth provider name.
 // Codex remains an internal backend and a legacy runtime value, but new logins
 // use the public GPT name (model family) because both routes authenticate the same account.
-// Copilot reuses the Codex backend but logs in through the GitHub-backed device
-// flow, so it is exposed as its own public provider.
+// Copilot is a separate GitHub OAuth and API backend.
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderKimi, ProviderKiro, ProviderClaude:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderClaude:
 		return target, nil
 	case ProviderChatGPTLegacy:
 		// Keep accepting "chatgpt" as a login alias; canonicalize to "gpt".
 		return ProviderChatGPT, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, kimi, kiro, or claude)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, or claude)", providerName)
 	}
 }
 
 func BackendProvider(providerName string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy, ProviderCopilot:
+	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy:
 		return ProviderCodex, nil
+	case ProviderCopilot:
+		return ProviderCopilot, nil
+	case ProviderQoder:
+		return ProviderQoder, nil
 	case ProviderGemini:
 		return "antigravity", nil
 	case ProviderGrok, backendXAI:
