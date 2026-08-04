@@ -47,6 +47,8 @@ jobs:
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
         run: |
           mkdir -p dist
+          # 先单进程填满模块缓存，避免下面 6 个并行 build 各自重复报 downloading
+          go mod download
           VERSION="${{ github.ref_name }}"
           LDFLAGS="-s -w -X github.com/claude-code-launch/ccl/cmd.Version=${VERSION}"
           if [[ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ]]; then
