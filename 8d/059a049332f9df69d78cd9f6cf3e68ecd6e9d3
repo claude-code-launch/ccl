@@ -1,0 +1,31 @@
+CLAUDE.md
+  s_41089dae8b231c::t_a8454ad4c94823 57-60
+  s_77f3949290d3c3::t_09f474bcfd9eae 31
+  s_41089dae8b231c::t_4b47fb129a85f5 45-46
+  s_41089dae8b231c::t_aa04aca5e0b4b4 22
+  s_77f3949290d3c3::t_bf503de2211b14 1-21,23-30,32-44,47-56,61-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "8d059a049332f9df69d78cd9f6cf3e68ecd6e9d3",
+  "prompts": {},
+  "sessions": {
+    "s_41089dae8b231c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "884a9543-30d0-483b-ad57-51d29eec6524",
+        "model": "Kimi-K3"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_77f3949290d3c3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6798fef8-66d3-433f-96a0-cb8cb5f30297",
+        "model": "dfmodel"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
