@@ -189,7 +189,7 @@ ccl bypass off      # 关闭
 
 | 命令 | 作用 |
 |------|------|
-| `ccl set [name]` | 交互式添加 / 更新 provider（单页：Test & Auto Configure 后直接编辑并保存） |
+| `ccl set [name]` | 交互式添加 / 更新 provider（单页：Auto Configure 后直接编辑并保存） |
 | `ccl ls` / `ccl ls -a` | 列出 provider（`-a` 显示完整 model pool） |
 | `ccl use <name>` | 切换当前 active provider |
 | `ccl cp <src> <dst>` | 复制 provider 配置 |
@@ -529,12 +529,12 @@ ccl set                 # 交互选择已有或新建
 ccl set my-provider     # 指定名称
 ```
 
-TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Test & Auto Configure** 后自动识别协议、鉴权方式与模型池，并推荐 Opus / Sonnet / Haiku / Custom / Subagent 槽位；随后可在同一页逐项修改：
+TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Auto Configure** 后自动识别协议、鉴权方式与模型池（只访问 `/models` 元数据端点，不消耗额度），并推荐 Opus / Sonnet / Haiku / Custom / Subagent 槽位；随后可在同一页逐项修改：
 
-- **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。
+- **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。**Test Model Availability** 行为可选项——会为每个模型发送一次最小请求（消耗额度），测试后槽位旁显示 `✓`/`✗` 状态。
 - **Context**：`←→` 在 Claude default / Custom 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
 - **Runtime**：Protocol / Fast / Max Output / Tools / Tool Search 均可 `←→` 调整。
-- 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。
+- 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。新配置未填写连接时，Model Mapping / Runtime 区置灰不可编辑。
 
 Context & Compact：
 

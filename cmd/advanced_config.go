@@ -224,36 +224,46 @@ func (m *AdvancedConfigModel) currentRow() configRowKind {
 	return rows[m.cursor].kind
 }
 
+// connectionReady reports whether the Model Mapping and Runtime sections are
+// interactive. For a new provider the Endpoint/API Key must be filled and
+// Auto Configure run (a model pool discovered); OAuth providers are always
+// ready (their credentials are already live).
+func (m *AdvancedConfigModel) connectionReady() bool {
+	if m.usesOAuth() {
+		return true
+	}
+	return m.modelPoolFromDiscovery
+}
+
 // visibleRows lists the focusable rows of the single configuration page in
-// render order. Before a successful detection only the Connection section is
-// shown; after it the full mapping/runtime rows appear.
+// render order. Connection rows are always present; before a successful
+// detection the Model Mapping / Runtime rows still render but are marked
+// non-editable (greyed out) until the connection is ready.
 func (m *AdvancedConfigModel) visibleRows() []configRow {
 	rows := []configRow{
 		{kind: rowEndpoint},
 		{kind: rowAPIKey},
 		{kind: rowTest},
 	}
-	if !m.pageDetected() {
-		return rows
-	}
+	ready := m.connectionReady()
 	// Render order matches View: Connection → Model Mapping → Context →
 	// Runtime (Protocol/Fast/...) → Active → actions.
 	rows = append(rows,
-		configRow{kind: rowOpus},
-		configRow{kind: rowSonnet},
-		configRow{kind: rowHaiku},
-		configRow{kind: rowCustom},
-		configRow{kind: rowSubagent},
-		configRow{kind: rowTestModels},
-		configRow{kind: rowContext},
+		configRow{kind: rowOpus, editable: ready},
+		configRow{kind: rowSonnet, editable: ready},
+		configRow{kind: rowHaiku, editable: ready},
+		configRow{kind: rowCustom, editable: ready},
+		configRow{kind: rowSubagent, editable: ready},
+		configRow{kind: rowTestModels, editable: ready},
+		configRow{kind: rowContext, editable: ready},
 	)
-	rows = append(rows, configRow{kind: rowProtocol, editable: true})
-	rows = append(rows, configRow{kind: rowFast, editable: true})
-	rows = append(rows, configRow{kind: rowMaxOutput, editable: true})
+	rows = append(rows, configRow{kind: rowProtocol, editable: ready})
+	rows = append(rows, configRow{kind: rowFast, editable: ready})
+	rows = append(rows, configRow{kind: rowMaxOutput, editable: ready})
 	rows = append(rows,
-		configRow{kind: rowTools, editable: true},
-		configRow{kind: rowToolSearch, editable: true},
-		configRow{kind: rowActive, editable: true},
+		configRow{kind: rowTools, editable: ready},
+		configRow{kind: rowToolSearch, editable: ready},
+		configRow{kind: rowActive, editable: ready},
 		configRow{kind: rowSave},
 		configRow{kind: rowCancel},
 	)
@@ -1129,6 +1139,9 @@ func formatFastLabel(on bool) string {
 }
 
 func (m *AdvancedConfigModel) adjustReviewField(delta int) {
+	if !m.connectionReady() {
+		return
+	}
 	switch m.currentRow() {
 	case rowContext:
 		m.cycleCompactPreset(delta)
@@ -1766,6 +1779,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch:
 				m.adjustReviewField(1)
 			case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
+				if !m.connectionReady() {
+					return m, nil
+				}
 				m.activeSlot = slotForRow(m.currentRow())
 				m.filterInput.Focus()
 				m.filterInput.SetValue("")
@@ -1773,6 +1789,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateFilteredPool()
 				setDebugf("open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
 			case rowTestModels:
+				if !m.connectionReady() {
+					return m, nil
+				}
 				// Start the per-model availability test. Each model gets one
 				// minimal request, so this is opt-in and consumes quota.
 				if len(m.modelPool) == 0 {
@@ -2000,18 +2019,26 @@ func (m *AdvancedConfigModel) View() tea.View {
 	}
 
 	// ── Model Mapping (only after detection) ──────────────────────────────
-	if m.pageDetected() {
+	{
 		body.WriteString("\n" + titleStyle.Render("Model Mapping") + "\n")
+		// (the block always renders; rows grey out until connectionReady)
+		ready := m.connectionReady()
 		renderMappingRow := func(kind configRowKind, label, display, modelID string, oneM bool) {
 			prefix := "  "
 			val := purpleText.Render(truncateMiddle(display, 52))
-			if m.cursor == m.mainRowIndex(kind) {
+			if !ready {
+				// Connection not ready: grey out the row, no focus affordance.
+				val = grayText.Render(truncateMiddle(display, 52))
+			} else if m.cursor == m.mainRowIndex(kind) {
 				prefix = selectedStyle.Render("> ")
 				val = selectedStyle.Render(truncateMiddle(display, 52))
 			}
 			badge := "    "
 			if oneM {
 				badge = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("[1M]")
+			}
+			if !ready {
+				badge = grayText.Render("  ")
 			}
 			// Availability badge, shown only after the optional test ran.
 			if status, ok := m.modelAvailability[modelID]; ok && status != modelAvailabilityUnknown {
@@ -2060,7 +2087,9 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// values).
 		ctxPrefix := "  "
 		ctxVal := purpleText.Render("‹ " + m.compactSummary() + " ›")
-		if m.cursor == m.mainRowIndex(rowContext) {
+		if !ready {
+			ctxVal = grayText.Render("‹ " + m.compactSummary() + " ›")
+		} else if m.cursor == m.mainRowIndex(rowContext) {
 			ctxPrefix = selectedStyle.Render("> ")
 			ctxVal = selectedStyle.Render("‹ " + m.compactSummary() + " ›")
 		}
@@ -2071,7 +2100,9 @@ func (m *AdvancedConfigModel) View() tea.View {
 		renderEditable := func(kind configRowKind, label, value string) {
 			prefix := "  "
 			val := purpleText.Render(value)
-			if m.cursor == m.mainRowIndex(kind) {
+			if !ready {
+				val = grayText.Render(value)
+			} else if m.cursor == m.mainRowIndex(kind) {
 				prefix = selectedStyle.Render("> ")
 				val = selectedStyle.Render(value)
 			}
@@ -2134,11 +2165,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(grayText.Render(locale.T(
 			"↑↓ 选择 · ←→ 调整 · enter 确认 · 模型行 enter 筛选",
 			"↑↓ select · ←→ adjust · enter confirm · enter on a model row to filter",
-		)) + "\n")
-	} else {
-		body.WriteString("\n" + grayText.Render(locale.T(
-			"填写 Endpoint 与 API Key 后点击 Auto Configure 自动填充",
-			"Enter Endpoint and API Key, then Auto Configure to auto-fill",
 		)) + "\n")
 	}
 
@@ -2236,26 +2262,34 @@ func (m *AdvancedConfigModel) View() tea.View {
 }
 
 // rowAtLine resolves a clicked screen row to a configuration row kind by
-// matching the rendered labels. Rows that are not focusable return ok=false.
+// matching the rendered labels. A click on the value row directly below a
+// label (Endpoint/API Key inputs) resolves to the same row as clicking the
+// label. Rows that are not focusable return ok=false.
 func rowAtLine(lines []string, y int) (configRowKind, bool) {
 	if y < 0 || y >= len(lines) {
 		return rowCancel, false
 	}
-	text := strings.TrimLeft(ansi.Strip(lines[y]), " │|>")
-	text = strings.TrimSpace(text)
-	// Checkbox rows render as "[x] Label" / "[ ] Label"; strip the box so the
-	// label prefix matches. Model rows render with a right-aligned model value,
-	// so label matching happens on the leading label only.
-	for kind, label := range rowClickLabels {
-		if strings.HasPrefix(text, label) {
-			return kind, true
+	for _, off := range []int{0, -1} {
+		row := y + off
+		if row < 0 || row >= len(lines) {
+			continue
 		}
-	}
-	// Retry after stripping a checkbox prefix.
-	text = strings.TrimLeft(strings.TrimSpace(text), "[]x ")
-	for kind, label := range rowClickLabels {
-		if strings.HasPrefix(text, label) {
-			return kind, true
+		text := strings.TrimLeft(ansi.Strip(lines[row]), " │|>")
+		text = strings.TrimSpace(text)
+		// Checkbox rows render as "[x] Label" / "[ ] Label"; strip the box so the
+		// label prefix matches. Model rows render with a right-aligned model value,
+		// so label matching happens on the leading label only.
+		for kind, label := range rowClickLabels {
+			if strings.HasPrefix(text, label) {
+				return kind, true
+			}
+		}
+		// Retry after stripping a checkbox prefix.
+		text = strings.TrimLeft(strings.TrimSpace(text), "[]x ")
+		for kind, label := range rowClickLabels {
+			if strings.HasPrefix(text, label) {
+				return kind, true
+			}
 		}
 	}
 	return rowCancel, false
