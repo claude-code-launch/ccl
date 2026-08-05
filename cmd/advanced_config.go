@@ -2071,28 +2071,27 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
 	} else {
 		keyValue := m.keyInput.View()
-		if m.cursor != m.mainRowIndex(rowAPIKey) {
-			// Not editing: mask as asterisks, or reveal when the eye is open.
-			if m.keyVisible {
-				keyValue = m.keyInput.Value()
-			} else {
-				keyValue = strings.Repeat("*", len([]rune(m.keyInput.Value())))
-				if keyValue == "" {
-					keyValue = m.keyInput.Placeholder
-				}
+		if m.keyVisible {
+			// Revealed: show the plain key.
+			keyValue = m.keyInput.Value()
+		} else if m.cursor != m.mainRowIndex(rowAPIKey) {
+			// Not editing and hidden: mask as asterisks.
+			keyValue = strings.Repeat("*", len([]rune(m.keyInput.Value())))
+			if keyValue == "" {
+				keyValue = m.keyInput.Placeholder
 			}
 		}
-		// Eye button to reveal/hide the key.
-		eye := "👁"
+		// Show/Hide button to reveal or mask the key.
+		toggleLabel := locale.T("显示", "Show")
 		if m.keyVisible {
-			eye = "🙈"
+			toggleLabel = locale.T("隐藏", "Hide")
 		}
-		eyeBtn := grayText.Render("[" + eye + "]")
+		toggleBtn := buttonStyle.Render(toggleLabel)
 		if m.cursor == m.mainRowIndex(rowToggleKey) {
-			eyeBtn = selectedStyle.Render("[" + eye + "]")
+			toggleBtn = buttonActiveStyle.Render(toggleLabel)
 		}
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
-		body.WriteString(renderCredentialField("API Key", keyValue+"  "+eyeBtn, m.cursor == m.mainRowIndex(rowAPIKey)))
+		body.WriteString(renderCredentialField("API Key", keyValue+"  "+toggleBtn, m.cursor == m.mainRowIndex(rowAPIKey)))
 	}
 
 	// Detection / auto-configure button.
@@ -2402,16 +2401,14 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 // start column is kept so a click's X can disambiguate Save vs Cancel, which
 // share one line.
 func matchRowLabel(text string, x int) (configRowKind, bool) {
-	// The API key value row carries the eye toggle; clicking on the 👁/🙈
-	// character toggles key visibility.
-	if idx := strings.Index(text, "[👁]"); idx >= 0 {
-		if x < 0 || (x >= idx && x < idx+4) {
-			return rowToggleKey, true
-		}
-	}
-	if idx := strings.Index(text, "[🙈]"); idx >= 0 {
-		if x < 0 || (x >= idx && x < idx+4) {
-			return rowToggleKey, true
+	// The API key value row carries a Show/Hide button; clicking it toggles key
+	// visibility. The button renders as "  Show  " with padding, so match the
+	// word and its surrounding space.
+	for _, label := range []string{"Show", "Hide"} {
+		if idx := strings.Index(text, " "+label+" "); idx >= 0 {
+			if x < 0 || (x >= idx && x < idx+len(label)+2) {
+				return rowToggleKey, true
+			}
 		}
 	}
 	// Strip leading border, cursor arrow, and whitespace to find the first field.
