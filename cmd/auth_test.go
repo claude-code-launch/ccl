@@ -713,8 +713,11 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 	next, _ := m.Update(msg)
 	m = next.(*AdvancedConfigModel)
 
-	if m.detectionError != nil || m.page != 5 || p.Model == "" {
-		t.Fatalf("OAuth set discovery failed: page=%d models=%q err=%v", m.page, p.Model, m.detectionError)
+	if m.detectionError != nil || !m.autoConfigured || !m.modelPoolFromDiscovery || p.Model == "" {
+		t.Fatalf("OAuth set discovery failed: auto=%t detected=%t models=%q err=%v", m.autoConfigured, m.modelPoolFromDiscovery, p.Model, m.detectionError)
+	}
+	if m.page != 4 {
+		t.Fatalf("single-page discovery should stay on the main page, got page=%d", m.page)
 	}
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("OAuth runtime values leaked into stored provider: %+v", p)

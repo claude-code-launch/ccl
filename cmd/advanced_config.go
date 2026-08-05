@@ -42,10 +42,8 @@ var (
 	purpleText       = lipgloss.NewStyle().Foreground(colorSecondary)
 	grayText         = lipgloss.NewStyle().Faint(true)
 	errorBoxStyle    = lipgloss.NewStyle().Foreground(colorError).Border(lipgloss.NormalBorder()).BorderForeground(colorError).Padding(0, 1).Width(62)
-	stepStyle        = lipgloss.NewStyle().Faint(true).MarginLeft(1)
 	dividerStyle     = lipgloss.NewStyle().Faint(true)
 	selectedStyle    = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	lightning        = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("⚡1M")
 	filterStyle      = lipgloss.NewStyle().Foreground(colorAccent)
 	availableStyle   = lipgloss.NewStyle().Foreground(colorData).Bold(true)
 	unavailableStyle = lipgloss.NewStyle().Foreground(colorError)
@@ -57,18 +55,41 @@ const (
 	preferredPanelWidth   = 82
 	minimumPanelWidth     = 54
 	minimumTerminalMargin = 4
-	slotMappingCount      = 5
-	slotTestCursor        = slotMappingCount
-	slotNextCursor        = slotTestCursor + 1
-	slotBackCursor        = slotNextCursor + 1
-	// Page 2: slots 0..4, context radios 5..6, Next/Back after.
-	compactRadioCount   = 2
-	oneMCompactStart    = slotMappingCount
-	oneMNextCursor      = oneMCompactStart + compactRadioCount
-	oneMBackCursor      = oneMNextCursor + 1
-	slotTestConcurrency = 50
-	lowCostProbeModel   = "gpt-5.4-mini"
+	slotTestConcurrency   = 50
+	lowCostProbeModel     = "gpt-5.4-mini"
 )
+
+// configRowKind enumerates the focusable rows of the single configuration page.
+// The page cursor indexes into visibleRows(); adding or hiding a row never
+// requires renumbering offsets.
+type configRowKind uint8
+
+const (
+	rowEndpoint configRowKind = iota
+	rowAPIKey
+	rowTest // Test & Auto Configure
+	rowProtocol
+	rowFast
+	rowOpus
+	rowSonnet
+	rowHaiku
+	rowCustom
+	rowSubagent
+	rowContext // Context & Compact entry
+	rowMaxOutput
+	rowTools
+	rowToolSearch
+	rowActive
+	rowSave
+	rowCancel
+)
+
+type configRow struct {
+	kind configRowKind
+	// editable marks rows adjusted with ←→ (Protocol/Fast/Runtime) or enter
+	// (model rows / save). Endpoint and API Key are always text-editable.
+	editable bool
+}
 
 // compactRadioOrder is the context sizing choice offered to the user.
 //
@@ -102,11 +123,23 @@ type AdvancedConfigModel struct {
 	modelPoolFromDiscovery bool
 	clearStaleSlots        bool
 	hadLocalModelPool      bool
+	// connectionDirty records that the user edited Endpoint or API Key after the
+	// last successful detection. A dirty connection must be re-tested before
+	// saving (except for OAuth providers, which never detect over HTTP).
+	connectionDirty bool
+	// autoConfigured is set after a successful detection filled the slots. It is
+	// cleared when the user edits a field so a later re-render cannot silently
+	// overwrite their choice.
+	autoConfigured bool
 
 	page   int
 	cursor int
 	width  int
 	height int
+	// scrollOffset is the number of rendered lines scrolled off the top of the
+	// single page when the content exceeds the terminal height. The cursor row is
+	// kept visible: scrolling happens in Update, never in View (which is pure).
+	scrollOffset int
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -133,7 +166,6 @@ type AdvancedConfigModel struct {
 
 	// Page 4
 	IsActiveChosen bool
-	manualConfig   bool
 	saveConfirmed  bool
 }
 
@@ -168,6 +200,179 @@ type modelFetchDoneMsg struct {
 	err                 error
 }
 
+// pageDetected reports whether a successful detection populated the config.
+// OAuth providers skip HTTP detection entirely, so they are always "detected".
+func (m *AdvancedConfigModel) pageDetected() bool {
+	if m.usesOAuth() {
+		return true
+	}
+	return m.modelPoolFromDiscovery
+}
+
+// currentRow returns the configRowKind the page cursor sits on. It is only
+// meaningful when page == 4 (the single configuration page).
+func (m *AdvancedConfigModel) currentRow() configRowKind {
+	rows := m.visibleRows()
+	if m.cursor < 0 || m.cursor >= len(rows) {
+		return rowCancel
+	}
+	return rows[m.cursor].kind
+}
+
+// visibleRows lists the focusable rows of the single configuration page in
+// render order. Before a successful detection only the Connection section is
+// shown; after it the full mapping/runtime rows appear.
+func (m *AdvancedConfigModel) visibleRows() []configRow {
+	rows := []configRow{
+		{kind: rowEndpoint},
+		{kind: rowAPIKey},
+		{kind: rowTest},
+	}
+	if !m.pageDetected() {
+		return rows
+	}
+	rows = append(rows, configRow{kind: rowProtocol, editable: true})
+	rows = append(rows, configRow{kind: rowFast})
+	rows = append(rows,
+		configRow{kind: rowOpus},
+		configRow{kind: rowSonnet},
+		configRow{kind: rowHaiku},
+		configRow{kind: rowCustom},
+		configRow{kind: rowSubagent},
+		configRow{kind: rowContext},
+	)
+	rows = append(rows, configRow{kind: rowMaxOutput, editable: true})
+	rows = append(rows,
+		configRow{kind: rowTools, editable: true},
+		configRow{kind: rowToolSearch, editable: true},
+		configRow{kind: rowActive, editable: true},
+		configRow{kind: rowSave},
+		configRow{kind: rowCancel},
+	)
+	return rows
+}
+
+// mainRowIndex maps a kind onto its index in visibleRows, or -1 when the row is
+// not currently shown.
+func (m *AdvancedConfigModel) mainRowIndex(kind configRowKind) int {
+	for i, r := range m.visibleRows() {
+		if r.kind == kind {
+			return i
+		}
+	}
+	return -1
+}
+
+// keepCursorVisible clamps scrollOffset so the cursor row stays inside the
+// visible region. It runs after cursor movement in Update; View never mutates
+// scroll state.
+func (m *AdvancedConfigModel) keepCursorVisible() {
+	// Scroll is only meaningful once the terminal height is known and the page
+	// content can exceed it. The view reports its overflow through the same
+	// height; without a height there is nothing to keep visible.
+	if m.height <= 0 {
+		return
+	}
+	// Estimate the row height of the cursor: connection rows take two lines
+	// (label + value); everything else one. The scroll budget is the terminal
+	// height minus the fixed header/panel chrome.
+	visibleHeight := m.height - 8
+	if visibleHeight < 6 {
+		visibleHeight = 6
+	}
+	rows := m.visibleRows()
+	if len(rows) == 0 {
+		return
+	}
+	cursorLine := 0
+	for i := 0; i < m.cursor && i < len(rows); i++ {
+		cursorLine += rowLineHeight(rows[i].kind)
+	}
+	rowH := rowLineHeight(rows[m.cursor].kind)
+
+	if cursorLine < m.scrollOffset {
+		m.scrollOffset = cursorLine
+	}
+	if cursorLine+rowH > m.scrollOffset+visibleHeight {
+		m.scrollOffset = cursorLine + rowH - visibleHeight
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+}
+
+// rowLineHeight reports how many rendered lines a row occupies. Connection rows
+// span two lines (label + value); every other row is a single line.
+func rowLineHeight(kind configRowKind) int {
+	if kind == rowEndpoint || kind == rowAPIKey {
+		return 2
+	}
+	return 1
+}
+
+// slotForRow maps a model row kind back to its advancedSlotRefs index.
+func slotForRow(kind configRowKind) int {
+	switch kind {
+	case rowOpus:
+		return 0
+	case rowSonnet:
+		return 1
+	case rowHaiku:
+		return 2
+	case rowCustom:
+		return 3
+	case rowSubagent:
+		return 4
+	}
+	return 0
+}
+
+// slotModelForRow returns the model currently bound to a model row kind.
+func (m *AdvancedConfigModel) slotModelForRow(kind configRowKind) string {
+	switch kind {
+	case rowOpus:
+		return m.p.OpusModel
+	case rowSonnet:
+		return m.p.SonnetModel
+	case rowHaiku:
+		return m.p.HaikuModel
+	case rowCustom:
+		return m.p.CustomModelID
+	case rowSubagent:
+		return m.p.SubagentModel
+	}
+	return ""
+}
+
+// canSave reports whether the current draft may be persisted. A new provider, or
+// one whose Connection was edited since the last detection, must have a
+// successful detection first. OAuth providers never detect over HTTP.
+func (m *AdvancedConfigModel) canSave() bool {
+	if m.usesOAuth() {
+		return true
+	}
+	if m.connectionDirty {
+		return false
+	}
+	if m.modelPoolFromDiscovery {
+		return true
+	}
+	// No detection yet: allow saving an existing provider whose connection inputs
+	// still match the persisted ones (e.g. editing only a model mapping).
+	return m.autoConfigured && m.connectionUnchanged()
+}
+
+// connectionUnchanged reports whether the endpoint/api-key inputs still match
+// the provider that was last detected (or the persisted one).
+func (m *AdvancedConfigModel) connectionUnchanged() bool {
+	if m.p == nil {
+		return false
+	}
+	endpointMatch := strings.TrimSpace(m.urlInput.Value()) == strings.TrimSpace(m.p.Endpoint)
+	keyMatch := m.keyInput.Value() == m.p.APIKey
+	return endpointMatch && keyMatch
+}
+
 func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	ui := textinput.New()
 	ui.Prompt = ""
@@ -197,13 +402,14 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		compactState:         compactState,
 		probeEndpoint:        p.Endpoint,
 		probeAPIKey:          p.APIKey,
-		page:                 0,
+		page:                 4,
 		cursor:               0,
 		urlInput:             ui,
 		keyInput:             ki,
 		filterInput:          fi,
 		IsActiveChosen:       true,
 		clearStaleSlots:      true,
+		connectionDirty:      false,
 		modelAvailability:    make(map[string]modelAvailability),
 	}
 
@@ -225,7 +431,8 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 func (m *AdvancedConfigModel) configureOAuthRuntime(endpoint, apiKey string) {
 	m.probeEndpoint = endpoint
 	m.probeAPIKey = apiKey
-	m.cursor = m.page0NextCursor()
+	m.connectionDirty = false
+	m.cursor = m.mainRowIndex(rowTest)
 	m.urlInput.Blur()
 	m.keyInput.Blur()
 }
@@ -234,32 +441,15 @@ func (m *AdvancedConfigModel) usesOAuth() bool {
 	return m.p != nil && strings.TrimSpace(m.p.OAuthProvider) != ""
 }
 
-func (m *AdvancedConfigModel) page0NextCursor() int {
-	if m.usesOAuth() {
-		return 0
-	}
-	return 2
-}
-
-func (m *AdvancedConfigModel) page0BackCursor() int {
-	if m.usesOAuth() {
-		return 1
-	}
-	return 3
-}
-
-func (m *AdvancedConfigModel) page0MaxCursor() int {
-	return m.page0BackCursor()
-}
-
 // textInputHasKeyboard 表示当前按键会被某个文本输入框消费。条件与本文件末尾
-// 的输入路由保持一致：page 0 的光标停在 Endpoint/API Key 上，或 page 1 的
-// 筛选框聚焦。OAuth provider 在 page 0 没有可编辑字段，因此不算。
+// 的输入路由保持一致：主页面光标停在 Endpoint/API Key 上，或模型筛选框聚焦。
+// OAuth provider 没有可编辑的端点字段，因此不算。
 func (m *AdvancedConfigModel) textInputHasKeyboard() bool {
-	if m.page == 0 && !m.usesOAuth() {
-		return m.cursor == 0 || m.cursor == 1
+	if m.usesOAuth() {
+		return m.filterInput.Focused()
 	}
-	return m.page == 1 && m.filterInput.Focused()
+	row := m.currentRow()
+	return row == rowEndpoint || row == rowAPIKey || m.filterInput.Focused()
 }
 
 // vimNavAliases 是导航键的单字母别名。它们同时是合法的输入字符，因此在文本
@@ -277,13 +467,14 @@ func NewAdvancedConfigModelAtPage1(p *provider.Provider, modelPool []string) *Ad
 // values.
 func NewAdvancedConfigModelAtPage1WithMetadata(p *provider.Provider, modelPool []string, metadata map[string]protocol.ModelInfo) *AdvancedConfigModel {
 	m := NewAdvancedConfigModel(p)
-	m.page = 1
-	m.cursor = slotNextCursor
+	m.page = 4
 	m.modelPool = modelPool
+	m.modelPoolFromDiscovery = true
 	m.modelDisplayMetadata = copyModelInfoIndex(metadata)
 	m.modelContextWindows = contextWindowsFromModelInfos(m.modelDisplayMetadata)
 	m.urlInput.Blur()
 	m.keyInput.Blur()
+	m.cursor = m.mainRowIndex(rowOpus)
 	return m
 }
 
@@ -413,6 +604,9 @@ func (m *AdvancedConfigModel) availabilitySmokeTestModel() string {
 	}
 }
 
+// materializeSubagentModel fills the Subagent slot with the runtime default when
+// it is unset, so a [1m] marker can be attached. Returns false when no default
+// exists (nothing to materialize).
 func (m *AdvancedConfigModel) materializeSubagentModel() bool {
 	if m.p == nil {
 		return false
@@ -517,6 +711,7 @@ func (m *AdvancedConfigModel) availabilityFor(model string) modelAvailability {
 	return modelAvailabilityUnknown
 }
 
+// availabilityLabel renders the per-model availability badge for the picker.
 func (m *AdvancedConfigModel) availabilityLabel(model string) string {
 	switch m.availabilityFor(model) {
 	case modelAvailabilityAvailable:
@@ -560,38 +755,6 @@ func (m *AdvancedConfigModel) updateInputWidths() {
 
 // doAutoConfig auto-fills the four Claude model slots, leaves subagents on
 // automatic model selection, and clears explicit effort and 1M settings.
-func (m *AdvancedConfigModel) doAutoConfig() {
-	slots := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID}
-	for i, ptr := range slots {
-		if i < len(m.modelPool) {
-			*ptr = m.modelPool[i]
-		} else {
-			*ptr = ""
-		}
-	}
-	m.p.SubagentModel = ""
-	// Auto mode only rewrites [1m] slot markers. Compact is independent: keep the
-	// user's existing provider-wide compact preset unless every mapped model is
-	// a confirmed 1M allowlist entry.
-	m.oneMSlots = make(map[string]bool)
-	m.compactPreset = m.compactState.preset
-	if allConfiguredModelsRecommendOneM(*m.p) {
-		for _, slot := range advancedSlotRefs(m.p) {
-			if strings.TrimSpace(*slot.ptr) != "" {
-				m.oneMSlots[slot.key] = true
-			}
-		}
-		// Enable Extended Context only. Compact budget stays whatever the user
-		// already had (or Claude default for fresh configs).
-	} else if m.compactState.legacy && len(m.oneMSlots) == 0 {
-		m.compactPreset = compactPresetDefault
-		m.compactState = compactConfigState{preset: compactPresetDefault}
-	}
-	// Default: do not override Claude's own effort setting.
-	m.p.EffortLevel = ""
-	setDebugf("doAutoConfig model_pool_count=%d slots=%s effort=%q one_m=%s", len(m.modelPool), slotDebugSummary(*m.p), m.p.EffortLevel, reviewOneMSummary(m.oneMSlots))
-}
-
 type advancedSlotRef struct {
 	key string
 	ptr *string
@@ -645,13 +808,6 @@ func (m *AdvancedConfigModel) staleSlotCount() int {
 
 func (m *AdvancedConfigModel) showStaleSlotToggle() bool {
 	return m.staleSlotCount() > 0
-}
-
-func (m *AdvancedConfigModel) page5MaxCursor() int {
-	if m.showStaleSlotToggle() {
-		return 2
-	}
-	return 1
 }
 
 func (m *AdvancedConfigModel) applyStaleSlotPolicy() {
@@ -776,13 +932,6 @@ func (m *AdvancedConfigModel) advertisedWindow(modelVal string) (int, bool) {
 }
 
 // slotModelForIndex returns the model configured in the page-2 row order.
-func (m *AdvancedConfigModel) slotModelForIndex(idx int) string {
-	if m.p == nil || idx < 0 || idx >= slotMappingCount {
-		return ""
-	}
-	return []string{m.p.OpusModel, m.p.SonnetModel, m.p.HaikuModel, m.p.CustomModelID, m.p.SubagentModel}[idx]
-}
-
 func (m *AdvancedConfigModel) canEditFastMode() bool {
 	return m.p != nil && supportsFastMode(m.p.OAuthProvider)
 }
@@ -801,71 +950,10 @@ func (m *AdvancedConfigModel) page4FastOffset() int {
 	return 0
 }
 
-func (m *AdvancedConfigModel) page4Base() int {
-	return m.page4ProtocolOffset() + m.page4FastOffset()
-}
-
-func (m *AdvancedConfigModel) page4ProtocolCursor() int {
-	if m.canToggleOpenAIProtocol() {
-		return 0
-	}
-	return -1
-}
-
-func (m *AdvancedConfigModel) page4FastCursor() int {
-	if !m.canEditFastMode() {
-		return -1
-	}
-	return m.page4ProtocolOffset()
-}
-
 // Context sizing has no row here: it is expressed per slot by [1m] on page 2,
 // and ccl writes no session-wide context value that could be edited.
-func (m *AdvancedConfigModel) page4MaxOutCursor() int { return m.page4Base() + 0 }
-func (m *AdvancedConfigModel) page4ToolsCursor() int  { return m.page4Base() + 1 }
-func (m *AdvancedConfigModel) page4SearchCursor() int { return m.page4Base() + 2 }
-func (m *AdvancedConfigModel) page4ActiveCursor() int { return m.page4Base() + 3 }
-func (m *AdvancedConfigModel) page4SaveCursor() int   { return m.page4Base() + 4 }
-func (m *AdvancedConfigModel) page4BackCursor() int   { return m.page4Base() + 5 }
-
-func (m *AdvancedConfigModel) page4MaxCursor() int {
-	return m.page4BackCursor()
-}
-
-func (m *AdvancedConfigModel) page4InitialCursor() int {
-	// Prefer first editable runtime field for discoverability.
-	if m.maxOutputUpstreamManaged() {
-		return m.page4ToolsCursor()
-	}
-	return m.page4MaxOutCursor()
-}
-
 // skipDisabledPage4Cursor moves past rows that are not interactive.
 // direction: +1 when moving down/tab, -1 when moving up/shift-tab.
-func (m *AdvancedConfigModel) skipDisabledPage4Cursor(direction int) {
-	if m.page != 4 || direction == 0 {
-		return
-	}
-	if !m.maxOutputUpstreamManaged() {
-		return
-	}
-	if m.cursor != m.page4MaxOutCursor() {
-		return
-	}
-	if direction > 0 {
-		m.cursor = m.page4ToolsCursor()
-		return
-	}
-	// Move to the row above Max Output when there is one (Protocol/Fast).
-	if above := m.page4Base() - 1; above >= 0 {
-		m.cursor = above
-		return
-	}
-	// Max Output is the first row: wrap to the end instead of bouncing back to
-	// Tools, which would make Back unreachable by keyboard.
-	m.cursor = m.page4MaxCursor()
-}
-
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
 var (
 	reviewMaxOutOptions  = []string{"", "16000", "32000", "64000", "128000"}
@@ -916,22 +1004,6 @@ func cycleStringOption(current string, options []string, delta int) string {
 		idx += n
 	}
 	return options[idx]
-}
-
-func cycleCompactOption(current compactPreset, delta int) compactPreset {
-	idx := 0
-	for i, opt := range reviewCompactOptions {
-		if opt == current {
-			idx = i
-			break
-		}
-	}
-	n := len(reviewCompactOptions)
-	idx = (idx + delta) % n
-	if idx < 0 {
-		idx += n
-	}
-	return reviewCompactOptions[idx]
 }
 
 func (m *AdvancedConfigModel) reviewMaxOutValue() string {
@@ -1017,27 +1089,6 @@ func formatSearchLabel(value string) string {
 	}
 }
 
-func formatCompactLabel(preset compactPreset) string {
-	if preset == compactPresetPreserve {
-		return "Custom (manual env)"
-	}
-	if preset == compactPresetDefault {
-		return "Claude default · 1M per slot"
-	}
-	switch preset {
-	case compactPresetDefault:
-		return formatEditableValue("Claude default", false)
-	case compactPreset300K:
-		return formatEditableValue("Switch-safe 300K / 200K", false)
-	case compactPreset500K:
-		return formatEditableValue("Balanced 500K / 400K", false)
-	case compactPreset1M:
-		return formatEditableValue("Maximum 1M / 900K", false)
-	default:
-		return formatEditableValue("Custom", false)
-	}
-}
-
 func formatFastLabel(on bool) string {
 	if on {
 		return formatEditableValue("On", false)
@@ -1046,17 +1097,19 @@ func formatFastLabel(on bool) string {
 }
 
 func (m *AdvancedConfigModel) adjustReviewField(delta int) {
-	switch m.cursor {
-	case m.page4ProtocolCursor():
+	switch m.currentRow() {
+	case rowContext:
+		m.cycleCompactPreset(delta)
+	case rowProtocol:
 		m.toggleOpenAIProtocol()
-	case m.page4FastCursor():
+	case rowFast:
 		if !m.canEditFastMode() {
 			return
 		}
 		// Toggle like Protocol; left/right/enter all flip the pin.
 		m.p.FastMode = !m.p.FastMode
-		setDebugf("page4 fast toggled fast_mode=%t", m.p.FastMode)
-	case m.page4MaxOutCursor():
+		setDebugf("fast toggled fast_mode=%t", m.p.FastMode)
+	case rowMaxOutput:
 		if m.maxOutputUpstreamManaged() {
 			return
 		}
@@ -1074,7 +1127,7 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		}
 		next := cycleStringOption(cur, reviewMaxOutOptions, delta)
 		setProviderEnvValue(m.p, claude.MaxOutputTokensEnv, next)
-	case m.page4ToolsCursor():
+	case rowTools:
 		cur := m.reviewToolsValue()
 		known := false
 		for _, opt := range reviewToolsOptions {
@@ -1088,7 +1141,7 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		}
 		next := cycleStringOption(cur, reviewToolsOptions, delta)
 		setProviderEnvValue(m.p, claude.ToolUseConcurrencyEnv, next)
-	case m.page4SearchCursor():
+	case rowToolSearch:
 		cur := m.reviewSearchValue()
 		known := false
 		for _, opt := range reviewSearchOptions {
@@ -1102,7 +1155,7 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		}
 		next := cycleStringOption(cur, reviewSearchOptions, delta)
 		setProviderEnvValue(m.p, claude.ToolSearchEnv, next)
-	case m.page4ActiveCursor():
+	case rowActive:
 		if delta < 0 {
 			m.IsActiveChosen = true
 		} else {
@@ -1111,75 +1164,43 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 	}
 }
 
-func (m *AdvancedConfigModel) goBack() {
-	oldPage := m.page
-	oldCursor := m.cursor
-	if m.page == 1 {
-		// Go back from slot mapping to config mode choice
-		m.page = 5
-		m.cursor = 1 // pre-select Manual Config (since user was in manual mode)
-		m.manualConfig = true
-	} else if m.page == 5 {
-		// Go back from choice to credentials
-		m.page = 0
-		m.cursor = m.page0NextCursor()
-	} else if m.page == 4 {
-		// Skip removed Effort page; return to Context & Compact.
-		m.page = 2
-		m.cursor = oneMNextCursor
-	} else if m.page > 0 {
-		m.page--
-		if m.page == 0 {
-			m.cursor = m.page0NextCursor()
-		}
-		if m.page == 1 {
-			m.cursor = slotNextCursor
-		}
-		if m.page == 2 {
-			m.cursor = oneMNextCursor
-		}
-	}
-	setDebugf("goBack old_page=%d old_cursor=%d new_page=%d new_cursor=%d", oldPage, oldCursor, m.page, m.cursor)
-}
-
 // workflowStep keeps the visible flow independent from the internal page IDs.
 // Page 5 is the config-mode choice shown immediately after credentials.
 // Reasoning Effort (old page 3) is no longer part of ccl set — Claude Code
 // manages effort natively via /effort, --effort, and settings.
-func (m *AdvancedConfigModel) workflowStep() int {
-	switch m.page {
-	case 0:
-		return 1
-	case 5:
-		return 2
-	case 1:
-		return 3
-	case 2:
-		return 4
-	case 4:
-		return 5
-	default:
-		return 1
-	}
-}
-
 // selectedCompactRadioIndex maps the current compact state onto the radio list.
 // Custom/legacy/unknown states land on the Custom radio.
-func (m *AdvancedConfigModel) selectedCompactRadioIndex() int {
-	preset := m.compactPreset
-	if m.compactState.custom || m.compactState.legacy {
-		preset = compactPresetPreserve
-	}
-	for i, p := range compactRadioOrder {
-		if p == preset {
-			return i
-		}
-	}
-	return len(compactRadioOrder) - 1
-}
-
 // selectCompactPreset sets the provider-wide compact budget from a radio index.
 // Per-slot [1m] markers are independent and never cleared here.
+// cycleCompactPreset moves the provider-wide compact budget one step through the
+// radio order (Claude default ↔ Custom). Used by the Context row on the single
+// page; per-slot [1m] markers are independent and never cleared here.
+func (m *AdvancedConfigModel) cycleCompactPreset(delta int) {
+	if delta == 0 {
+		return
+	}
+	current := m.compactPreset
+	if m.compactState.custom || m.compactState.legacy {
+		current = compactPresetPreserve
+	}
+	idx := -1
+	for i, p := range compactRadioOrder {
+		if p == current {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	next := (idx + delta) % len(compactRadioOrder)
+	if next < 0 {
+		next += len(compactRadioOrder)
+	}
+	m.selectCompactPreset(next)
+	setDebugf("cycle compact preset delta=%d preset=%v summary=%s", delta, m.compactPreset, m.compactSummary())
+}
+
 func (m *AdvancedConfigModel) selectCompactPreset(radioIdx int) {
 	if radioIdx < 0 || radioIdx >= len(compactRadioOrder) {
 		return
@@ -1202,13 +1223,6 @@ func (m *AdvancedConfigModel) selectCompactPreset(radioIdx int) {
 			m.p.Env = nil
 		}
 	}
-}
-
-func compactRadioLabel(preset compactPreset) string {
-	if preset == compactPresetPreserve {
-		return "Custom — keep the context env set by hand"
-	}
-	return "Claude Code default — 1M per slot via Extended Context"
 }
 
 // syncOneMForSameModels prompts-free: when a slot toggles [1m], apply the same
@@ -1314,43 +1328,74 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 
 	if derr != nil {
 		m.detectionError = derr
-		m.page = 0
-		m.cursor = m.page0NextCursor()
+		m.cursor = m.mainRowIndex(rowTest)
 		setDebugf("applyModelDetectionResult detection failed detection_error=%v model_count=%d", m.detectionError, len(m.modelPool))
 		return nil
 	}
 
 	// 本次 set 必须以接口返回的模型为准；不再用旧的本地模型池兜底。
 	if len(m.modelPool) == 0 {
-		if derr != nil {
-			m.detectionError = derr
-		} else {
-			m.detectionError = fmt.Errorf("%s", locale.T(
-				"未从接口获取到任何可用模型，未使用本地旧模型池",
-				"no models were fetched from the provider API; local cached models were not used",
-			))
-		}
-		m.page = 0
-		m.cursor = m.page0NextCursor()
+		m.detectionError = fmt.Errorf("%s", locale.T(
+			"未从接口获取到任何可用模型，未使用本地旧模型池",
+			"no models were fetched from the provider API; local cached models were not used",
+		))
+		m.cursor = m.mainRowIndex(rowTest)
 		setDebugf("applyModelDetectionResult no models detection_error=%v", m.detectionError)
 		return nil
 	}
 
 	sort.Strings(m.modelPool)
-	m.page = 5
-	m.cursor = 0
+	// Single page: detection success auto-configures the slots and stays on the
+	// page. Connection is now the detected endpoint, so it is no longer dirty.
+	m.connectionDirty = false
+	m.applyRecommendation()
+	m.cursor = m.mainRowIndex(rowOpus)
 	setDebugf(
-		"applyModelDetectionResult success provider_type=%q endpoint=%q anthropic_auth=%q model_count=%d stale_slot_count=%d clear_stale_slots=%t page=%d cursor=%d",
+		"applyModelDetectionResult success provider_type=%q endpoint=%q anthropic_auth=%q model_count=%d stale_slot_count=%d clear_stale_slots=%t cursor=%d",
 		m.p.Type,
 		m.p.Endpoint,
 		m.p.AnthropicAuth,
 		len(m.modelPool),
 		m.staleSlotCount(),
 		m.clearStaleSlots,
-		m.page,
 		m.cursor,
 	)
 	return nil
+}
+
+// applyRecommendation fills empty slots from the auto recommendation engine and
+// records that the config was auto-configured. User-edited fields (identified by
+// not matching the recommendation) are left alone.
+func (m *AdvancedConfigModel) applyRecommendation() {
+	rec := RecommendModels(*m.p, m.modelPool, m.modelDisplayMetadata)
+	// Only fill slots the user has not already pinned in this session. Detecting
+	// again must not overwrite a manual choice made after the first detection.
+	if strings.TrimSpace(m.p.OpusModel) == "" {
+		m.p.OpusModel = rec.Opus
+	}
+	if strings.TrimSpace(m.p.SonnetModel) == "" {
+		m.p.SonnetModel = rec.Sonnet
+	}
+	if strings.TrimSpace(m.p.HaikuModel) == "" {
+		m.p.HaikuModel = rec.Haiku
+	}
+	if strings.TrimSpace(m.p.CustomModelID) == "" {
+		m.p.CustomModelID = rec.Custom
+	}
+	if strings.TrimSpace(m.p.SubagentModel) == "" {
+		m.p.SubagentModel = rec.Subagent
+	}
+	for key, on := range rec.OneMSlots {
+		if m.oneMSlots[key] == on {
+			continue
+		}
+		m.oneMSlots[key] = on
+	}
+	m.autoConfigured = true
+	m.detectionError = nil
+	m.connectionDirty = false
+	m.hadLocalModelPool = countCSV(m.p.Model) > 0
+	setDebugf("applyRecommendation slots=%s one_m=%s", slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots))
 }
 
 func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1364,21 +1409,20 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case focusCredentialFieldMsg:
-		if m.page != 0 || m.usesOAuth() {
+		if m.usesOAuth() {
 			return m, nil
 		}
-		m.cursor = msg.cursor
-		var focusCmd tea.Cmd
 		switch msg.cursor {
 		case 0:
+			m.cursor = m.mainRowIndex(rowEndpoint)
 			m.keyInput.Blur()
-			focusCmd = m.urlInput.Focus()
+			return m, m.urlInput.Focus()
 		case 1:
+			m.cursor = m.mainRowIndex(rowAPIKey)
 			m.urlInput.Blur()
-			focusCmd = m.keyInput.Focus()
+			return m, m.keyInput.Focus()
 		}
-		setDebugf("page0 focus by click cursor=%d", m.cursor)
-		return m, focusCmd
+		return m, nil
 
 	case modelFetchTickMsg:
 		if !m.detecting {
@@ -1473,388 +1517,255 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.modelTesting = false
 				m.modelTestCancel = nil
 				m.modelTestCanceled = true
-				m.cursor = slotTestCursor
 				setDebugf("model availability test canceled test_id=%d", m.modelTestID)
 			}
 			return m, nil
 		}
 		switch key {
 		case "esc":
-			if m.page == 1 && m.filterInput.Focused() {
+			// Single page: esc quits (unless the model picker overlay is open).
+			if m.filterInput.Focused() {
 				m.filterInput.Blur()
-				setDebugf("esc closed slot picker active_slot=%d page=%d cursor=%d", m.activeSlot, m.page, m.cursor)
-			} else {
-				if m.page == 0 {
-					setDebugf("esc quit from credentials page cursor=%d endpoint_set=%t api_key_len=%d", m.cursor, strings.TrimSpace(m.urlInput.Value()) != "", len(m.keyInput.Value()))
-					return m, tea.Quit
-				}
-				setDebugf("esc goBack from page=%d cursor=%d", m.page, m.cursor)
-				m.goBack()
+				setDebugf("esc closed slot picker active_slot=%d cursor=%d", m.activeSlot, m.cursor)
+				return m, nil
 			}
-			return m, nil
+			setDebugf("esc quit cursor=%d endpoint_set=%t api_key_len=%d", m.cursor, strings.TrimSpace(m.urlInput.Value()) != "", len(m.keyInput.Value()))
+			return m, tea.Quit
 
 		case "up", "k":
-			if m.page == 1 && m.filterInput.Focused() {
+			if m.filterInput.Focused() {
 				if m.slotListCursor > 0 {
 					m.slotListCursor--
-					// Scroll window up if cursor goes above visible area
 					if m.slotListCursor < m.filterWindowStart {
 						m.filterWindowStart = m.slotListCursor
 					}
 				}
 				return m, nil
-			} else {
-				if m.page == 0 && !m.usesOAuth() && (m.cursor == 2 || m.cursor == 3) {
-					m.cursor = 1
-				} else if m.page == 1 && (m.cursor == slotNextCursor || m.cursor == slotBackCursor) {
-					m.cursor = slotTestCursor
-				} else if m.page == 2 && (m.cursor == oneMNextCursor || m.cursor == oneMBackCursor) {
-					m.cursor = oneMCompactStart + compactRadioCount - 1
-				} else if m.page == 5 && m.cursor > 0 {
-					m.cursor--
-				} else if m.page == 4 && m.cursor > 0 {
-					m.cursor--
-					m.skipDisabledPage4Cursor(-1)
-				} else if m.cursor > 0 {
-					m.cursor--
-				}
 			}
+			rows := m.visibleRows()
+			if len(rows) == 0 {
+				return m, nil
+			}
+			if m.cursor > 0 {
+				m.cursor--
+			} else {
+				m.cursor = len(rows) - 1
+			}
+			m.keepCursorVisible()
 
 		case "down", "j":
-			if m.page == 1 && m.filterInput.Focused() {
+			if m.filterInput.Focused() {
 				if m.slotListCursor < len(m.filteredPool)-1 {
 					m.slotListCursor++
-					// Scroll window down if cursor goes below visible area
 					if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
 						m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
 					}
 				}
 				return m, nil
 			}
-
-			if m.page == 0 {
-				if m.usesOAuth() {
-					if m.cursor < m.page0MaxCursor() {
-						m.cursor++
-					}
-				} else if m.cursor < 2 {
-					m.cursor++
-				}
-			} else if m.page == 1 {
-				if m.cursor < slotNextCursor {
-					m.cursor++
-				}
-			} else if m.page == 2 {
-				if m.cursor < oneMNextCursor {
-					m.cursor++
-				}
-			} else if m.page == 4 {
-				if m.cursor < m.page4MaxCursor() {
-					m.cursor++
-					m.skipDisabledPage4Cursor(+1)
-				}
-			} else if m.page == 5 {
-				if m.cursor < m.page5MaxCursor() {
-					m.cursor++
-				}
+			rows := m.visibleRows()
+			if len(rows) == 0 {
+				return m, nil
 			}
+			if m.cursor < len(rows)-1 {
+				m.cursor++
+			} else {
+				m.cursor = 0
+			}
+			m.keepCursorVisible()
 
 		case "left", "h":
-			if m.page == 0 && m.cursor == m.page0BackCursor() {
-				m.cursor = m.page0NextCursor()
+			if m.filterInput.Focused() {
+				return m, nil
 			}
-			if m.page == 1 && m.cursor == slotBackCursor {
-				m.cursor = slotNextCursor
-			}
-			if m.page == 2 && m.cursor == oneMBackCursor {
-				m.cursor = oneMNextCursor
-			}
-			if m.page == 4 {
+			switch m.currentRow() {
+			case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
 				m.adjustReviewField(-1)
-			}
-			if m.page == 5 && m.cursor == 2 && m.showStaleSlotToggle() {
-				m.clearStaleSlots = true
-				setDebugf("page5 stale slot cleanup toggled clear_stale_slots=%t stale_slot_count=%d", m.clearStaleSlots, m.staleSlotCount())
 			}
 
 		case "right", "l":
-			if m.page == 0 && m.cursor == m.page0NextCursor() {
-				m.cursor = m.page0BackCursor()
+			if m.filterInput.Focused() {
+				return m, nil
 			}
-			if m.page == 1 && m.cursor == slotNextCursor {
-				m.cursor = slotBackCursor
-			}
-			if m.page == 2 && m.cursor == oneMNextCursor {
-				m.cursor = oneMBackCursor
-			}
-			if m.page == 4 {
+			switch m.currentRow() {
+			case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
 				m.adjustReviewField(1)
 			}
-			if m.page == 5 && m.cursor == 2 && m.showStaleSlotToggle() {
-				m.clearStaleSlots = false
-				setDebugf("page5 stale slot cleanup toggled clear_stale_slots=%t stale_slot_count=%d", m.clearStaleSlots, m.staleSlotCount())
+
+		case "space":
+			// Toggle the 1M context marker on a model row. Turning it on is refused
+			// when the backend window rules 1M out; turning an existing marker off
+			// stays possible.
+			if m.filterInput.Focused() {
+				return m, nil
 			}
+			row := m.currentRow()
+			if row != rowOpus && row != rowSonnet && row != rowHaiku && row != rowCustom && row != rowSubagent {
+				return m, nil
+			}
+			slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[slotForRow(row)]
+			model := m.slotModelForRow(row)
+			if !m.oneMSlots[slot] && m.oneMSlotBlocked(model) {
+				setDebugf("1M blocked slot=%s model=%q", slot, model)
+				return m, nil
+			}
+			if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
+				return m, nil
+			}
+			m.oneMSlots[slot] = !m.oneMSlots[slot]
+			synced := m.syncOneMForSameModels(slot, m.oneMSlots[slot])
+			setDebugf("toggle 1M slot=%s enabled=%t synced=%d summary=%s", slot, m.oneMSlots[slot], synced, reviewOneMSummary(m.oneMSlots))
 
 		case "tab":
-			// Tab → 下一项（同 ↓）
-			if m.page == 1 && m.filterInput.Focused() {
+			if m.filterInput.Focused() {
 				if m.slotListCursor < len(m.filteredPool)-1 {
 					m.slotListCursor++
-					// Scroll window down if cursor goes below visible area
 					if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
 						m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
 					}
 				}
 				return m, nil
 			}
-			m.cursor++
-			if m.page == 0 && m.cursor > m.page0MaxCursor() {
-				m.cursor = 0
-			} else if m.page == 1 && m.cursor > slotBackCursor {
-				m.cursor = 0
-			} else if m.page == 2 && m.cursor > oneMBackCursor {
-				m.cursor = 0
-			} else if m.page == 4 && m.cursor > m.page4MaxCursor() {
-				m.cursor = 0
-			} else if m.page == 5 && m.cursor > m.page5MaxCursor() {
-				m.cursor = 0
+			rows := m.visibleRows()
+			if len(rows) == 0 {
+				return m, nil
 			}
-			if m.page == 4 {
-				m.skipDisabledPage4Cursor(+1)
-			}
-
-		// case "space":
-		// 	// 空格键：Page 2 切换槽位的 1M 上下文开关
-		// 	if m.page == 2 && m.cursor < 4 {
-		// 		slot := []string{"opus", "sonnet", "haiku", "custom"}[m.cursor]
-		// 		m.oneMSlots[slot] = !m.oneMSlots[slot]
-		// 	}
+			m.cursor = (m.cursor + 1) % len(rows)
+			m.keepCursorVisible()
 
 		case "shift+tab":
-			// Shift+Tab → 上一项（同 ↑）
+			if m.filterInput.Focused() {
+				return m, nil
+			}
+			rows := m.visibleRows()
+			if len(rows) == 0 {
+				return m, nil
+			}
 			m.cursor--
 			if m.cursor < 0 {
-				if m.page == 0 {
-					m.cursor = m.page0MaxCursor()
-				} else if m.page == 1 {
-					m.cursor = slotBackCursor
-				} else if m.page == 2 {
-					m.cursor = oneMBackCursor
-				} else if m.page == 4 {
-					m.cursor = m.page4MaxCursor()
-				} else if m.page == 5 {
-					m.cursor = m.page5MaxCursor()
-				}
-			}
-			if m.page == 4 {
-				m.skipDisabledPage4Cursor(-1)
+				m.cursor = len(rows) - 1
 			}
 
 		case "enter":
-			// 如果点击了底部的“上一步”按钮，直接返回
-			if (m.page == 0 && m.cursor == m.page0BackCursor()) || (m.page == 1 && m.cursor == slotBackCursor) || (m.page == 2 && m.cursor == oneMBackCursor) {
-				m.goBack()
+			if m.filterInput.Focused() {
+				// Model picker selection.
+				if len(m.filteredPool) == 0 {
+					return m, nil
+				}
+				if m.slotListCursor < 0 || m.slotListCursor >= len(m.filteredPool) {
+					m.slotListCursor = 0
+				}
+				selectedModel := m.filteredPool[m.slotListCursor]
+				if selectedModel == locale.T("(设置为未设置/清空)", "(clear/unset)") || selectedModel == locale.T("(无匹配模型)", "(no match)") {
+					selectedModel = ""
+				}
+				ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID, &m.p.SubagentModel}[m.activeSlot]
+				*ptr = selectedModel
+				if m.activeSlot == 4 && m.p.Env != nil {
+					delete(m.p.Env, claude.SubagentModelEnv)
+				}
+				m.filterInput.Blur()
+				m.autoConfigured = false
+				setDebugf("slot selected active_slot=%d model=%q slots=%s", m.activeSlot, selectedModel, slotDebugSummary(*m.p))
 				return m, nil
 			}
 
-			switch m.page {
-			case 0:
-				if m.usesOAuth() && m.cursor == m.page0NextCursor() {
-					m.detectionError = nil
-					m.detecting = true
-					m.detectProgress = 5
-					m.detectFrame = 0
-					setDebugf("page0 start OAuth detection provider=%q endpoint=%q", m.p.OAuthProvider, m.probeEndpoint)
-					return m, tea.Batch(modelFetchCmd(m.probeEndpoint, m.probeAPIKey), modelFetchTickCmd())
-				} else if !m.usesOAuth() && m.cursor == 0 {
-					m.cursor = 1
-					m.urlInput.Blur()
-					m.keyInput.Focus()
-					setDebugf("page0 enter endpoint field complete next_cursor=%d endpoint=%q", m.cursor, m.urlInput.Value())
-				} else if !m.usesOAuth() && m.cursor == 1 {
-					m.cursor = 2
-					setDebugf("page0 enter api key field complete next_cursor=%d api_key_len=%d", m.cursor, len(m.keyInput.Value()))
-				} else if !m.usesOAuth() && m.cursor == m.page0NextCursor() {
+			switch m.currentRow() {
+			case rowEndpoint:
+				m.cursor = m.mainRowIndex(rowAPIKey)
+				m.urlInput.Blur()
+				m.keyInput.Focus()
+				setDebugf("enter endpoint -> api key endpoint=%q", m.urlInput.Value())
+			case rowAPIKey:
+				m.cursor = m.mainRowIndex(rowTest)
+				m.urlInput.Blur()
+				m.keyInput.Blur()
+				setDebugf("enter api key -> test api_key_len=%d", len(m.keyInput.Value()))
+			case rowTest:
+				// Start detection with the current input values (OAuth uses the
+				// session runtime endpoint/key already injected by configureOAuthRuntime).
+				if !m.usesOAuth() {
 					m.p.Endpoint = m.urlInput.Value()
 					m.p.APIKey = m.keyInput.Value()
 					m.probeEndpoint = m.p.Endpoint
 					m.probeAPIKey = m.p.APIKey
-					m.urlInput.Blur()
-					m.keyInput.Blur()
-					m.detectionError = nil
-					m.detecting = true
-					m.detectProgress = 5
-					m.detectFrame = 0
-					setDebugf("page0 start detection endpoint=%q api_key_len=%d", m.p.Endpoint, len(m.p.APIKey))
-					return m, tea.Batch(modelFetchCmd(m.probeEndpoint, m.probeAPIKey), modelFetchTickCmd())
+					m.connectionDirty = m.autoConfigured
 				}
-			case 1:
-				if !m.filterInput.Focused() {
-					if m.cursor == slotTestCursor {
-						m.modelTestID++
-						testID := m.modelTestID
-						ctx, cancel := context.WithCancel(context.Background())
-						m.modelTesting = true
-						m.modelTestCancel = cancel
-						m.modelTestFrame = 0
-						m.modelTestCanceled = false
-						setDebugf("model availability test started model_count=%d", len(m.modelPool))
-						return m, tea.Batch(
-							modelAvailabilityTestCmd(ctx, testID, m.modelPool, m.probeEndpoint, m.probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.availabilitySmokeTestModel()),
-							modelAvailabilityTickCmd(testID),
-						)
-					} else if m.cursor == slotNextCursor {
-						m.page = 2
-						m.cursor = 0
-						setDebugf("page1 next to page2 slots=%s", slotDebugSummary(*m.p))
-					} else if m.cursor >= 0 && m.cursor < slotTestCursor {
-						m.activeSlot = m.cursor
-						m.filterInput.Focus()
-						m.filterInput.SetValue("")
-						m.slotListCursor = 0
-						m.updateFilteredPool()
-						setDebugf("page1 open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
-					}
-				} else {
-					// Safety: clamp cursor to valid range before accessing filteredPool
-					if len(m.filteredPool) == 0 {
-						return m, nil
-					}
-					if m.slotListCursor < 0 || m.slotListCursor >= len(m.filteredPool) {
-						m.slotListCursor = 0
-					}
-					selectedModel := m.filteredPool[m.slotListCursor]
-					if selectedModel == locale.T("(设置为未设置/清空)", "(clear/unset)") || selectedModel == locale.T("(无匹配模型)", "(no match)") {
-						selectedModel = ""
-					}
-					ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID, &m.p.SubagentModel}[m.activeSlot]
-					*ptr = selectedModel
-					if m.activeSlot == 4 && m.p.Env != nil {
-						delete(m.p.Env, claude.SubagentModelEnv)
-					}
-					m.filterInput.Blur()
-					setDebugf("page1 slot selected active_slot=%d model=%q slots=%s", m.activeSlot, selectedModel, slotDebugSummary(*m.p))
+				m.urlInput.Blur()
+				m.keyInput.Blur()
+				m.detectionError = nil
+				m.detecting = true
+				m.detectProgress = 5
+				m.detectFrame = 0
+				setDebugf("start detection endpoint=%q api_key_len=%d oauth=%t", m.probeEndpoint, len(m.probeAPIKey), m.usesOAuth())
+				return m, tea.Batch(modelFetchCmd(m.probeEndpoint, m.probeAPIKey), modelFetchTickCmd())
+			case rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch:
+				m.adjustReviewField(1)
+			case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
+				m.activeSlot = slotForRow(m.currentRow())
+				m.filterInput.Focus()
+				m.filterInput.SetValue("")
+				m.slotListCursor = 0
+				m.updateFilteredPool()
+				setDebugf("open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
+			case rowContext:
+				// Context & Compact is edited inline; nothing to open yet.
+				setDebugf("context row selected")
+			case rowActive:
+				m.IsActiveChosen = !m.IsActiveChosen
+				setDebugf("active choice toggled active_chosen=%t", m.IsActiveChosen)
+			case rowSave:
+				if !m.canSave() {
+					setDebugf("save blocked: connection dirty or undetected")
+					return m, nil
 				}
-			case 2:
-				if m.cursor < slotMappingCount {
-					// Extended context only — compact preset is independent.
-					slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.cursor]
-					// Turning 1M on is refused when the backend window rules it out;
-					// turning an existing marker off stays possible.
-					if !m.oneMSlots[slot] && m.oneMSlotBlocked(m.slotModelForIndex(m.cursor)) {
-						setDebugf("page2 one_m blocked slot=%s model=%q", slot, m.slotModelForIndex(m.cursor))
-						return m, nil
-					}
-					if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
-						return m, nil
-					}
-					m.oneMSlots[slot] = !m.oneMSlots[slot]
-					synced := m.syncOneMForSameModels(slot, m.oneMSlots[slot])
-					setDebugf("page2 toggle one_m slot=%s enabled=%t synced=%d summary=%s", slot, m.oneMSlots[slot], synced, reviewOneMSummary(m.oneMSlots))
-					m.cursor++
-				} else if m.cursor >= oneMCompactStart && m.cursor < oneMNextCursor {
-					m.selectCompactPreset(m.cursor - oneMCompactStart)
-					setDebugf("page2 select compact radio=%d preset=%v summary=%s", m.cursor-oneMCompactStart, m.compactPreset, m.compactSummary())
-				} else if m.cursor == oneMNextCursor {
-					// Context page is the last configuration step before review.
-					m.page = 4
-					m.cursor = m.page4InitialCursor()
-					setDebugf("page2 next to review one_m=%s compact=%s", reviewOneMSummary(m.oneMSlots), m.compactSummary())
-				}
-			case 4:
-				switch m.cursor {
-				case m.page4ProtocolCursor(), m.page4FastCursor(), m.page4MaxOutCursor(), m.page4ToolsCursor(), m.page4SearchCursor():
-					m.adjustReviewField(1)
-				case m.page4ActiveCursor():
-					m.IsActiveChosen = !m.IsActiveChosen
-					setDebugf("page4 active choice toggled active_chosen=%t", m.IsActiveChosen)
-				case m.page4BackCursor():
-					m.goBack()
-				case m.page4SaveCursor():
-					// Persist compact choice selected on review before save.
-					// applyCompactConfig is also called by RunProviderSet; set preset only.
-					m.compactState = compactConfigState{preset: m.compactPreset}
-					m.saveConfirmed = true
-					setDebugf("page4 save requested provider=%q type=%q model_count=%d slots=%s one_m=%s compact=%s active_chosen=%t fast_mode=%t", m.p.Name, m.p.Type, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.compactSummary(), m.IsActiveChosen, m.p.FastMode)
-					return m, tea.Quit
-				}
-			case 5:
-				// Page 5: Auto / Manual config choice
-				if m.cursor == 0 {
-					// Auto Config: auto-fill slots, set effort=max, skip 1M, go to save
-					m.manualConfig = false
-					m.applyStaleSlotPolicy()
-					m.doAutoConfig()
-					m.page = 4
-					m.cursor = m.page4InitialCursor()
-					setDebugf("page5 auto config selected next_page=%d cursor=%d slots=%s effort=%q", m.page, m.cursor, slotDebugSummary(*m.p), m.p.EffortLevel)
-				} else if m.cursor == 1 {
-					// Manual Config: go to slot mapping (old page 1)
-					m.manualConfig = true
-					m.applyStaleSlotPolicy()
-					m.page = 1
-					m.cursor = slotNextCursor
-					setDebugf("page5 manual config selected next_page=%d cursor=%d clear_stale_slots=%t slots=%s", m.page, m.cursor, m.clearStaleSlots, slotDebugSummary(*m.p))
-				} else if m.cursor == 2 && m.showStaleSlotToggle() {
-					m.clearStaleSlots = !m.clearStaleSlots
-					setDebugf("page5 stale slot cleanup toggled clear_stale_slots=%t stale_slot_count=%d", m.clearStaleSlots, m.staleSlotCount())
-				}
+				m.compactState = compactConfigState{preset: m.compactPreset}
+				m.saveConfirmed = true
+				setDebugf("save requested provider=%q type=%q model_count=%d slots=%s one_m=%s compact=%s active_chosen=%t fast_mode=%t", m.p.Name, m.p.Type, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.compactSummary(), m.IsActiveChosen, m.p.FastMode)
+				return m, tea.Quit
+			case rowCancel:
+				setDebugf("cancel requested")
+				return m, tea.Quit
 			}
+			m.keepCursorVisible()
 		}
 	}
 
-	if m.page == 0 && !m.usesOAuth() {
-		// 让光标位置与输入框焦点保持同步：只有获得焦点的输入框才会处理
-		// 按键和粘贴（textinput.Update 在未聚焦时会直接返回）。
-		var focusCmd, updateCmd tea.Cmd
-		switch m.cursor {
-		case 0:
-			if !m.urlInput.Focused() {
-				m.keyInput.Blur()
-				focusCmd = m.urlInput.Focus()
-			}
-			m.urlInput, updateCmd = m.urlInput.Update(msg)
-		case 1:
-			if !m.keyInput.Focused() {
-				m.urlInput.Blur()
-				focusCmd = m.keyInput.Focus()
-			}
-			m.keyInput, updateCmd = m.keyInput.Update(msg)
-		default:
-			// 光标在按钮上时，取消两个输入框的焦点
-			m.urlInput.Blur()
-			m.keyInput.Blur()
-		}
-		cmd = tea.Batch(focusCmd, updateCmd)
-	} else if m.page == 1 && m.filterInput.Focused() {
+	// 让光标位置与输入框焦点保持同步：只有获得焦点的输入框才会处理
+	// 按键和粘贴（textinput.Update 在未聚焦时会直接返回）。
+	switch {
+	case m.filterInput.Focused():
 		m.filterInput, cmd = m.filterInput.Update(msg)
 		m.updateFilteredPool()
+	case m.currentRow() == rowEndpoint && !m.usesOAuth():
+		if !m.urlInput.Focused() {
+			m.keyInput.Blur()
+			cmd = m.urlInput.Focus()
+		}
+		var updateCmd tea.Cmd
+		m.urlInput, updateCmd = m.urlInput.Update(msg)
+		cmd = tea.Batch(cmd, updateCmd)
+		if m.autoConfigured {
+			m.connectionDirty = true
+		}
+	case m.currentRow() == rowAPIKey && !m.usesOAuth():
+		if !m.keyInput.Focused() {
+			m.urlInput.Blur()
+			cmd = m.keyInput.Focus()
+		}
+		var updateCmd tea.Cmd
+		m.keyInput, updateCmd = m.keyInput.Update(msg)
+		cmd = tea.Batch(cmd, updateCmd)
+		if m.autoConfigured {
+			m.connectionDirty = true
+		}
+	default:
+		// 光标在按钮或只读行上时，取消两个输入框的焦点
+		m.urlInput.Blur()
+		m.keyInput.Blur()
 	}
 
 	return m, cmd
-}
-
-func renderBottomButtons(page int, currentCursor int, nextIdx, backIdx int) string {
-	nextStr := locale.T("下一步", "Next")
-	backStr := locale.T("上一步", "Back")
-
-	if currentCursor == nextIdx {
-		nextStr = selectedStyle.Render("> " + nextStr)
-	} else {
-		nextStr = "  " + nextStr
-	}
-
-	if page == 0 {
-		backStr = grayText.Render(backStr)
-	} else {
-		if currentCursor == backIdx {
-			backStr = selectedStyle.Render("> " + backStr)
-		} else {
-			backStr = "  " + backStr
-		}
-	}
-
-	return fmt.Sprintf("\n%s    %s\n\n", nextStr, backStr)
 }
 
 func renderModelFetchProgress(progress, frame int, oauth bool) string {
@@ -1936,49 +1847,11 @@ func renderCredentialField(label, value string, focused bool) string {
 
 func (m *AdvancedConfigModel) renderPageHeader(title, badge string) string {
 	line := titleStyle.Render(title) + badgeStyle.Render(badge)
-	if m.page != 4 {
+	if !m.pageDetected() {
 		line += protoBadgeStyle.Render("Protocol: " + m.getProtocolFamily())
 	}
-	step := fmt.Sprintf(locale.T("步骤 %d/5", "Step %d/5"), m.workflowStep())
-	line += stepStyle.Render(step)
 	dividerWidth := max(m.panelWidth()-6, 16)
 	return line + "\n" + dividerStyle.Render(strings.Repeat("─", dividerWidth)) + "\n\n"
-}
-
-func (m *AdvancedConfigModel) renderStepProgress() string {
-	const totalSteps = 5
-	dots := make([]string, 0, totalSteps)
-	for step := 1; step <= totalSteps; step++ {
-		if step == m.workflowStep() {
-			dots = append(dots, cyanText.Render("●"))
-			continue
-		}
-		dots = append(dots, grayText.Render("○"))
-	}
-	return strings.Join(dots, "  ")
-}
-
-func renderReviewModelMapping(label, model string, oneM bool) string {
-	const modelDisplayWidth = 52
-	display := stripOneMSuffix(model)
-	if strings.TrimSpace(display) == "" {
-		// Keep auto subagent labels intact.
-		display = strings.TrimSpace(model)
-	}
-	plain := truncateMiddle(display, modelDisplayWidth)
-	if strings.TrimSpace(plain) == "" {
-		plain = locale.T("(未设置)", "(unset)")
-	}
-	padded := padDisplay(plain, modelDisplayWidth)
-	value := availableStyle.Render(padded)
-	if strings.TrimSpace(display) == "" {
-		value = grayText.Render(padded)
-	}
-	badge := "    "
-	if oneM {
-		badge = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("[1M]")
-	}
-	return fmt.Sprintf("  %-10s %s %s\n", label, value, badge)
 }
 
 // truncateMiddle keeps endpoint/model names on one line for the review page.
@@ -2023,444 +1896,230 @@ func padDisplay(s string, width int) string {
 	}
 	return s + strings.Repeat(" ", width-w)
 }
-
 func (m *AdvancedConfigModel) View() tea.View {
+	// Model picker overlay: when the filter input has focus, render only the
+	// filtered model list (search + availability) instead of the main page.
+	if m.filterInput.Focused() {
+		return m.viewModelPicker()
+	}
+
 	var body strings.Builder
 
-	switch m.page {
-	case 0:
-		// ==================== PAGE 0: 凭据配置 ====================
-		if m.usesOAuth() {
-			body.WriteString(m.renderPageHeader(locale.T("OAuth 认证配置", "OAuth Credentials"), "OAuth"))
-			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Provider", cyanText.Render(m.p.OAuthProvider)))
-			if m.p.AuthGroup != "" {
-				body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Group", cyanText.Render(m.p.AuthGroup)))
-				body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Accounts", cyanText.Render(fmt.Sprintf("%d", len(m.p.OAuthAccountCredentials)))))
-			}
-			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Fast", cyanText.Render(providerFastSummary(*m.p))))
-			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
-			body.WriteString(fmt.Sprintf("  • %-12s: %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
-			body.WriteString("\n" + grayText.Render(locale.T(
-				"模型发现和可用性测试将通过本地 OAuth 代理完成，不会保存临时 API Key。",
-				"Model discovery and availability tests use the local OAuth proxy; its temporary API key is never saved.",
-			)) + "\n")
-		} else {
-			body.WriteString(m.renderPageHeader(locale.T("基础凭据配置", "Base Credentials"), "Credentials"))
-			body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == 0))
-			body.WriteString(renderCredentialField("API Key", m.keyInput.View(), m.cursor == 1))
-		}
+	// ── Title bar ──────────────────────────────────────────────────────────
+	title := locale.T("Provider 配置", "Provider Configuration")
+	badge := "Config"
+	if m.usesOAuth() {
+		badge = "OAuth"
+	}
+	body.WriteString(m.renderPageHeader(title, badge))
 
-		if m.detecting {
-			body.WriteString(renderModelFetchProgress(m.detectProgress, m.detectFrame, m.usesOAuth()))
-		} else {
-			if m.detectionError != nil {
-				errorWidth := max(m.panelWidth()-8, 20)
-				body.WriteString(errorBoxStyle.Width(errorWidth).Render(locale.T("检测失败，无法继续", "Detection failed; cannot continue")+"\n"+m.detectionError.Error()) + "\n\n")
-			}
-			body.WriteString(renderBottomButtons(m.page, m.cursor, m.page0NextCursor(), m.page0BackCursor()))
-			if m.usesOAuth() {
-				body.WriteString(grayText.Render(locale.T("←→ 切换按钮 · enter 获取模型", "←→ Toggle Buttons · enter fetch models")))
-			} else {
-				body.WriteString(grayText.Render(locale.T("↑↓ 切换焦点 · ←→ 切换按钮 · enter 确认", "↑↓ Switch · ←→ Toggle Buttons · enter confirm")))
-			}
-		}
-
-	case 1:
-		// ==================== PAGE 1: 槽位映射配置 ====================
-		if !m.filterInput.Focused() {
-			body.WriteString(m.renderPageHeader(locale.T("Claude Slot 映射配置", "Claude Slot Mapping"), "Slot List"))
-			renderRow := func(idx int, label, val string) {
-				prefix := "  "
-				var labelStr string
-				if m.cursor == idx {
-					prefix = selectedStyle.Render("> ")
-					labelStr = selectedStyle.Render(label) + grayText.Render(" ("+locale.T("enter 筛选", "enter to list")+")")
-				} else {
-					// ✅ 修复：先对纯文本 label 填充至 6 宽，再加颜色
-					labelStr = purpleText.Render(fmt.Sprintf("%-9s", label))
-				}
-				modelStr := cyanText.Render(val)
-				if val == "" {
-					modelStr = grayText.Render(locale.T("(未设置)", "(unset)"))
-				}
-				body.WriteString(fmt.Sprintf("%s%s – %s\n", prefix, labelStr, modelStr))
-			}
-			renderRow(0, "Opus", m.modelDisplayLabel(m.p.OpusModel))
-			renderRow(1, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel))
-			renderRow(2, "Haiku", m.modelDisplayLabel(m.p.HaikuModel))
-			renderRow(3, "Custom", m.modelDisplayLabel(m.p.CustomModelID))
-			renderRow(4, "Subagent", m.subagentDisplayLabel())
-
-			testPrefix := "  "
-			testLabel := locale.T("测试模型可用性", "Test model availability")
-			testDetail := locale.T("将为每个模型发送一次最小请求", "Sends one minimal request per model")
-			if smokeModel := m.availabilitySmokeTestModel(); smokeModel != "" {
-				testDetail = fmt.Sprintf(locale.T("仅使用 %s 发送一次低成本测试请求", "Uses one low-cost test request with %s"), smokeModel)
-			}
-			if m.modelTesting {
-				spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-				spin := spinners[m.modelTestFrame%len(spinners)]
-				testLabel = fmt.Sprintf("%s %s", spin, locale.T("正在测试模型可用性...", "Testing model availability..."))
-				if smokeModel := m.availabilitySmokeTestModel(); smokeModel != "" {
-					testDetail = fmt.Sprintf(locale.T("正在使用 %s 测试 · 按 esc 取消", "Testing with %s · press esc to cancel"), smokeModel)
-				} else {
-					testDetail = locale.T("测试进行中 · 按 esc 取消", "Test in progress · press esc to cancel")
-				}
-			} else if len(m.modelAvailability) > 0 {
-				available, unavailable := m.availabilityCounts()
-				testDetail = fmt.Sprintf(locale.T("%d 个可用 · %d 个不可用 · 可用模型已前置", "%d available · %d unavailable · available models first"), available, unavailable)
-			} else if m.modelTestCanceled {
-				testDetail = locale.T("测试已取消，结果未应用", "Test canceled; results were not applied")
-			}
-			if m.cursor == slotTestCursor {
-				testPrefix = selectedStyle.Render("> ")
-				testLabel = selectedStyle.Render(testLabel)
-			} else {
-				testLabel = purpleText.Render(testLabel)
-			}
-			body.WriteString("\n" + testPrefix + testLabel + "\n")
-			body.WriteString(grayText.Render("    "+testDetail) + "\n")
-
-			body.WriteString(renderBottomButtons(m.page, m.cursor, slotNextCursor, slotBackCursor))
-			body.WriteString(grayText.Render(locale.T("↑↓ 移动光标 · ←→ 切换按钮 · enter 选择、测试或跳转", "↑↓ Move · ←→ Toggle Buttons · enter select, test, or continue")))
-		} else {
-			slotName := []string{"Opus", "Sonnet", "Haiku", "Custom", "Subagent"}[m.activeSlot]
-			body.WriteString(titleStyle.Render(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName)))
-			body.WriteString("\n" + filterStyle.Render(locale.T("🔍 过滤模型: ", "🔍 Filter model: ")) + m.filterInput.View() + "\n")
-			// Virtual scrolling: only render visible window of filteredPool
-			start := m.filterWindowStart
-			end := start + filterViewHeight
-			if end > len(m.filteredPool) {
-				end = len(m.filteredPool)
-			}
-			if start > 0 {
-				body.WriteString(grayText.Render(fmt.Sprintf("   ↑ ... %d more above ...", start)) + "\n")
-			}
-			for i := start; i < end; i++ {
-				mod := m.filteredPool[i]
-				prefix := "   "
-				display := mod
-				if stringInSlice(mod, m.modelPool) {
-					display = m.modelDisplayLabel(mod)
-				}
-				line := grayText.Render(display)
-				status := ""
-				if stringInSlice(mod, m.modelPool) {
-					status = "  " + m.availabilityLabel(mod)
-				}
-				if i == m.slotListCursor {
-					prefix = selectedStyle.Render(" > ")
-					line = selectedStyle.Render(display)
-				}
-				body.WriteString(prefix + line + status + "\n")
-			}
-			if end < len(m.filteredPool) {
-				body.WriteString(grayText.Render(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filteredPool)-end)) + "\n")
-			}
-			body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel")) + "\n")
-		}
-
-	case 2:
-		// ==================== PAGE 2: Extended Context + Auto Compact ====================
-		// Layout matches the product mockup: checkbox matrix + radio list.
-		body.WriteString(m.renderPageHeader(locale.T("上下文与自动压缩", "Context & Compact"), "Context"))
-		body.WriteString(grayText.Render(locale.T(
-			"[1m] 按槽位生效 · 同名模型切换会同步 · 压缩阈值由 Claude Code 自行决定",
-			"[1m] is per slot · same model syncs · Claude Code decides the compact threshold",
-		)) + "\n\n")
-
-		body.WriteString(titleStyle.Render("Extended Context") + "\n")
-
-		renderContextRow := func(idx int, label, modelVal string) {
-			slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[idx]
-			blocked := m.oneMSlotBlocked(modelVal)
-			box := "[ ]"
-			if m.oneMSlots[slotKey] {
-				box = "[x]"
-			}
-			if blocked && !m.oneMSlots[slotKey] {
-				box = "[-]"
-			}
-
-			// Editable slot control: purple label/checkbox when idle, blue when
-			// focused, gray when the backend window rules 1M out.
-			prefix := "  "
-			boxStyled := purpleText.Render(box)
-			labelStyled := purpleText.Render(fmt.Sprintf("%-10s", label))
-			if blocked {
-				boxStyled = grayText.Render(box)
-				labelStyled = grayText.Render(fmt.Sprintf("%-10s", label))
-			}
-			if m.cursor == idx {
-				prefix = selectedStyle.Render("> ")
-				boxStyled = selectedStyle.Render(box)
-				labelStyled = titleStyle.Render(fmt.Sprintf("%-10s", label))
-			}
-
-			displayModel := stripOneMSuffix(modelVal)
-			if displayModel == "" && slotKey == "subagent" {
-				displayModel = m.subagentDisplayLabel()
-			} else if displayModel != "" {
-				displayModel = m.modelDisplayLabel(displayModel)
-			}
-			// Model IDs are facts for this page (chosen earlier) — keep cyan/read-only.
-			modelPart := availableStyle.Render(displayModel)
-			if strings.TrimSpace(displayModel) == "" {
-				modelPart = grayText.Render(locale.T("(未设置)", "(unset)"))
-			}
-
-			capLabel := grayText.Render("Standard/unknown")
-			if blocked {
-				window, _ := m.advertisedWindow(modelVal)
-				capLabel = grayText.Render(fmt.Sprintf(locale.T("后端 %s · 无 1M", "backend %s · no 1M"), formatTokenCount(window)))
-			} else if m.oneMSlots[slotKey] {
-				capLabel = lightning
-			} else if recommendedOneMModel(modelVal) {
-				capLabel = availableStyle.Render(locale.T("建议 1M", "1M recommended"))
-			} else if window, ok := m.advertisedWindow(modelVal); ok && protocol.ContextWindowSuggests1M(window) {
-				capLabel = availableStyle.Render("1M reported")
-			}
-
-			// Columns: [x] Label   model   capacity
-			body.WriteString(fmt.Sprintf("%s%s %s %-28s %s\n",
-				prefix, boxStyled, labelStyled, modelPart, capLabel))
-		}
-
-		renderContextRow(0, "Opus", m.p.OpusModel)
-		renderContextRow(1, "Sonnet", m.p.SonnetModel)
-		renderContextRow(2, "Haiku", m.p.HaikuModel)
-		renderContextRow(3, "Custom", m.p.CustomModelID)
-		renderContextRow(4, "Subagent", m.p.SubagentModel)
-
-		body.WriteString("\n" + titleStyle.Render("Auto Compact") + "\n")
-		selectedRadio := m.selectedCompactRadioIndex()
-		for i, preset := range compactRadioOrder {
-			cursorIdx := oneMCompactStart + i
-			radio := "( )"
-			if i == selectedRadio {
-				radio = "(●)"
-			}
-			// Editable radio options: purple when idle, blue when focused.
-			prefix := "  "
-			radioStyled := purpleText.Render(radio)
-			label := purpleText.Render(compactRadioLabel(preset))
-			if m.cursor == cursorIdx {
-				prefix = selectedStyle.Render("> ")
-				radioStyled = selectedStyle.Render(radio)
-				label = titleStyle.Render(compactRadioLabel(preset))
-			}
-			body.WriteString(fmt.Sprintf("%s%s %s\n", prefix, radioStyled, label))
-		}
-
-		body.WriteString(renderBottomButtons(m.page, m.cursor, oneMNextCursor, oneMBackCursor))
-		body.WriteString(grayText.Render(locale.T("enter 切换 · ↑↓ 移动 · ←→ 按钮", "enter toggle · ↑↓ move · ←→ buttons")))
-
-	case 4:
-		// ==================== PAGE 4: editable configuration summary ====================
-		// Compact when the terminal cannot fit the full review (header+border ~29 lines with Fast).
-		// Use full content probe when height is known.
-		compactHeight := m.height > 0 && m.height < 29
-		sectionGap := "\n"
-		if compactHeight {
-			sectionGap = ""
-		}
-		body.WriteString(m.renderPageHeader(locale.T("核对并应用", "Review & Apply"), "Confirm"))
-
-		// Connection
-		body.WriteString(titleStyle.Render("Connection") + "\n")
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Endpoint", availableStyle.Render(truncateMiddle(m.p.Endpoint, 52))))
-		if m.canToggleOpenAIProtocol() {
-			prefix := "  "
-			value := "Chat"
-			if provider.IsOpenAIResponsesType(m.p.Type) {
-				value = "Responses"
-			}
-			editable := purpleText.Render("‹ " + value + " ›")
-			if m.cursor == m.page4ProtocolCursor() {
-				prefix = selectedStyle.Render("> ")
-				editable = selectedStyle.Render("‹ " + value + " ›")
-			}
-			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, "Protocol", editable))
-		} else {
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
-		}
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
+	// ── Connection ─────────────────────────────────────────────────────────
+	body.WriteString(titleStyle.Render("Connection") + "\n")
+	if m.usesOAuth() {
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Provider", cyanText.Render(m.p.OAuthProvider)))
 		if m.p.AuthGroup != "" {
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Group", availableStyle.Render(m.p.AuthGroup)))
+			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Group", cyanText.Render(m.p.AuthGroup)))
+			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Accounts", cyanText.Render(fmt.Sprintf("%d", len(m.p.OAuthAccountCredentials)))))
 		}
-		// FastMode (Claude Code /fast) for ChatGPT/Copilot OAuth; editable on review.
-		if m.canEditFastMode() {
-			prefix := "  "
-			value := formatFastLabel(m.p.FastMode)
-			val := purpleText.Render(value)
-			if m.cursor == m.page4FastCursor() {
-				prefix = selectedStyle.Render("> ")
-				val = selectedStyle.Render(value)
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", cyanText.Render(providerFastSummary(*m.p))))
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
+	} else {
+		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
+		body.WriteString(renderCredentialField("API Key", m.keyInput.View(), m.cursor == m.mainRowIndex(rowAPIKey)))
+	}
+
+	// Detection / auto-configure button.
+	if m.detecting {
+		body.WriteString(renderModelFetchProgress(m.detectProgress, m.detectFrame, m.usesOAuth()))
+	} else {
+		testLabel := locale.T("Test & Auto Configure", "Test & Auto Configure")
+		testStr := "  " + testLabel
+		if m.cursor == m.mainRowIndex(rowTest) {
+			testStr = selectedStyle.Render("> " + testLabel)
+		}
+		body.WriteString(testStr + "\n")
+
+		if m.detectionError != nil {
+			errorWidth := max(m.panelWidth()-8, 20)
+			body.WriteString(errorBoxStyle.Width(errorWidth).Render(locale.T("检测失败，无法继续", "Detection failed; cannot continue")+"\n"+m.detectionError.Error()) + "\n\n")
+		} else if m.modelPoolFromDiscovery {
+			status := fmt.Sprintf(locale.T("✓ 已连接 · %s · %d 个模型", "✓ Connected · %s · %d models"), provider.ProtocolLabelForProvider(*m.p), len(m.modelPool))
+			body.WriteString(availableStyle.Render(status) + "\n")
+			if !m.usesOAuth() {
+				body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
 			}
-			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, "Fast", val))
-		} else {
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", availableStyle.Render(providerFastSummary(*m.p))))
 		}
+	}
 
-		// Model Mapping (read-only, cyan + [1M] badge)
-		body.WriteString(sectionGap + titleStyle.Render("Model Mapping") + "\n")
-		body.WriteString(renderReviewModelMapping("Opus", m.modelDisplayLabel(m.p.OpusModel), m.oneMSlots["opus"]))
-		body.WriteString(renderReviewModelMapping("Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.oneMSlots["sonnet"]))
-		body.WriteString(renderReviewModelMapping("Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.oneMSlots["haiku"]))
-		body.WriteString(renderReviewModelMapping("Custom", m.modelDisplayLabel(m.p.CustomModelID), m.oneMSlots["custom"]))
-		body.WriteString(renderReviewModelMapping("Subagent", m.subagentDisplayLabel(), m.oneMSlots["subagent"]))
+	// ── Model Mapping (only after detection) ──────────────────────────────
+	if m.pageDetected() {
+		body.WriteString("\n" + titleStyle.Render("Model Mapping") + "\n")
+		renderMappingRow := func(kind configRowKind, label, display string, oneM bool) {
+			prefix := "  "
+			val := purpleText.Render(truncateMiddle(display, 52))
+			if m.cursor == m.mainRowIndex(kind) {
+				prefix = selectedStyle.Render("> ")
+				val = selectedStyle.Render(truncateMiddle(display, 52))
+			}
+			badge := "    "
+			if oneM {
+				badge = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("[1M]")
+			}
+			body.WriteString(fmt.Sprintf("%s%-10s %s %s\n", prefix, label, val, badge))
+		}
+		renderMappingRow(rowOpus, "Opus", m.modelDisplayLabel(m.p.OpusModel), m.oneMSlots["opus"])
+		renderMappingRow(rowSonnet, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.oneMSlots["sonnet"])
+		renderMappingRow(rowHaiku, "Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.oneMSlots["haiku"])
+		renderMappingRow(rowCustom, "Custom", m.modelDisplayLabel(m.p.CustomModelID), m.oneMSlots["custom"])
+		renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.oneMSlots["subagent"])
 
-		// Runtime (editable with ‹ ›)
-		body.WriteString(sectionGap + titleStyle.Render("Runtime") + "\n")
-		renderEditable := func(cursor int, label, value string) {
+		// Context & Compact — per-slot [1m] via Space on the rows above; the
+		// provider-wide fallback cycles with ←→.
+		ctxPrefix := "  "
+		ctxVal := purpleText.Render(m.compactSummary())
+		if m.cursor == m.mainRowIndex(rowContext) {
+			ctxPrefix = selectedStyle.Render("> ")
+			ctxVal = selectedStyle.Render(m.compactSummary())
+		}
+		body.WriteString(fmt.Sprintf("%s%-12s %s\n", ctxPrefix, "Context", ctxVal))
+
+		// ── Runtime ──────────────────────────────────────────────────────
+		body.WriteString("\n" + titleStyle.Render("Runtime") + "\n")
+		renderEditable := func(kind configRowKind, label, value string) {
 			prefix := "  "
 			val := purpleText.Render(value)
-			if m.cursor == cursor {
+			if m.cursor == m.mainRowIndex(kind) {
 				prefix = selectedStyle.Render("> ")
 				val = selectedStyle.Render(value)
 			}
 			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, label, val))
 		}
+		if m.canToggleOpenAIProtocol() {
+			value := "Chat"
+			if provider.IsOpenAIResponsesType(m.p.Type) {
+				value = "Responses"
+			}
+			renderEditable(rowProtocol, "Protocol", "‹ "+value+" ›")
+		} else {
+			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
+		}
+		renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
 		if m.maxOutputUpstreamManaged() {
-			// Read-only green: upstream path cannot honor CLAUDE_CODE_MAX_OUTPUT_TOKENS.
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Max Output", availableStyle.Render(locale.T("上游管理", "Upstream managed"))))
 		} else {
-			renderEditable(m.page4MaxOutCursor(), "Max Output", formatMaxOutLabel(m.reviewMaxOutValue()))
+			renderEditable(rowMaxOutput, "Max Output", formatMaxOutLabel(m.reviewMaxOutValue()))
 		}
-		renderEditable(m.page4ToolsCursor(), "Tools", formatToolsLabel(m.reviewToolsValue()))
-		renderEditable(m.page4SearchCursor(), "Tool Search", formatSearchLabel(m.reviewSearchValue()))
+		renderEditable(rowTools, "Tools", formatToolsLabel(m.reviewToolsValue()))
+		renderEditable(rowToolSearch, "Tool Search", formatSearchLabel(m.reviewSearchValue()))
 
-		// Active checkbox
-		body.WriteString(sectionGap)
+		// ── Active checkbox ──────────────────────────────────────────────
+		body.WriteString("\n")
 		activePrefix := "  "
 		activeBox := "[ ]"
 		if m.IsActiveChosen {
 			activeBox = "[x]"
 		}
 		activeLabel := locale.T("设为当前激活 Provider", "Set as active provider")
-		// Editable control: purple like other mutable review fields.
 		boxStyled := purpleText.Render(activeBox)
 		labelStyled := purpleText.Render(activeLabel)
-		if m.cursor == m.page4ActiveCursor() {
+		if m.cursor == m.mainRowIndex(rowActive) {
 			activePrefix = selectedStyle.Render("> ")
 			boxStyled = selectedStyle.Render(activeBox)
 			labelStyled = titleStyle.Render(activeLabel)
 		}
 		body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, boxStyled, labelStyled))
 
-		// Actions
-		applyLabel := locale.T("应用并完成", "Apply & Finish")
-		backLabel := locale.T("返回", "Back")
+		// ── Actions ──────────────────────────────────────────────────────
+		applyLabel := locale.T("保存并激活", "Save & Activate")
+		if !m.IsActiveChosen {
+			applyLabel = locale.T("保存 Provider", "Save Provider")
+		}
+		cancelLabel := locale.T("取消", "Cancel")
 		applyStr := "  " + applyLabel
-		backStr := "  " + backLabel
-		if m.cursor == m.page4SaveCursor() {
+		cancelStr := "  " + cancelLabel
+		if m.cursor == m.mainRowIndex(rowSave) {
 			applyStr = selectedStyle.Render("> " + applyLabel)
 		}
-		if m.cursor == m.page4BackCursor() {
-			backStr = selectedStyle.Render("> " + backLabel)
+		if m.cursor == m.mainRowIndex(rowCancel) {
+			cancelStr = selectedStyle.Render("> " + cancelLabel)
 		}
-		// Compact terminals already lost one line to the Fast status row; skip
-		// the blank line above actions so height 24 still fits.
-		if compactHeight {
-			body.WriteString(applyStr + "             " + backStr + "\n")
-		} else {
-			body.WriteString("\n" + applyStr + "             " + backStr + "\n")
-			body.WriteString("\n")
-			body.WriteString(grayText.Render(locale.T(
-				"紫色可修改 · 绿色只读 · ↑↓ 选择 · ←→ 调整 · enter 确认",
-				"purple editable · green read-only · ↑↓ select · ←→ adjust · enter confirm",
-			)))
+		body.WriteString("\n" + applyStr + "          " + cancelStr + "\n")
+
+		if m.connectionDirty && !m.usesOAuth() {
+			body.WriteString(grayText.Render(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving")) + "\n")
 		}
-
-	case 5:
-		// ==================== PAGE 5: 配置模式选择 ====================
-		body.WriteString(m.renderPageHeader(locale.T("配置模式选择", "Config Mode"), "Choice"))
-		body.WriteString(grayText.Render(fmt.Sprintf(locale.T("已从接口获取 %d 个模型，请选择配置方式：", "Fetched %d models from provider API. Choose config mode:"), len(m.modelPool))) + "\n")
-		if m.modelPoolFromDiscovery && m.hadLocalModelPool {
-			body.WriteString(grayText.Render(locale.T("旧本地模型池将用本次接口结果刷新。", "The local model pool will be refreshed with this API result.")) + "\n")
-		}
-		body.WriteString("\n")
-
-		autoPrefix := "  "
-		autoLabel := grayText.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
-		autoDesc := grayText.Render("    " + locale.T("自动填入前 4 个可用模型，跳过手动 1M 配置", "Auto-fill first 4 models; skip manual 1M config"))
-		if m.cursor == 0 {
-			autoPrefix = selectedStyle.Render("> ")
-			autoLabel = selectedStyle.Render(locale.T("🔄 自动配置 (推荐)", "🔄 Auto Config (recommended)"))
-		}
-		body.WriteString(autoPrefix + autoLabel + "\n")
-		body.WriteString(autoDesc + "\n\n")
-
-		manualPrefix := "  "
-		manualLabel := grayText.Render(locale.T("🛠 手动配置", "🛠 Manual Config"))
-		manualDesc := grayText.Render("    " + locale.T("手动选择每个槽位的模型与 1M 上下文开关", "Manually set slot models and 1M context"))
-		if m.cursor == 1 {
-			manualPrefix = selectedStyle.Render("> ")
-			manualLabel = selectedStyle.Render(locale.T("🛠 手动配置", "🛠 Manual Config"))
-		}
-		body.WriteString(manualPrefix + manualLabel + "\n")
-		body.WriteString(manualDesc + "\n\n")
-
-		if m.showStaleSlotToggle() {
-			cleanupPrefix := "  "
-			cleanupLabel := grayText.Render(locale.T("手动配置时清理旧槽位", "Clean stale slots for manual config"))
-			if m.cursor == 2 {
-				cleanupPrefix = selectedStyle.Render("> ")
-				cleanupLabel = selectedStyle.Render(locale.T("手动配置时清理旧槽位", "Clean stale slots for manual config"))
-			}
-			box := "[ ]"
-			state := locale.T("否", "No")
-			if m.clearStaleSlots {
-				box = "[x]"
-				state = locale.T("是", "Yes")
-			}
-			cleanupDesc := grayText.Render(fmt.Sprintf("    %s %s · %s",
-				box,
-				state,
-				fmt.Sprintf(locale.T("将清空 %d 个不在接口模型列表中的旧槽位", "Clear %d old slot(s) not present in the API model list"), m.staleSlotCount()),
-			))
-			body.WriteString(cleanupPrefix + cleanupLabel + "\n")
-			body.WriteString(cleanupDesc + "\n\n")
-		}
-
-		body.WriteString(grayText.Render(locale.T("↑↓ 选择 · ←→ 切换清理选项 · enter 确认 · esc 返回", "↑↓ Select · ←→ Toggle cleanup · enter confirm · esc back")))
-
-	default:
-		// No page navigates here — page 3 was the removed Reasoning Effort step.
-		// Rendering something diagnosable beats a blank frame if that ever
-		// changes: View must stay pure, so it cannot redirect the way the old
-		// page-3 arm did (it assigned m.page from inside the renderer).
-		body.WriteString(m.renderPageHeader(locale.T("未知页面", "Unknown page"), "?"))
-		body.WriteString(grayText.Render(fmt.Sprintf(locale.T(
-			"页面 %d 没有对应视图，按 esc 返回。",
-			"page %d has no view; press esc to go back.",
-		), m.page)))
+		body.WriteString(grayText.Render(locale.T(
+			"↑↓ 选择 · ←→ 调整 · enter 确认 · 模型行 enter 筛选",
+			"↑↓ select · ←→ adjust · enter confirm · enter on a model row to filter",
+		)) + "\n")
+	} else {
+		body.WriteString("\n" + grayText.Render(locale.T(
+			"填写 Endpoint 与 API Key 后点击 Test & Auto Configure 自动填充",
+			"Enter Endpoint and API Key, then Test & Auto Configure to auto-fill",
+		)) + "\n")
 	}
 
 	panelStyle := windowStyle.Width(m.panelWidth())
 	if m.page == 4 {
 		panelStyle = panelStyle.Padding(0, 2)
 	}
-	panel := panelStyle.Render(body.String())
+	// Scroll the page body when it exceeds the terminal. The offset is derived
+	// from the cursor row so the focused row stays visible; View does not mutate
+	// model state. Fixed chrome (panel border + footer tip) leaves the rest.
+	bodyLines := strings.Split(body.String(), "\n")
+	scrollOffset := m.scrollOffset
+	if m.height > 0 && len(bodyLines) > m.height {
+		// The frame must fit: border (2) + footer (3) leave height-5 for the body.
+		maxBody := m.height - 5
+		if maxBody < 6 {
+			maxBody = 6
+		}
+		// Anchor the scroll window to the cursor row using the persisted offset
+		// (maintained by keepCursorVisible on cursor movement). The Save/Cancel
+		// action bar is the most important thing to keep reachable, so when the
+		// persisted offset would hide it the window is anchored to the tail.
+		offset := m.scrollOffset
+		if offset < 0 {
+			offset = 0
+		}
+		// If the cursor is near the action bar (Save/Cancel), or the offset would
+		// leave it off-screen, clamp to the tail so the actions stay visible.
+		if m.cursor >= m.mainRowIndex(rowSave) {
+			offset = len(bodyLines) - maxBody
+			if offset < 0 {
+				offset = 0
+			}
+		} else if offset+maxBody > len(bodyLines) {
+			offset = len(bodyLines) - maxBody
+			if offset < 0 {
+				offset = 0
+			}
+		}
+		bodyLines = bodyLines[offset : offset+maxBody]
+		if len(bodyLines) == 0 {
+			bodyLines = []string{""}
+		}
+	}
+	panel := panelStyle.Render(strings.Join(bodyLines, "\n"))
 	langTipMsg := locale.T(
 		"💡 提示: 使用 `ccl lang` 更改终端显示语言",
 		"💡 Tip: Change the TUI display language with `ccl lang`",
 	)
 	content := panel
-	if m.page != 4 {
-		footer := m.renderStepProgress() + "\n" + grayText.Render(langTipMsg)
-		content += "\n\n" + footer
+	if scrollOffset > 0 {
+		content = grayText.Render(locale.T("▲ 上滚 · ↑ 查看", "▲ scrolled up · ↑ to view")) + "\n" + content
 	}
+	content += "\n\n" + grayText.Render(langTipMsg)
+
 	finalStr := content
 	if m.width > 0 && m.height > 0 {
 		finalStr = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 	}
 	v := tea.NewView(finalStr)
 	v.AltScreen = true
-	// Mouse reporting is enabled only on the credentials page, where clicking a
-	// field is the natural way to move focus. Everywhere else it stays off so the
-	// terminal keeps its own text selection.
-	if m.page == 0 && !m.usesOAuth() {
+	// Mouse reporting on the Connection inputs only.
+	if !m.usesOAuth() && m.mainRowIndex(rowEndpoint) >= 0 {
 		v.MouseMode = tea.MouseModeCellMotion
 		lines := strings.Split(finalStr, "\n")
 		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
@@ -2474,5 +2133,55 @@ func (m *AdvancedConfigModel) View() tea.View {
 			return func() tea.Msg { return focusCredentialFieldMsg{cursor: cursor} }
 		}
 	}
+	return v
+}
+
+// viewModelPicker renders the filtered model selection overlay. It is shown
+// whenever the filter input owns the keyboard; selecting a model (enter) or
+// pressing esc returns to the main configuration page.
+func (m *AdvancedConfigModel) viewModelPicker() tea.View {
+	var body strings.Builder
+	slotName := []string{"Opus", "Sonnet", "Haiku", "Custom", "Subagent"}[m.activeSlot]
+	body.WriteString(titleStyle.Render(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName)))
+	body.WriteString("\n" + filterStyle.Render(locale.T("🔍 过滤模型: ", "🔍 Filter model: ")) + m.filterInput.View() + "\n")
+
+	start := m.filterWindowStart
+	end := start + filterViewHeight
+	if end > len(m.filteredPool) {
+		end = len(m.filteredPool)
+	}
+	if start > 0 {
+		body.WriteString(grayText.Render(fmt.Sprintf("   ↑ ... %d more above ...", start)) + "\n")
+	}
+	for i := start; i < end; i++ {
+		mod := m.filteredPool[i]
+		prefix := "   "
+		display := mod
+		if stringInSlice(mod, m.modelPool) {
+			display = m.modelDisplayLabel(mod)
+		}
+		line := grayText.Render(display)
+		status := ""
+		if stringInSlice(mod, m.modelPool) {
+			status = "  " + m.availabilityLabel(mod)
+		}
+		if i == m.slotListCursor {
+			prefix = selectedStyle.Render(" > ")
+			line = selectedStyle.Render(display)
+		}
+		body.WriteString(prefix + line + status + "\n")
+	}
+	if end < len(m.filteredPool) {
+		body.WriteString(grayText.Render(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filteredPool)-end)) + "\n")
+	}
+	body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel")) + "\n")
+
+	panel := windowStyle.Width(m.panelWidth()).Render(body.String())
+	finalStr := panel
+	if m.width > 0 && m.height > 0 {
+		finalStr = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
+	}
+	v := tea.NewView(finalStr)
+	v.AltScreen = true
 	return v
 }

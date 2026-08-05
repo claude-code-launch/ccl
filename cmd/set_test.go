@@ -261,7 +261,7 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 	m.configureOAuthRuntime("http://127.0.0.1:54321/v1", "ccl-session-secret")
 
 	view := m.View().Content
-	for _, want := range []string{"OAuth Credentials", "oauth/gpt", "Ready (this session only)"} {
+	for _, want := range []string{"Provider Configuration", "oauth/gpt", "Ready (this session only)"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("OAuth credential page should contain %q, got %q", want, view)
 		}
@@ -286,8 +286,11 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 		discoveredModelsRaw: "gpt-5.6-sol,gpt-5.6-codex",
 	})
 	m = next.(*AdvancedConfigModel)
-	if m.page != 5 || m.detectionError != nil {
+	if m.page != 4 || m.detectionError != nil {
 		t.Fatalf("OAuth discovery result was not accepted: page=%d err=%v", m.page, m.detectionError)
+	}
+	if !m.autoConfigured || !m.modelPoolFromDiscovery {
+		t.Fatalf("OAuth discovery should auto-configure and stay on the page: auto=%t detected=%t", m.autoConfigured, m.modelPoolFromDiscovery)
 	}
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("temporary OAuth runtime values leaked into provider: %+v", p)
@@ -384,8 +387,8 @@ func TestApplyModelDetectionResultFailsWhenDetectionFailsWithoutExistingType(t *
 	if cmd != nil {
 		t.Fatalf("expected detection failure to stay on page instead of quitting")
 	}
-	if m.page != 0 || m.cursor != 2 {
-		t.Fatalf("expected detection failure to stay on credential page retry button, got page=%d cursor=%d", m.page, m.cursor)
+	if m.page != 4 || m.cursor != m.mainRowIndex(rowTest) {
+		t.Fatalf("expected detection failure to stay on the main page at Test & Auto Configure, got page=%d cursor=%d", m.page, m.cursor)
 	}
 }
 
@@ -413,40 +416,12 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 	if cmd != nil {
 		t.Fatalf("expected detection failure to stay on page instead of quitting")
 	}
-	if m.page != 0 || m.cursor != 2 {
-		t.Fatalf("expected detection failure to stay on credential page retry button, got page=%d cursor=%d", m.page, m.cursor)
+	if m.page != 4 || m.cursor != m.mainRowIndex(rowTest) {
+		t.Fatalf("expected detection failure to stay on the main page at Test & Auto Configure, got page=%d cursor=%d", m.page, m.cursor)
 	}
 	view := m.View()
 	if !strings.Contains(view.Content, "models failed") {
 		t.Fatalf("expected detection error to be visible in view, got %q", view.Content)
-	}
-}
-
-func TestAdvancedConfigViewUsesCompactHeaderAndLanguageTip(t *testing.T) {
-	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
-	m := NewAdvancedConfigModel(&p)
-	m.page = 2
-
-	view := m.View().Content
-	if !strings.Contains(view, "Context & Compact") || !strings.Contains(view, "Step 4/5") {
-		t.Fatalf("expected compact page header, got %q", view)
-	}
-	if !strings.Contains(view, "Protocol: OpenAI") || strings.Contains(view, "Protocol: openai(chat)") {
-		t.Fatalf("expected the pre-review header to show only the OpenAI family, got %q", view)
-	}
-	if !strings.Contains(view, "Change the TUI display language") || !strings.Contains(view, "●") || !strings.Contains(view, "○") {
-		t.Fatalf("expected language tip and step progress, got %q", view)
-	}
-}
-
-func TestConfigModeIsSecondWorkflowStep(t *testing.T) {
-	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
-	m := NewAdvancedConfigModel(&p)
-	m.page = 5
-
-	view := m.View().Content
-	if !strings.Contains(view, "Config Mode") || !strings.Contains(view, "Step 2/5") {
-		t.Fatalf("expected config-mode page to be step 2, got %q", view)
 	}
 }
 
@@ -461,7 +436,7 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 		SubagentModel: "model-subagent",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
+	enterDetectedReview(m, "model-opus", "model-sonnet", "model-haiku")
 	m.oneMSlots["sonnet"] = true
 
 	view := m.View().Content
@@ -477,7 +452,7 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	}
 }
 
-func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
+func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	p := provider.Provider{
 		OpusModel:     "gpt-5.6-sol",
 		SonnetModel:   "gpt-5.6-terra",
@@ -485,67 +460,72 @@ func TestContextPageShowsGPT56RecommendationAndUnknownSafety(t *testing.T) {
 		CustomModelID: "gpt-5.6-sol",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 2
+	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+	m.oneMSlots["opus"], m.oneMSlots["sonnet"] = true, true
+	m.oneMSlots["haiku"], m.oneMSlots["custom"] = true, true
 	view := m.View().Content
-	if !strings.Contains(view, "Extended Context") {
-		t.Fatalf("expected Extended Context section, got %q", view)
-	}
-	if !strings.Contains(view, "Extended Context") || !strings.Contains(view, "Auto Compact") {
-		t.Fatalf("expected split Extended Context / Auto Compact sections, got %q", view)
-	}
-	// Only two sizings exist, so no intermediate presets may be offered.
+	// Only two sizings exist on the single page, so no intermediate presets may be
+	// offered anywhere in the rendered frame.
 	for _, removed := range []string{"Balanced", "500K", "300K", "Switch-safe", "Maximum depth"} {
 		if strings.Contains(view, removed) {
-			t.Fatalf("context page still offers the removed preset %q: %q", removed, view)
+			t.Fatalf("single page still offers the removed preset %q: %q", removed, view)
 		}
 	}
-	if !strings.Contains(view, "1M recommended") {
-		t.Fatalf("expected per-slot 1M recommendation badges, got %q", view)
+	if !allConfiguredModelsRecommendOneM(p) {
+		t.Fatal("all gpt-5.6 slots should recommend 1M")
+	}
+	// The [1M] markers next to the model rows are the per-slot recommendation; the
+	// Context row keeps Claude Code's own default compact budget.
+	if !strings.Contains(view, "[1M]") || !strings.Contains(view, "Claude default") {
+		t.Fatalf("expected per-slot 1M badges and the default compact summary, got %q", view)
 	}
 
 	p.CustomModelID = "unknown-model"
 	m = NewAdvancedConfigModel(&p)
-	m.page = 2
-	view = m.View().Content
+	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 	if allConfiguredModelsRecommendOneM(p) {
 		t.Fatal("mixed unknown models should not all-recommend 1M")
 	}
-	// The hint must say sizing is per slot and that Claude Code owns the compact
-	// threshold; ccl no longer has a provider-wide compact budget to explain.
-	if !strings.Contains(view, "per slot") && !strings.Contains(view, "按槽位") {
-		t.Fatalf("expected the per-slot sizing note, got %q", view)
-	}
-	if strings.Contains(view, "provider-wide") || strings.Contains(view, "Provider 全局") {
-		t.Fatalf("hint still claims a provider-wide compact budget: %q", view)
+
+	// OAuth backends own the compact threshold at launch, which the summary says.
+	oauth := p
+	oauth.OAuthProvider = "gpt"
+	mo := NewAdvancedConfigModel(&oauth)
+	enterDetectedReview(mo, "gpt-5.6-sol")
+	if view := mo.View().Content; !strings.Contains(view, "per slot") {
+		t.Fatalf("expected the per-slot sizing note for OAuth, got %q", view)
 	}
 }
 
-func TestCompactPresetRadioSelectsClaudeDefault(t *testing.T) {
+func TestCompactPresetCyclesClaudeDefaultAndCustom(t *testing.T) {
 	p := provider.Provider{Env: map[string]string{
 		autoCompactWindowEnv: "750000",
 		autoCompactPctEnv:    "82",
 	}}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 2
-	// Custom/preserve is radio index 4; Claude default is radio index 0.
-	m.cursor = oneMCompactStart + 0
+	enterDetectedReview(m, "model")
+	// The provider carries a hand-set compact env, so it opens on Custom.
+	if m.compactPreset != compactPresetPreserve {
+		t.Fatalf("compact preset = %v, want Custom for hand-set env", m.compactPreset)
+	}
+	m.cursor = m.mainRowIndex(rowContext)
 	m.oneMSlots["opus"] = true
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	// Left from Custom hands the provider back to Claude default.
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
 	m = next.(*AdvancedConfigModel)
 	if m.compactPreset != compactPresetDefault {
 		t.Fatalf("compact preset = %v, want Claude default", m.compactPreset)
 	}
 	if !m.oneMSlots["opus"] {
-		t.Fatal("selecting compact radio must not clear [1m] slots")
+		t.Fatal("cycling compact must not clear [1m] slots")
 	}
 	if got := m.compactSummary(); got != "Claude default" {
 		t.Fatalf("compact summary = %q", got)
 	}
 
-	// Selecting Custom keeps the [1m] slots and hands the env back to the user.
-	m.cursor = oneMCompactStart + 1
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	// Right again selects Custom, keeping the [1m] slots and handing the env back.
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
 	m = next.(*AdvancedConfigModel)
 	if m.compactPreset != compactPresetPreserve {
 		t.Fatalf("compact preset = %v, want Custom", m.compactPreset)
@@ -553,12 +533,13 @@ func TestCompactPresetRadioSelectsClaudeDefault(t *testing.T) {
 	if !m.oneMSlots["opus"] {
 		t.Fatal("selecting Custom must not clear [1m] slots")
 	}
+	if !provider.ContextBudgetIsManual(*m.p) {
+		t.Fatalf("Custom did not opt out of the context policy: %#v", m.p.Env)
+	}
 	view := m.View().Content
-	for _, expected := range []string{
-		"Extended Context", "Auto Compact", "Claude Code default", "Custom", "(●)",
-	} {
+	for _, expected := range []string{"Context", "Custom"} {
 		if !strings.Contains(view, expected) {
-			t.Fatalf("page2 view missing %q: %s", expected, view)
+			t.Fatalf("single page view missing %q: %s", expected, view)
 		}
 	}
 }
@@ -573,7 +554,7 @@ func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
 		},
 	}
 	m := NewAdvancedConfigModelAtPage1(&p, []string{"main-model", "cheap-subagent-model"})
-	m.cursor = 4
+	m.cursor = m.mainRowIndex(rowSubagent)
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
@@ -599,24 +580,19 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 		CustomModelID: "subagent-model",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 2
-	m.cursor = 4
-	m.width = 110
-	m.height = 34
+	enterDetectedReview(m, "subagent-model")
+	m.cursor = m.mainRowIndex(rowSubagent)
 
 	view := m.View().Content
 	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "(auto: subagent-model)") {
-		t.Fatalf("1M page does not show Subagent: %q", view)
+		t.Fatalf("single page does not show Subagent: %q", view)
 	}
-	for _, expected := range []string{"Extended Context", "Auto Compact", "Claude Code default", "Custom"} {
-		if !strings.Contains(view, expected) {
-			t.Fatalf("1M page missing %q: %q", expected, view)
-		}
+	if !strings.Contains(view, "Claude default") {
+		t.Fatalf("single page missing compact summary: %q", view)
 	}
-	if height := lipgloss.Height(view); height > m.height {
-		t.Fatalf("1M page height = %d, terminal height = %d", height, m.height)
-	}
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	// Space on the Subagent row toggles the per-slot 1M marker and materializes the
+	// runtime subagent default.
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
 	if !m.oneMSlots["subagent"] {
 		t.Fatal("Subagent 1M option was not enabled")
@@ -644,8 +620,7 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 		CustomModelID: "gpt-5.6-sol",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
-	m.manualConfig = true
+	enterDetectedReview(m, "gpt-5.6-sol")
 
 	view := m.View().Content
 	for _, expected := range []string{
@@ -655,8 +630,7 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 		"Tool Search", "‹ Default · Off ›",
 		"Max Output", "‹ Default · 32K ›",
 		"Set as active provider",
-		"Apply & Finish",
-		"purple editable",
+		"Save & Activate",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected manual review to contain %q, got %q", expected, view)
@@ -675,16 +649,17 @@ func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
 		SubagentModel: "gpt-5.6-terra",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
-	m.manualConfig = true
+	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 	m.width = 110
 	m.height = 30
+	m.cursor = m.mainRowIndex(rowSave)
+	m.keepCursorVisible()
 
 	view := m.View().Content
 	if height := lipgloss.Height(view); height > m.height {
 		t.Fatalf("review height = %d, terminal height = %d\n%s", height, m.height, view)
 	}
-	if !strings.Contains(view, "Apply & Finish") {
+	if !strings.Contains(view, "Save & Activate") {
 		t.Fatalf("review action is not visible: %q", view)
 	}
 }
@@ -692,11 +667,10 @@ func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
 func TestAutoReviewPageOmitsRuntimeDefaults(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", CustomModelID: "gpt-5.6-sol"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
-	m.manualConfig = false
+	enterDetectedReview(m, "gpt-5.6-sol")
 
 	view := m.View().Content
-	// Runtime editors are always available on review (compact defaults).
+	// Runtime editors are always available on the single page.
 	if !strings.Contains(view, "Runtime") || !strings.Contains(view, "Max Output") {
 		t.Fatalf("review should show runtime editors, got %q", view)
 	}
@@ -705,8 +679,8 @@ func TestAutoReviewPageOmitsRuntimeDefaults(t *testing.T) {
 func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
-	m.cursor = m.page4ProtocolCursor()
+	enterDetectedReview(m, "gpt-test")
+	m.cursor = m.mainRowIndex(rowProtocol)
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
@@ -714,7 +688,7 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 		t.Fatalf("protocol toggle stored %q, want openai_responses", p.Type)
 	}
 	view := m.View().Content
-	for _, want := range []string{"‹ Responses ›", "purple editable", "Max Output", "Tools"} {
+	for _, want := range []string{"‹ Responses ›", "Max Output", "Tools"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("Responses review should contain %q, got %q", want, view)
 		}
@@ -724,25 +698,25 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 	}
 }
 
-func TestOpenAIReviewStartsOnProtocolSelection(t *testing.T) {
+func TestOpenAIReviewStaysOnSinglePage(t *testing.T) {
 	p := provider.Provider{Type: "openai_responses", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 2
-	m.cursor = oneMNextCursor
+	enterDetectedReview(m, "gpt-test")
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
+	// Detection success keeps the model on the single page with the cursor on the
+	// first model row; there is no separate review page to enter.
 	if m.page != 4 {
-		t.Fatalf("review opened at page=%d, want 4", m.page)
+		t.Fatalf("single page must stay on page 4, got %d", m.page)
 	}
-	// Land on first editable runtime field for discoverability. Context sizing has
-	// no row here: it is per slot on page 2.
-	if m.cursor != m.page4InitialCursor() {
-		t.Fatalf("review cursor=%d, want first editable field %d", m.cursor, m.page4InitialCursor())
+	if m.cursor != m.mainRowIndex(rowOpus) {
+		t.Fatalf("cursor=%d, want rowOpus %d", m.cursor, m.mainRowIndex(rowOpus))
 	}
 	view := m.View().Content
+	if !strings.Contains(view, "Protocol") {
+		t.Fatalf("single page missing editable Protocol row: %q", view)
+	}
 	if strings.Contains(view, "Compact") {
-		t.Fatalf("review page must not show a Compact row: %q", view)
+		t.Fatalf("single page must not show a Compact section: %q", view)
 	}
 }
 
@@ -755,7 +729,6 @@ func TestAdvancedConfigOnlyConfirmsSaveFromReviewAction(t *testing.T) {
 		Model:    "gpt-test",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 5
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
 	m = next.(*AdvancedConfigModel)
@@ -764,8 +737,8 @@ func TestAdvancedConfigOnlyConfirmsSaveFromReviewAction(t *testing.T) {
 	}
 
 	m = NewAdvancedConfigModel(&p)
-	m.page = 4
-	m.cursor = m.page4SaveCursor()
+	enterDetectedReview(m, "gpt-test")
+	m.cursor = m.mainRowIndex(rowSave)
 	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
 	if !m.saveConfirmed || cmd == nil {
@@ -791,15 +764,12 @@ func TestReorderModelsByAvailability(t *testing.T) {
 func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
 	m := NewAdvancedConfigModelAtPage1(&p, []string{"model-unavailable", "model-available"})
-	m.cursor = slotTestCursor
+	// The single page has no dedicated test button; the test is driven by the
+	// modelTesting state that the availability command wires up.
+	m.modelTesting = true
+	m.modelTestID = 42
 
-	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	if !m.modelTesting || cmd == nil {
-		t.Fatalf("expected availability test to start, testing=%t cmd=%v", m.modelTesting, cmd)
-	}
-
-	next, _ = m.Update(modelAvailabilityDoneMsg{statuses: map[string]modelAvailability{
+	next, _ := m.Update(modelAvailabilityDoneMsg{statuses: map[string]modelAvailability{
 		"model-unavailable": modelAvailabilityUnavailable,
 		"model-available":   modelAvailabilityAvailable,
 	}, testID: m.modelTestID})
@@ -846,23 +816,18 @@ func TestParseModelListForDetectionPreservesDisplayMetadata(t *testing.T) {
 func TestSlotModelAvailabilityTestCanBeCanceled(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
 	m := NewAdvancedConfigModelAtPage1(&p, []string{"model-a"})
-	m.cursor = slotTestCursor
+	m.modelTesting = true
+	m.modelTestID = 7
+	m.modelTestCancel = func() {}
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	testID := m.modelTestID
-	if !m.modelTesting || m.modelTestCancel == nil {
-		t.Fatalf("expected cancelable test, testing=%t cancel=%v", m.modelTesting, m.modelTestCancel)
-	}
-
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
 	m = next.(*AdvancedConfigModel)
 	if m.modelTesting || !m.modelTestCanceled {
 		t.Fatalf("expected canceled test state, testing=%t canceled=%t", m.modelTesting, m.modelTestCanceled)
 	}
 
 	next, _ = m.Update(modelAvailabilityDoneMsg{
-		testID: testID,
+		testID: m.modelTestID,
 		statuses: map[string]modelAvailability{
 			"model-a": modelAvailabilityAvailable,
 		},
@@ -871,8 +836,8 @@ func TestSlotModelAvailabilityTestCanBeCanceled(t *testing.T) {
 	if len(m.modelAvailability) != 0 {
 		t.Fatalf("expected canceled test result to be ignored, got %v", m.modelAvailability)
 	}
-	if view := m.View().Content; !strings.Contains(view, "Test canceled; results were not applied") {
-		t.Fatalf("expected cancellation feedback, got %q", view)
+	if !m.modelTestCanceled {
+		t.Fatal("expected the cancellation to remain surfaced on the model")
 	}
 }
 
@@ -918,10 +883,15 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 		}
 	}
 
+	// The single-page model still wires the OAuth smoke probe: a ChatGPT OAuth
+	// provider reports the cheap probe model as its availability test target.
 	p := provider.Provider{OAuthProvider: "gpt"}
-	m := NewAdvancedConfigModelAtPage1(&p, models)
-	if view := m.View().Content; !strings.Contains(view, "Uses one low-cost test request with gpt-5.4-mini") {
-		t.Fatalf("OAuth test cost hint missing from view: %q", view)
+	m := NewAdvancedConfigModel(&p)
+	if got := m.availabilitySmokeTestModel(); got != lowCostProbeModel {
+		t.Fatalf("OAuth smoke model = %q, want %q", got, lowCostProbeModel)
+	}
+	if view := m.View().Content; !strings.Contains(view, "Model Mapping") {
+		t.Fatalf("OAuth single page missing Model Mapping: %q", view)
 	}
 }
 
@@ -1639,8 +1609,8 @@ func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 		Model:    "gpt-test",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
-	m.cursor = m.page4MaxOutCursor()
+	enterDetectedReview(m, "gpt-test")
+	m.cursor = m.mainRowIndex(rowMaxOutput)
 
 	// Cycle Max Output away from default -> 16K.
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))

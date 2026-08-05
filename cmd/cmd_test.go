@@ -172,7 +172,7 @@ func TestReviewPageShowsBearerForOpenAIChatDisplayLabel(t *testing.T) {
 		Endpoint: "https://example.com/v1",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
+	enterDetectedReview(m, "model-a", "model-b")
 	view := m.View().Content
 
 	if !contains(view, "Auth") {

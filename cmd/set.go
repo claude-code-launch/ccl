@@ -141,7 +141,7 @@ func RunProviderSet(args []string) error {
 		}
 	}
 	setDebugf(
-		"advanced config finished name=%q endpoint_empty=%t api_key_len=%d type=%q model_count=%d effort=%q slots=%s one_m=%s page=%d cursor=%d detecting=%t detection_error=%v model_pool_count=%d",
+		"advanced config finished name=%q endpoint_empty=%t api_key_len=%d type=%q model_count=%d effort=%q slots=%s one_m=%s detecting=%t detection_error=%v model_pool_count=%d connection_dirty=%t auto_configured=%t",
 		p.Name,
 		p.Endpoint == "",
 		len(p.APIKey),
@@ -150,15 +150,25 @@ func RunProviderSet(args []string) error {
 		p.EffortLevel,
 		slotDebugSummary(p),
 		reviewOneMSummary(updatedModel.oneMSlots),
-		updatedModel.page,
-		updatedModel.cursor,
 		updatedModel.detecting,
 		updatedModel.detectionError,
 		len(updatedModel.modelPool),
+		updatedModel.connectionDirty,
+		updatedModel.autoConfigured,
 	)
 	if !updatedModel.saveConfirmed {
 		setDebugf("abort: save was not confirmed")
 		fmt.Fprintln(os.Stderr, locale.T("ℹ️ 已取消配置，未保存。", "ℹ️ Configuration canceled; no changes were saved."))
+		return nil
+	}
+
+	// 连接被修改但未重新检测，或从未成功探测过 → 不允许保存半成品。
+	if !updatedModel.canSave() {
+		setDebugf("abort: cannot save endpoint_dirty=%t detected=%t", updatedModel.connectionDirty, updatedModel.modelPoolFromDiscovery)
+		fmt.Fprintln(os.Stderr, locale.T(
+			"ℹ️ 连接已修改或尚未成功检测，未保存。请重新运行 Test & Auto Configure。",
+			"ℹ️ Connection changed or not detected; nothing was saved. Re-run Test & Auto Configure.",
+		))
 		return nil
 	}
 

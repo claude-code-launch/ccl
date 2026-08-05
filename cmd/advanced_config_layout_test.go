@@ -55,24 +55,17 @@ func TestReviewShowsFastStatus(t *testing.T) {
 	chatgpt.OAuthProvider = "gpt"
 	chatgpt.FastMode = true
 	m := NewAdvancedConfigModel(&chatgpt)
-	m.page = 4
+	enterDetectedReview(m, "m")
 	view := m.View().Content
-	if !strings.Contains(view, "Fast") || !strings.Contains(view, "on") {
+	if !strings.Contains(view, "Fast") || !strings.Contains(view, "‹ On ›") {
 		t.Fatalf("review page missing Fast=on: %q", view)
-	}
-
-	// Page 0 OAuth credentials also surfaces the pin.
-	m.page = 0
-	view = m.View().Content
-	if !strings.Contains(view, "Fast") || !strings.Contains(view, "on") {
-		t.Fatalf("oauth credentials page missing Fast=on: %q", view)
 	}
 
 	off := providerFrom("plain", "https://example.com/v1", "openai")
 	m = NewAdvancedConfigModel(&off)
-	m.page = 4
+	enterDetectedReview(m, "m")
 	view = m.View().Content
-	if !strings.Contains(view, "Fast") || !strings.Contains(view, "off") {
+	if !strings.Contains(view, "Fast") || !strings.Contains(view, "‹ Off ›") {
 		t.Fatalf("review page missing Fast=off: %q", view)
 	}
 }
@@ -87,12 +80,12 @@ func TestMaxOutputEditableForChatGPTOAuthAndManagedForCodexAndKiro(t *testing.T)
 	if m.canToggleOpenAIProtocol() {
 		t.Fatal("OAuth protocol must be read-only on review")
 	}
-	m.page = 4
+	enterDetectedReview(m, "m")
 	view := m.View().Content
 	if strings.Contains(view, "Upstream managed") || !strings.Contains(view, "Max Output") {
 		t.Fatalf("ChatGPT OAuth review did not render editable Max Output: %q", view)
 	}
-	m.cursor = m.page4MaxOutCursor()
+	m.cursor = m.mainRowIndex(rowMaxOutput)
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
 	m = next.(*AdvancedConfigModel)
 	if got := m.p.Env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]; got != "16000" {
@@ -127,7 +120,7 @@ func TestMaxOutputEditableForChatGPTOAuthAndManagedForCodexAndKiro(t *testing.T)
 	if !m.maxOutputUpstreamManaged() {
 		t.Fatal("Kiro OAuth should treat max output as upstream-managed")
 	}
-	m.page = 4
+	enterDetectedReview(m, "m")
 	view = m.View().Content
 	if !strings.Contains(view, "Upstream managed") {
 		t.Fatalf("Kiro review should show Upstream managed, got %q", view)
@@ -145,38 +138,38 @@ func TestMaxOutputEditableForChatGPTOAuthAndManagedForCodexAndKiro(t *testing.T)
 		t.Fatal("plain responses should allow max output editing")
 	}
 
-	m.page = 4
+	enterDetectedReview(m, "m")
 	view = m.View().Content
 	if strings.Contains(view, "Upstream managed") {
 		t.Fatalf("plain responses unexpectedly shows Upstream managed: %q", view)
 	}
 
 	m = NewAdvancedConfigModel(&codex)
-	m.page = 4
+	enterDetectedReview(m, "m")
 	view = m.View().Content
 	if !strings.Contains(view, "Upstream managed") {
 		t.Fatalf("codex review should show Upstream managed, got %q", view)
 	}
 }
 
-func TestPage4UpFromToolsSkipsDisabledMaxOutput(t *testing.T) {
-	codex := providerFrom("codex", "https://example.com/codex", "openai_responses")
-	m := NewAdvancedConfigModel(&codex)
-	m.page = 4
-	m.cursor = m.page4ToolsCursor()
+func TestPageUpDownStaysWithinVisibleRows(t *testing.T) {
+	// Moving up/down must stay inside the single page's visible row set, wrapping
+	// at the ends instead of drifting into a disabled row.
+	cp := providerFrom("codex", "https://example.com/codex", "openai_responses")
+	m := NewAdvancedConfigModel(&cp)
+	enterDetectedReview(m, "codex-max")
+	rows := len(m.visibleRows())
+	m.cursor = 0
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
 	m = next.(*AdvancedConfigModel)
-	// Max Output is managed upstream for Codex, so moving up must skip it. With
-	// Protocol and Fast both absent it is the first row, so the cursor wraps to the
-	// end rather than bouncing back to Tools, which would trap the user.
-	if m.cursor == m.page4MaxOutCursor() {
-		t.Fatalf("up from Tools landed on the disabled Max Output row %d", m.cursor)
+	if m.cursor != rows-1 {
+		t.Fatalf("up from the first row landed on %d, want the last row %d", m.cursor, rows-1)
 	}
-	if m.cursor == m.page4ToolsCursor() {
-		t.Fatalf("up from Tools did not move: cursor %d", m.cursor)
-	}
-	if m.page4Base() == 0 && m.cursor != m.page4MaxCursor() {
-		t.Fatalf("up from the first row landed on %d, want the last row %d", m.cursor, m.page4MaxCursor())
+	m.cursor = rows - 1
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	m = next.(*AdvancedConfigModel)
+	if m.cursor != 0 {
+		t.Fatalf("down from the last row landed on %d, want the first row 0", m.cursor)
 	}
 }
 
@@ -184,27 +177,45 @@ func providerFrom(name, endpoint, typ string) provider.Provider {
 	return provider.Provider{Name: name, Endpoint: endpoint, Type: typ, APIKey: "k", Model: "m"}
 }
 
+// enterDetectedReview puts a model into the post-detection single-page state:
+// a populated pool, discovered flag set, and the cursor on a model row. It is the
+// single-page equivalent of the old "m.page = 4" idiom.
+func enterDetectedReview(m *AdvancedConfigModel, models ...string) *AdvancedConfigModel {
+	m.modelPool = append([]string(nil), models...)
+	m.modelPoolFromDiscovery = true
+	m.p.Model = strings.Join(models, ",")
+	m.page = 4
+	if len(models) > 0 {
+		m.cursor = m.mainRowIndex(rowOpus)
+	}
+	return m
+}
+
 func TestReviewFitsCommonTerminalHeights(t *testing.T) {
 	p := providerFrom("p", "https://example.com/v1", "openai")
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
+	enterDetectedReview(m, "model-a", "model-b", "model-c")
 	m.width = 100
-	m.manualConfig = true
 
+	// The single page is scrollable: at every terminal height, moving the cursor
+	// to the Save row scrolls it into view, and the rendered frame never exceeds
+	// the terminal.
 	for _, h := range []int{24, 26, 27, 28, 30} {
 		m.height = h
+		m.cursor = m.mainRowIndex(rowSave)
+		m.keepCursorVisible()
 		view := m.View().Content
 		got := lipgloss.Height(view)
 		if got > h {
 			t.Fatalf("terminal height %d rendered %d lines (overflow)\n%s", h, got, view)
 		}
-		if !strings.Contains(view, "Apply & Finish") {
-			t.Fatalf("Apply not visible at height %d", h)
+		if !strings.Contains(view, "Save & Activate") {
+			t.Fatalf("Save not visible at height %d", h)
 		}
 	}
 }
 
-func TestPage2BlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
+func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 	p := provider.Provider{
 		Type:        "openai_responses",
 		Endpoint:    "https://example.test/v1",
@@ -213,36 +224,31 @@ func TestPage2BlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 		HaikuModel:  "unknown-window",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 2
+	enterDetectedReview(m, "small-window", "big-window", "unknown-window")
 	m.modelContextWindows = map[string]int{
 		"small-window": 272_000,
 		"big-window":   1_050_000,
 	}
 
-	view := m.View().Content
-	if !strings.Contains(view, "backend 272K") || !strings.Contains(view, "no 1M") {
-		t.Fatalf("expected the Opus row to explain why 1M is unavailable: %q", view)
-	}
-
-	// Opus: 1M must not be selectable.
-	m.cursor = 0
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	// Opus: 1M must not be selectable via Space.
+	m.cursor = m.mainRowIndex(rowOpus)
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
 	if m.oneMSlots["opus"] {
 		t.Fatal("1M was enabled for a model whose backend window is 272K")
 	}
 
 	// Sonnet: a 1M-class window stays selectable.
-	m.cursor = 1
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m.cursor = m.mainRowIndex(rowSonnet)
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
 	if !m.oneMSlots["sonnet"] {
 		t.Fatal("1M must remain selectable for a 1M-class model")
 	}
 
 	// Unknown window: the catalog is advisory, so keep it editable.
-	m.cursor = 2
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m.cursor = m.mainRowIndex(rowHaiku)
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
 	if !m.oneMSlots["haiku"] {
 		t.Fatal("1M must stay editable when the window is unknown")
@@ -250,8 +256,8 @@ func TestPage2BlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 
 	// An existing marker on a blocked slot can still be cleared.
 	m.oneMSlots["opus"] = true
-	m.cursor = 0
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m.cursor = m.mainRowIndex(rowOpus)
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
 	if m.oneMSlots["opus"] {
 		t.Fatal("a stale [1m] marker on a blocked slot must be removable")
@@ -273,17 +279,17 @@ func TestPage2DefaultsToClaudeAutoCompact(t *testing.T) {
 	if m.compactPreset != compactPresetDefault {
 		t.Fatalf("compact preset = %v, want Claude default", m.compactPreset)
 	}
-	m.page = 2
-	view := m.View().Content
-	if !strings.Contains(view, "(●)") || !strings.Contains(view, "Claude Code default") {
-		t.Fatalf("Auto Compact should default to Claude Code default: %q", view)
+	// The legacy preset is dropped, not surfaced, so the saved provider clears the
+	// stale context env on apply.
+	if m.compactState.legacy {
+		t.Fatalf("legacy compact state should be recognized as default, got %+v", m.compactState)
 	}
 }
 
 func TestCredentialsPageResolvesClickToField(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "sk-test"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 0
+	m.page = 4
 	m.width = 100
 	m.height = 30
 
@@ -346,7 +352,7 @@ func TestOAuthCredentialsPageLeavesMouseAlone(t *testing.T) {
 	// selection behaviour.
 	p := provider.Provider{Type: "openai_responses", OAuthProvider: "gpt", Endpoint: "oauth://codex"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 0
+	m.page = 4
 	m.width = 100
 	m.height = 30
 	if view := m.View(); view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
@@ -354,23 +360,24 @@ func TestOAuthCredentialsPageLeavesMouseAlone(t *testing.T) {
 	}
 }
 
-func TestPage2BlocksOneMForMixedCaseModelIDs(t *testing.T) {
+func TestSinglePageBlocksOneMForMixedCaseModelIDs(t *testing.T) {
 	// The catalog is keyed by lowercased model id; a gateway serving mixed-case ids
-	// must not slip past the check.
+	// must not slip past the check. On the single page the 1M marker is toggled by
+	// Space on a model row, not by Enter on the removed page 2.
 	p := provider.Provider{
 		Type:      "openai",
 		Endpoint:  "https://example.test/v1",
 		OpusModel: "GLM-4.6",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 2
 	m.modelContextWindows = map[string]int{"glm-4.6": 200_000}
 
 	if !m.oneMSlotBlocked("GLM-4.6") {
 		t.Fatal("a 200K model must block 1M regardless of id casing")
 	}
-	m.cursor = 0
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	enterDetectedReview(m, "GLM-4.6")
+	m.cursor = m.mainRowIndex(rowOpus)
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
 	if m.oneMSlots["opus"] {
 		t.Fatal("1M was enabled for a 200K model with a mixed-case id")
@@ -429,7 +436,7 @@ func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
 			for _, r := range []rune{'q', 'k', 'j', 'h', 'l'} {
 				p := provider.Provider{Type: "openai"}
 				m := NewAdvancedConfigModel(&p)
-				m.page = 0
+				m.page = 4
 				m.cursor = tc.cursor
 
 				next, cmd := m.Update(typeKey(r))
@@ -494,10 +501,14 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 		{ID: "dfmodel", DisplayName: "DeepSeek-V4-Flash", ContextWindow: 1_000_000, RateMultiplier: &flashRate, IsNew: true},
 	})
 	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, []string{"qmodel_38max", "dfmodel"}, metadata)
-	m.cursor = 0
+	m.cursor = m.mainRowIndex(rowOpus)
 
+	// Enter on a model row opens the slot picker overlay on the single page.
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
+	if !m.filterInput.Focused() {
+		t.Fatalf("enter on the Opus row did not open the model picker")
+	}
 	view := m.View().Content
 	for _, want := range []string{"Qwen3.8-Max", "qmodel_38max", "0.5x", "new", "off-peak discount"} {
 		if !strings.Contains(view, want) {
@@ -522,19 +533,13 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 		t.Fatalf("display label leaked into slot mapping: %q", p.OpusModel)
 	}
 
-	// Every later page must use the same display projection. The underlying
-	// values remain IDs for context checks and persistence.
-	for _, page := range []int{1, 2, 4} {
-		m.page = page
-		m.filterInput.Blur()
-		view = m.View().Content
-		for _, want := range []string{"Qwen3.8-Max", "DeepSeek-V4-Flash"} {
-			if !strings.Contains(view, want) {
-				t.Fatalf("page %d missing friendly model %q: %q", page, want, view)
-			}
-		}
-		if page == 2 && !strings.Contains(view, "1M reported") {
-			t.Fatalf("context page did not use catalog context window: %q", view)
+	// Back on the main page, the same display projection is used while the
+	// persisted values remain internal IDs for requests.
+	m.filterInput.Blur()
+	view = m.View().Content
+	for _, want := range []string{"Qwen3.8-Max", "DeepSeek-V4-Flash"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("main page missing friendly model %q: %q", want, view)
 		}
 	}
 }
@@ -552,7 +557,7 @@ func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewAdvancedConfigModel(&tc.p)
-			m.page = 0
+			m.page = 4
 			m.cursor = tc.cursor
 			if _, cmd := m.Update(typeKey('q')); !quits(cmd) {
 				t.Fatal("q no longer quits")
@@ -563,9 +568,9 @@ func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 
 func TestViewDoesNotMutateTheModel(t *testing.T) {
 	// View is a renderer: bubbletea may call it without a following Update, so
-	// state changed here makes the frame and the model disagree. Page 3 (the
-	// removed Reasoning Effort step) used to assign m.page and m.cursor from
-	// inside View to bounce the user to the review page.
+	// state changed here makes the frame and the model disagree. The single page
+	// renders identically regardless of any stale page value; View must never
+	// assign m.page or m.cursor.
 	for _, page := range []int{0, 1, 2, 3, 4, 5, 99} {
 		p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", Model: "model-a,model-b"}
 		m := NewAdvancedConfigModel(&p)
@@ -582,30 +587,6 @@ func TestViewDoesNotMutateTheModel(t *testing.T) {
 		}
 		if strings.TrimSpace(view.Content) == "" {
 			t.Fatalf("View() on page %d rendered a blank frame", page)
-		}
-	}
-}
-
-func TestNoNavigationReachesTheRemovedEffortPage(t *testing.T) {
-	// goBack is the only path that decrements the page, so it is the only way a
-	// caller could land on the removed page 3. Page 4 must skip straight to 2.
-	for _, from := range []int{1, 2, 4, 5} {
-		p := provider.Provider{Type: "openai"}
-		m := NewAdvancedConfigModel(&p)
-		m.page = from
-		m.goBack()
-		if m.page == 3 {
-			t.Fatalf("goBack from page %d landed on the removed effort page", from)
-		}
-	}
-
-	// The visible step numbering has no slot for it either.
-	p := provider.Provider{Type: "openai"}
-	m := NewAdvancedConfigModel(&p)
-	for _, page := range []int{0, 1, 2, 4, 5} {
-		m.page = page
-		if step := m.workflowStep(); step < 1 || step > 5 {
-			t.Fatalf("page %d maps to workflow step %d, outside 1..5", page, step)
 		}
 	}
 }
