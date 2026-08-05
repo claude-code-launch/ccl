@@ -168,8 +168,8 @@ func RunProviderSet(args []string) error {
 	if !updatedModel.canSave() {
 		setDebugf("abort: cannot save endpoint_dirty=%t detected=%t", updatedModel.connectionDirty, updatedModel.modelPoolFromDiscovery)
 		fmt.Fprintln(os.Stderr, locale.T(
-			"ℹ️ 连接已修改或尚未成功检测，未保存。请重新运行 Test & Auto Configure。",
-			"ℹ️ Connection changed or not detected; nothing was saved. Re-run Test & Auto Configure.",
+			"ℹ️ 连接已修改或尚未成功检测，未保存。请重新运行 Auto Configure。",
+			"ℹ️ Connection changed or not detected; nothing was saved. Re-run Auto Configure.",
 		))
 		return nil
 	}

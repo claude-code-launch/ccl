@@ -388,7 +388,7 @@ func TestApplyModelDetectionResultFailsWhenDetectionFailsWithoutExistingType(t *
 		t.Fatalf("expected detection failure to stay on page instead of quitting")
 	}
 	if m.page != 4 || m.cursor != m.mainRowIndex(rowTest) {
-		t.Fatalf("expected detection failure to stay on the main page at Test & Auto Configure, got page=%d cursor=%d", m.page, m.cursor)
+		t.Fatalf("expected detection failure to stay on the main page at Auto Configure, got page=%d cursor=%d", m.page, m.cursor)
 	}
 }
 
@@ -417,7 +417,7 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 		t.Fatalf("expected detection failure to stay on page instead of quitting")
 	}
 	if m.page != 4 || m.cursor != m.mainRowIndex(rowTest) {
-		t.Fatalf("expected detection failure to stay on the main page at Test & Auto Configure, got page=%d cursor=%d", m.page, m.cursor)
+		t.Fatalf("expected detection failure to stay on the main page at Auto Configure, got page=%d cursor=%d", m.page, m.cursor)
 	}
 	view := m.View()
 	if !strings.Contains(view.Content, "models failed") {

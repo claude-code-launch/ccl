@@ -67,7 +67,7 @@ type configRowKind uint8
 const (
 	rowEndpoint configRowKind = iota
 	rowAPIKey
-	rowTest // Test & Auto Configure
+	rowTest // Auto Configure
 	rowProtocol
 	rowFast
 	rowOpus
@@ -75,7 +75,8 @@ const (
 	rowHaiku
 	rowCustom
 	rowSubagent
-	rowContext // Context & Compact entry
+	rowTestModels // Test model availability (optional, costs quota)
+	rowContext    // Context & Compact entry
 	rowMaxOutput
 	rowTools
 	rowToolSearch
@@ -205,13 +206,12 @@ type modelFetchDoneMsg struct {
 	err                 error
 }
 
-// pageDetected reports whether a successful detection populated the config.
-// OAuth providers skip HTTP detection entirely, so they are always "detected".
+// pageDetected reports whether the full single page (Connection + Model Mapping
+// + Runtime) is shown. It is always true: the config page is one page for both
+// new and existing providers. Before detection the Model Mapping rows render
+// empty with an Auto Configure hint; after it they show the discovered models.
 func (m *AdvancedConfigModel) pageDetected() bool {
-	if m.usesOAuth() {
-		return true
-	}
-	return m.modelPoolFromDiscovery
+	return true
 }
 
 // currentRow returns the configRowKind the page cursor sits on. It is only
@@ -244,6 +244,7 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		configRow{kind: rowHaiku},
 		configRow{kind: rowCustom},
 		configRow{kind: rowSubagent},
+		configRow{kind: rowTestModels},
 		configRow{kind: rowContext},
 	)
 	rows = append(rows, configRow{kind: rowProtocol, editable: true})
@@ -1771,6 +1772,25 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.slotListCursor = 0
 				m.updateFilteredPool()
 				setDebugf("open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
+			case rowTestModels:
+				// Start the per-model availability test. Each model gets one
+				// minimal request, so this is opt-in and consumes quota.
+				if len(m.modelPool) == 0 {
+					setDebugf("model availability test skipped: empty pool")
+					return m, nil
+				}
+				m.modelTestID++
+				testID := m.modelTestID
+				ctx, cancel := context.WithCancel(context.Background())
+				m.modelTesting = true
+				m.modelTestCancel = cancel
+				m.modelTestFrame = 0
+				m.modelTestCanceled = false
+				setDebugf("model availability test started model_count=%d", len(m.modelPool))
+				return m, tea.Batch(
+					modelAvailabilityTestCmd(ctx, testID, m.modelPool, m.probeEndpoint, m.probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.availabilitySmokeTestModel()),
+					modelAvailabilityTickCmd(testID),
+				)
 			case rowContext:
 				// Context & Compact is edited inline; nothing to open yet.
 				setDebugf("context row selected")
@@ -1880,7 +1900,8 @@ func renderCredentialField(label, value string, focused bool) string {
 
 func (m *AdvancedConfigModel) renderPageHeader(title, badge string) string {
 	line := titleStyle.Render(title) + badgeStyle.Render(badge)
-	if !m.pageDetected() {
+	// Show the protocol family in the header until a detection has pinned it.
+	if !m.modelPoolFromDiscovery && !m.usesOAuth() {
 		line += protoBadgeStyle.Render("Protocol: " + m.getProtocolFamily())
 	}
 	dividerWidth := max(m.panelWidth()-6, 16)
@@ -1959,7 +1980,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 	if m.detecting {
 		body.WriteString(renderModelFetchProgress(m.detectProgress, m.detectFrame, m.usesOAuth()))
 	} else {
-		testLabel := locale.T("Test & Auto Configure", "Test & Auto Configure")
+		testLabel := locale.T("Auto Configure", "Auto Configure")
 		testStr := "  " + testLabel
 		if m.cursor == m.mainRowIndex(rowTest) {
 			testStr = selectedStyle.Render("> " + testLabel)
@@ -1981,7 +2002,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 	// ── Model Mapping (only after detection) ──────────────────────────────
 	if m.pageDetected() {
 		body.WriteString("\n" + titleStyle.Render("Model Mapping") + "\n")
-		renderMappingRow := func(kind configRowKind, label, display string, oneM bool) {
+		renderMappingRow := func(kind configRowKind, label, display, modelID string, oneM bool) {
 			prefix := "  "
 			val := purpleText.Render(truncateMiddle(display, 52))
 			if m.cursor == m.mainRowIndex(kind) {
@@ -1992,13 +2013,47 @@ func (m *AdvancedConfigModel) View() tea.View {
 			if oneM {
 				badge = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("[1M]")
 			}
+			// Availability badge, shown only after the optional test ran.
+			if status, ok := m.modelAvailability[modelID]; ok && status != modelAvailabilityUnknown {
+				switch status {
+				case modelAvailabilityAvailable:
+					badge = availableStyle.Render("✓") + " "
+				case modelAvailabilityUnavailable:
+					badge = unavailableStyle.Render("✗") + " "
+				}
+			}
 			body.WriteString(fmt.Sprintf("%s%-10s %s %s\n", prefix, label, val, badge))
 		}
-		renderMappingRow(rowOpus, "Opus", m.modelDisplayLabel(m.p.OpusModel), m.oneMSlots["opus"])
-		renderMappingRow(rowSonnet, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.oneMSlots["sonnet"])
-		renderMappingRow(rowHaiku, "Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.oneMSlots["haiku"])
-		renderMappingRow(rowCustom, "Custom", m.modelDisplayLabel(m.p.CustomModelID), m.oneMSlots["custom"])
-		renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.oneMSlots["subagent"])
+		renderMappingRow(rowOpus, "Opus", m.modelDisplayLabel(m.p.OpusModel), m.p.OpusModel, m.oneMSlots["opus"])
+		renderMappingRow(rowSonnet, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.p.SonnetModel, m.oneMSlots["sonnet"])
+		renderMappingRow(rowHaiku, "Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.p.HaikuModel, m.oneMSlots["haiku"])
+		renderMappingRow(rowCustom, "Custom", m.modelDisplayLabel(m.p.CustomModelID), m.p.CustomModelID, m.oneMSlots["custom"])
+		renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.p.SubagentModel, m.oneMSlots["subagent"])
+
+		// Test Model Availability — optional; each probe consumes quota, so the
+		// user opts in explicitly. Results are shown next to the model rows above.
+		testPrefix := "  "
+		testLabel := locale.T("Test Model Availability", "Test Model Availability")
+		if m.modelTesting {
+			spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+			spin := spinners[m.modelTestFrame%len(spinners)]
+			testLabel = fmt.Sprintf("%s %s", spin, locale.T("正在测试模型可用性...", "Testing model availability..."))
+		}
+		if m.cursor == m.mainRowIndex(rowTestModels) {
+			testPrefix = selectedStyle.Render("> ")
+			testLabel = selectedStyle.Render(testLabel)
+		} else {
+			testLabel = purpleText.Render(testLabel)
+		}
+		body.WriteString(testPrefix + testLabel + "\n")
+		if m.modelTesting {
+			body.WriteString(grayText.Render("    "+locale.T("测试进行中 · 按 esc 取消", "Testing in progress · press esc to cancel")) + "\n")
+		} else if len(m.modelAvailability) > 0 {
+			available, unavailable := m.availabilityCounts()
+			body.WriteString(grayText.Render(fmt.Sprintf("    "+locale.T("%d 个可用 · %d 个不可用", "%d available · %d unavailable"), available, unavailable)) + "\n")
+		} else {
+			body.WriteString(grayText.Render(locale.T("    ⚠ 会为每个模型发送一次最小请求，消耗额度", "    ⚠ sends one minimal request per model; consumes quota")) + "\n")
+		}
 
 		// Context & Compact — per-slot [1m] via Space on the rows above; the
 		// provider-wide fallback cycles with ←→ (shown as ‹ › like other editable
@@ -2082,8 +2137,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 		)) + "\n")
 	} else {
 		body.WriteString("\n" + grayText.Render(locale.T(
-			"填写 Endpoint 与 API Key 后点击 Test & Auto Configure 自动填充",
-			"Enter Endpoint and API Key, then Test & Auto Configure to auto-fill",
+			"填写 Endpoint 与 API Key 后点击 Auto Configure 自动填充",
+			"Enter Endpoint and API Key, then Auto Configure to auto-fill",
 		)) + "\n")
 	}
 
@@ -2211,7 +2266,7 @@ func rowAtLine(lines []string, y int) (configRowKind, bool) {
 var rowClickLabels = map[configRowKind]string{
 	rowEndpoint:   "Endpoint URL",
 	rowAPIKey:     "API Key",
-	rowTest:       "Test & Auto Configure",
+	rowTest:       "Auto Configure",
 	rowProtocol:   "Protocol",
 	rowFast:       "Fast",
 	rowOpus:       "Opus",
@@ -2219,6 +2274,7 @@ var rowClickLabels = map[configRowKind]string{
 	rowHaiku:      "Haiku",
 	rowCustom:     "Custom",
 	rowSubagent:   "Subagent",
+	rowTestModels: "Test Model Availability",
 	rowContext:    "Context",
 	rowMaxOutput:  "Max Output",
 	rowTools:      "Tools",
