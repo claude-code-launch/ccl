@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
@@ -72,7 +73,8 @@ type configRowKind uint8
 const (
 	rowEndpoint configRowKind = iota
 	rowAPIKey
-	rowToggleKey // eye button to reveal/hide the API key
+	rowToggleKey // Show/Hide button for the API key
+	rowCopyKey   // click the revealed key value to copy the full key
 	rowTest      // Auto Configure
 	rowProtocol
 	rowFast
@@ -147,18 +149,16 @@ type AdvancedConfigModel struct {
 	// single page when the content exceeds the terminal height. The cursor row is
 	// kept visible: scrolling happens in Update, never in View (which is pure).
 	scrollOffset int
-	// scrollContentHeight is the rendered body line count from the last View
-	// pass. The mouse wheel uses it to bound scrollOffset so the wheel can reach
-	// the bottom (action bar) even when the content is much taller than the
-	// terminal. It is derived in View but read by Update's mouseScrollMsg.
-	scrollContentHeight int
 	// autoDetectOnOpen marks an existing provider whose connection should be
 	// re-verified automatically when the page opens (Init). Until that check
 	// succeeds, connectionReady is false and Model Mapping / Runtime stay greyed.
 	autoDetectOnOpen bool
 	// keyVisible toggles whether the API key is shown in plain text next to the
-	// eye button, or masked as asterisks. Defaults to masked.
+	// Show/Hide button, or masked as asterisks. Defaults to masked.
 	keyVisible bool
+	// keyCopiedAt is a monotonic tick when the key was last copied to the
+	// clipboard, used to show a brief "copied" hint next to the field.
+	keyCopiedAt uint64
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -1541,6 +1541,15 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if msg.row == rowCopyKey {
+			// Clicking the revealed key copies the full value to the clipboard.
+			m.keyCopiedAt++
+			if err := clipboard.WriteAll(m.keyInput.Value()); err != nil {
+				setDebugf("copy key to clipboard failed: %v", err)
+			}
+			setDebugf("key copied to clipboard")
+			return m, nil
+		}
 		idx := m.mainRowIndex(msg.row)
 		if idx < 0 {
 			return m, nil
@@ -1589,38 +1598,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.keyInput.Blur()
 			m.filterInput.Blur()
 		}
-		return m, nil
-
-	case mouseScrollMsg:
-		// Mouse wheel scrolls the single page when content exceeds the terminal.
-		// Amplify each tick so holding the wheel moves several rows per event
-		// (bubbletea emits one event per wheel step), and clamp to the rendered
-		// content so the wheel can reach the bottom.
-		if m.height <= 0 {
-			return m, nil
-		}
-		step := msg.delta * 3
-		if step < 0 && m.scrollOffset < -step {
-			m.scrollOffset = 0
-		} else {
-			m.scrollOffset += step
-		}
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
-		}
-		maxOffset := m.scrollContentHeight
-		if maxOffset > 0 {
-			if m.scrollOffset > maxOffset {
-				m.scrollOffset = maxOffset
-			}
-		} else if m.height > 0 {
-			// Fallback bound when no view has rendered yet.
-			limit := (m.height - 5) * 8
-			if m.scrollOffset > limit {
-				m.scrollOffset = limit
-			}
-		}
-		setDebugf("mouse scroll delta=%d offset=%d content=%d", msg.delta, m.scrollOffset, m.scrollContentHeight)
 		return m, nil
 
 	case modelFetchTickMsg:
@@ -1982,10 +1959,6 @@ func renderModelFetchProgress(progress, frame int, oauth bool) string {
 // instead of mutating the model from the view.
 type focusRowMsg struct{ row configRowKind }
 
-// mouseScrollMsg reports a mouse-wheel tick; the sign of delta is the scroll
-// direction and the magnitude is in rows.
-type mouseScrollMsg struct{ delta int }
-
 func renderCredentialField(label, value string, focused bool) string {
 	prefix := "  "
 	labelText := purpleText.Render(label)
@@ -2070,15 +2043,21 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
 	} else {
+		// The key is shown at a fixed width so the Show/Hide button never moves
+		// as the key changes. Masked keys are a fixed run of asterisks; revealed
+		// keys are middle-truncated with an ellipsis (the full value is copied on
+		// click).
+		const keyDisplayWidth = 42
 		keyValue := m.keyInput.View()
-		if m.keyVisible {
-			// Revealed: show the plain key.
-			keyValue = m.keyInput.Value()
-		} else if m.cursor != m.mainRowIndex(rowAPIKey) {
-			// Not editing and hidden: mask as asterisks.
-			keyValue = strings.Repeat("*", len([]rune(m.keyInput.Value())))
-			if keyValue == "" {
+		switch {
+		case m.keyVisible:
+			keyValue = truncateMiddle(m.keyInput.Value(), keyDisplayWidth)
+		case m.cursor != m.mainRowIndex(rowAPIKey):
+			key := m.keyInput.Value()
+			if key == "" {
 				keyValue = m.keyInput.Placeholder
+			} else {
+				keyValue = strings.Repeat("*", keyDisplayWidth)
 			}
 		}
 		// Show/Hide button to reveal or mask the key.
@@ -2276,7 +2255,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 	// from the cursor row so the focused row stays visible; View does not mutate
 	// model state. Fixed chrome (panel border + footer tip) leaves the rest.
 	bodyLines := strings.Split(body.String(), "\n")
-	m.scrollContentHeight = len(bodyLines)
 	scrollOffset := m.scrollOffset
 	if m.height > 0 && len(bodyLines) > m.height {
 		// The frame must fit: border (2) + footer (3) leave height-5 for the body.
@@ -2335,28 +2313,17 @@ func (m *AdvancedConfigModel) View() tea.View {
 		v.MouseMode = tea.MouseModeAllMotion
 		lines := strings.Split(finalStr, "\n")
 		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
-			switch msg.(type) {
-			case tea.MouseClickMsg:
-				mouse := msg.Mouse()
-				row, ok := rowAtLineAt(lines, mouse.Y, mouse.X)
-				if !ok {
-					return nil
-				}
-				return func() tea.Msg { return focusRowMsg{row: row} }
-			case tea.MouseWheelMsg:
-				mouse := msg.Mouse()
-				delta := 0
-				if mouse.Button == tea.MouseWheelUp {
-					delta = -1
-				} else if mouse.Button == tea.MouseWheelDown {
-					delta = 1
-				}
-				if delta == 0 {
-					return nil
-				}
-				return func() tea.Msg { return mouseScrollMsg{delta: delta} }
+			// Only clicks are handled; the mouse wheel and trackpad two-finger
+			// scroll are deliberately ignored so they do not scroll the page.
+			if _, ok := msg.(tea.MouseClickMsg); !ok {
+				return nil
 			}
-			return nil
+			mouse := msg.Mouse()
+			row, ok := rowAtLineAt(lines, mouse.Y, mouse.X)
+			if !ok {
+				return nil
+			}
+			return func() tea.Msg { return focusRowMsg{row: row} }
 		}
 	}
 	return v
@@ -2401,14 +2368,20 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 // start column is kept so a click's X can disambiguate Save vs Cancel, which
 // share one line.
 func matchRowLabel(text string, x int) (configRowKind, bool) {
-	// The API key value row carries a Show/Hide button; clicking it toggles key
-	// visibility. The button renders as "  Show  " with padding, so match the
-	// word and its surrounding space.
+	// The API key value row carries the masked key (or revealed plaintext) plus a
+	// Show/Hide button. Clicking the button toggles visibility; clicking the key
+	// value copies the full key. The value row starts with asterisks (masked) or
+	// the key text (revealed) before the button.
 	for _, label := range []string{"Show", "Hide"} {
 		if idx := strings.Index(text, " "+label+" "); idx >= 0 {
 			if x < 0 || (x >= idx && x < idx+len(label)+2) {
 				return rowToggleKey, true
 			}
+			// Click on the key value area (before the button) copies the key.
+			if x >= 0 && x < idx {
+				return rowCopyKey, true
+			}
+			return rowCancel, false
 		}
 	}
 	// Strip leading border, cursor arrow, and whitespace to find the first field.
