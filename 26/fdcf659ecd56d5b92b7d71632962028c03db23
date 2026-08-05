@@ -1,0 +1,29 @@
+cmd/advanced_config.go
+  s_8a80ff043cf944::t_531f7a9f85563f 2103-2105
+  s_8a80ff043cf944::t_d2824faeb48280 227-237,239-241,248,252-258,260-262,264-266
+  s_8a80ff043cf944::t_f0ab7b304477f9 1782-1784,1792-1794
+  s_8a80ff043cf944::t_c66ac3d08c5e7b 2024
+  s_8a80ff043cf944::t_48720ee6eb993b 2090-2092
+  s_8a80ff043cf944::t_06c07eb0e42e1d 2042,2265-2267,2272-2292
+  s_8a80ff043cf944::t_17676990b0f173 2022,2025,2029-2032,2040-2041
+  s_8a80ff043cf944::t_2db58a4ce91635 1142-1144
+README.md
+  s_8a80ff043cf944::t_73733507fa0cf9 192
+  s_8a80ff043cf944::t_61f20ca06f8cdf 532,534,537
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "26fdcf659ecd56d5b92b7d71632962028c03db23",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
