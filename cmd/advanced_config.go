@@ -1948,7 +1948,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Accounts", cyanText.Render(fmt.Sprintf("%d", len(m.p.OAuthAccountCredentials)))))
 		}
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", cyanText.Render(providerFastSummary(*m.p))))
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
+		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
 	} else {
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
@@ -1973,7 +1973,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 			status := fmt.Sprintf(locale.T("✓ 已连接 · %s · %d 个模型", "✓ Connected · %s · %d models"), provider.ProtocolLabelForProvider(*m.p), len(m.modelPool))
 			body.WriteString(availableStyle.Render(status) + "\n")
 			if !m.usesOAuth() {
-				body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", purpleText.Render(providerAuthLabel(*m.p))))
+				body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 			}
 		}
 	}
@@ -2001,12 +2001,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 		renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.oneMSlots["subagent"])
 
 		// Context & Compact — per-slot [1m] via Space on the rows above; the
-		// provider-wide fallback cycles with ←→.
+		// provider-wide fallback cycles with ←→ (shown as ‹ › like other editable
+		// values).
 		ctxPrefix := "  "
-		ctxVal := purpleText.Render(m.compactSummary())
+		ctxVal := purpleText.Render("‹ " + m.compactSummary() + " ›")
 		if m.cursor == m.mainRowIndex(rowContext) {
 			ctxPrefix = selectedStyle.Render("> ")
-			ctxVal = selectedStyle.Render(m.compactSummary())
+			ctxVal = selectedStyle.Render("‹ " + m.compactSummary() + " ›")
 		}
 		body.WriteString(fmt.Sprintf("%s%-12s %s\n", ctxPrefix, "Context", ctxVal))
 
