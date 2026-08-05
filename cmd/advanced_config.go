@@ -2069,12 +2069,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// user opts in explicitly. Results are shown next to the model rows above.
 		testPrefix := "  "
 		testLabel := locale.T("Test Model Availability", "Test Model Availability")
-		if m.modelTesting {
+		if !ready {
+			testLabel = grayText.Render(testLabel)
+		} else if m.modelTesting {
 			spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 			spin := spinners[m.modelTestFrame%len(spinners)]
 			testLabel = fmt.Sprintf("%s %s", spin, locale.T("正在测试模型可用性...", "Testing model availability..."))
-		}
-		if m.cursor == m.mainRowIndex(rowTestModels) {
+		} else if m.cursor == m.mainRowIndex(rowTestModels) {
 			testPrefix = selectedStyle.Render("> ")
 			testLabel = selectedStyle.Render(testLabel)
 		} else {
