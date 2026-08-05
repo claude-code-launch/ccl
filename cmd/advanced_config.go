@@ -140,6 +140,11 @@ type AdvancedConfigModel struct {
 	// single page when the content exceeds the terminal height. The cursor row is
 	// kept visible: scrolling happens in Update, never in View (which is pure).
 	scrollOffset int
+	// scrollContentHeight is the rendered body line count from the last View
+	// pass. The mouse wheel uses it to bound scrollOffset so the wheel can reach
+	// the bottom (action bar) even when the content is much taller than the
+	// terminal. It is derived in View but read by Update's mouseScrollMsg.
+	scrollContentHeight int
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -231,8 +236,8 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 	if !m.pageDetected() {
 		return rows
 	}
-	rows = append(rows, configRow{kind: rowProtocol, editable: true})
-	rows = append(rows, configRow{kind: rowFast, editable: true})
+	// Render order matches View: Connection → Model Mapping → Context →
+	// Runtime (Protocol/Fast/...) → Active → actions.
 	rows = append(rows,
 		configRow{kind: rowOpus},
 		configRow{kind: rowSonnet},
@@ -241,6 +246,8 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		configRow{kind: rowSubagent},
 		configRow{kind: rowContext},
 	)
+	rows = append(rows, configRow{kind: rowProtocol, editable: true})
+	rows = append(rows, configRow{kind: rowFast, editable: true})
 	rows = append(rows, configRow{kind: rowMaxOutput, editable: true})
 	rows = append(rows,
 		configRow{kind: rowTools, editable: true},
@@ -1457,23 +1464,34 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mouseScrollMsg:
 		// Mouse wheel scrolls the single page when content exceeds the terminal.
+		// Amplify each tick so holding the wheel moves several rows per event
+		// (bubbletea emits one event per wheel step), and clamp to the rendered
+		// content so the wheel can reach the bottom.
 		if m.height <= 0 {
 			return m, nil
 		}
-		maxOffset := m.height - 5
-		if maxOffset < 0 {
-			maxOffset = 0
+		step := msg.delta * 3
+		if step < 0 && m.scrollOffset < -step {
+			m.scrollOffset = 0
+		} else {
+			m.scrollOffset += step
 		}
-		m.scrollOffset += msg.delta
 		if m.scrollOffset < 0 {
 			m.scrollOffset = 0
 		}
-		// Clamp to the content length: the offset is in row units, so approximate
-		// with a generous bound so the tail (action bar) is reachable.
-		if m.scrollOffset > maxOffset*4 {
-			m.scrollOffset = maxOffset * 4
+		maxOffset := m.scrollContentHeight
+		if maxOffset > 0 {
+			if m.scrollOffset > maxOffset {
+				m.scrollOffset = maxOffset
+			}
+		} else if m.height > 0 {
+			// Fallback bound when no view has rendered yet.
+			limit := (m.height - 5) * 8
+			if m.scrollOffset > limit {
+				m.scrollOffset = limit
+			}
 		}
-		setDebugf("mouse scroll delta=%d offset=%d", msg.delta, m.scrollOffset)
+		setDebugf("mouse scroll delta=%d offset=%d content=%d", msg.delta, m.scrollOffset, m.scrollContentHeight)
 		return m, nil
 
 	case modelFetchTickMsg:
@@ -2076,6 +2094,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 	// from the cursor row so the focused row stays visible; View does not mutate
 	// model state. Fixed chrome (panel border + footer tip) leaves the rest.
 	bodyLines := strings.Split(body.String(), "\n")
+	m.scrollContentHeight = len(bodyLines)
 	scrollOffset := m.scrollOffset
 	if m.height > 0 && len(bodyLines) > m.height {
 		// The frame must fit: border (2) + footer (3) leave height-5 for the body.
@@ -2129,7 +2148,9 @@ func (m *AdvancedConfigModel) View() tea.View {
 	// Mouse reporting: clicking a configuration row focuses it, and the wheel
 	// scrolls the single page when content exceeds the terminal.
 	if !m.filterInput.Focused() {
-		v.MouseMode = tea.MouseModeCellMotion
+		// AllMotion so trackpad two-finger scroll and plain wheel both report
+		// motion/wheel events even when no button is held.
+		v.MouseMode = tea.MouseModeAllMotion
 		lines := strings.Split(finalStr, "\n")
 		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
 			switch msg.(type) {
