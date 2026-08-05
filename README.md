@@ -189,7 +189,7 @@ ccl bypass off      # 关闭
 
 | 命令 | 作用 |
 |------|------|
-| `ccl set [name]` | 交互式添加 / 更新 provider（最后一页 Review & Apply） |
+| `ccl set [name]` | 交互式添加 / 更新 provider（单页：Test & Auto Configure 后直接编辑并保存） |
 | `ccl ls` / `ccl ls -a` | 列出 provider（`-a` 显示完整 model pool） |
 | `ccl use <name>` | 切换当前 active provider |
 | `ccl cp <src> <dst>` | 复制 provider 配置 |
@@ -345,7 +345,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
   - Sonnet → `claude-sonnet-4-6`
   - Haiku → `claude-haiku-4-5`
 - 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。
-- **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：可在 `ccl set` 的「核对并应用 / Review & Apply」页编辑，也可在 Claude Code 内用 `/fast` 开关。
+- **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：可在 `ccl set` 单页的 Runtime 区用 `←→` 调整，也可在 Claude Code 内用 `/fast` 开关。
 - **Copilot** 使用独立的 GitHub OAuth 凭据和 `api.githubcopilot.com`；登录写盘前会验证账号确实拥有可用的 Copilot 模型。启动时读取账号实际模型目录，并根据每个模型声明的端点选择 Responses、Chat Completions 或 Anthropic Messages；该目录是 `ccl models --all` 的权威来源，不会混入本地兼容层的内建模型。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `copilot(auto)`。
 - **Qoder** 完全由 ccl 直接接入：`ccl oauth qoder` 打开 Qoder 授权页并轮询 OAuth token；运行时直接刷新 token、读取账号模型目录、生成 COSY 签名、编码请求并把 Qoder SSE 转换为 Anthropic Messages。不会调用、探测或读取 `qodercli`，系统无需安装 Qoder CLI。模型目录由账号实时返回；`ccl models` 会显示 Qoder 展示名、内部模型 ID、Credit 倍率以及 New / 错峰优惠标记。暂时无法读取目录时使用最小兼容目录启动。
 
@@ -529,15 +529,12 @@ ccl set                 # 交互选择已有或新建
 ccl set my-provider     # 指定名称
 ```
 
-TUI 大致流程：
+TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Test & Auto Configure** 后自动识别协议、鉴权方式与模型池，并推荐 Opus / Sonnet / Haiku / Custom / Subagent 槽位；随后可在同一页逐项修改：
 
-| 步骤 | 内容 |
-|------|------|
-| Step 1 | Endpoint + API Key |
-| Step 2 | Auto / Manual 配置模式 |
-| Step 3 | Opus / Sonnet / Haiku / Custom / Subagent 映射 |
-| Step 4 | 扩展上下文 `[1m]` + Auto Compact 预设 |
-| Step 5 | 核对 Connection / Mapping / Runtime 并保存 |
+- **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。
+- **Context**：`←→` 在 Claude default / Custom 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
+- **Runtime**：Protocol / Fast / Max Output / Tools / Tool Search 均可 `←→` 调整。
+- 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。
 
 Context & Compact：
 
