@@ -1,0 +1,66 @@
+internal/oauthproxy/doc.go
+  s_20b3579e49fa32::t_3c7783d6ff9a93 53-55
+  s_f615690a68b622::t_ca8a34c3f16bc4 15-19
+internal/oauthproxy/copilot_runtime.go
+  s_20b3579e49fa32::t_ef969c510f2e29 792
+internal/oauthproxy/runtime.go
+  s_f615690a68b622::t_6676c28a4bcf71 626-627,629,633-634,639,642,656,678,692,695
+  s_20b3579e49fa32::t_ef969c510f2e29 486,628
+  s_20b3579e49fa32::t_3c7783d6ff9a93 442-443
+  s_20b3579e49fa32::t_034fbea9336d69 54-71
+cmd/log.go
+  s_20b3579e49fa32::t_3c7783d6ff9a93 31-34
+CLAUDE.md
+  s_8a80ff043cf944::t_d9acf823a7cb91 43
+  s_f615690a68b622::t_b28dc368a09814 53
+  s_1449d0559569fa::t_752c9b11b0314d 7,12,16-17,30-31,45,58,66-70,82,87,89
+  s_8a80ff043cf944::t_d5570726261ff4 60-62
+  s_8a80ff043cf944::t_00eed55259f480 86
+  s_8a80ff043cf944::t_b52aa852266c6c 44,59
+cmd/oauth_runtime.go
+  s_20b3579e49fa32::t_034fbea9336d69 52-55
+internal/oauthproxy/auth_test.go
+  s_20b3579e49fa32::t_0616ba542fd92a 534-535
+  s_20b3579e49fa32::t_884b0feef3dc9a 844,855,865,877-878,880-881,883-884,986
+  s_f615690a68b622::t_6015c668d6cd89 842
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "941c32d60a60c10ba64634e16701101092c57480",
+  "prompts": {},
+  "sessions": {
+    "s_1449d0559569fa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80a198e1-cec9-420f-a1f6-9b23ea6ccb7d",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_20b3579e49fa32": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fcff6-0b80-7b11-bef1-920e0919acc4",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_f615690a68b622": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ce853f1e-460a-466c-96aa-dd308a0610a5",
+        "model": "Qwen3.8-Max"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
