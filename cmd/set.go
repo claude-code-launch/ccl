@@ -53,7 +53,9 @@ func RunProviderSet(args []string) error {
 	if len(args) > 0 {
 		targetName = strings.TrimSpace(args[0])
 	} else {
-		// 没有传 provider name：显示已有 provider 列表，提供新建入口
+		// 没有传 provider name：显示已有 provider 列表，提供新建入口。选中后进
+		// 单页配置——URL / Key 直接在配置页顶部的 Connection 区填写，无需单独
+		// 的凭据步骤。
 		var names []string
 		for name := range cfg.Providers {
 			names = append(names, name)

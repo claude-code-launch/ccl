@@ -302,8 +302,14 @@ func TestCredentialsPageResolvesClickToField(t *testing.T) {
 	}
 	lines := strings.Split(view.Content, "\n")
 
-	// Every field is reachable by clicking its label row and the value row below it.
-	for _, field := range credentialFields {
+	// Endpoint and API Key are reachable by clicking their label rows.
+	for _, field := range []struct {
+		row   configRowKind
+		label string
+	}{
+		{rowEndpoint, "Endpoint URL"},
+		{rowAPIKey, "API Key"},
+	} {
 		labelRow := -1
 		for i, line := range lines {
 			if strings.Contains(line, field.label) {
@@ -314,49 +320,63 @@ func TestCredentialsPageResolvesClickToField(t *testing.T) {
 		if labelRow < 0 {
 			t.Fatalf("label %q is not on the credentials page", field.label)
 		}
-		for _, row := range []int{labelRow, labelRow + 1} {
-			got, ok := credentialFieldAtLine(lines, row)
-			if !ok || got != field.cursor {
-				t.Fatalf("click on row %d resolved to (%d, %t), want cursor %d", row, got, ok, field.cursor)
-			}
+		got, ok := rowAtLine(lines, labelRow)
+		if !ok || got != field.row {
+			t.Fatalf("click on row %d resolved to (%v, %t), want %v", labelRow, got, ok, field.row)
 		}
 	}
 
 	// Prose that merely mentions a label must not steal focus.
-	if _, ok := credentialFieldAtLine([]string{"  detection uses the API Key you entered"}, 0); ok {
+	if _, ok := rowAtLine([]string{"  detection uses the API Key you entered"}, 0); ok {
 		t.Fatal("a hint mentioning \"API Key\" resolved to the field")
 	}
 
 	// A click far away from any field must be ignored rather than stealing focus.
-	if _, ok := credentialFieldAtLine(lines, 0); ok {
+	if _, ok := rowAtLine(lines, 0); ok {
 		t.Fatal("click on the top padding row resolved to a field")
 	}
 
 	// The resolved click focuses the API key input.
-	next, _ := m.Update(focusCredentialFieldMsg{cursor: 1})
+	next, _ := m.Update(focusRowMsg{row: rowAPIKey})
 	m = next.(*AdvancedConfigModel)
-	if m.cursor != 1 || !m.keyInput.Focused() || m.urlInput.Focused() {
+	if m.cursor != m.mainRowIndex(rowAPIKey) || !m.keyInput.Focused() || m.urlInput.Focused() {
 		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the key input focused",
 			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
 	}
-	next, _ = m.Update(focusCredentialFieldMsg{cursor: 0})
+	next, _ = m.Update(focusRowMsg{row: rowEndpoint})
 	m = next.(*AdvancedConfigModel)
-	if m.cursor != 0 || !m.urlInput.Focused() || m.keyInput.Focused() {
+	if m.cursor != m.mainRowIndex(rowEndpoint) || !m.urlInput.Focused() || m.keyInput.Focused() {
 		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the endpoint input focused",
 			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
 	}
 }
 
-func TestOAuthCredentialsPageLeavesMouseAlone(t *testing.T) {
-	// OAuth providers have no editable fields here, so the terminal keeps its own
-	// selection behaviour.
+func TestOAuthPageSupportsMouseClick(t *testing.T) {
+	// The single page captures mouse clicks for every row, OAuth included, so
+	// model rows / Save / Cancel are reachable without the keyboard.
 	p := provider.Provider{Type: "openai_responses", OAuthProvider: "gpt", Endpoint: "oauth://codex"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
+	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra")
 	m.width = 100
 	m.height = 30
-	if view := m.View(); view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
-		t.Fatal("OAuth credentials page must not capture the mouse")
+	if view := m.View(); view.MouseMode == tea.MouseModeNone || view.OnMouse == nil {
+		t.Fatal("single page must capture mouse clicks for clickable rows")
+	}
+	// Clicking the Opus row focuses it.
+	lines := strings.Split(m.View().Content, "\n")
+	opusLine := -1
+	for i, line := range lines {
+		if strings.Contains(line, "Opus") {
+			opusLine = i
+			break
+		}
+	}
+	if opusLine < 0 {
+		t.Fatal("Opus row not rendered")
+	}
+	row, ok := rowAtLine(lines, opusLine)
+	if !ok || row != rowOpus {
+		t.Fatalf("click on Opus resolved to (%v, %t), want rowOpus", row, ok)
 	}
 }
 

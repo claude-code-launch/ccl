@@ -232,7 +232,7 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		return rows
 	}
 	rows = append(rows, configRow{kind: rowProtocol, editable: true})
-	rows = append(rows, configRow{kind: rowFast})
+	rows = append(rows, configRow{kind: rowFast, editable: true})
 	rows = append(rows,
 		configRow{kind: rowOpus},
 		configRow{kind: rowSonnet},
@@ -308,6 +308,37 @@ func rowLineHeight(kind configRowKind) int {
 		return 2
 	}
 	return 1
+}
+
+// isModelRow reports whether a row kind is one of the five model slots.
+func (m *AdvancedConfigModel) isModelRow(kind configRowKind) bool {
+	switch kind {
+	case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
+		return true
+	}
+	return false
+}
+
+// toggleOneMAtRow flips the 1M context marker for the model row the cursor is
+// on. Turning it on is refused when the backend window rules 1M out; turning an
+// existing marker off stays possible. Returns true when the marker changed.
+func (m *AdvancedConfigModel) toggleOneMAtRow(row configRowKind) bool {
+	if !m.isModelRow(row) {
+		return false
+	}
+	slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[slotForRow(row)]
+	model := m.slotModelForRow(row)
+	if !m.oneMSlots[slot] && m.oneMSlotBlocked(model) {
+		setDebugf("1M blocked slot=%s model=%q", slot, model)
+		return false
+	}
+	if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
+		return false
+	}
+	m.oneMSlots[slot] = !m.oneMSlots[slot]
+	synced := m.syncOneMForSameModels(slot, m.oneMSlots[slot])
+	setDebugf("toggle 1M slot=%s enabled=%t synced=%d summary=%s", slot, m.oneMSlots[slot], synced, reviewOneMSummary(m.oneMSlots))
+	return true
 }
 
 // slotForRow maps a model row kind back to its advancedSlotRefs index.
@@ -424,6 +455,17 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	cleanAndPopulate(&m.p.HaikuModel, "haiku")
 	cleanAndPopulate(&m.p.CustomModelID, "custom")
 	cleanAndPopulate(&m.p.SubagentModel, "subagent")
+
+	// An existing provider already carries a model pool (p.Model): open the full
+	// single page directly — the Connection inputs stay at the top, editable — so
+	// the user lands on the whole configuration, not a bare URL/Key step.
+	if !m.usesOAuth() {
+		pool := uniqueModels(parseModelList(m.p.Model))
+		if len(pool) > 0 {
+			m.modelPool = pool
+			m.modelPoolFromDiscovery = true
+		}
+	}
 
 	return m
 }
@@ -806,10 +848,6 @@ func (m *AdvancedConfigModel) staleSlotCount() int {
 	return count
 }
 
-func (m *AdvancedConfigModel) showStaleSlotToggle() bool {
-	return m.staleSlotCount() > 0
-}
-
 func (m *AdvancedConfigModel) applyStaleSlotPolicy() {
 	if !m.clearStaleSlots || !m.modelPoolFromDiscovery {
 		return
@@ -932,22 +970,12 @@ func (m *AdvancedConfigModel) advertisedWindow(modelVal string) (int, bool) {
 }
 
 // slotModelForIndex returns the model configured in the page-2 row order.
+// canEditFastMode reports whether the Fast (Claude Code /fast) pin can be
+// toggled. It is a settings.json fastMode flag that every provider can carry; it
+// only has a speed effect for the GPT/Codex OAuth backend, but setting it for
+// others is harmless.
 func (m *AdvancedConfigModel) canEditFastMode() bool {
-	return m.p != nil && supportsFastMode(m.p.OAuthProvider)
-}
-
-func (m *AdvancedConfigModel) page4ProtocolOffset() int {
-	if m.canToggleOpenAIProtocol() {
-		return 1
-	}
-	return 0
-}
-
-func (m *AdvancedConfigModel) page4FastOffset() int {
-	if m.canEditFastMode() {
-		return 1
-	}
-	return 0
+	return m.p != nil
 }
 
 // Context sizing has no row here: it is expressed per slot by [1m] on page 2,
@@ -956,13 +984,9 @@ func (m *AdvancedConfigModel) page4FastOffset() int {
 // direction: +1 when moving down/tab, -1 when moving up/shift-tab.
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
 var (
-	reviewMaxOutOptions  = []string{"", "16000", "32000", "64000", "128000"}
-	reviewToolsOptions   = []string{"", "1", "2", "3", "4", "6", "8"}
-	reviewSearchOptions  = []string{"", "true", "false"} // Default / On / Off
-	reviewCompactOptions = []compactPreset{
-		compactPresetDefault,
-		compactPresetPreserve,
-	}
+	reviewMaxOutOptions = []string{"", "16000", "32000", "64000", "128000"}
+	reviewToolsOptions  = []string{"", "1", "2", "3", "4", "6", "8"}
+	reviewSearchOptions = []string{"", "true", "false"} // Default / On / Off
 )
 
 func ensureProviderEnvMap(p *provider.Provider) {
@@ -1408,20 +1432,48 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateInputWidths()
 		return m, nil
 
-	case focusCredentialFieldMsg:
-		if m.usesOAuth() {
+	case focusRowMsg:
+		// Click on any row: move the cursor there. Endpoint/API Key additionally
+		// focus their text inputs so typing lands in the field.
+		idx := m.mainRowIndex(msg.row)
+		if idx < 0 {
 			return m, nil
 		}
-		switch msg.cursor {
-		case 0:
-			m.cursor = m.mainRowIndex(rowEndpoint)
+		m.cursor = idx
+		m.keepCursorVisible()
+		switch msg.row {
+		case rowEndpoint:
 			m.keyInput.Blur()
 			return m, m.urlInput.Focus()
-		case 1:
-			m.cursor = m.mainRowIndex(rowAPIKey)
+		case rowAPIKey:
 			m.urlInput.Blur()
 			return m, m.keyInput.Focus()
+		default:
+			m.urlInput.Blur()
+			m.keyInput.Blur()
+			m.filterInput.Blur()
 		}
+		return m, nil
+
+	case mouseScrollMsg:
+		// Mouse wheel scrolls the single page when content exceeds the terminal.
+		if m.height <= 0 {
+			return m, nil
+		}
+		maxOffset := m.height - 5
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		m.scrollOffset += msg.delta
+		if m.scrollOffset < 0 {
+			m.scrollOffset = 0
+		}
+		// Clamp to the content length: the offset is in row units, so approximate
+		// with a generous bound so the tail (action bar) is reachable.
+		if m.scrollOffset > maxOffset*4 {
+			m.scrollOffset = maxOffset * 4
+		}
+		setDebugf("mouse scroll delta=%d offset=%d", msg.delta, m.scrollOffset)
 		return m, nil
 
 	case modelFetchTickMsg:
@@ -1578,18 +1630,26 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.filterInput.Focused() {
 				return m, nil
 			}
-			switch m.currentRow() {
-			case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
-				m.adjustReviewField(-1)
+			if m.isModelRow(m.currentRow()) {
+				m.toggleOneMAtRow(m.currentRow())
+			} else {
+				switch m.currentRow() {
+				case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
+					m.adjustReviewField(-1)
+				}
 			}
 
 		case "right", "l":
 			if m.filterInput.Focused() {
 				return m, nil
 			}
-			switch m.currentRow() {
-			case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
-				m.adjustReviewField(1)
+			if m.isModelRow(m.currentRow()) {
+				m.toggleOneMAtRow(m.currentRow())
+			} else {
+				switch m.currentRow() {
+				case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
+					m.adjustReviewField(1)
+				}
 			}
 
 		case "space":
@@ -1599,22 +1659,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.filterInput.Focused() {
 				return m, nil
 			}
-			row := m.currentRow()
-			if row != rowOpus && row != rowSonnet && row != rowHaiku && row != rowCustom && row != rowSubagent {
-				return m, nil
-			}
-			slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[slotForRow(row)]
-			model := m.slotModelForRow(row)
-			if !m.oneMSlots[slot] && m.oneMSlotBlocked(model) {
-				setDebugf("1M blocked slot=%s model=%q", slot, model)
-				return m, nil
-			}
-			if slot == "subagent" && !m.oneMSlots[slot] && !m.materializeSubagentModel() {
-				return m, nil
-			}
-			m.oneMSlots[slot] = !m.oneMSlots[slot]
-			synced := m.syncOneMForSameModels(slot, m.oneMSlots[slot])
-			setDebugf("toggle 1M slot=%s enabled=%t synced=%d summary=%s", slot, m.oneMSlots[slot], synced, reviewOneMSummary(m.oneMSlots))
+			m.toggleOneMAtRow(m.currentRow())
 
 		case "tab":
 			if m.filterInput.Focused() {
@@ -1796,44 +1841,14 @@ func renderModelFetchProgress(progress, frame int, oauth bool) string {
 }
 
 // focusCredentialFieldMsg asks the model to focus one of the credential inputs.
-// The mouse handler runs against the last rendered frame (see View), so it
-// reports the intent as a message instead of mutating the model from the view.
-type focusCredentialFieldMsg struct{ cursor int }
+// focusRowMsg asks the model to move the cursor to a specific configuration row,
+// clicked in the rendered frame. The mouse handler reports intent as a message
+// instead of mutating the model from the view.
+type focusRowMsg struct{ row configRowKind }
 
-// credentialFields maps the page-0 cursor positions onto their rendered labels,
-// in render order.
-var credentialFields = []struct {
-	cursor int
-	label  string
-}{
-	{cursor: 0, label: "Endpoint URL"},
-	{cursor: 1, label: "API Key"},
-}
-
-// credentialFieldAtLine resolves a clicked screen row to a credential input.
-//
-// The row is matched against the rendered frame rather than recomputed from the
-// layout: the panel is centered and its height varies with detection state, so
-// searching the frame that is actually on screen is both simpler and correct.
-// A field occupies its label line plus the value line below it.
-func credentialFieldAtLine(lines []string, y int) (int, bool) {
-	for _, offset := range []int{0, -1} {
-		row := y + offset
-		if row < 0 || row >= len(lines) {
-			continue
-		}
-		// The label must start the row (after the cursor prefix and the panel
-		// border), so prose that merely mentions "API Key" cannot steal focus.
-		text := strings.TrimLeft(ansi.Strip(lines[row]), " │|>")
-		text = strings.TrimSpace(text)
-		for _, field := range credentialFields {
-			if strings.HasPrefix(text, field.label) {
-				return field.cursor, true
-			}
-		}
-	}
-	return 0, false
-}
+// mouseScrollMsg reports a mouse-wheel tick; the sign of delta is the scroll
+// direction and the magnitude is in rows.
+type mouseScrollMsg struct{ delta int }
 
 func renderCredentialField(label, value string, focused bool) string {
 	prefix := "  "
@@ -1889,13 +1904,6 @@ func truncateMiddle(s string, max int) string {
 	return left + ellipsis + right
 }
 
-func padDisplay(s string, width int) string {
-	w := lipgloss.Width(s)
-	if w >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-w)
-}
 func (m *AdvancedConfigModel) View() tea.View {
 	// Model picker overlay: when the filter input has focus, render only the
 	// filtered model list (search + availability) instead of the main page.
@@ -2118,22 +2126,84 @@ func (m *AdvancedConfigModel) View() tea.View {
 	}
 	v := tea.NewView(finalStr)
 	v.AltScreen = true
-	// Mouse reporting on the Connection inputs only.
-	if !m.usesOAuth() && m.mainRowIndex(rowEndpoint) >= 0 {
+	// Mouse reporting: clicking a configuration row focuses it, and the wheel
+	// scrolls the single page when content exceeds the terminal.
+	if !m.filterInput.Focused() {
 		v.MouseMode = tea.MouseModeCellMotion
 		lines := strings.Split(finalStr, "\n")
 		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
-			if _, ok := msg.(tea.MouseClickMsg); !ok {
-				return nil
+			switch msg.(type) {
+			case tea.MouseClickMsg:
+				row, ok := rowAtLine(lines, msg.Mouse().Y)
+				if !ok {
+					return nil
+				}
+				return func() tea.Msg { return focusRowMsg{row: row} }
+			case tea.MouseWheelMsg:
+				mouse := msg.Mouse()
+				delta := 0
+				if mouse.Button == tea.MouseWheelUp {
+					delta = -1
+				} else if mouse.Button == tea.MouseWheelDown {
+					delta = 1
+				}
+				if delta == 0 {
+					return nil
+				}
+				return func() tea.Msg { return mouseScrollMsg{delta: delta} }
 			}
-			cursor, ok := credentialFieldAtLine(lines, msg.Mouse().Y)
-			if !ok {
-				return nil
-			}
-			return func() tea.Msg { return focusCredentialFieldMsg{cursor: cursor} }
+			return nil
 		}
 	}
 	return v
+}
+
+// rowAtLine resolves a clicked screen row to a configuration row kind by
+// matching the rendered labels. Rows that are not focusable return ok=false.
+func rowAtLine(lines []string, y int) (configRowKind, bool) {
+	if y < 0 || y >= len(lines) {
+		return rowCancel, false
+	}
+	text := strings.TrimLeft(ansi.Strip(lines[y]), " │|>")
+	text = strings.TrimSpace(text)
+	// Checkbox rows render as "[x] Label" / "[ ] Label"; strip the box so the
+	// label prefix matches. Model rows render with a right-aligned model value,
+	// so label matching happens on the leading label only.
+	for kind, label := range rowClickLabels {
+		if strings.HasPrefix(text, label) {
+			return kind, true
+		}
+	}
+	// Retry after stripping a checkbox prefix.
+	text = strings.TrimLeft(strings.TrimSpace(text), "[]x ")
+	for kind, label := range rowClickLabels {
+		if strings.HasPrefix(text, label) {
+			return kind, true
+		}
+	}
+	return rowCancel, false
+}
+
+// rowClickLabels maps a configuration row to the label prefix a click must
+// match on its rendered line. Only rows that make sense to click are listed.
+var rowClickLabels = map[configRowKind]string{
+	rowEndpoint:   "Endpoint URL",
+	rowAPIKey:     "API Key",
+	rowTest:       "Test & Auto Configure",
+	rowProtocol:   "Protocol",
+	rowFast:       "Fast",
+	rowOpus:       "Opus",
+	rowSonnet:     "Sonnet",
+	rowHaiku:      "Haiku",
+	rowCustom:     "Custom",
+	rowSubagent:   "Subagent",
+	rowContext:    "Context",
+	rowMaxOutput:  "Max Output",
+	rowTools:      "Tools",
+	rowToolSearch: "Tool Search",
+	rowActive:     "Set as active provider",
+	rowSave:       "Save & Activate",
+	rowCancel:     "Cancel",
 }
 
 // viewModelPicker renders the filtered model selection overlay. It is shown
