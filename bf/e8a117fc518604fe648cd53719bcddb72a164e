@@ -1,0 +1,27 @@
+cmd/advanced_config.go
+  s_8a80ff043cf944::t_734b0b1a2ba700 15
+  s_8a80ff043cf944::t_6883847c230f26 76-77
+  s_8a80ff043cf944::t_593f90d437e029 1544-1552
+  s_8a80ff043cf944::t_9bb1ea301a7804 2046-2050,2052-2057,2059-2060
+  s_8a80ff043cf944::t_27962cee33a3a5 2371-2374,2380-2384
+  s_8a80ff043cf944::t_3098701ad1f105 2316-2319,2321-2326
+  s_8a80ff043cf944::t_1ceb24de3afcff 157,159-161
+go.mod
+  s_8a80ff043cf944::t_13df92b38b0368 26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "bfe8a117fc518604fe648cd53719bcddb72a164e",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
