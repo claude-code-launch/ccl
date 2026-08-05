@@ -12,19 +12,11 @@
 // as a regression checklist whenever the pinned
 // github.com/router-for-me/CLIProxyAPI/v7 version changes:
 //
-//  1. responsesCompatibilityProxy (responses_compat.go)
-//     Placed in front of every Responses upstream (plain and Codex). It:
-//     (a) rewrites completed-only streams into a normal output_text.delta
-//     because CLIProxyAPI's streaming Claude translator currently ignores
-//     text that only appears in response.completed;
-//     (b) ensures response.created precedes any content event and drops a
-//     late real created after a synthetic one, so the translator never
-//     emits content before message_start or a second message_start; and
-//     (c) for plain Responses, strips residual Codex headers/body that the
-//     SDK's codex-api-key executor always injects (codex-tui UA, Session_id,
-//     client_metadata, Originator) and replaces UA with ccl-openai-responses.
-//     Dedicated Codex bases still inject full Codex client identity.
-//     Remove or shrink once the SDK exposes a non-Codex Responses executor.
+//  1. Responses translation ownership (runtime.go)
+//     CPA's codex-api-key executor owns Claude Messages to Responses request
+//     translation, upstream request serialization, and Responses-to-Claude
+//     streaming conversion. CCL passes the real upstream base URL directly to
+//     CPA and must not place another request-rewriting proxy after it.
 //
 //  2. Runtime.Stop shutdown ordering (runtime.go)
 //     Service.Run performs its own deferred Shutdown after the run context is
@@ -58,9 +50,9 @@
 //     Copilot does not use CLIProxyAPI OAuth credentials. ccl authenticates
 //     with GitHub, discovers the account's authoritative model catalog, and
 //     routes each model to its advertised Chat, Responses, or Messages
-//     endpoint before the local compatibility layer. Do not add synthetic
-//     request identity headers without testing the real Copilot API: they can
-//     change model visibility or entitlement decisions.
+//     endpoint directly. Do not add synthetic request identity headers without
+//     testing the real Copilot API: they can change model visibility or
+//     entitlement decisions.
 //
 //  8. Qoder direct runtime (qoder_*.go)
 //     Qoder browser OAuth, refresh, COSY signing, WAF body encoding, model

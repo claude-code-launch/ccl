@@ -24,7 +24,6 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/protocol"
-	"github.com/google/uuid"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxy "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -52,25 +51,24 @@ const (
 var codexVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
 
 type Runtime struct {
-	endpoint        string
-	apiKey          string
-	service         *cliproxy.Service
-	coreManager     *coreauth.Manager
-	httpServer      *http.Server
-	listAuths       func() []*coreauth.Auth
-	responsesCompat *responsesCompatibilityProxy
-	copilotGateway  *copilotGateway
-	cancel          context.CancelFunc
-	done            chan struct{}
-	runErr          chan error
-	started         chan struct{}
-	configPath      string
-	runtimeDir      string
-	restoreLogs     func()
-	models          []string
-	modelNames      map[string]string
-	ownsLog         bool
-	stopOnce        sync.Once
+	endpoint       string
+	apiKey         string
+	service        *cliproxy.Service
+	coreManager    *coreauth.Manager
+	httpServer     *http.Server
+	listAuths      func() []*coreauth.Auth
+	copilotGateway *copilotGateway
+	cancel         context.CancelFunc
+	done           chan struct{}
+	runErr         chan error
+	started        chan struct{}
+	configPath     string
+	runtimeDir     string
+	restoreLogs    func()
+	models         []string
+	modelNames     map[string]string
+	ownsLog        bool
+	stopOnce       sync.Once
 	// usage accumulates per-model token totals for this runtime. It is never nil:
 	// StartProvider always installs one, even when the backend cannot report
 	// usage, so callers do not need a nil check.
@@ -132,7 +130,6 @@ type StartOptions struct {
 	// OAuthCredentialResolver optionally refreshes an auth group's exact file
 	// list while a ccl-launched Claude session is still running.
 	OAuthCredentialResolver func() ([]string, error)
-	MaxOutputTokens         int // plain Responses only; 0 leaves SDK/default behavior
 }
 
 type runtimeModelRoute struct {
@@ -442,8 +439,8 @@ func Start(parent context.Context, providerName string) (*Runtime, error) {
 // embedded CLIProxyAPI; Kiro uses the direct Amazon Q adapter in kiro_server.go.
 //
 // openai_responses is split:
-//   - dedicated Codex bases (…/codex) → StartCodexAPI with Codex client identity
-//   - plain Responses gateways → StartOpenAIResponsesAPI without Codex headers/body
+//   - dedicated Codex bases (…/codex) → StartCodexAPI with Codex client headers
+//   - plain Responses gateways → StartOpenAIResponsesAPI without those headers
 //
 // Invalid Codex paths such as …/codex/v1 are rejected before routing so they
 // cannot fall through to the plain Responses path and hit …/codex/v1/responses.
@@ -486,7 +483,7 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		if protocol.IsCodexBaseEndpoint(options.Endpoint) {
 			return StartCodexAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 		}
-		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec, options.MaxOutputTokens)
+		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -626,29 +623,23 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 }
 
 // StartOpenAIResponsesAPI starts an embedded CLIProxyAPI runtime against a plain
-// OpenAI Responses upstream (not a dedicated Codex base).
-//
-// CLIProxyAPI only exposes a Responses upstream executor through codex-api-key,
-// so the config still uses that slot. Unlike StartCodexAPI, no Codex Originator /
-// User-Agent / client_metadata / session headers are injected — plain gateways
-// often reject those as unsupported parameters.
-// maxOutputTokens is re-injected by the plain Responses compatibility proxy
-// because CLIProxyAPI currently drops Claude max_tokens on the Codex path.
-func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, maxOutputTokens int) (*Runtime, error) {
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false, maxOutputTokens)
+// OpenAI Responses upstream (not a dedicated Codex base). CPA owns the complete
+// Claude Messages to Responses translation and talks to the upstream directly.
+func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false)
 }
 
 // StartCodexAPI starts an embedded CLIProxyAPI runtime for a dedicated Codex
-// Responses endpoint (…/codex). It injects Codex client identity headers and
-// body metadata required by Codex-compatible upstreams.
+// Responses endpoint (…/codex). Codex client headers are configured on CPA's
+// executor; CPA owns the request body and sends it directly to the upstream.
 func StartCodexAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
 	if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint); invalid {
 		return nil, fmt.Errorf("invalid Codex endpoint %q: use %q without /v1; ccl requests /models separately", endpoint, suggestion)
 	}
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true, 0)
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true)
 }
 
-func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexIdentity bool, maxOutputTokens int) (*Runtime, error) {
+func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexHeaders bool) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -661,16 +652,10 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 		return nil, fmt.Errorf("OpenAI Responses runtime requires at least one model")
 	}
 
-	var identity *codexRequestIdentity
 	var headers map[string]string
-	if codexIdentity {
+	if codexHeaders {
 		codexVersion := detectCodexClientVersion()
 		codexUserAgent := buildCodexUserAgent(codexVersion)
-		id, err := newCodexRequestIdentity()
-		if err != nil {
-			return nil, err
-		}
-		identity = &id
 		headers = map[string]string{
 			"User-Agent":            codexUserAgent,
 			"Originator":            embeddedCodexOriginator,
@@ -682,14 +667,6 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 	if err != nil {
 		return nil, err
 	}
-	if codexIdentity {
-		maxOutputTokens = 0
-	}
-	compat, err := startResponsesCompatibilityProxy(endpoint, identity, maxOutputTokens)
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return nil, err
-	}
 	models := make([]runtimeCodexModel, 0, len(routes))
 	for _, route := range routes {
 		models = append(models, runtimeCodexModel{Name: route.Name, Alias: route.Alias})
@@ -698,27 +675,24 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
 		CodexAPIKey: []runtimeCodexKey{{
 			APIKey:  upstreamAPIKey,
-			BaseURL: compat.endpoint,
+			BaseURL: endpoint,
 			Models:  models,
 			Headers: headers,
 		}},
 	})
 	if err != nil {
-		compat.Stop()
 		_ = os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("encode OpenAI Responses runtime config: %w", err)
 	}
 	proxyRuntime, err := startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
 	if err != nil {
-		compat.Stop()
 		return nil, err
 	}
-	proxyRuntime.responsesCompat = compat
 	mode := "openai_responses"
-	if codexIdentity {
+	if codexHeaders {
 		mode = "codex_responses"
 	}
-	LogInfof("runtime start %s endpoint=%q port=%d model_count=%d max_output_tokens=%d", mode, endpoint, port, len(models), maxOutputTokens)
+	LogInfof("runtime start %s endpoint=%q port=%d model_count=%d", mode, endpoint, port, len(models))
 	return proxyRuntime, nil
 }
 
@@ -829,23 +803,6 @@ func stripContextModelSuffix(model string) string {
 		model = strings.TrimSpace(model[:len(model)-len("[1m]")])
 	}
 	return model
-}
-
-type codexRequestIdentity struct {
-	installationID string
-	sessionID      string
-	turnID         string
-}
-
-func newCodexRequestIdentity() (codexRequestIdentity, error) {
-	installationID := uuid.NewString()
-	sessionID := uuid.NewString()
-	turnID := uuid.NewString()
-	return codexRequestIdentity{
-		installationID: installationID,
-		sessionID:      sessionID,
-		turnID:         turnID,
-	}, nil
 }
 
 func detectCodexClientVersion() string {
@@ -1271,9 +1228,6 @@ func (r *Runtime) Stop() {
 					registry.UnregisterClient(auth.ID)
 				}
 			}
-		}
-		if r.responsesCompat != nil {
-			r.responsesCompat.Stop()
 		}
 		if r.copilotGateway != nil {
 			r.copilotGateway.Stop()

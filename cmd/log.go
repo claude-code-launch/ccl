@@ -28,10 +28,10 @@ ccl-debug-claude_<id>.log. All slog levels for that session share one file.
 Levels:
   on / info  Normal runtime events, including startup, model routing, upstream
              status errors, OAuth refreshes, cooldowns, and context settings.
-  debug      Includes INFO plus request metadata. Responses compatibility,
-             Copilot, and Kiro runtimes also record final upstream request
-             payloads and failed response bodies. These can contain prompts,
-             tool results, and user-provided secrets; keep this log local.
+  debug      Includes INFO plus request metadata. Copilot and Kiro runtimes also
+             record final upstream request payloads and failed response bodies.
+             These can contain prompts, tool results, and user-provided secrets;
+             keep this log local.
   warn/error Show only records emitted at those severities.
   off        Disable file logging.
 

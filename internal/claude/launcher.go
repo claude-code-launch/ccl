@@ -443,12 +443,6 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 		if provider.IsOpenAIResponsesType(providerCopy.Type) {
 			upstreamProtocol = oauthproxy.ProtocolOpenAIResponses
 		}
-		maxOut := 0
-		if provider.IsOpenAIResponsesType(providerCopy.Type) {
-			if n, err := strconv.Atoi(ResolveRuntimeSettings(providerCopy).MaxOutputTokens); err == nil {
-				maxOut = n
-			}
-		}
 		runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
 			Protocol:                upstreamProtocol,
 			Endpoint:                providerCopy.Endpoint,
@@ -458,7 +452,6 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 			OAuthAccountCredential:  providerCopy.OAuthAccountCredential,
 			OAuthAccountCredentials: providerCopy.OAuthAccountCredentials,
 			OAuthCredentialResolver: groupCredentialResolver(providerCopy.AuthGroup),
-			MaxOutputTokens:         maxOut,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("start embedded provider runtime: %w", err)

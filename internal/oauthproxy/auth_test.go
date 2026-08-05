@@ -525,98 +525,19 @@ func TestStartCodexAPIAdaptsResponsesRequest(t *testing.T) {
 	if got.header.Get("X-Codex-Beta-Features") != "remote_compaction_v2" {
 		t.Fatalf("upstream X-Codex-Beta-Features = %q", got.header.Get("X-Codex-Beta-Features"))
 	}
-	if got.header.Get("Session-Id") == "" || got.header.Get("Thread-Id") == "" {
-		t.Fatalf("upstream session headers are incomplete: %+v", got.header)
-	}
-	for key := range got.header {
-		if strings.EqualFold(key, "Session_id") {
-			t.Fatalf("upstream retained legacy duplicate session header %q: %+v", key, got.header)
-		}
-	}
-	if got.header.Get("X-Client-Request-Id") != got.header.Get("Session-Id") {
-		t.Fatalf("upstream X-Client-Request-Id = %q, session = %q", got.header.Get("X-Client-Request-Id"), got.header.Get("Session-Id"))
-	}
-	if got.header.Get("X-Codex-Window-Id") != got.header.Get("Session-Id")+":0" {
-		t.Fatalf("upstream X-Codex-Window-Id = %q", got.header.Get("X-Codex-Window-Id"))
-	}
-	var turnMetadata map[string]any
-	if err := json.Unmarshal([]byte(got.header.Get("X-Codex-Turn-Metadata")), &turnMetadata); err != nil {
-		t.Fatalf("decode X-Codex-Turn-Metadata: %v", err)
-	}
-	if turnMetadata["session_id"] != got.header.Get("Session-Id") || turnMetadata["window_id"] != got.header.Get("X-Codex-Window-Id") {
-		t.Fatalf("turn metadata does not match request headers: %+v", turnMetadata)
-	}
 	if _, ok := got.body["max_output_tokens"]; ok {
 		t.Fatalf("Codex request retained max_output_tokens: %+v", got.body)
 	}
 	if stream, _ := got.body["stream"].(bool); !stream {
 		t.Fatalf("Codex request did not force streaming: %+v", got.body)
 	}
-	clientMetadata, ok := got.body["client_metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("Codex request is missing client_metadata: %+v", got.body)
-	}
-	if clientMetadata["session_id"] != got.header.Get("Session-Id") ||
-		clientMetadata["thread_id"] != got.header.Get("Thread-Id") ||
-		clientMetadata["x-codex-window-id"] != got.header.Get("X-Codex-Window-Id") {
-		t.Fatalf("client_metadata does not match request headers: %+v", clientMetadata)
-	}
-	if clientMetadata["x-codex-turn-metadata"] != got.header.Get("X-Codex-Turn-Metadata") {
-		t.Fatalf("client_metadata turn metadata does not match header: %+v", clientMetadata)
-	}
-	if got.body["prompt_cache_key"] != got.header.Get("Session-Id") {
-		t.Fatalf("prompt_cache_key = %v, session = %q", got.body["prompt_cache_key"], got.header.Get("Session-Id"))
+	if got.body["model"] != "gpt-5.4-mini" {
+		t.Fatalf("upstream model = %v, want gpt-5.4-mini", got.body["model"])
 	}
 
 	proxyRuntime.Stop()
 	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
 		t.Fatalf("Codex runtime directory still exists after Stop(): %v", err)
-	}
-}
-
-func TestNormalizeCodexRequestIdentityUsesTranslatedPromptCacheKey(t *testing.T) {
-	identity := codexRequestIdentity{
-		installationID: "installation-test",
-		sessionID:      "fallback-session",
-		turnID:         "turn-test",
-	}
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"http://127.0.0.1/responses",
-		strings.NewReader(`{"prompt_cache_key":"translated-session","client_metadata":{"existing":"yes"}}`),
-	)
-	request.Header["Session_id"] = []string{"translated-session"}
-	request.Header["Session-Id"] = []string{"conflicting-session"}
-
-	if err := normalizeCodexRequestIdentity(request, identity); err != nil {
-		t.Fatalf("normalizeCodexRequestIdentity() error: %v", err)
-	}
-	if got := request.Header.Get("Session-Id"); got != "translated-session" {
-		t.Fatalf("Session-Id = %q", got)
-	}
-	sessionHeaders := 0
-	for key := range request.Header {
-		if strings.ReplaceAll(strings.ToLower(key), "_", "-") == "session-id" {
-			sessionHeaders++
-		}
-	}
-	if sessionHeaders != 1 {
-		t.Fatalf("session header variants = %d: %+v", sessionHeaders, request.Header)
-	}
-
-	var body map[string]any
-	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-		t.Fatalf("decode normalized body: %v", err)
-	}
-	metadata, ok := body["client_metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("client_metadata missing: %+v", body)
-	}
-	if metadata["existing"] != "yes" || metadata["session_id"] != "translated-session" {
-		t.Fatalf("client_metadata = %+v", metadata)
-	}
-	if body["prompt_cache_key"] != "translated-session" {
-		t.Fatalf("prompt_cache_key = %v", body["prompt_cache_key"])
 	}
 }
 
@@ -744,30 +665,6 @@ func runtimeModelIDs(t *testing.T, ctx context.Context, proxyRuntime *Runtime) m
 		models[model.ID] = true
 	}
 	return models
-}
-
-func TestStartCodexAPIClaudeMessagesCompletedOutputOnly(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_compact\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"compact summary\"}]}],\"usage\":{\"input_tokens\":40000,\"output_tokens\":20,\"total_tokens\":40020}}}\n\n")
-	}))
-	t.Cleanup(upstream.Close)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	proxyRuntime, err := StartCodexAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
-	if err != nil {
-		t.Fatalf("StartCodexAPI() error: %v", err)
-	}
-	defer proxyRuntime.Stop()
-
-	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
-	if !strings.Contains(responseBody, "compact summary") || !strings.Contains(responseBody, `"type":"message_stop"`) {
-		t.Fatalf("CLIProxyAPI lost completed-only compact output: %s", responseBody)
-	}
-	if count := strings.Count(responseBody, "compact summary"); count != 1 {
-		t.Fatalf("completed-only compact output appeared %d times, want once: %s", count, responseBody)
-	}
 }
 
 func postClaudeMessage(t *testing.T, ctx context.Context, proxyRuntime *Runtime, model string) string {
@@ -942,8 +839,9 @@ func TestSilenceStdoutNestedReferenceCount(t *testing.T) {
 	}
 }
 
-func TestStartOpenAIResponsesAPIDoesNotInjectCodexIdentity(t *testing.T) {
+func TestStartOpenAIResponsesAPIDelegatesDirectlyToCPA(t *testing.T) {
 	type capture struct {
+		path   string
 		header http.Header
 		body   map[string]any
 	}
@@ -954,7 +852,7 @@ func TestStartOpenAIResponsesAPIDoesNotInjectCodexIdentity(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		captured <- capture{header: r.Header.Clone(), body: body}
+		captured <- capture{path: r.URL.Path, header: r.Header.Clone(), body: body}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
 		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"plain ok\"}\n\n")
@@ -964,7 +862,7 @@ func TestStartOpenAIResponsesAPIDoesNotInjectCodexIdentity(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
@@ -976,28 +874,14 @@ func TestStartOpenAIResponsesAPIDoesNotInjectCodexIdentity(t *testing.T) {
 	}
 
 	got := <-captured
-	if got.header.Get("Originator") != "" {
-		t.Fatalf("plain Responses must not send Originator, got %q", got.header.Get("Originator"))
+	if got.path != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses", got.path)
 	}
-	if got.header.Get("X-Codex-Beta-Features") != "" {
-		t.Fatalf("plain Responses must not send X-Codex-Beta-Features, got %q", got.header.Get("X-Codex-Beta-Features"))
+	if got.header.Get("Authorization") != "Bearer upstream-key" {
+		t.Fatalf("upstream authorization = %q", got.header.Get("Authorization"))
 	}
-	if _, ok := got.body["client_metadata"]; ok {
-		t.Fatalf("plain Responses must not inject client_metadata: %+v", got.body)
-	}
-	ua := got.header.Get("User-Agent")
-	if strings.Contains(strings.ToLower(ua), "codex") {
-		t.Fatalf("plain Responses must not use Codex User-Agent, got %q", ua)
-	}
-	if ua != plainResponsesUserAgent {
-		t.Fatalf("plain Responses User-Agent = %q, want %q", ua, plainResponsesUserAgent)
-	}
-	for key := range got.header {
-		normalized := strings.ReplaceAll(strings.ToLower(key), "_", "-")
-		switch normalized {
-		case "session-id", "thread-id", "x-codex-window-id", "originator", "x-codex-beta-features":
-			t.Fatalf("plain Responses retained Codex header %q: %+v", key, got.header)
-		}
+	if got.body["model"] != "gpt-test" {
+		t.Fatalf("upstream model = %v, want gpt-test", got.body["model"])
 	}
 }
 
@@ -1099,7 +983,7 @@ func TestStartOpenAIResponsesAPIToolCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
@@ -1141,34 +1025,6 @@ func postClaudeMessageWithTools(t *testing.T, ctx context.Context, proxyRuntime 
 		t.Fatalf("Claude tool response status = %d: %s", resp.StatusCode, body)
 	}
 	return string(body)
-}
-
-func TestStartCodexAPIClaudeMessagesMissingCreatedBeforeDelta(t *testing.T) {
-	// Upstream emits a content delta before any response.created; the compat
-	// proxy must synthesize created first so CLIProxyAPI gets a sane order.
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"order ok\"}\n\n")
-		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_order\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"order ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
-	}))
-	t.Cleanup(upstream.Close)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
-	if err != nil {
-		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
-	}
-	defer proxyRuntime.Stop()
-
-	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
-	if !strings.Contains(responseBody, "order ok") {
-		t.Fatalf("missing content when created was delayed: %s", responseBody)
-	}
-	// Claude stream should still produce a normal message lifecycle.
-	if !strings.Contains(responseBody, `"type":"message_start"`) || !strings.Contains(responseBody, `"type":"message_stop"`) {
-		t.Fatalf("Claude lifecycle incomplete without upstream created: %s", responseBody)
-	}
 }
 
 func assertClaudeToolUse(t *testing.T, responseBody, toolName, argSnippet string) {

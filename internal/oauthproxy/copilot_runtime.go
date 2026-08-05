@@ -788,18 +788,8 @@ func startCopilotOAuthWithFiles(parent context.Context, modelSpec string, creden
 		runtimeConfigBase:      newRuntimeConfigBase(port, runtimeDir, apiKey),
 		DisableClaudeCloakMode: true,
 	}
-	var compat *responsesCompatibilityProxy
 	if len(routes.responses) > 0 {
-		compat, err = startResponsesCompatibilityProxy(gateway.endpoint, nil, 0)
-		if err != nil {
-			return nil, err
-		}
-		defer func() {
-			if stopGateway && compat != nil {
-				compat.Stop()
-			}
-		}()
-		configFile.CodexAPIKey = []runtimeCodexKey{{APIKey: "copilot", BaseURL: compat.endpoint, Models: routes.responses}}
+		configFile.CodexAPIKey = []runtimeCodexKey{{APIKey: "copilot", BaseURL: gateway.endpoint, Models: routes.responses}}
 	}
 	if len(routes.chat) > 0 {
 		configFile.OpenAICompatibility = []runtimeOpenAICompatibility{{
@@ -821,7 +811,6 @@ func startCopilotOAuthWithFiles(parent context.Context, modelSpec string, creden
 	}
 	cleanupRuntimeDir = false
 	stopGateway = false
-	proxyRuntime.responsesCompat = compat
 	proxyRuntime.copilotGateway = gateway
 	proxyRuntime.listAuths = pool.listAuths
 	proxyRuntime.models = append([]string(nil), routes.models...)
