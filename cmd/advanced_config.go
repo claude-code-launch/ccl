@@ -47,6 +47,11 @@ var (
 	filterStyle      = lipgloss.NewStyle().Foreground(colorAccent)
 	availableStyle   = lipgloss.NewStyle().Foreground(colorData).Bold(true)
 	unavailableStyle = lipgloss.NewStyle().Foreground(colorError)
+	// Buttons always carry a background so they read as selectable even when the
+	// cursor is elsewhere. The unselected state is a dimmer version of the
+	// selected accent so focus is obvious at a glance.
+	buttonStyle       = lipgloss.NewStyle().Foreground(compat.AdaptiveColor{Light: lipgloss.Color("#6B7A93"), Dark: lipgloss.Color("#9AA7BE")}).Background(compat.AdaptiveColor{Light: lipgloss.Color("#C8D2E4"), Dark: lipgloss.Color("#2E3A50")}).Padding(0, 1)
+	buttonActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(colorAccent).Bold(true).Padding(0, 1)
 )
 
 const (
@@ -67,7 +72,8 @@ type configRowKind uint8
 const (
 	rowEndpoint configRowKind = iota
 	rowAPIKey
-	rowTest // Auto Configure
+	rowToggleKey // eye button to reveal/hide the API key
+	rowTest      // Auto Configure
 	rowProtocol
 	rowFast
 	rowOpus
@@ -150,6 +156,9 @@ type AdvancedConfigModel struct {
 	// re-verified automatically when the page opens (Init). Until that check
 	// succeeds, connectionReady is false and Model Mapping / Runtime stay greyed.
 	autoDetectOnOpen bool
+	// keyVisible toggles whether the API key is shown in plain text next to the
+	// eye button, or masked as asterisks. Defaults to masked.
+	keyVisible bool
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -1460,6 +1469,53 @@ func (m *AdvancedConfigModel) applyRecommendation() {
 	setDebugf("applyRecommendation slots=%s one_m=%s", slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots))
 }
 
+// activateRow fires the action for a button row on click or Enter: Auto
+// Configure starts the connection check, Test Model Availability starts the
+// per-model probes. Returns the tea.Cmd to run, or nil for no-op.
+func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
+	switch kind {
+	case rowTest:
+		// Start detection with the current input values (OAuth uses the session
+		// runtime endpoint/key already injected by configureOAuthRuntime).
+		if !m.usesOAuth() {
+			m.p.Endpoint = m.urlInput.Value()
+			m.p.APIKey = m.keyInput.Value()
+			m.probeEndpoint = m.p.Endpoint
+			m.probeAPIKey = m.p.APIKey
+			m.connectionDirty = m.autoConfigured
+		}
+		m.urlInput.Blur()
+		m.keyInput.Blur()
+		m.detectionError = nil
+		m.detecting = true
+		m.detectProgress = 5
+		m.detectFrame = 0
+		setDebugf("start detection endpoint=%q api_key_len=%d oauth=%t", m.probeEndpoint, len(m.probeAPIKey), m.usesOAuth())
+		return tea.Batch(modelFetchCmd(m.probeEndpoint, m.probeAPIKey), modelFetchTickCmd())
+	case rowTestModels:
+		if !m.connectionReady() {
+			return nil
+		}
+		if len(m.modelPool) == 0 {
+			setDebugf("model availability test skipped: empty pool")
+			return nil
+		}
+		m.modelTestID++
+		testID := m.modelTestID
+		ctx, cancel := context.WithCancel(context.Background())
+		m.modelTesting = true
+		m.modelTestCancel = cancel
+		m.modelTestFrame = 0
+		m.modelTestCanceled = false
+		setDebugf("model availability test started model_count=%d", len(m.modelPool))
+		return tea.Batch(
+			modelAvailabilityTestCmd(ctx, testID, m.modelPool, m.probeEndpoint, m.probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.availabilitySmokeTestModel()),
+			modelAvailabilityTickCmd(testID),
+		)
+	}
+	return nil
+}
+
 func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
@@ -1471,12 +1527,25 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case focusRowMsg:
-		// Click on any row: move the cursor there. Endpoint/API Key additionally
-		// focus their text inputs so typing lands in the field.
+		// Click semantics: the first click on a row selects it (moves the cursor);
+		// a second click on the already-selected row performs its action. Endpoint
+		// and API Key focus their text inputs on first click so typing lands there.
+		// rowToggleKey has no standalone row in visibleRows (it is part of the
+		// API Key value line), so it is tracked by cursor position alone.
+		if msg.row == rowToggleKey {
+			alreadySelected := m.cursor == m.mainRowIndex(rowAPIKey)
+			m.cursor = m.mainRowIndex(rowAPIKey)
+			if alreadySelected {
+				m.keyVisible = !m.keyVisible
+				setDebugf("key visibility toggled visible=%t", m.keyVisible)
+			}
+			return m, nil
+		}
 		idx := m.mainRowIndex(msg.row)
 		if idx < 0 {
 			return m, nil
 		}
+		alreadySelected := m.cursor == idx && !m.textInputHasKeyboard()
 		m.cursor = idx
 		m.keepCursorVisible()
 		switch msg.row {
@@ -1486,6 +1555,35 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case rowAPIKey:
 			m.urlInput.Blur()
 			return m, m.keyInput.Focus()
+		case rowTest, rowTestModels:
+			m.urlInput.Blur()
+			m.keyInput.Blur()
+			if alreadySelected {
+				return m, m.activateRow(msg.row)
+			}
+			return m, nil
+		case rowSave:
+			m.urlInput.Blur()
+			m.keyInput.Blur()
+			if alreadySelected {
+				if !m.canSave() {
+					setDebugf("click save blocked: connection dirty or undetected")
+					return m, nil
+				}
+				m.compactState = compactConfigState{preset: m.compactPreset}
+				m.saveConfirmed = true
+				setDebugf("click save requested provider=%q", m.p.Name)
+				return m, tea.Quit
+			}
+			return m, nil
+		case rowCancel:
+			m.urlInput.Blur()
+			m.keyInput.Blur()
+			if alreadySelected {
+				setDebugf("click cancel requested")
+				return m, tea.Quit
+			}
+			return m, nil
 		default:
 			m.urlInput.Blur()
 			m.keyInput.Blur()
@@ -1608,6 +1706,15 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.detecting {
+			// Allow esc to abort a connection check so the user is never frozen
+			// out of the page; ctrl+c/q still quit above.
+			if key == "esc" {
+				m.detecting = false
+				m.detectionError = fmt.Errorf("%s", locale.T("已取消连接检查", "connection check canceled"))
+				m.cursor = m.mainRowIndex(rowTest)
+				setDebugf("connection check canceled by user")
+				return m, nil
+			}
 			return m, nil
 		}
 		if m.modelTesting {
@@ -1776,23 +1883,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.keyInput.Blur()
 				setDebugf("enter api key -> test api_key_len=%d", len(m.keyInput.Value()))
 			case rowTest:
-				// Start detection with the current input values (OAuth uses the
-				// session runtime endpoint/key already injected by configureOAuthRuntime).
-				if !m.usesOAuth() {
-					m.p.Endpoint = m.urlInput.Value()
-					m.p.APIKey = m.keyInput.Value()
-					m.probeEndpoint = m.p.Endpoint
-					m.probeAPIKey = m.p.APIKey
-					m.connectionDirty = m.autoConfigured
-				}
-				m.urlInput.Blur()
-				m.keyInput.Blur()
-				m.detectionError = nil
-				m.detecting = true
-				m.detectProgress = 5
-				m.detectFrame = 0
-				setDebugf("start detection endpoint=%q api_key_len=%d oauth=%t", m.probeEndpoint, len(m.probeAPIKey), m.usesOAuth())
-				return m, tea.Batch(modelFetchCmd(m.probeEndpoint, m.probeAPIKey), modelFetchTickCmd())
+				return m, m.activateRow(rowTest)
 			case rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch:
 				m.adjustReviewField(1)
 			case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
@@ -1806,27 +1897,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateFilteredPool()
 				setDebugf("open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
 			case rowTestModels:
-				if !m.connectionReady() {
-					return m, nil
-				}
-				// Start the per-model availability test. Each model gets one
-				// minimal request, so this is opt-in and consumes quota.
-				if len(m.modelPool) == 0 {
-					setDebugf("model availability test skipped: empty pool")
-					return m, nil
-				}
-				m.modelTestID++
-				testID := m.modelTestID
-				ctx, cancel := context.WithCancel(context.Background())
-				m.modelTesting = true
-				m.modelTestCancel = cancel
-				m.modelTestFrame = 0
-				m.modelTestCanceled = false
-				setDebugf("model availability test started model_count=%d", len(m.modelPool))
-				return m, tea.Batch(
-					modelAvailabilityTestCmd(ctx, testID, m.modelPool, m.probeEndpoint, m.probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.availabilitySmokeTestModel()),
-					modelAvailabilityTickCmd(testID),
-				)
+				return m, m.activateRow(rowTestModels)
 			case rowContext:
 				// Context & Compact is edited inline; nothing to open yet.
 				setDebugf("context row selected")
@@ -1999,8 +2070,29 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
 	} else {
+		keyValue := m.keyInput.View()
+		if m.cursor != m.mainRowIndex(rowAPIKey) {
+			// Not editing: mask as asterisks, or reveal when the eye is open.
+			if m.keyVisible {
+				keyValue = m.keyInput.Value()
+			} else {
+				keyValue = strings.Repeat("*", len([]rune(m.keyInput.Value())))
+				if keyValue == "" {
+					keyValue = m.keyInput.Placeholder
+				}
+			}
+		}
+		// Eye button to reveal/hide the key.
+		eye := "👁"
+		if m.keyVisible {
+			eye = "🙈"
+		}
+		eyeBtn := grayText.Render("[" + eye + "]")
+		if m.cursor == m.mainRowIndex(rowToggleKey) {
+			eyeBtn = selectedStyle.Render("[" + eye + "]")
+		}
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
-		body.WriteString(renderCredentialField("API Key", m.keyInput.View(), m.cursor == m.mainRowIndex(rowAPIKey)))
+		body.WriteString(renderCredentialField("API Key", keyValue+"  "+eyeBtn, m.cursor == m.mainRowIndex(rowAPIKey)))
 	}
 
 	// Detection / auto-configure button.
@@ -2008,11 +2100,11 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(renderModelFetchProgress(m.detectProgress, m.detectFrame, m.usesOAuth()))
 	} else {
 		testLabel := locale.T("Auto Configure", "Auto Configure")
-		testStr := "  " + testLabel
+		testStr := buttonStyle.Render(testLabel)
 		if m.cursor == m.mainRowIndex(rowTest) {
-			testStr = selectedStyle.Render("> " + testLabel)
+			testStr = buttonActiveStyle.Render(testLabel)
 		}
-		body.WriteString(testStr + "\n")
+		body.WriteString("  " + testStr + "\n")
 
 		if m.detectionError != nil {
 			errorWidth := max(m.panelWidth()-8, 20)
@@ -2148,7 +2240,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.cursor == m.mainRowIndex(rowActive) {
 			activePrefix = selectedStyle.Render("> ")
 			boxStyled = selectedStyle.Render(activeBox)
-			labelStyled = titleStyle.Render(activeLabel)
+			labelStyled = selectedStyle.Render(activeLabel)
 		}
 		body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, boxStyled, labelStyled))
 
@@ -2158,15 +2250,15 @@ func (m *AdvancedConfigModel) View() tea.View {
 			applyLabel = locale.T("保存 Provider", "Save Provider")
 		}
 		cancelLabel := locale.T("取消", "Cancel")
-		applyStr := "  " + applyLabel
-		cancelStr := "  " + cancelLabel
+		applyStr := buttonStyle.Render(applyLabel)
+		cancelStr := buttonStyle.Render(cancelLabel)
 		if m.cursor == m.mainRowIndex(rowSave) {
-			applyStr = selectedStyle.Render("> " + applyLabel)
+			applyStr = buttonActiveStyle.Render(applyLabel)
 		}
 		if m.cursor == m.mainRowIndex(rowCancel) {
-			cancelStr = selectedStyle.Render("> " + cancelLabel)
+			cancelStr = buttonActiveStyle.Render(cancelLabel)
 		}
-		body.WriteString("\n" + applyStr + "          " + cancelStr + "\n")
+		body.WriteString("\n  " + applyStr + "          " + cancelStr + "\n")
 
 		if m.connectionDirty && !m.usesOAuth() {
 			body.WriteString(grayText.Render(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving")) + "\n")
@@ -2246,7 +2338,8 @@ func (m *AdvancedConfigModel) View() tea.View {
 		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
 			switch msg.(type) {
 			case tea.MouseClickMsg:
-				row, ok := rowAtLine(lines, msg.Mouse().Y)
+				mouse := msg.Mouse()
+				row, ok := rowAtLineAt(lines, mouse.Y, mouse.X)
 				if !ok {
 					return nil
 				}
@@ -2275,6 +2368,14 @@ func (m *AdvancedConfigModel) View() tea.View {
 // label (Endpoint/API Key inputs) resolves to the same row as clicking the
 // label. Rows that are not focusable return ok=false.
 func rowAtLine(lines []string, y int) (configRowKind, bool) {
+	return rowAtLineAt(lines, y, -1)
+}
+
+// rowAtLineAt resolves a clicked screen row to a configuration row kind. x is
+// the column offset (-1 to ignore). The X column disambiguates multiple labels
+// on one rendered line (Save & Activate vs Cancel): the click maps to whichever
+// label's character range contains it.
+func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 	if y < 0 || y >= len(lines) {
 		return rowCancel, false
 	}
@@ -2283,25 +2384,87 @@ func rowAtLine(lines []string, y int) (configRowKind, bool) {
 		if row < 0 || row >= len(lines) {
 			continue
 		}
-		text := strings.TrimLeft(ansi.Strip(lines[row]), " │|>")
-		text = strings.TrimSpace(text)
-		// Checkbox rows render as "[x] Label" / "[ ] Label"; strip the box so the
-		// label prefix matches. Model rows render with a right-aligned model value,
-		// so label matching happens on the leading label only.
-		for kind, label := range rowClickLabels {
-			if strings.HasPrefix(text, label) {
-				return kind, true
-			}
-		}
-		// Retry after stripping a checkbox prefix.
-		text = strings.TrimLeft(strings.TrimSpace(text), "[]x ")
-		for kind, label := range rowClickLabels {
-			if strings.HasPrefix(text, label) {
-				return kind, true
-			}
+		// Strip ANSI only; keep the leading border/space columns so label
+		// offsets line up with the click's X column.
+		text := ansi.Strip(lines[row])
+		kind, ok := matchRowLabel(text, x)
+		if ok {
+			return kind, true
 		}
 	}
 	return rowCancel, false
+}
+
+// matchRowLabel matches a rendered line against the clickable labels. A label
+// matches only when it begins a field — the line, after stripping the leading
+// border/cursor/space/checkbox prefix, starts with the label. This keeps prose
+// like "detection uses the API Key you entered" from matching. The label's
+// start column is kept so a click's X can disambiguate Save vs Cancel, which
+// share one line.
+func matchRowLabel(text string, x int) (configRowKind, bool) {
+	// The API key value row carries the eye toggle; clicking on the 👁/🙈
+	// character toggles key visibility.
+	if idx := strings.Index(text, "[👁]"); idx >= 0 {
+		if x < 0 || (x >= idx && x < idx+4) {
+			return rowToggleKey, true
+		}
+	}
+	if idx := strings.Index(text, "[🙈]"); idx >= 0 {
+		if x < 0 || (x >= idx && x < idx+4) {
+			return rowToggleKey, true
+		}
+	}
+	// Strip leading border, cursor arrow, and whitespace to find the first field.
+	trimmed := strings.TrimLeft(text, " │|>")
+	lead := len(text) - len(trimmed)
+	// Account for a checkbox "[x] "/"[ ] " before the label.
+	rest := trimmed
+	if strings.HasPrefix(rest, "[") {
+		if idx := strings.Index(rest, "] "); idx >= 0 {
+			rest = rest[idx+2:]
+			lead = len(text) - len(rest)
+		}
+	}
+	// Find every label that starts the trimmed field.
+	var matched configRowKind
+	var matchedIdx int
+	hasMatch := false
+	for kind, label := range rowClickLabels {
+		if strings.HasPrefix(rest, label) {
+			idx := lead
+			if !hasMatch || idx < matchedIdx {
+				matched = kind
+				matchedIdx = idx
+				hasMatch = true
+			}
+		}
+	}
+	if !hasMatch {
+		return rowCancel, false
+	}
+	// A single label at the field start is unambiguous.
+	if x < 0 {
+		return matched, true
+	}
+	// With column info, Save and Cancel on the same line are distinct. The click
+	// belongs to the label whose field start is at or before x (Save then Cancel).
+	best := matched
+	bestIdx := matchedIdx
+	for kind, label := range rowClickLabels {
+		if kind == matched {
+			continue
+		}
+		idx := strings.Index(rest, label)
+		if idx < 0 {
+			continue
+		}
+		absIdx := lead + idx
+		if absIdx <= x && (bestIdx > x || absIdx > bestIdx) {
+			best = kind
+			bestIdx = absIdx
+		}
+	}
+	return best, true
 }
 
 // rowClickLabels maps a configuration row to the label prefix a click must
