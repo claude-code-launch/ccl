@@ -1,0 +1,21 @@
+README.md
+  s_8a80ff043cf944::t_db276a3785f239 532,534-537
+  s_8a80ff043cf944::t_f486a8de49cca7 192
+  s_8a80ff043cf944::t_eb835162aad903 348
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "8a68ba8d331702eead582653872734416e578963",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
