@@ -1,0 +1,36 @@
+cmd/advanced_config_layout_test.go
+  s_8a80ff043cf944::t_33c15601dcc8d6 354-356,359,362-366,378-379
+  s_8a80ff043cf944::t_cb1ec145d0643c 305-312,323-325,330,335,340,342,346,348
+  s_8a80ff043cf944::t_0cdc0ed1be9eef 367-377
+cmd/advanced_config.go
+  s_8a80ff043cf944::t_14c16f21fd8522 1662
+  s_8a80ff043cf944::t_2b95d0cd2ef4b6 459-469
+  s_8a80ff043cf944::t_effc54443f8527 313-343
+  s_8a80ff043cf944::t_131adfc23fe696 1633-1639,1646-1652
+  s_8a80ff043cf944::t_cbf41125a59944 235
+  s_8a80ff043cf944::t_28478cb731bdc9 1844-1847,1849-1851
+  s_8a80ff043cf944::t_c5253d89a77d5d 1435-1439,1442-1445,1448,1451-1454,1458-1476
+  s_8a80ff043cf944::t_1ee78c4961c911 987-989,2190-2206
+  s_8a80ff043cf944::t_0125a71a0f6bea 2169-2178
+  s_8a80ff043cf944::t_2b5445e1258478 2129-2131,2135-2153,2155,2161-2168,2179-2189,2207
+  s_8a80ff043cf944::t_7806aabfeec07b 973-976,978
+  s_8a80ff043cf944::t_b353f1115c9394 1477-1478,2208
+cmd/set.go
+  s_8a80ff043cf944::t_5f5ace2a082eac 56-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "317eca0291beea1b8bfa63ec0b9bf48519047c6d",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
