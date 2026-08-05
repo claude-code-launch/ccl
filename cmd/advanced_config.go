@@ -1530,15 +1530,14 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Click semantics: the first click on a row selects it (moves the cursor);
 		// a second click on the already-selected row performs its action. Endpoint
 		// and API Key focus their text inputs on first click so typing lands there.
-		// rowToggleKey has no standalone row in visibleRows (it is part of the
-		// API Key value line), so it is tracked by cursor position alone.
+		// rowToggleKey (Show/Hide) toggles on a single click — it has no standalone
+		// row in visibleRows, being part of the API Key value line.
 		if msg.row == rowToggleKey {
-			alreadySelected := m.cursor == m.mainRowIndex(rowAPIKey)
+			// Show/Hide is a toggle: a single click flips visibility regardless of
+			// the cursor, so the button always responds immediately.
 			m.cursor = m.mainRowIndex(rowAPIKey)
-			if alreadySelected {
-				m.keyVisible = !m.keyVisible
-				setDebugf("key visibility toggled visible=%t", m.keyVisible)
-			}
+			m.keyVisible = !m.keyVisible
+			setDebugf("key visibility toggled visible=%t", m.keyVisible)
 			return m, nil
 		}
 		if msg.row == rowCopyKey {
@@ -2057,7 +2056,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 			if key == "" {
 				keyValue = m.keyInput.Placeholder
 			} else {
-				keyValue = strings.Repeat("*", keyDisplayWidth)
+				// One asterisk per real key character, clamped to the display
+				// width and padded to keep the button position fixed.
+				n := len([]rune(key))
+				if n > keyDisplayWidth {
+					n = keyDisplayWidth
+				}
+				keyValue = strings.Repeat("*", n) + strings.Repeat(" ", keyDisplayWidth-n)
 			}
 		}
 		// Show/Hide button to reveal or mask the key.
