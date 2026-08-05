@@ -146,6 +146,10 @@ type AdvancedConfigModel struct {
 	// the bottom (action bar) even when the content is much taller than the
 	// terminal. It is derived in View but read by Update's mouseScrollMsg.
 	scrollContentHeight int
+	// autoDetectOnOpen marks an existing provider whose connection should be
+	// re-verified automatically when the page opens (Init). Until that check
+	// succeeds, connectionReady is false and Model Mapping / Runtime stay greyed.
+	autoDetectOnOpen bool
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -474,14 +478,15 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	cleanAndPopulate(&m.p.CustomModelID, "custom")
 	cleanAndPopulate(&m.p.SubagentModel, "subagent")
 
-	// An existing provider already carries a model pool (p.Model): open the full
-	// single page directly — the Connection inputs stay at the top, editable — so
-	// the user lands on the whole configuration, not a bare URL/Key step.
+	// An existing provider already carries a model pool (p.Model) and a
+	// connection. Load the pool for display but do NOT mark it discovered: the
+	// connection is re-verified automatically on open (Init), and until that
+	// check succeeds the Model Mapping / Runtime sections stay greyed out.
 	if !m.usesOAuth() {
 		pool := uniqueModels(parseModelList(m.p.Model))
 		if len(pool) > 0 {
 			m.modelPool = pool
-			m.modelPoolFromDiscovery = true
+			m.autoDetectOnOpen = true
 		}
 	}
 
@@ -538,7 +543,19 @@ func NewAdvancedConfigModelAtPage1WithMetadata(p *provider.Provider, modelPool [
 	return m
 }
 
-func (m *AdvancedConfigModel) Init() tea.Cmd { return textinput.Blink }
+func (m *AdvancedConfigModel) Init() tea.Cmd {
+	cmds := []tea.Cmd{textinput.Blink}
+	// Re-verify an existing provider's connection on open. Until the check
+	// succeeds the sections below Connection stay greyed out; OAuth providers
+	// are always ready so they skip this.
+	if m.autoDetectOnOpen && !m.usesOAuth() && strings.TrimSpace(m.probeEndpoint) != "" {
+		m.detecting = true
+		m.detectProgress = 5
+		m.detectFrame = 0
+		cmds = append(cmds, tea.Batch(modelFetchCmd(m.probeEndpoint, m.probeAPIKey), modelFetchTickCmd()))
+	}
+	return tea.Batch(cmds...)
+}
 
 func modelFetchTickCmd() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
@@ -1877,24 +1894,15 @@ func renderModelFetchProgress(progress, frame int, oauth bool) string {
 	if progress > 100 {
 		progress = 100
 	}
-	const width = 34
-	filled := progress * width / 100
-	if filled > width {
-		filled = width
-	}
 	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spin := spinners[frame%len(spinners)]
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-	label := locale.T("正在检测协议并获取模型", "Detecting protocol and fetching models")
-	hint := locale.T("请稍候，正在验证 BaseURL 和 API Key", "Please wait while BaseURL and API Key are validated")
+	label := locale.T("Connecting...", "Connecting...")
 	if oauth {
-		label = locale.T("正在通过 OAuth 获取模型", "Fetching models through OAuth")
-		hint = locale.T("请稍候，本地代理正在读取已认证账号的模型", "Please wait while the local proxy loads models for the authenticated account")
+		label = locale.T("Connecting via OAuth...", "Connecting via OAuth...")
 	}
 	return "\n" +
 		selectedStyle.Render(fmt.Sprintf("%s %s", spin, label)) + "\n" +
-		cyanText.Render(fmt.Sprintf("[%s] %3d%%", bar, progress)) + "\n" +
-		grayText.Render(hint) + "\n"
+		grayText.Render(locale.T("请稍候，正在验证连接", "Please wait while the connection is verified")) + "\n"
 }
 
 // focusCredentialFieldMsg asks the model to focus one of the credential inputs.
