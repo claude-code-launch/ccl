@@ -74,7 +74,8 @@ const (
 	rowEndpoint configRowKind = iota
 	rowAPIKey
 	rowToggleKey // Show/Hide button for the API key
-	rowCopyKey   // click the revealed key value to copy the full key
+	rowCopyKey   // click the key value to copy the full key
+	rowCopyURL   // click the endpoint value to copy the URL
 	rowTest      // Auto Configure
 	rowProtocol
 	rowFast
@@ -165,8 +166,9 @@ type AdvancedConfigModel struct {
 	// keyVisible toggles whether the API key is shown in plain text next to the
 	// Show/Hide button, or masked as asterisks. Defaults to masked.
 	keyVisible bool
-	// keyCopied shows a brief "copied" hint after the key was copied.
+	// keyCopied / urlCopied show a brief "copied" hint after the value is copied.
 	keyCopied bool
+	urlCopied bool
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -200,6 +202,9 @@ type modelFetchTickMsg struct{}
 
 // copiedClearMsg fires shortly after a key is copied, clearing the hint.
 type copiedClearMsg struct{}
+
+// urlCopiedClearMsg fires shortly after the endpoint URL is copied.
+type urlCopiedClearMsg struct{}
 
 type modelAvailability uint8
 
@@ -1614,6 +1619,10 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.keyCopied = false
 		return m, nil
 
+	case urlCopiedClearMsg:
+		m.urlCopied = false
+		return m, nil
+
 	case focusRowMsg:
 		// Click semantics: the first click on a row selects it (moves the cursor);
 		// a second click on the already-selected row performs its action. Endpoint
@@ -1632,14 +1641,22 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.row == rowCopyKey {
-			// Clicking the revealed key copies the full value to the clipboard and
-			// shows a brief "copied" hint.
+			// Clicking the key value copies the full key and shows a brief hint.
 			m.keyCopied = true
 			if err := clipboard.WriteAll(m.keyInput.Value()); err != nil {
 				setDebugf("copy key to clipboard failed: %v", err)
 			}
 			setDebugf("key copied to clipboard")
 			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return copiedClearMsg{} })
+		}
+		if msg.row == rowCopyURL {
+			// Clicking the endpoint value copies the URL and shows a brief hint.
+			m.urlCopied = true
+			if err := clipboard.WriteAll(m.urlInput.Value()); err != nil {
+				setDebugf("copy url to clipboard failed: %v", err)
+			}
+			setDebugf("url copied to clipboard")
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return urlCopiedClearMsg{} })
 		}
 		idx := m.mainRowIndex(msg.row)
 		if idx < 0 {
@@ -2196,7 +2213,11 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// never shows a selection marker; focusing is indicated by the input's
 		// own text cursor. The Show/Hide button leads the key value on the same
 		// row.
-		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), false))
+		urlCopiedHint := ""
+		if m.urlCopied {
+			urlCopiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
+		}
+		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View()+urlCopiedHint, false))
 		body.WriteString(renderCredentialField("API Key", toggleBtn+" "+keyValue+copiedHint, false))
 	}
 
@@ -2523,15 +2544,19 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 // start column is kept so a click's X can disambiguate Save vs Cancel, which
 // share one line.
 func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
-	// The API Key label row carries the Show/Hide button after the field name.
-	// A click on the button's column maps to it; a click elsewhere on the row
-	// falls through to the leading-label match. Buttons only respond to a direct
-	// click on their own row (allowButton), not the off-by-one label fallback.
+	// The API key value row is "[Show] <key value>": a click on the button maps
+	// to the toggle, a click on the key value after it copies the key. Buttons
+	// only respond to a direct click on their own row (allowButton), not the
+	// off-by-one label fallback.
 	if allowButton && x >= 0 {
 		for _, label := range []string{"Show", "Hide"} {
 			if idx := strings.Index(text, " "+label+" "); idx >= 0 {
 				if x >= idx-1 && x < idx+len(label)+2 {
 					return rowToggleKey, true
+				}
+				// After the button: the key value copies the full key.
+				if x >= idx+len(label)+2 {
+					return rowCopyKey, true
 				}
 			}
 		}
@@ -2562,11 +2587,18 @@ func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
 		}
 	}
 	if !hasMatch {
-		// No leading label: this is a value row. The API key value row is the
-		// masked asterisks or the revealed (possibly truncated) plaintext, so a
-		// direct click on it copies the full key (allowButton). Other value rows
-		// resolve via the off-by-one label scan instead.
-		if allowButton && (strings.HasPrefix(strings.TrimSpace(text), "*") || strings.Contains(text, "…")) {
+		// No leading label: a value row. The endpoint value copies the URL, and
+		// a bare masked/plaintext key value copies the key. Both only respond to
+		// a direct click (allowButton), not the off-by-one label fallback. The
+		// leading border/space is already stripped in rest.
+		if !allowButton {
+			return rowCancel, false
+		}
+		switch {
+		case strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://"):
+			return rowCopyURL, true
+		case strings.HasPrefix(rest, "*") || strings.Contains(rest, "…") ||
+			strings.HasPrefix(rest, "sk-"):
 			return rowCopyKey, true
 		}
 		return rowCancel, false
