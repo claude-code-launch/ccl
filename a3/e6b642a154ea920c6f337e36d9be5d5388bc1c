@@ -1,0 +1,31 @@
+cmd/advanced_config.go
+  s_8a80ff043cf944::t_4768f0d7b33fa2 2417-2418
+  s_8a80ff043cf944::t_f15ac84f93bfcf 192-194
+  s_8a80ff043cf944::t_48698b87da3143 1877,1880,1882
+  s_8a80ff043cf944::t_44639fb69b84c9 1544-1546,1551,1553-1554
+  s_8a80ff043cf944::t_1bc9352155e7d6 1543,1547-1550,1552,1555
+  s_8a80ff043cf944::t_146d626010c6c3 1561
+  s_8a80ff043cf944::t_c814755be1db20 1559-1560,1566
+  s_8a80ff043cf944::t_d5aa36d77698ac 159-160
+  s_8a80ff043cf944::t_9285e0d2924e8c 261-263
+  s_8a80ff043cf944::t_b7135ee7709a5b 1878-1879,1881
+  s_8a80ff043cf944::t_a3915d7512cd9b 2099-2102,2104
+  s_8a80ff043cf944::t_eabe55ce84ecc7 1534-1537
+  s_8a80ff043cf944::t_89703187b00b0e 2408-2410,2414
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "a3e6b642a154ea920c6f337e36d9be5d5388bc1c",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
