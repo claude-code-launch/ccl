@@ -1,0 +1,35 @@
+cmd/advanced_config.go
+  s_8a80ff043cf944::t_0ae514b584e9b6 11
+  s_8a80ff043cf944::t_0d284005ed4d10 386-387,389-390,392-393
+  s_8a80ff043cf944::t_02e573c6ab4f25 2541-2547,2554-2555
+  s_8a80ff043cf944::t_87e71ebd81c567 526-529,532,534
+  s_8a80ff043cf944::t_fec0d2cbcb8de0 2497
+  s_8a80ff043cf944::t_a92e5adf77e6b5 77-79
+  s_8a80ff043cf944::t_6417776e48e228 639
+  s_8a80ff043cf944::t_dda9d15a261b07 1974-1980,1987-1989
+  s_8a80ff043cf944::t_6a7e845c55a999 2183-2187,2189
+  s_8a80ff043cf944::t_d915592a918dd1 2551
+  s_8a80ff043cf944::t_de52c68a98f46e 182
+  s_8a80ff043cf944::t_645eb30a44a9dc 2553
+cmd/advanced_config_layout_test.go
+  s_8a80ff043cf944::t_df2068c2c908f1 453-455
+  s_8a80ff043cf944::t_7fd849744bcf8f 641
+cmd/cmd_test.go
+  s_8a80ff043cf944::t_26d5a98d64b713 189,191,204-207
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "4d01d90f8e1f957e4de827b2f2f12167f4c6f991",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
