@@ -2079,12 +2079,12 @@ func (m *AdvancedConfigModel) View() tea.View {
 				keyValue = m.keyInput.Placeholder
 			} else {
 				// One asterisk per real key character, clamped to the display
-				// width and padded to keep the button position fixed.
+				// width; the Show/Hide button follows right after the mask.
 				n := len([]rune(key))
 				if n > keyDisplayWidth {
 					n = keyDisplayWidth
 				}
-				keyValue = strings.Repeat("*", n) + strings.Repeat(" ", keyDisplayWidth-n)
+				keyValue = strings.Repeat("*", n)
 			}
 		}
 		// Show/Hide button to reveal or mask the key.
@@ -2101,7 +2101,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 			copiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
 		}
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
-		body.WriteString(renderCredentialField("API Key", keyValue+"  "+toggleBtn+copiedHint, m.cursor == m.mainRowIndex(rowAPIKey)))
+		body.WriteString(renderCredentialField("API Key", keyValue+" "+toggleBtn+copiedHint, m.cursor == m.mainRowIndex(rowAPIKey)))
 	}
 
 	// Detection / auto-configure button.
