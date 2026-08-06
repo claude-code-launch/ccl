@@ -156,9 +156,8 @@ type AdvancedConfigModel struct {
 	// keyVisible toggles whether the API key is shown in plain text next to the
 	// Show/Hide button, or masked as asterisks. Defaults to masked.
 	keyVisible bool
-	// keyCopiedAt is a monotonic tick when the key was last copied to the
-	// clipboard, used to show a brief "copied" hint next to the field.
-	keyCopiedAt uint64
+	// keyCopied shows a brief "copied" hint after the key was copied.
+	keyCopied bool
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -189,6 +188,9 @@ type AdvancedConfigModel struct {
 }
 
 type modelFetchTickMsg struct{}
+
+// copiedClearMsg fires shortly after a key is copied, clearing the hint.
+type copiedClearMsg struct{}
 
 type modelAvailability uint8
 
@@ -256,6 +258,9 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 	rows := []configRow{
 		{kind: rowEndpoint},
 		{kind: rowAPIKey},
+		// rowToggleKey is the Show/Hide button, focusable like any other row
+		// (select with ↑↓ or a first click, then Enter / a second click toggles).
+		{kind: rowToggleKey},
 		{kind: rowTest},
 	}
 	ready := m.connectionReady()
@@ -1526,28 +1531,39 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateInputWidths()
 		return m, nil
 
+	case copiedClearMsg:
+		m.keyCopied = false
+		return m, nil
+
 	case focusRowMsg:
 		// Click semantics: the first click on a row selects it (moves the cursor);
 		// a second click on the already-selected row performs its action. Endpoint
 		// and API Key focus their text inputs on first click so typing lands there.
-		// rowToggleKey (Show/Hide) toggles on a single click — it has no standalone
-		// row in visibleRows, being part of the API Key value line.
 		if msg.row == rowToggleKey {
-			// Show/Hide is a toggle: a single click flips visibility regardless of
-			// the cursor, so the button always responds immediately.
-			m.cursor = m.mainRowIndex(rowAPIKey)
-			m.keyVisible = !m.keyVisible
-			setDebugf("key visibility toggled visible=%t", m.keyVisible)
+			// Show/Hide follows the same select-then-act pattern as the other
+			// buttons: the first click selects it, a second click toggles. After
+			// toggling, the cursor leaves the button so the next Show/Hide click
+			// is a fresh selection (Show and Hide share this row).
+			idx := m.mainRowIndex(rowToggleKey)
+			alreadySelected := m.cursor == idx
+			if alreadySelected {
+				m.keyVisible = !m.keyVisible
+				m.cursor = m.mainRowIndex(rowAPIKey)
+				setDebugf("key visibility toggled visible=%t", m.keyVisible)
+			} else {
+				m.cursor = idx
+			}
 			return m, nil
 		}
 		if msg.row == rowCopyKey {
-			// Clicking the revealed key copies the full value to the clipboard.
-			m.keyCopiedAt++
+			// Clicking the revealed key copies the full value to the clipboard and
+			// shows a brief "copied" hint.
+			m.keyCopied = true
 			if err := clipboard.WriteAll(m.keyInput.Value()); err != nil {
 				setDebugf("copy key to clipboard failed: %v", err)
 			}
 			setDebugf("key copied to clipboard")
-			return m, nil
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return copiedClearMsg{} })
 		}
 		idx := m.mainRowIndex(msg.row)
 		if idx < 0 {
@@ -1858,6 +1874,12 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.urlInput.Blur()
 				m.keyInput.Blur()
 				setDebugf("enter api key -> test api_key_len=%d", len(m.keyInput.Value()))
+			case rowToggleKey:
+				// Enter on the selected Show/Hide button toggles visibility, then
+				// leave the button so the next interaction is a fresh selection.
+				m.keyVisible = !m.keyVisible
+				m.cursor = m.mainRowIndex(rowAPIKey)
+				setDebugf("key visibility toggled visible=%t", m.keyVisible)
 			case rowTest:
 				return m, m.activateRow(rowTest)
 			case rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch:
@@ -2074,8 +2096,12 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.cursor == m.mainRowIndex(rowToggleKey) {
 			toggleBtn = buttonActiveStyle.Render(toggleLabel)
 		}
+		copiedHint := ""
+		if m.keyCopied {
+			copiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
+		}
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
-		body.WriteString(renderCredentialField("API Key", keyValue+"  "+toggleBtn, m.cursor == m.mainRowIndex(rowAPIKey)))
+		body.WriteString(renderCredentialField("API Key", keyValue+"  "+toggleBtn+copiedHint, m.cursor == m.mainRowIndex(rowAPIKey)))
 	}
 
 	// Detection / auto-configure button.
@@ -2379,14 +2405,17 @@ func matchRowLabel(text string, x int) (configRowKind, bool) {
 	// the key text (revealed) before the button.
 	for _, label := range []string{"Show", "Hide"} {
 		if idx := strings.Index(text, " "+label+" "); idx >= 0 {
-			if x < 0 || (x >= idx && x < idx+len(label)+2) {
+			// No column info, or the click lands on the button (label plus its
+			// left/right padding spaces).
+			if x < 0 || (x >= idx-1 && x < idx+len(label)+2) {
 				return rowToggleKey, true
 			}
 			// Click on the key value area (before the button) copies the key.
-			if x >= 0 && x < idx {
+			if x < idx {
 				return rowCopyKey, true
 			}
-			return rowCancel, false
+			// Beyond the button (right padding / border): fall through so the
+			// off-by-one row scan can still match.
 		}
 	}
 	// Strip leading border, cursor arrow, and whitespace to find the first field.
