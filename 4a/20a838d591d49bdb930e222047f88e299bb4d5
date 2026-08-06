@@ -1,0 +1,19 @@
+cmd/advanced_config.go
+  s_8a80ff043cf944::t_7de49151d9f508 2194-2209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "4a20a838d591d49bdb930e222047f88e299bb4d5",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "qwen3.8-max"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
