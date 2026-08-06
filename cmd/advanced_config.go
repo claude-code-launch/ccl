@@ -169,6 +169,10 @@ type AdvancedConfigModel struct {
 	// keyCopied / urlCopied show a brief "copied" hint after the value is copied.
 	keyCopied bool
 	urlCopied bool
+	// lastCopyClickAt / lastCopyClickRow detect a double-click on a value row:
+	// the second click within the window copies instead of focusing.
+	lastCopyClickAt  time.Time
+	lastCopyClickRow configRowKind
 
 	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
 	detectionError error
@@ -1640,17 +1644,31 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.row == rowCopyKey {
-			// Clicking the key value copies the full key and shows a brief hint.
-			m.keyCopied = true
-			if err := clipboard.WriteAll(m.keyInput.Value()); err != nil {
-				setDebugf("copy key to clipboard failed: %v", err)
+		if msg.row == rowCopyKey || msg.row == rowCopyURL {
+			// A single click on a value row focuses its input; a double-click
+			// (second click on the same row within the window) copies the value.
+			now := time.Now()
+			double := msg.row == m.lastCopyClickRow && now.Sub(m.lastCopyClickAt) < 500*time.Millisecond
+			m.lastCopyClickRow = msg.row
+			m.lastCopyClickAt = now
+			if !double {
+				focus := rowAPIKey
+				if msg.row == rowCopyURL {
+					focus = rowEndpoint
+				}
+				m.cursor = m.mainRowIndex(focus)
+				m.urlInput.Blur()
+				m.keyInput.Blur()
+				return m, nil
 			}
-			setDebugf("key copied to clipboard")
-			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return copiedClearMsg{} })
-		}
-		if msg.row == rowCopyURL {
-			// Clicking the endpoint value copies the URL and shows a brief hint.
+			if msg.row == rowCopyKey {
+				m.keyCopied = true
+				if err := clipboard.WriteAll(m.keyInput.Value()); err != nil {
+					setDebugf("copy key to clipboard failed: %v", err)
+				}
+				setDebugf("key copied to clipboard")
+				return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return copiedClearMsg{} })
+			}
 			m.urlCopied = true
 			if err := clipboard.WriteAll(m.urlInput.Value()); err != nil {
 				setDebugf("copy url to clipboard failed: %v", err)
