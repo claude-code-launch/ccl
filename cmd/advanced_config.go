@@ -2153,12 +2153,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// keys are middle-truncated with an ellipsis (the full value is copied on
 		// click).
 		const keyDisplayWidth = 42
-		// The key is always shown at a fixed width, focused or not, so the value
-		// row never grows: revealed keys are middle-truncated, masked keys are a
-		// run of asterisks matching the real key length (clamped). The textinput's
-		// own View would render the full mask plus cursor and overflow.
+		// Focused, show the textinput's own View so the editing cursor is visible,
+		// clipped to the fixed display width (ANSI-safe). Otherwise render a
+		// fixed-width mask or truncated plaintext.
 		var keyValue string
 		switch {
+		case m.cursor == m.mainRowIndex(rowAPIKey):
+			keyValue = ansi.TruncateWc(m.keyInput.View(), keyDisplayWidth, "")
 		case m.keyVisible:
 			keyValue = truncateMiddle(m.keyInput.Value(), keyDisplayWidth)
 		default:
@@ -2347,11 +2348,16 @@ func (m *AdvancedConfigModel) View() tea.View {
 			applyLabel = locale.T("保存 Provider", "Save Provider")
 		}
 		cancelLabel := locale.T("取消", "Cancel")
+		applyDisabled := !m.canSave()
 		applyStr := buttonStyle.Render(applyLabel)
-		cancelStr := buttonStyle.Render(cancelLabel)
-		if m.cursor == m.mainRowIndex(rowSave) {
+		if applyDisabled {
+			// Not connected (or a dirty connection not yet re-tested): the button
+			// is greyed out and not focusable.
+			applyStr = grayText.Render("  " + applyLabel + "  ")
+		} else if m.cursor == m.mainRowIndex(rowSave) {
 			applyStr = buttonActiveStyle.Render(applyLabel)
 		}
+		cancelStr := buttonStyle.Render(cancelLabel)
 		if m.cursor == m.mainRowIndex(rowCancel) {
 			cancelStr = buttonActiveStyle.Render(cancelLabel)
 		}
