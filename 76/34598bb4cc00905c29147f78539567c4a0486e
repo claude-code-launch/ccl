@@ -1,0 +1,62 @@
+internal/oauthproxy/runtime.go
+  s_9db90b6fcb6c0d::t_8fe0720f3ada6f 133-138
+  s_9db90b6fcb6c0d::t_4516d5a839b969 705-718,727,741
+  s_9db90b6fcb6c0d::t_d52529f08b9ce5 655-658
+  s_9db90b6fcb6c0d::t_7621ad2ccac1e4 513
+  s_9db90b6fcb6c0d::t_6d6ae1a20d2979 195-215
+  s_9db90b6fcb6c0d::t_6063e39ff361b3 668-670,673
+cmd/set_test.go
+  s_9db90b6fcb6c0d::t_63329fa36dfe6a 428-470
+cmd/advanced_config.go
+  s_9db90b6fcb6c0d::t_342409c6a6210e 1499-1503
+  s_9db90b6fcb6c0d::t_77211e118f4840 334-346,359-360
+  s_9db90b6fcb6c0d::t_ea821e1244cec9 2377-2380,2402-2406,2408-2421
+  s_9db90b6fcb6c0d::t_c107901b76ef63 1567-1569
+  s_9db90b6fcb6c0d::t_c6c4a210db100f 1433-1436
+  s_8a80ff043cf944::t_95c921f9aff97f 2174-2176,2190
+  s_9db90b6fcb6c0d::t_ba27a39206d93f 474-499
+  s_9db90b6fcb6c0d::t_a7a546c67ab3e5 1939-1947
+  s_9db90b6fcb6c0d::t_b1c6bbd3493cf5 2407
+  s_9db90b6fcb6c0d::t_891e0a311e4327 2024,2033
+  s_9db90b6fcb6c0d::t_98fa0ea1ebc39f 132-138,142-146
+  s_8a80ff043cf944::t_699c8937029893 2508-2516
+  s_9db90b6fcb6c0d::t_31d5cf2368a685 311-333
+  s_8a80ff043cf944::t_f9c7e994492320 2422,2546-2552
+cmd/advanced_config_layout_test.go
+  s_9db90b6fcb6c0d::t_fb281c4ef30710 567-578,584-630
+  s_9db90b6fcb6c0d::t_10d7090e78ecc0 579-583
+internal/claude/launcher.go
+  s_9db90b6fcb6c0d::t_ebda2b5b1be13c 446-451,461
+cmd/oauth_runtime.go
+  s_9db90b6fcb6c0d::t_ff52e8d93efb6b 53-56
+  s_9db90b6fcb6c0d::t_d34c4905ed2372 28
+  s_9db90b6fcb6c0d::t_50b16792554c48 57
+  s_9db90b6fcb6c0d::t_1101e713a3c412 93-108
+internal/oauthproxy/auth_test.go
+  s_9db90b6fcb6c0d::t_6a88918e56dadd 865,1055
+  s_9db90b6fcb6c0d::t_aee4acb77a9c15 888-956
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "7634598bb4cc00905c29147f78539567c4a0486e",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_9db90b6fcb6c0d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29c6546f-9701-4d40-b08e-899ce9d97d74",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
