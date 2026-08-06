@@ -1620,17 +1620,14 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// and API Key focus their text inputs on first click so typing lands there.
 		if msg.row == rowToggleKey {
 			// Show/Hide follows the same select-then-act pattern as the other
-			// buttons: the first click selects it, a second click toggles. After
-			// toggling, the cursor leaves the button so the next Show/Hide click
-			// is a fresh selection (Show and Hide share this row).
+			// buttons: the first click selects it, a second click toggles. The
+			// selection is kept after toggling so repeated clicks keep toggling.
 			idx := m.mainRowIndex(rowToggleKey)
 			alreadySelected := m.cursor == idx
+			m.cursor = idx
 			if alreadySelected {
 				m.keyVisible = !m.keyVisible
-				m.cursor = m.mainRowIndex(rowAPIKey)
 				setDebugf("key visibility toggled visible=%t", m.keyVisible)
-			} else {
-				m.cursor = idx
 			}
 			return m, nil
 		}
@@ -1963,10 +1960,9 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.keyInput.Blur()
 				setDebugf("enter api key -> test api_key_len=%d", len(m.keyInput.Value()))
 			case rowToggleKey:
-				// Enter on the selected Show/Hide button toggles visibility, then
-				// leave the button so the next interaction is a fresh selection.
+				// Enter on the selected Show/Hide button toggles visibility and
+				// keeps the selection so repeated Enters keep toggling.
 				m.keyVisible = !m.keyVisible
-				m.cursor = m.mainRowIndex(rowAPIKey)
 				setDebugf("key visibility toggled visible=%t", m.keyVisible)
 			case rowTest:
 				return m, m.activateRow(rowTest)
@@ -2160,8 +2156,12 @@ func (m *AdvancedConfigModel) View() tea.View {
 		var keyValue string
 		switch {
 		case m.keyVisible:
+			// Revealed: show the plaintext, no cursor (the user reads the key;
+			// editing happens in the masked textinput).
 			keyValue = truncateMiddle(m.keyInput.Value(), keyDisplayWidth)
 		case m.cursor == m.mainRowIndex(rowAPIKey):
+			// Masked and focused: the textinput View renders the mask plus the
+			// editing cursor, clipped to the fixed width (ANSI-safe).
 			keyValue = ansi.TruncateWc(m.keyInput.View(), keyDisplayWidth, "")
 		default:
 			key := m.keyInput.Value()
