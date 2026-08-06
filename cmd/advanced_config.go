@@ -520,7 +520,6 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	ui.Prompt = ""
 	ui.Placeholder = "https://api.openai.com/v1"
 	ui.SetWidth(credentialInputWidth)
-	ui.Focus()
 	ui.SetValue(p.Endpoint)
 
 	// The API key is a multi-line plaintext textarea (no password masking): the
@@ -2192,13 +2191,22 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.urlCopied {
 			urlCopiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
 		}
-		// Endpoint is a single-line text input; the API key is a multi-line
-		// plaintext textarea (no masking). Each renders its value directly, and
-		// double-clicking a value row copies the full value. Trailing blank lines
-		// from the textarea's fixed height are trimmed so the field does not
-		// consume extra rows in the panel.
-		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View()+urlCopiedHint, false))
-		body.WriteString(renderCredentialField("API Key", strings.TrimRight(m.keyInput.View(), "\n")+copiedHint, false))
+		// Endpoint and API Key render identically: unfocused they are grey text
+		// (so the two fields match), and only when focused do they show the live
+		// input view with its cursor. Double-clicking a value row copies the full
+		// value. Trailing blank lines from the textarea's fixed height are
+		// trimmed so the field does not consume extra rows in the panel.
+		const idleWidth = 60
+		urlValue := grayText.Render(truncateMiddle(m.urlInput.Value(), idleWidth))
+		if m.urlInput.Focused() {
+			urlValue = m.urlInput.View()
+		}
+		keyValue := grayText.Render(truncateMiddle(m.keyInput.Value(), idleWidth))
+		if m.keyInput.Focused() {
+			keyValue = strings.TrimRight(m.keyInput.View(), "\n")
+		}
+		body.WriteString(renderCredentialField("Endpoint URL", urlValue+urlCopiedHint, false))
+		body.WriteString(renderCredentialField("API Key", keyValue+copiedHint, false))
 	}
 
 	// Detection / auto-configure button.
