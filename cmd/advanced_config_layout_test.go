@@ -450,7 +450,7 @@ func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
 		field  func(*AdvancedConfigModel) string
 	}{
 		{"endpoint", 0, func(m *AdvancedConfigModel) string { return m.urlInput.Value() }},
-		{"api key", 1, func(m *AdvancedConfigModel) string { return m.keyInput.Value() }},
+		{"api key", 2, func(m *AdvancedConfigModel) string { return m.keyInput.Value() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, r := range []rune{'q', 'k', 'j', 'h', 'l'} {
@@ -636,7 +636,7 @@ func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 		p      provider.Provider
 		cursor int
 	}{
-		{"api key provider, cursor on a button", provider.Provider{Type: "openai"}, 2},
+		{"api key provider, cursor on a button", provider.Provider{Type: "openai"}, 1},
 		{"oauth provider", provider.Provider{Type: "openai", OAuthProvider: "codex"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -266,10 +266,10 @@ func (m *AdvancedConfigModel) connectionReady() bool {
 func (m *AdvancedConfigModel) visibleRows() []configRow {
 	rows := []configRow{
 		{kind: rowEndpoint},
-		{kind: rowAPIKey},
-		// rowToggleKey is the Show/Hide button, focusable like any other row
-		// (select with ↑↓ or a first click, then Enter / a second click toggles).
+		// rowToggleKey (Show/Hide button) comes before the key input, so ↓ lands
+		// on the button first, then the input.
 		{kind: rowToggleKey},
+		{kind: rowAPIKey},
 		{kind: rowTest},
 	}
 	ready := m.connectionReady()
@@ -2194,9 +2194,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 		// Endpoint / API Key are input fields, not focusable labels: the label
 		// never shows a selection marker; focusing is indicated by the input's
-		// own text cursor.
+		// own text cursor. The Show/Hide button leads the key value on the same
+		// row.
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), false))
-		body.WriteString(renderCredentialField("API Key "+toggleBtn+copiedHint, keyValue, false))
+		body.WriteString(renderCredentialField("API Key", toggleBtn+" "+keyValue+copiedHint, false))
 	}
 
 	// Detection / auto-configure button.
