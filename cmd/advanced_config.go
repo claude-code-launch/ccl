@@ -2149,20 +2149,22 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// keys are middle-truncated with an ellipsis (the full value is copied on
 		// click).
 		const keyDisplayWidth = 42
-		// When the key is revealed (Show), always show the plaintext, focused or
-		// not. When masked, the focused textinput shows its own View so the
-		// editing cursor is visible (clipped ANSI-safely); unfocused it is a
-		// fixed-width run of asterisks.
+		// Revealed or masked, a focused input shows its own View with the editing
+		// cursor; an unfocused revealed key shows truncated plaintext, an
+		// unfocused masked key shows a fixed-width run of asterisks.
+		if m.keyVisible {
+			m.keyInput.EchoMode = textinput.EchoNormal
+		} else {
+			m.keyInput.EchoMode = textinput.EchoPassword
+		}
 		var keyValue string
 		switch {
-		case m.keyVisible:
-			// Revealed: show the plaintext, no cursor (the user reads the key;
-			// editing happens in the masked textinput).
-			keyValue = truncateMiddle(m.keyInput.Value(), keyDisplayWidth)
 		case m.cursor == m.mainRowIndex(rowAPIKey):
-			// Masked and focused: the textinput View renders the mask plus the
-			// editing cursor, clipped to the fixed width (ANSI-safe).
+			// Focused: the textinput View renders plaintext (revealed) or the
+			// mask (hidden) plus the editing cursor, clipped ANSI-safely.
 			keyValue = ansi.TruncateWc(m.keyInput.View(), keyDisplayWidth, "")
+		case m.keyVisible:
+			keyValue = truncateMiddle(m.keyInput.Value(), keyDisplayWidth)
 		default:
 			key := m.keyInput.Value()
 			if key == "" {
