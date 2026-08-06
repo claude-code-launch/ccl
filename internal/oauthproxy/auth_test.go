@@ -862,7 +862,7 @@ func TestStartOpenAIResponsesAPIDelegatesDirectlyToCPA(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
@@ -882,6 +882,75 @@ func TestStartOpenAIResponsesAPIDelegatesDirectlyToCPA(t *testing.T) {
 	}
 	if got.body["model"] != "gpt-test" {
 		t.Fatalf("upstream model = %v, want gpt-test", got.body["model"])
+	}
+}
+
+// TestStartOpenAIResponsesAPIReinjectsMaxOutputTokens verifies that the plain
+// Responses runtime re-injects the ccl-configured output cap onto the upstream
+// body. CLIProxyAPI's Claude→Responses translator drops Anthropic max_tokens,
+// so without the payload rule the value never reaches a plain gateway.
+func TestStartOpenAIResponsesAPIReinjectsMaxOutputTokens(t *testing.T) {
+	type capture struct {
+		body map[string]any
+	}
+	captured := make(chan capture, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- capture{body: body}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 64000)
+	if err != nil {
+		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
+	}
+	defer proxyRuntime.Stop()
+
+	_ = postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
+	got := <-captured
+	if got.body["max_output_tokens"] != float64(64000) {
+		t.Fatalf("upstream max_output_tokens = %v, want 64000 (whole body: %v)", got.body["max_output_tokens"], got.body)
+	}
+}
+
+// TestStartOpenAIResponsesAPIZeroLeavesUpstreamBodyUntouched verifies that a
+// zero maxOutputTokens (the dedicated Codex base path) does not inject the
+// field onto a plain Responses upstream.
+func TestStartOpenAIResponsesAPIZeroLeavesUpstreamBodyUntouched(t *testing.T) {
+	type capture struct {
+		body map[string]any
+	}
+	captured := make(chan capture, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		captured <- capture{body: body}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
+	if err != nil {
+		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
+	}
+	defer proxyRuntime.Stop()
+
+	_ = postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
+	got := <-captured
+	if _, exists := got.body["max_output_tokens"]; exists {
+		t.Fatalf("upstream max_output_tokens present with zero option: %v", got.body)
 	}
 }
 
@@ -983,7 +1052,7 @@ func TestStartOpenAIResponsesAPIToolCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}

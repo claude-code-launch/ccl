@@ -129,12 +129,21 @@ type AdvancedConfigModel struct {
 	probeEndpoint string
 	probeAPIKey   string
 
+	// detectedInputEndpoint / detectedInputKey hold the raw Endpoint/API Key the
+	// last successful detection ran against (before any normalization). A
+	// connection is dirty when the current inputs differ from these, so reverting
+	// an edit or cancelling a re-detection un-dirties the page naturally.
+	detectedInputEndpoint string
+	detectedInputKey      string
+
 	modelPoolFromDiscovery bool
 	clearStaleSlots        bool
 	hadLocalModelPool      bool
-	// connectionDirty records that the user edited Endpoint or API Key after the
-	// last successful detection. A dirty connection must be re-tested before
-	// saving (except for OAuth providers, which never detect over HTTP).
+	// connectionDirty reports that the current Endpoint/API Key inputs differ
+	// from the last successful detection. A dirty connection must be re-tested
+	// before saving (except for OAuth providers, which never detect over HTTP).
+	// It is derived on demand rather than a sticky flag, so reverting an edit
+	// or cancelling a re-detection clears it.
 	connectionDirty bool
 	// autoConfigured is set after a successful detection filled the slots. It is
 	// cleared when the user edits a field so a later re-render cannot silently
@@ -299,6 +308,42 @@ func (m *AdvancedConfigModel) mainRowIndex(kind configRowKind) int {
 	return -1
 }
 
+// renderedCursorLine returns the 0-based line index within a rendered body where
+// the cursor row's label starts. The body is searched line by line for the row's
+// clickable label (matching rowAtLine's label set), so the window slicing in View
+// lines up with the row the cursor is actually on — even when structural blank
+// lines between sections shift rows from the rowLineHeight estimate. Rows that
+// have no rendered label (or a cursor beyond the visible rows) resolve to 0.
+func renderedCursorLine(body string, cursor int, rows []configRow) int {
+	if cursor < 0 || cursor >= len(rows) {
+		return 0
+	}
+	kind := rows[cursor].kind
+	label, ok := rowClickLabels[kind]
+	if !ok || label == "" {
+		return 0
+	}
+	for i, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, label) {
+			return i
+		}
+	}
+	return 0
+}
+
+// scrollBodyBudget returns how many body lines fit under the fixed page chrome
+// (title bar, connection block gap, detection status, panel border, footer tip).
+// Both keepCursorVisible (Update) and View use this so the cursor row the update
+// keeps visible is exactly the window View slices, never a line taller than the
+// renderer's actual body lines.
+func scrollBodyBudget(height int) int {
+	budget := height - 8
+	if budget < 6 {
+		budget = 6
+	}
+	return budget
+}
+
 // keepCursorVisible clamps scrollOffset so the cursor row stays inside the
 // visible region. It runs after cursor movement in Update; View never mutates
 // scroll state.
@@ -311,11 +356,8 @@ func (m *AdvancedConfigModel) keepCursorVisible() {
 	}
 	// Estimate the row height of the cursor: connection rows take two lines
 	// (label + value); everything else one. The scroll budget is the terminal
-	// height minus the fixed header/panel chrome.
-	visibleHeight := m.height - 8
-	if visibleHeight < 6 {
-		visibleHeight = 6
-	}
+	// height minus the fixed header/panel chrome (must match View).
+	visibleHeight := scrollBodyBudget(m.height)
 	rows := m.visibleRows()
 	if len(rows) == 0 {
 		return
@@ -427,6 +469,32 @@ func (m *AdvancedConfigModel) canSave() bool {
 	// No detection yet: allow saving an existing provider whose connection inputs
 	// still match the persisted ones (e.g. editing only a model mapping).
 	return m.autoConfigured && m.connectionUnchanged()
+}
+
+// refreshConnectionDirty re-derives the dirty state from the current inputs
+// against the last successful detection's raw inputs. It is called whenever an
+// input changes, so reverting an edit or cancelling a re-detection naturally
+// clears the flag without a sticky manual reset.
+func (m *AdvancedConfigModel) refreshConnectionDirty() {
+	m.connectionDirty = !m.connectionMatchesDetected()
+}
+
+// connectionMatchesDetected reports whether the current Endpoint/API Key inputs
+// match the raw inputs the last successful detection ran against. Before any
+// successful detection the persisted provider values are the baseline.
+func (m *AdvancedConfigModel) connectionMatchesDetected() bool {
+	if m.p == nil {
+		return false
+	}
+	baselineEndpoint := m.detectedInputEndpoint
+	baselineKey := m.detectedInputKey
+	hasDetected := m.detectedInputEndpoint != "" || m.detectedInputKey != ""
+	if !hasDetected {
+		baselineEndpoint = strings.TrimSpace(m.p.Endpoint)
+		baselineKey = m.p.APIKey
+	}
+	return strings.TrimSpace(m.urlInput.Value()) == strings.TrimSpace(baselineEndpoint) &&
+		m.keyInput.Value() == baselineKey
 }
 
 // connectionUnchanged reports whether the endpoint/api-key inputs still match
@@ -1362,6 +1430,10 @@ func reviewOneMSummary(oneMSlots map[string]bool) string {
 func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, anthropicAuth, detectedEndpoint string, derr error) tea.Cmd {
 	discoveredModels := uniqueModels(parseModelList(discoveredModelsRaw))
 	m.hadLocalModelPool = countCSV(m.p.Model) > 0
+	// Capture the raw detection inputs before probeEndpoint is normalized below,
+	// so the successful-detection baseline is what the user actually typed.
+	detectedInputEndpoint := m.probeEndpoint
+	detectedInputKey := m.probeAPIKey
 	setDebugf(
 		"applyModelDetectionResult start detected_type=%q detected_endpoint=%q anthropic_auth=%q discovered_model_count=%d existing_model_count=%d err=%v",
 		detectedType,
@@ -1424,6 +1496,11 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 	// Single page: detection success auto-configures the slots and stays on the
 	// page. Connection is now the detected endpoint, so it is no longer dirty.
 	m.connectionDirty = false
+	// Record the inputs this successful detection ran against (the raw values
+	// before endpoint normalization) as the save baseline. Reverting an edit or
+	// cancelling a re-detection naturally returns the page to this state.
+	m.detectedInputEndpoint = detectedInputEndpoint
+	m.detectedInputKey = detectedInputKey
 	m.applyRecommendation()
 	m.cursor = m.mainRowIndex(rowOpus)
 	setDebugf(
@@ -1487,7 +1564,9 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
 			m.p.APIKey = m.keyInput.Value()
 			m.probeEndpoint = m.p.Endpoint
 			m.probeAPIKey = m.p.APIKey
-			m.connectionDirty = m.autoConfigured
+			// The inputs being detected become the new baseline only if the
+			// detection succeeds; until then keep the dirty state honest.
+			m.refreshConnectionDirty()
 		}
 		m.urlInput.Blur()
 		m.keyInput.Blur()
@@ -1857,6 +1936,15 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.activeSlot == 4 && m.p.Env != nil {
 					delete(m.p.Env, claude.SubagentModelEnv)
 				}
+				// A slot whose model was just changed must not keep a [1m] marker
+				// the backend rules out for the new model — toggleOneMAtRow refuses
+				// to enable one there, so leaving an enabled marker would be
+				// inconsistent and would send a non-1M model with the [1m] suffix.
+				slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.activeSlot]
+				if m.oneMSlots[slotKey] && m.oneMSlotBlocked(selectedModel) {
+					m.oneMSlots[slotKey] = false
+					setDebugf("slot model changed to a non-1M model; cleared 1M marker slot=%s model=%q", slotKey, selectedModel)
+				}
 				m.filterInput.Blur()
 				m.autoConfigured = false
 				setDebugf("slot selected active_slot=%d model=%q slots=%s", m.activeSlot, selectedModel, slotDebugSummary(*m.p))
@@ -1933,9 +2021,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var updateCmd tea.Cmd
 		m.urlInput, updateCmd = m.urlInput.Update(msg)
 		cmd = tea.Batch(cmd, updateCmd)
-		if m.autoConfigured {
-			m.connectionDirty = true
-		}
+		m.refreshConnectionDirty()
 	case m.currentRow() == rowAPIKey && !m.usesOAuth():
 		if !m.keyInput.Focused() {
 			m.urlInput.Blur()
@@ -1944,9 +2030,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var updateCmd tea.Cmd
 		m.keyInput, updateCmd = m.keyInput.Update(msg)
 		cmd = tea.Batch(cmd, updateCmd)
-		if m.autoConfigured {
-			m.connectionDirty = true
-		}
+		m.refreshConnectionDirty()
 	default:
 		// 光标在按钮或只读行上时，取消两个输入框的焦点
 		m.urlInput.Blur()
@@ -2087,7 +2171,9 @@ func (m *AdvancedConfigModel) View() tea.View {
 				keyValue = strings.Repeat("*", n)
 			}
 		}
-		// Show/Hide button to reveal or mask the key.
+		// Show/Hide button sits on the API Key label row, right after the field
+		// name, so it reads as part of the API Key field rather than trailing the
+		// value.
 		toggleLabel := locale.T("显示", "Show")
 		if m.keyVisible {
 			toggleLabel = locale.T("隐藏", "Hide")
@@ -2101,7 +2187,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 			copiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
 		}
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
-		body.WriteString(renderCredentialField("API Key", keyValue+" "+toggleBtn+copiedHint, m.cursor == m.mainRowIndex(rowAPIKey)))
+		body.WriteString(renderCredentialField("API Key "+toggleBtn+copiedHint, keyValue, m.cursor == m.mainRowIndex(rowAPIKey)))
 	}
 
 	// Detection / auto-configure button.
@@ -2288,11 +2374,10 @@ func (m *AdvancedConfigModel) View() tea.View {
 	bodyLines := strings.Split(body.String(), "\n")
 	scrollOffset := m.scrollOffset
 	if m.height > 0 && len(bodyLines) > m.height {
-		// The frame must fit: border (2) + footer (3) leave height-5 for the body.
-		maxBody := m.height - 5
-		if maxBody < 6 {
-			maxBody = 6
-		}
+		// The frame must fit: title bar, detection block, panel border, footer tip.
+		// The budget must match keepCursorVisible so a cursor it keeps visible is
+		// exactly the window sliced here.
+		maxBody := scrollBodyBudget(m.height)
 		// Anchor the scroll window to the cursor row using the persisted offset
 		// (maintained by keepCursorVisible on cursor movement). The Save/Cancel
 		// action bar is the most important thing to keep reachable, so when the
@@ -2312,6 +2397,27 @@ func (m *AdvancedConfigModel) View() tea.View {
 			offset = len(bodyLines) - maxBody
 			if offset < 0 {
 				offset = 0
+			}
+		}
+		// Keep the cursor's own rendered line inside the window. keepCursorVisible
+		// already did this for the cursor-line model, but the structural blank
+		// lines in the body can push the rendered line a few rows later than the
+		// cursor-line estimate; clamp here so the focused row is never sliced off.
+		if m.cursor >= 0 && m.cursor < len(m.visibleRows()) {
+			cursorLine := renderedCursorLine(body.String(), m.cursor, m.visibleRows())
+			if cursorLine < offset {
+				offset = cursorLine
+			} else if cursorLine >= offset+maxBody {
+				offset = cursorLine - maxBody + 1
+			}
+			if offset < 0 {
+				offset = 0
+			}
+			if offset+maxBody > len(bodyLines) {
+				offset = len(bodyLines) - maxBody
+				if offset < 0 {
+					offset = 0
+				}
 			}
 		}
 		bodyLines = bodyLines[offset : offset+maxBody]
@@ -2399,23 +2505,16 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 // start column is kept so a click's X can disambiguate Save vs Cancel, which
 // share one line.
 func matchRowLabel(text string, x int) (configRowKind, bool) {
-	// The API key value row carries the masked key (or revealed plaintext) plus a
-	// Show/Hide button. Clicking the button toggles visibility; clicking the key
-	// value copies the full key. The value row starts with asterisks (masked) or
-	// the key text (revealed) before the button.
-	for _, label := range []string{"Show", "Hide"} {
-		if idx := strings.Index(text, " "+label+" "); idx >= 0 {
-			// No column info, or the click lands on the button (label plus its
-			// left/right padding spaces).
-			if x < 0 || (x >= idx-1 && x < idx+len(label)+2) {
-				return rowToggleKey, true
+	// The API Key label row carries the Show/Hide button after the field name.
+	// A click on the button's column maps to it; a click elsewhere on the row
+	// falls through to the leading-label match.
+	if x >= 0 {
+		for _, label := range []string{"Show", "Hide"} {
+			if idx := strings.Index(text, " "+label+" "); idx >= 0 {
+				if x >= idx-1 && x < idx+len(label)+2 {
+					return rowToggleKey, true
+				}
 			}
-			// Click on the key value area (before the button) copies the key.
-			if x < idx {
-				return rowCopyKey, true
-			}
-			// Beyond the button (right padding / border): fall through so the
-			// off-by-one row scan can still match.
 		}
 	}
 	// Strip leading border, cursor arrow, and whitespace to find the first field.
@@ -2444,6 +2543,13 @@ func matchRowLabel(text string, x int) (configRowKind, bool) {
 		}
 	}
 	if !hasMatch {
+		// No leading label: this is a value row. The API key value row is the
+		// masked asterisks or the revealed (possibly truncated) plaintext, so a
+		// click on it copies the full key. Other value rows resolve via the
+		// off-by-one label scan instead.
+		if strings.HasPrefix(strings.TrimSpace(text), "*") || strings.Contains(text, "…") {
+			return rowCopyKey, true
+		}
 		return rowCancel, false
 	}
 	// A single label at the field start is unambiguous.

@@ -564,6 +564,70 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 	}
 }
 
+// TestChangingModelClearsBlockedOneMMarker verifies that picking a new model for
+// a slot drops a [1m] marker when the backend window rules 1M out for the new
+// model. toggleOneMAtRow refuses to enable such a marker, so leaving it enabled
+// would send a non-1M model with the [1m] suffix at save time.
+func TestChangingModelClearsBlockedOneMMarker(t *testing.T) {
+	p := provider.Provider{Type: "openai", OpusModel: "gpt-5.6-sol"}
+	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, []string{"gpt-5.6-sol", "small-window-model"}, indexModelInfos([]protocol.ModelInfo{
+		{ID: "gpt-5.6-sol", ContextWindow: 1_000_000},
+		{ID: "small-window-model", ContextWindow: 128_000},
+	}))
+	m.cursor = m.mainRowIndex(rowOpus)
+	m.oneMSlots["opus"] = true // user enabled [1m] on Opus (allowlist-confirmed)
+	if m.oneMSlotBlocked("gpt-5.6-sol") {
+		t.Fatalf("gpt-5.6-sol should not be blocked; its 1M window allows the marker")
+	}
+	if !m.oneMSlotBlocked("small-window-model") {
+		t.Fatalf("small-window-model should be blocked: 128K window rules 1M out")
+	}
+
+	// Open the picker and select the small-window model on the Opus row.
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if !m.filterInput.Focused() {
+		t.Fatalf("enter on the Opus row did not open the model picker")
+	}
+	m.filterInput.SetValue("small-window")
+	m.updateFilteredPool()
+	m.slotListCursor = 0
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if p.OpusModel != "small-window-model" {
+		t.Fatalf("Opus model = %q, want small-window-model", p.OpusModel)
+	}
+	if m.oneMSlots["opus"] {
+		t.Fatalf("1M marker should be cleared after picking a blocked model, but it is still enabled")
+	}
+}
+
+// TestChangingModelKeepsOneMMarkerOnNonBlockedModel verifies the marker survives
+// when the new model is not backend-blocked (the advisory path).
+func TestChangingModelKeepsOneMMarkerOnNonBlockedModel(t *testing.T) {
+	p := provider.Provider{Type: "openai", OpusModel: "gpt-5.6-sol"}
+	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, []string{"gpt-5.6-sol", "other-model"}, indexModelInfos([]protocol.ModelInfo{
+		{ID: "gpt-5.6-sol", ContextWindow: 1_000_000},
+		{ID: "other-model"}, // no advertised window → not blocked
+	}))
+	m.cursor = m.mainRowIndex(rowOpus)
+	m.oneMSlots["opus"] = true
+
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	m.filterInput.SetValue("other-model")
+	m.updateFilteredPool()
+	m.slotListCursor = 0
+	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(*AdvancedConfigModel)
+	if p.OpusModel != "other-model" {
+		t.Fatalf("Opus model = %q, want other-model", p.OpusModel)
+	}
+	if !m.oneMSlots["opus"] {
+		t.Fatalf("1M marker should stay for a non-blocked model, but it was cleared")
+	}
+}
+
 func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 	// The shortcut must keep working on buttons and for OAuth providers, whose
 	// credentials page has no editable field at all.

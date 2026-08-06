@@ -25,6 +25,7 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, *oauthproxy
 			OAuthAccountCredential:  p.OAuthAccountCredential,
 			OAuthAccountCredentials: p.OAuthAccountCredentials,
 			OAuthCredentialResolver: oauthGroupCredentialResolver(p.AuthGroup),
+			MaxOutputTokens:         oauthMaxOutputTokens(p),
 		})
 		if err != nil {
 			return provider.Provider{}, nil, nop, fmt.Errorf("start embedded provider runtime: %w", err)
@@ -49,10 +50,11 @@ func prepareProviderRuntime(p provider.Provider) (provider.Provider, *oauthproxy
 		p.Model = models
 	}
 	runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
-		Protocol:  oauthRuntimeProtocol(p),
-		Endpoint:  p.Endpoint,
-		APIKey:    p.APIKey,
-		ModelSpec: provider.RuntimeModelSpec(p),
+		Protocol:        oauthRuntimeProtocol(p),
+		Endpoint:        p.Endpoint,
+		APIKey:          p.APIKey,
+		ModelSpec:       provider.RuntimeModelSpec(p),
+		MaxOutputTokens: oauthMaxOutputTokens(p),
 	})
 	if err != nil {
 		return provider.Provider{}, nil, nop, fmt.Errorf("start embedded provider runtime: %w", err)
@@ -87,4 +89,20 @@ func oauthRuntimeProtocol(p provider.Provider) oauthproxy.UpstreamProtocol {
 	// Claude OAuth and OpenAI Chat OAuth both go through CPA's local
 	// /v1/messages surface; Claude executor is selected by OAuth backend.
 	return oauthproxy.ProtocolOpenAIChat
+}
+
+func oauthMaxOutputTokens(p provider.Provider) int {
+	if !provider.IsOpenAIResponsesType(p.Type) {
+		return 0
+	}
+	// Import cycle-safe: resolve via env directly rather than claude package.
+	if p.Env != nil {
+		if v := strings.TrimSpace(p.Env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]); v != "" {
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 32000
 }

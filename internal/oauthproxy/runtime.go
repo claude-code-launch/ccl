@@ -130,6 +130,12 @@ type StartOptions struct {
 	// OAuthCredentialResolver optionally refreshes an auth group's exact file
 	// list while a ccl-launched Claude session is still running.
 	OAuthCredentialResolver func() ([]string, error)
+	// MaxOutputTokens is re-injected onto the plain Responses upstream body.
+	// CLIProxyAPI's Claude→Responses translator drops Anthropic max_tokens, so
+	// without this the value from CLAUDE_CODE_MAX_OUTPUT_TOKENS never reaches a
+	// plain OpenAI Responses gateway. 0 leaves the upstream body unchanged;
+	// dedicated Codex bases are never touched.
+	MaxOutputTokens int
 }
 
 type runtimeModelRoute struct {
@@ -186,6 +192,27 @@ type runtimeCodexConfigFile struct {
 	runtimeConfigBase `yaml:",inline"`
 	CodexAPIKey       []runtimeCodexKey                   `yaml:"codex-api-key"`
 	OAuthModelAlias   map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
+	// Payload carries upstream body overrides. The plain Responses path uses it
+	// to re-inject max_output_tokens (the Claude→Responses translator drops it);
+	// the dedicated Codex base leaves it empty.
+	Payload *runtimePayloadConfig `yaml:"payload,omitempty"`
+}
+
+// runtimePayloadConfig mirrors sdkconfig.PayloadConfig. It is declared here
+// (instead of reusing the CPA type) so the embedded YAML stays self-contained
+// and omits the config when no rule applies.
+type runtimePayloadConfig struct {
+	Override []runtimePayloadRule `yaml:"override"`
+}
+
+type runtimePayloadRule struct {
+	Models []runtimePayloadModelRule `yaml:"models"`
+	Params map[string]any            `yaml:"params"`
+}
+
+type runtimePayloadModelRule struct {
+	Name     string `yaml:"name"`
+	Protocol string `yaml:"protocol,omitempty"`
 }
 
 type runtimeOpenAIConfigFile struct {
@@ -483,7 +510,7 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		if protocol.IsCodexBaseEndpoint(options.Endpoint) {
 			return StartCodexAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 		}
-		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
+		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec, options.MaxOutputTokens)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -625,8 +652,10 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 // StartOpenAIResponsesAPI starts an embedded CLIProxyAPI runtime against a plain
 // OpenAI Responses upstream (not a dedicated Codex base). CPA owns the complete
 // Claude Messages to Responses translation and talks to the upstream directly.
-func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false)
+// maxOutputTokens is re-injected onto the upstream body via a CPA payload rule
+// because the Claude→Responses translator drops Anthropic max_tokens.
+func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, maxOutputTokens int) (*Runtime, error) {
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false, maxOutputTokens)
 }
 
 // StartCodexAPI starts an embedded CLIProxyAPI runtime for a dedicated Codex
@@ -636,10 +665,12 @@ func StartCodexAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec s
 	if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint); invalid {
 		return nil, fmt.Errorf("invalid Codex endpoint %q: use %q without /v1; ccl requests /models separately", endpoint, suggestion)
 	}
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true)
+	// Dedicated Codex bases must leave max_output_tokens unset: they expect ccl
+	// not to override it (the old compatibility layer left Codex mode untouched).
+	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true, 0)
 }
 
-func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexHeaders bool) (*Runtime, error) {
+func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexHeaders bool, maxOutputTokens int) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -671,6 +702,20 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 	for _, route := range routes {
 		models = append(models, runtimeCodexModel{Name: route.Name, Alias: route.Alias})
 	}
+	// Plain Responses only: CLIProxyAPI's Claude→Responses translator drops
+	// Anthropic max_tokens, so re-inject the ccl-configured output cap onto the
+	// upstream body via a payload rule. The rule's "*" model matches every
+	// request; the protocol scopes it to the codex translator that serves the
+	// Responses upstream. Dedicated Codex bases skip this (codexHeaders=true).
+	var payload *runtimePayloadConfig
+	if maxOutputTokens > 0 && !codexHeaders {
+		payload = &runtimePayloadConfig{
+			Override: []runtimePayloadRule{{
+				Models: []runtimePayloadModelRule{{Name: "*", Protocol: "codex"}},
+				Params: map[string]any{"max_output_tokens": maxOutputTokens},
+			}},
+		}
+	}
 	rawConfig, err := yaml.Marshal(runtimeCodexConfigFile{
 		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
 		CodexAPIKey: []runtimeCodexKey{{
@@ -679,6 +724,7 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 			Models:  models,
 			Headers: headers,
 		}},
+		Payload: payload,
 	})
 	if err != nil {
 		_ = os.RemoveAll(runtimeDir)
@@ -692,7 +738,7 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 	if codexHeaders {
 		mode = "codex_responses"
 	}
-	LogInfof("runtime start %s endpoint=%q port=%d model_count=%d", mode, endpoint, port, len(models))
+	LogInfof("runtime start %s endpoint=%q port=%d model_count=%d max_output_tokens=%d", mode, endpoint, port, len(models), maxOutputTokens)
 	return proxyRuntime, nil
 }
 

@@ -425,6 +425,49 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 	}
 }
 
+// TestConnectionEditRevertClearsDirty verifies that editing the Endpoint and
+// then reverting it un-dirties the connection, so a save is allowed again.
+func TestConnectionEditRevertClearsDirty(t *testing.T) {
+	p := provider.Provider{
+		Name:     "existing-provider",
+		Type:     "openai_responses",
+		Endpoint: "https://api.example.com/v1",
+		APIKey:   "test-key",
+		Model:    "gpt-test",
+	}
+	m := NewAdvancedConfigModel(&p)
+
+	// Simulate a successful detection committing the baseline.
+	m.probeEndpoint = "https://api.example.com/v1"
+	m.probeAPIKey = "test-key"
+	m.modelPool = []string{"gpt-test"}
+	m.modelPoolFromDiscovery = true
+	m.applyModelDetectionResult("openai", "gpt-test", "", "https://api.example.com/v1", nil)
+	if m.detectionError != nil {
+		t.Fatalf("unexpected detection error: %v", m.detectionError)
+	}
+	if !m.canSave() {
+		t.Fatalf("freshly detected connection should be saveable")
+	}
+
+	// Edit the endpoint → dirty, save blocked.
+	m.urlInput.SetValue("https://api.example.com/v1/changed")
+	m.refreshConnectionDirty()
+	if !m.connectionDirty || m.canSave() {
+		t.Fatalf("edited endpoint should be dirty and un-saveable: dirty=%t canSave=%t", m.connectionDirty, m.canSave())
+	}
+
+	// Revert → dirty clears, save allowed again.
+	m.urlInput.SetValue("https://api.example.com/v1")
+	m.refreshConnectionDirty()
+	if m.connectionDirty {
+		t.Fatalf("reverted endpoint should not be dirty")
+	}
+	if !m.canSave() {
+		t.Fatalf("reverted endpoint should be saveable")
+	}
+}
+
 func TestReviewPageShowsModelMapping(t *testing.T) {
 	p := provider.Provider{
 		Type:          "openai",
