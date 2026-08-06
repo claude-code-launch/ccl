@@ -2153,17 +2153,19 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// keys are middle-truncated with an ellipsis (the full value is copied on
 		// click).
 		const keyDisplayWidth = 42
-		keyValue := m.keyInput.View()
+		// The key is always shown at a fixed width, focused or not, so the value
+		// row never grows: revealed keys are middle-truncated, masked keys are a
+		// run of asterisks matching the real key length (clamped). The textinput's
+		// own View would render the full mask plus cursor and overflow.
+		var keyValue string
 		switch {
 		case m.keyVisible:
 			keyValue = truncateMiddle(m.keyInput.Value(), keyDisplayWidth)
-		case m.cursor != m.mainRowIndex(rowAPIKey):
+		default:
 			key := m.keyInput.Value()
 			if key == "" {
 				keyValue = m.keyInput.Placeholder
 			} else {
-				// One asterisk per real key character, clamped to the display
-				// width; the Show/Hide button follows right after the mask.
 				n := len([]rune(key))
 				if n > keyDisplayWidth {
 					n = keyDisplayWidth
