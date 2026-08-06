@@ -2504,7 +2504,10 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 		// Strip ANSI only; keep the leading border/space columns so label
 		// offsets line up with the click's X column.
 		text := ansi.Strip(lines[row])
-		kind, ok := matchRowLabel(text, x)
+		// Buttons (Show/Hide, copy) are only hit when clicked directly on their
+		// own row; the off-by-one fallback (a value-row click resolving to its
+		// label row) must not trigger them.
+		kind, ok := matchRowLabel(text, x, off == 0)
 		if ok {
 			return kind, true
 		}
@@ -2518,11 +2521,12 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 // like "detection uses the API Key you entered" from matching. The label's
 // start column is kept so a click's X can disambiguate Save vs Cancel, which
 // share one line.
-func matchRowLabel(text string, x int) (configRowKind, bool) {
+func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
 	// The API Key label row carries the Show/Hide button after the field name.
 	// A click on the button's column maps to it; a click elsewhere on the row
-	// falls through to the leading-label match.
-	if x >= 0 {
+	// falls through to the leading-label match. Buttons only respond to a direct
+	// click on their own row (allowButton), not the off-by-one label fallback.
+	if allowButton && x >= 0 {
 		for _, label := range []string{"Show", "Hide"} {
 			if idx := strings.Index(text, " "+label+" "); idx >= 0 {
 				if x >= idx-1 && x < idx+len(label)+2 {
@@ -2559,9 +2563,9 @@ func matchRowLabel(text string, x int) (configRowKind, bool) {
 	if !hasMatch {
 		// No leading label: this is a value row. The API key value row is the
 		// masked asterisks or the revealed (possibly truncated) plaintext, so a
-		// click on it copies the full key. Other value rows resolve via the
-		// off-by-one label scan instead.
-		if strings.HasPrefix(strings.TrimSpace(text), "*") || strings.Contains(text, "…") {
+		// direct click on it copies the full key (allowButton). Other value rows
+		// resolve via the off-by-one label scan instead.
+		if allowButton && (strings.HasPrefix(strings.TrimSpace(text), "*") || strings.Contains(text, "…")) {
 			return rowCopyKey, true
 		}
 		return rowCancel, false
