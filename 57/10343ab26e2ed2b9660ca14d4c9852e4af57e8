@@ -1,0 +1,21 @@
+cmd/advanced_config.go
+  s_8a80ff043cf944::t_0f57a2870c4b3e 2524,2527-2529
+  s_8a80ff043cf944::t_6e3932f9870b25 2566-2568
+  s_8a80ff043cf944::t_7681fd9c1665c9 2507-2510
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "5710343ab26e2ed2b9660ca14d4c9852e4af57e8",
+  "prompts": {},
+  "sessions": {
+    "s_8a80ff043cf944": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34fc79c8-a3fb-4a86-a4d1-53a09d84c0cd",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
