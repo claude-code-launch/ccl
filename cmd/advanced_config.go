@@ -2190,8 +2190,11 @@ func (m *AdvancedConfigModel) View() tea.View {
 		if m.keyCopied {
 			copiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
 		}
-		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), m.cursor == m.mainRowIndex(rowEndpoint)))
-		body.WriteString(renderCredentialField("API Key "+toggleBtn+copiedHint, keyValue, m.cursor == m.mainRowIndex(rowAPIKey)))
+		// Endpoint / API Key are input fields, not focusable labels: the label
+		// never shows a selection marker; focusing is indicated by the input's
+		// own text cursor.
+		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View(), false))
+		body.WriteString(renderCredentialField("API Key "+toggleBtn+copiedHint, keyValue, false))
 	}
 
 	// Detection / auto-configure button.
