@@ -533,13 +533,17 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	ki.SetWidth(credentialInputWidth)
 	ki.SetHeight(2)
 	ki.SetValue(p.APIKey)
-	// Match the Endpoint textinput's focus look: no CursorLine background (the
-	// textarea default paints the active row black on dark terminals) and an
-	// underline cursor instead of a solid block.
+	// Match the Endpoint textinput's look: unfocused text is grey, focused text
+	// is bright, and the cursor is a solid reverse-video block like the
+	// textinput's. The textarea's default paints the active line black, which
+	// reads as the whole row selected; drop that background so only the cursor
+	// highlights.
 	taStyles := ki.Styles()
 	taStyles.Focused.CursorLine = lipgloss.NewStyle()
 	taStyles.Blurred.CursorLine = lipgloss.NewStyle()
-	taStyles.Cursor.Shape = tea.CursorUnderline
+	taStyles.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("255")) // bright white when editing
+	taStyles.Blurred.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // grey when idle
+	taStyles.Cursor.Shape = tea.CursorBlock
 	ki.SetStyles(taStyles)
 
 	fi := textinput.New()
