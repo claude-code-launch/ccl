@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -73,10 +74,9 @@ type configRowKind uint8
 const (
 	rowEndpoint configRowKind = iota
 	rowAPIKey
-	rowToggleKey // Show/Hide button for the API key
-	rowCopyKey   // click the key value to copy the full key
-	rowCopyURL   // click the endpoint value to copy the URL
-	rowTest      // Auto Configure
+	rowCopyKey // click the key value to copy the full key
+	rowCopyURL // click the endpoint value to copy the URL
+	rowTest    // Auto Configure
 	rowProtocol
 	rowFast
 	rowOpus
@@ -163,9 +163,6 @@ type AdvancedConfigModel struct {
 	// re-verified automatically when the page opens (Init). Until that check
 	// succeeds, connectionReady is false and Model Mapping / Runtime stay greyed.
 	autoDetectOnOpen bool
-	// keyVisible toggles whether the API key is shown in plain text next to the
-	// Show/Hide button, or masked as asterisks. Defaults to masked.
-	keyVisible bool
 	// keyCopied / urlCopied show a brief "copied" hint after the value is copied.
 	keyCopied bool
 	urlCopied bool
@@ -182,7 +179,7 @@ type AdvancedConfigModel struct {
 
 	// Page 0
 	urlInput textinput.Model
-	keyInput textinput.Model
+	keyInput textarea.Model
 
 	// Page 1
 	activeSlot        int
@@ -275,9 +272,6 @@ func (m *AdvancedConfigModel) connectionReady() bool {
 func (m *AdvancedConfigModel) visibleRows() []configRow {
 	rows := []configRow{
 		{kind: rowEndpoint},
-		// rowToggleKey (Show/Hide button) comes before the key input, so ↓ lands
-		// on the button first, then the input.
-		{kind: rowToggleKey},
 		{kind: rowAPIKey},
 		{kind: rowTest},
 	}
@@ -389,10 +383,14 @@ func (m *AdvancedConfigModel) keepCursorVisible() {
 }
 
 // rowLineHeight reports how many rendered lines a row occupies. Connection rows
-// span two lines (label + value); every other row is a single line.
+// span label + value; the API key value is a 2-line textarea so its row is one
+// line taller than the endpoint. Every other row is a single line.
 func rowLineHeight(kind configRowKind) int {
-	if kind == rowEndpoint || kind == rowAPIKey {
+	switch kind {
+	case rowEndpoint:
 		return 2
+	case rowAPIKey:
+		return 3
 	}
 	return 1
 }
@@ -525,12 +523,15 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	ui.Focus()
 	ui.SetValue(p.Endpoint)
 
-	ki := textinput.New()
+	// The API key is a multi-line plaintext textarea (no password masking): the
+	// user may paste or type a multi-line credential and see it as-is. Endpoint
+	// stays a single-line textinput below.
+	ki := textarea.New()
 	ki.Prompt = ""
 	ki.Placeholder = "sk-..."
-	ki.EchoMode = textinput.EchoPassword
-	ki.EchoCharacter = '*'
+	ki.ShowLineNumbers = false
 	ki.SetWidth(credentialInputWidth)
+	ki.SetHeight(2)
 	ki.SetValue(p.APIKey)
 
 	fi := textinput.New()
@@ -635,7 +636,7 @@ func NewAdvancedConfigModelAtPage1WithMetadata(p *provider.Provider, modelPool [
 }
 
 func (m *AdvancedConfigModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink}
+	cmds := []tea.Cmd{textinput.Blink, textarea.Blink}
 	// Re-verify an existing provider's connection on open. Until the check
 	// succeeds the sections below Connection stay greyed out; OAuth providers
 	// are always ready so they skip this.
@@ -1631,19 +1632,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Click semantics: the first click on a row selects it (moves the cursor);
 		// a second click on the already-selected row performs its action. Endpoint
 		// and API Key focus their text inputs on first click so typing lands there.
-		if msg.row == rowToggleKey {
-			// Show/Hide follows the same select-then-act pattern as the other
-			// buttons: the first click selects it, a second click toggles. The
-			// selection is kept after toggling so repeated clicks keep toggling.
-			idx := m.mainRowIndex(rowToggleKey)
-			alreadySelected := m.cursor == idx
-			m.cursor = idx
-			if alreadySelected {
-				m.keyVisible = !m.keyVisible
-				setDebugf("key visibility toggled visible=%t", m.keyVisible)
-			}
-			return m, nil
-		}
 		if msg.row == rowCopyKey || msg.row == rowCopyURL {
 			// A single click on a value row focuses its input; a double-click
 			// (second click on the same row within the window) copies the value.
@@ -1983,22 +1971,27 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+			// The API key textarea inserts newlines with Enter, so while it is
+			// focused the key must fall through to the input routing below rather
+			// than advance the page cursor.
+			if m.keyInput.Focused() {
+				break
+			}
+
 			switch m.currentRow() {
 			case rowEndpoint:
 				m.cursor = m.mainRowIndex(rowAPIKey)
 				m.urlInput.Blur()
 				m.keyInput.Focus()
 				setDebugf("enter endpoint -> api key endpoint=%q", m.urlInput.Value())
+				// Return so the Enter that moved focus here is not re-delivered to
+				// the freshly focused textarea (which would insert a newline).
+				return m, nil
 			case rowAPIKey:
 				m.cursor = m.mainRowIndex(rowTest)
 				m.urlInput.Blur()
 				m.keyInput.Blur()
 				setDebugf("enter api key -> test api_key_len=%d", len(m.keyInput.Value()))
-			case rowToggleKey:
-				// Enter on the selected Show/Hide button toggles visibility and
-				// keeps the selection so repeated Enters keep toggling.
-				m.keyVisible = !m.keyVisible
-				setDebugf("key visibility toggled visible=%t", m.keyVisible)
 			case rowTest:
 				return m, m.activateRow(rowTest)
 			case rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch:
@@ -2179,64 +2172,21 @@ func (m *AdvancedConfigModel) View() tea.View {
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
 	} else {
-		// The key is shown at a fixed width so the Show/Hide button never moves
-		// as the key changes. Masked keys are a fixed run of asterisks; revealed
-		// keys are middle-truncated with an ellipsis (the full value is copied on
-		// click).
-		const keyDisplayWidth = 42
-		// Revealed or masked, a focused input shows its own View with the editing
-		// cursor; an unfocused revealed key shows truncated plaintext, an
-		// unfocused masked key shows a fixed-width run of asterisks.
-		if m.keyVisible {
-			m.keyInput.EchoMode = textinput.EchoNormal
-		} else {
-			m.keyInput.EchoMode = textinput.EchoPassword
-		}
-		var keyValue string
-		switch {
-		case m.cursor == m.mainRowIndex(rowAPIKey):
-			// Focused: the textinput View renders plaintext (revealed) or the
-			// mask (hidden) plus the editing cursor, clipped ANSI-safely.
-			keyValue = ansi.TruncateWc(m.keyInput.View(), keyDisplayWidth, "")
-		case m.keyVisible:
-			keyValue = truncateMiddle(m.keyInput.Value(), keyDisplayWidth)
-		default:
-			key := m.keyInput.Value()
-			if key == "" {
-				keyValue = m.keyInput.Placeholder
-			} else {
-				n := len([]rune(key))
-				if n > keyDisplayWidth {
-					n = keyDisplayWidth
-				}
-				keyValue = strings.Repeat("*", n)
-			}
-		}
-		// Show/Hide button sits on the API Key label row, right after the field
-		// name, so it reads as part of the API Key field rather than trailing the
-		// value.
-		toggleLabel := locale.T("显示", "Show")
-		if m.keyVisible {
-			toggleLabel = locale.T("隐藏", "Hide")
-		}
-		toggleBtn := buttonStyle.Render(toggleLabel)
-		if m.cursor == m.mainRowIndex(rowToggleKey) {
-			toggleBtn = buttonActiveStyle.Render(toggleLabel)
-		}
 		copiedHint := ""
 		if m.keyCopied {
 			copiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
 		}
-		// Endpoint / API Key are input fields, not focusable labels: the label
-		// never shows a selection marker; focusing is indicated by the input's
-		// own text cursor. The Show/Hide button leads the key value on the same
-		// row.
 		urlCopiedHint := ""
 		if m.urlCopied {
 			urlCopiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
 		}
+		// Endpoint is a single-line text input; the API key is a multi-line
+		// plaintext textarea (no masking). Each renders its value directly, and
+		// double-clicking a value row copies the full value. Trailing blank lines
+		// from the textarea's fixed height are trimmed so the field does not
+		// consume extra rows in the panel.
 		body.WriteString(renderCredentialField("Endpoint URL", m.urlInput.View()+urlCopiedHint, false))
-		body.WriteString(renderCredentialField("API Key", toggleBtn+" "+keyValue+copiedHint, false))
+		body.WriteString(renderCredentialField("API Key", strings.TrimRight(m.keyInput.View(), "\n")+copiedHint, false))
 	}
 
 	// Detection / auto-configure button.
@@ -2544,7 +2494,7 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 		// Strip ANSI only; keep the leading border/space columns so label
 		// offsets line up with the click's X column.
 		text := ansi.Strip(lines[row])
-		// Buttons (Show/Hide, copy) are only hit when clicked directly on their
+		// Copy rows (key / URL value) are only hit when clicked directly on their
 		// own row; the off-by-one fallback (a value-row click resolving to its
 		// label row) must not trigger them.
 		kind, ok := matchRowLabel(text, x, off == 0)
@@ -2562,23 +2512,6 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 // start column is kept so a click's X can disambiguate Save vs Cancel, which
 // share one line.
 func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
-	// The API key value row is "[Show] <key value>": a click on the button maps
-	// to the toggle, a click on the key value after it copies the key. Buttons
-	// only respond to a direct click on their own row (allowButton), not the
-	// off-by-one label fallback.
-	if allowButton && x >= 0 {
-		for _, label := range []string{"Show", "Hide"} {
-			if idx := strings.Index(text, " "+label+" "); idx >= 0 {
-				if x >= idx-1 && x < idx+len(label)+2 {
-					return rowToggleKey, true
-				}
-				// After the button: the key value copies the full key.
-				if x >= idx+len(label)+2 {
-					return rowCopyKey, true
-				}
-			}
-		}
-	}
 	// Strip leading border, cursor arrow, and whitespace to find the first field.
 	trimmed := strings.TrimLeft(text, " │|>")
 	lead := len(text) - len(trimmed)
@@ -2605,18 +2538,21 @@ func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
 		}
 	}
 	if !hasMatch {
-		// No leading label: a value row. The endpoint value copies the URL, and
-		// a bare masked/plaintext key value copies the key. Both only respond to
-		// a direct click (allowButton), not the off-by-one label fallback. The
-		// leading border/space is already stripped in rest.
+		// No leading label: a value row. The endpoint value copies the URL; the
+		// API key value (now plaintext and possibly spanning multiple lines)
+		// copies the key. Both only respond to a direct click (allowButton), not
+		// the off-by-one label fallback. The leading border/space is already
+		// stripped in rest. Prose and hints must never resolve to a copy row,
+		// so only URL prefixes and dense credential tokens (a key, after the
+		// textarea's trailing padding is trimmed) count as value rows.
 		if !allowButton {
 			return rowCancel, false
 		}
-		switch {
-		case strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://"):
+		if strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://") {
 			return rowCopyURL, true
-		case strings.HasPrefix(rest, "*") || strings.Contains(rest, "…") ||
-			strings.HasPrefix(rest, "sk-"):
+		}
+		key := strings.TrimSpace(rest)
+		if key != "" && (strings.HasPrefix(key, "sk-") || strings.HasPrefix(key, "-----BEGIN") || !strings.ContainsAny(key, " \t")) {
 			return rowCopyKey, true
 		}
 		return rowCancel, false

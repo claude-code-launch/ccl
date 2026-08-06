@@ -186,9 +186,9 @@ func TestReviewPageShowsBearerForOpenAIChatDisplayLabel(t *testing.T) {
 	}
 }
 
-func TestCredentialPageMasksAPIKey(t *testing.T) {
+func TestCredentialPageShowsAPIKeyPlaintext(t *testing.T) {
 	p := provider.Provider{
-		Name:     "masked-key",
+		Name:     "plaintext-key",
 		Type:     "anthropic",
 		Endpoint: "https://open.bigmodel.cn/api/anthropic",
 		APIKey:   "super-secret-api-key-1234567890",
@@ -201,8 +201,10 @@ func TestCredentialPageMasksAPIKey(t *testing.T) {
 			t.Fatalf("expected credential page to contain %q, got: %s", want, view)
 		}
 	}
-	if contains(view, p.APIKey) {
-		t.Fatalf("credential page should mask API key, got: %s", view)
+	// The API key is now edited as plaintext in a multi-line textarea, so the
+	// page shows the key verbatim instead of masking it.
+	if !contains(view, p.APIKey) {
+		t.Fatalf("credential page should show the API key in plaintext, got: %s", view)
 	}
 }
 
