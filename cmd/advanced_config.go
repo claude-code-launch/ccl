@@ -533,6 +533,14 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	ki.SetWidth(credentialInputWidth)
 	ki.SetHeight(2)
 	ki.SetValue(p.APIKey)
+	// Match the Endpoint textinput's focus look: no CursorLine background (the
+	// textarea default paints the active row black on dark terminals) and an
+	// underline cursor instead of a solid block.
+	taStyles := ki.Styles()
+	taStyles.Focused.CursorLine = lipgloss.NewStyle()
+	taStyles.Blurred.CursorLine = lipgloss.NewStyle()
+	taStyles.Cursor.Shape = tea.CursorUnderline
+	ki.SetStyles(taStyles)
 
 	fi := textinput.New()
 	fi.Placeholder = ""
