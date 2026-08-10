@@ -44,21 +44,17 @@ func (credential *qoderCredential) signingCredential() qoderSigningCredential {
 }
 
 type qoderCredentialPool struct {
-	authDir         string
-	credentialFiles map[string]struct{}
-	restrictToFiles bool
-	resolver        func() ([]string, error)
-	client          *http.Client
-	next            atomic.Uint64
-	refreshMu       sync.Mutex
+	authDir        string
+	credentialFile string
+	client         *http.Client
+	next           atomic.Uint64
+	refreshMu      sync.Mutex
 }
 
-func newQoderCredentialPool(authDir string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) *qoderCredentialPool {
+func newQoderCredentialPool(authDir, credentialFile string) *qoderCredentialPool {
 	return &qoderCredentialPool{
-		authDir:         authDir,
-		credentialFiles: credentialFileSet(credentialFiles),
-		restrictToFiles: restrictToFiles,
-		resolver:        resolver,
+		authDir:        authDir,
+		credentialFile: strings.TrimSpace(credentialFile),
 		client: &http.Client{Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			ForceAttemptHTTP2:     true,
@@ -67,29 +63,7 @@ func newQoderCredentialPool(authDir string, credentialFiles []string, restrictTo
 	}
 }
 
-func (pool *qoderCredentialPool) selectedFiles() (map[string]struct{}, error) {
-	if pool.resolver != nil {
-		files, err := pool.resolver()
-		if err != nil {
-			return nil, err
-		}
-		return credentialFileSet(files), nil
-	}
-	selected := make(map[string]struct{}, len(pool.credentialFiles))
-	for file := range pool.credentialFiles {
-		selected[file] = struct{}{}
-	}
-	return selected, nil
-}
-
 func (pool *qoderCredentialPool) load() ([]*qoderCredential, error) {
-	selected, err := pool.selectedFiles()
-	if err != nil {
-		return nil, err
-	}
-	if pool.restrictToFiles && len(selected) == 0 {
-		return nil, nil
-	}
 	entries, err := os.ReadDir(pool.authDir)
 	if err != nil {
 		return nil, fmt.Errorf("read Qoder auth directory: %w", err)
@@ -99,10 +73,8 @@ func (pool *qoderCredentialPool) load() ([]*qoderCredential, error) {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 			continue
 		}
-		if pool.restrictToFiles {
-			if _, ok := selected[strings.ToLower(entry.Name())]; !ok {
-				continue
-			}
+		if pool.credentialFile != "" && !strings.EqualFold(entry.Name(), filepath.Base(pool.credentialFile)) {
+			continue
 		}
 		path := filepath.Join(pool.authDir, entry.Name())
 		raw, err := os.ReadFile(path)
@@ -269,7 +241,8 @@ func (pool *qoderCredentialPool) refresh(ctx context.Context, credential *qoderC
 	if err := writeCredentialAtomic(credential.path, append(raw, '\n')); err != nil {
 		return nil, err
 	}
-	LogInfof("Qoder credential refreshed file=%q", credential.fileName)
+	LogInfoEvent("credential_refreshed", "component", "qoder", "request_id", requestLogID(ctx),
+		"credential", credential.fileName)
 	return credential, nil
 }
 

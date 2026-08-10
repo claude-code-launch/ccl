@@ -151,7 +151,7 @@ ccl bypass off      # 关闭
    用 `ccl set` / `ccl map` 手动指定后，对应档位以手动为准。
 
 2. **协议翻译与流式代理**  
-   OpenAI Chat、OpenAI Responses、Codex 与 OAuth provider 统一暴露本机 `/v1/messages`。通用转换内嵌 CLIProxyAPI Go SDK；Kiro 由 ccl 直接转换 Amazon Q 请求和 AWS EventStream；Qoder 由 ccl 直接完成 COSY 签名、请求编码和 SSE 转换；Anthropic 兼容网关保持直连。
+   OpenAI Chat、OpenAI Responses 与订阅 provider 统一暴露本机 `/v1/messages`。通用转换内嵌 CLIProxyAPI Go SDK；Kiro 由 ccl 直接转换 Amazon Q 请求和 AWS EventStream；Qoder 由 ccl 直接完成 COSY 签名、请求编码和 SSE 转换；Anthropic 兼容网关保持直连。
 
 3. **交互式 TUI 配置**  
    全屏向导配置 endpoint、协议、模型槽位、上下文压缩等；支持中文 / English（`ccl lang`）。
@@ -165,90 +165,101 @@ ccl bypass off      # 关闭
 6. **订阅 OAuth 一键接入**  
    `gpt` / `gemini` / `grok` / `copilot` / `qoder` / `kimi` / `kiro` / `claude`，支持多账号别名；token 会在运行时刷新。
 
+### 协议与运行时边界
+
+Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Session 先决定直连还是启动本机 runtime，并负责模型补全、loopback 地址、随机会话 key 和清理生命周期。之后的最新边界如下：
+
+| 接入类型 | 登录、凭据与刷新 | 模型目录 | 请求路由与协议转换 | CPA 边界 |
+|---|---|---|---|---|
+| Anthropic API Key 网关 | CCL 保存用户 API Key | CCL 直查 Anthropic `/v1/models` | Claude Code 直连 Messages | 不参与 |
+| OpenAI Chat API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CPA `openai-compatibility` 完成 Messages ↔ Chat Completions | 完整数据面转换 |
+| OpenAI Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CPA `codex-api-key` executor 完成 Messages ↔ Responses | 完整数据面转换；executor 名仅是 CPA 内部术语 |
+| GPT 订阅 | CPA Codex authenticator 登录、刷新；CCL 只绑定单个凭据文件 | CPA backend 注册模型，CCL 从本机 `/models` 读取 | CPA Codex executor 完成 Messages ↔ Responses | 登录、刷新、模型注册和数据面均由 CPA |
+| Gemini / Grok / Kimi / Claude 订阅 | CPA 对应 authenticator 登录、刷新；CCL 只绑定单个凭据文件 | CPA backend 注册模型，CCL 从本机 `/models` 读取 | CPA 对应 executor 完成 Messages ↔ 各自上游协议 | 登录、刷新、模型注册和数据面均由 CPA |
+| GitHub Copilot 订阅 | CCL 自研 GitHub device flow、Copilot 换票与凭据状态 | CCL 直查 Copilot 模型目录并读取每个模型声明的 endpoint | CCL gateway 选择 Messages / Chat / Responses 上游并负责换票、重试；CPA 负责三类协议与 Messages 的转换 | 仅使用 CPA 的协议转换与 loopback 服务，是混合栈 |
+| Kiro 订阅 | CCL 自研 Portal PKCE / Builder ID、刷新和单凭据运行时 | CCL 调 Kiro Portal / Amazon Q 模型接口并缓存 | CCL 完成 Messages → Amazon Q、重试、AWS EventStream → Messages | 请求数据面不经过 CPA |
+| Qoder 订阅 | CCL 自研浏览器 OAuth、刷新和单凭据运行时 | CCL 直查 Qoder 模型目录，失败时使用最小兼容目录 | CCL 完成 COSY 签名、WAF 编码、Messages → Qoder、Qoder SSE → Messages | 请求数据面不经过 CPA |
+
+CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上下文元数据、日志、usage 汇总和 runtime 生命周期。CPA runtime 由 Go SDK 内嵌启动，不依赖外部 `CLIProxyAPI` 进程。
+
+错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：CPA-backed provider 的 401、429、5xx、`Retry-After`、凭据可用性和冷却全部由 CPA 管理；Copilot gateway 自己负责换票与切换凭据；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。这样每个适配器可以保留上游真正需要的恢复方式，而不会被统一冷却覆盖。
+
+API Key Responses 网关只有一种 CCL 行为，不存在单独的“Codex API Key 网关”模式。endpoint 的 `/codex` 或 `/codex/v1` 只是普通路径，不会触发协议判断或注入 `Originator`、Codex User-Agent 等身份头。GPT 订阅则通过 `oauthProvider: gpt` 使用 OpenAI OAuth 凭据，底层 CPA backend 名为 `codex`；它和 API Key Responses 网关共享 Messages ↔ Responses 的协议形态，但鉴权、模型来源和上游 executor 不同。
+
 ---
 
 ## 命令速查
 
-下面是**完整命令总表**（首选写法在前；括号内为兼容别名）。更细的说明见各小节。
+下面是当前二进制实际注册的**完整命令面**：
 
-### 总表
+```text
+ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参数会透传
+├─ set [name]                         新增或修改 provider
+├─ ls [-a|--all]                      列出 provider
+├─ use <provider>                     切换 active provider
+├─ cp <source> <target> [-y]          复制 provider
+├─ mv <source> <target> [-y]          重命名 provider
+├─ rm <name> [-y]                     删除 provider
+├─ map [provider]
+│  ├─ map auto [provider]             自动填充模型槽位
+│  └─ --opus/--sonnet/--haiku/--custom/--subagent
+├─ models [-a|--all]                  列出并检测模型
+├─ env <KEY> <VALUE>                  设置 provider 环境变量
+│  ├─ env ls                          列出环境变量
+│  ├─ env rm <KEY> [-y]               删除环境变量
+│  └─ env mv <OLD> <NEW> [-y]         重命名环境变量
+├─ preview                            预览注入 Claude Code 的 settings JSON
+├─ doctor                             检查环境、provider 和订阅健康
+│
+├─ provider                           上述 provider 命令的命名空间形式
+│  ├─ set / ls / use
+│  ├─ cp / mv / rm
+│  ├─ map / models / preview
+│  └─ env <KEY> <VALUE> | ls | rm | mv
+│
+├─ oauth <provider> [alias]           登录订阅；别名：auth
+│  └─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | claude
+│
+├─ bypass [on|off]                    权限确认旁路
+├─ log [on|off]                       运行时日志；别名：debug
+│  └─ --level debug|info|warn|error
+├─ lang [zh|zh-TW|en]                 显示语言
+│
+├─ cloud                              加密云同步
+│  ├─ login <icloud|google-drive> [alias]
+│  ├─ logout [alias]
+│  ├─ push
+│  ├─ pull
+│  ├─ tag [name]
+│  ├─ status [remote]
+│  ├─ key
+│  │  ├─ export
+│  │  └─ import [recovery-key]
+│  ├─ device
+│  │  ├─ request
+│  │  ├─ ls
+│  │  ├─ approve <code>
+│  │  ├─ deny <code>
+│  │  ├─ complete <code>
+│  │  └─ pending
+│  └─ remote
+│     ├─ ls
+│     ├─ use <alias>
+│     ├─ rename <old-alias> <new-alias>
+│     └─ set <alias>
+│
+├─ login / logout                     cloud 兼容入口
+├─ push / pull / tag / status         cloud 兼容入口
+├─ key / device                       cloud 兼容入口，保留各自子命令
+│
+├─ update                             更新 ccl
+├─ version                            打印版本
+├─ completion                         生成 shell 补全
+│  └─ bash | fish | powershell | zsh
+└─ help [command]                     命令帮助
+```
 
-#### 启动与全局开关
-
-| 命令 | 作用 |
-|------|------|
-| `ccl` / `ccl …` | 用当前 provider 启动 Claude Code（其余参数透传） |
-| `ccl bypass [on\|off]` | 启动时自动加 `--dangerously-skip-permissions`（原 `auto`） |
-| `ccl log [on\|off]` / `ccl log --level <level>` | 会话级运行时日志（默认关闭；开启后每个会话独立文件） |
-| `ccl lang [zh\|en]` | TUI / 终端显示语言 |
-| `ccl version` | 打印版本 |
-| `ccl update` | 更新到最新版本 |
-| `ccl completion …` | 生成 shell 补全脚本 |
-
-#### Provider 管理
-
-| 命令 | 作用 |
-|------|------|
-| `ccl set [name]` | 交互式添加 / 更新 provider（单页：Auto Configure 后直接编辑并保存） |
-| `ccl ls` / `ccl ls -a` | 列出 provider（`-a` 显示完整 model pool） |
-| `ccl use <name>` | 切换当前 active provider |
-| `ccl cp <src> <dst>` | 复制 provider 配置 |
-| `ccl mv <src> <dst>` | 重命名 provider |
-| `ccl rm <name>` | 删除 provider |
-| `ccl map [name]` | 快速映射 Opus / Sonnet / Haiku / Custom 槽位 |
-| `ccl models` | 列出模型并做可用性检测 |
-| `ccl env …` | 管理 provider 级环境变量 |
-| `ccl preview` | 预览将注入 Claude Code 的 settings JSON |
-| `ccl doctor` | 环境检查 + provider 状态/连通性；OAuth/group 显示实际 **runtime** 健康（含额度标记） |
-| `ccl provider …` | 上述 provider 子命令的命名空间形式（`set/ls/use/cp/mv/rm/map/models/env/preview`） |
-
-> `ccl ls` 的 `KIND` 为 `normal` 或 `group`；已加入 group 的单账号 provider 默认隐藏。
-
-#### OAuth 订阅账号
-
-| 命令 | 作用 |
-|------|------|
-| `ccl oauth <gpt\|gemini\|grok\|copilot\|qoder\|kimi\|kiro\|claude> [alias]` | 浏览器 / 设备码登录订阅（别名：`ccl auth …`） |
-| `ccl oauth import <file\|dir>` | 导入已有 ccl 支持的凭据 JSON（目录只扫一层） |
-| `ccl oauth group [name]` | 创建 / 编辑同 backend 多账号组（TUI 全选数量） |
-| `ccl oauth group ls\|cp\|mv\|rm …` | 列出 / 复制 / 重命名 / 删除 group |
-| `ccl oauth sync`（别名 `ccl sync`） | 对账并**默认删除** disabled/unavailable 凭据；`--keep-invalid` 只报告；`--clean-quota` 也删额度用尽 |
-
-常用登录示例：`ccl oauth gpt`、`ccl oauth gpt work`、`ccl oauth grok`。  
-旧写法 `ccl oauth chatgpt` 仍可用，会规范为 `gpt`。
-
-#### 加密云同步（首选 `ccl cloud …`）
-
-| 命令 | 作用 |
-|------|------|
-| `ccl cloud login <icloud\|google-drive> [alias]` | 连接网盘并建立/加入加密 profile |
-| `ccl cloud logout [alias]` | 删除本机该 remote 的 token/cache（可选 `--revoke` / `--delete-remote`） |
-| `ccl cloud push` | 加密推送当前配置（`--to` / `--all` / `--force`） |
-| `ccl cloud pull` | 拉取并解密快照（`--from` / `--tag` / `--force`） |
-| `ccl cloud tag [name]` | 为下次 push 打标签（默认 `latest`） |
-| `ccl cloud status [remote]` | 查看同步状态（`--all` 检查全部 remote） |
-| `ccl cloud key export\|import` | 导出 / 导入离线恢复密钥 |
-| `ccl cloud device …` | 新设备配对：`request` / `ls` / `approve` / `deny` / `complete` / `pending` |
-| `ccl cloud remote ls\|use\|rename\|set` | 管理多 remote（primary / mirror） |
-
-**根级兼容别名**（与上表等价，旧脚本可继续用）：
-
-`ccl login` · `ccl logout` · `ccl push` · `ccl pull` · `ccl tag` · `ccl status` · `ccl key` · `ccl device`
-
-> 注意：`ccl status` = **云同步状态**；provider 体检请用 `ccl doctor`。
-
-#### 一眼对照：容易混的命令
-
-| 你想做的事 | 用这个 |
-|------------|--------|
-| 看 / 测当前 provider | `ccl doctor` |
-| 看云盘同步状态 | `ccl cloud status`（或根级 `ccl status`） |
-| 登录订阅账号 | `ccl oauth gpt/gemini/…` |
-| 登录 iCloud / Google Drive 同步 | `ccl cloud login …` |
-| 多账号 token 池 | `ccl oauth group …` |
-| 凭据目录对账 | `ccl oauth sync` |
-| 推配置到云 | `ccl cloud push` |
-| 开权限旁路 | `ccl bypass on`（不是旧的 `auto`） |
+`ccl oauth` 只负责登录并创建绑定单个凭据的 provider，不提供凭据导入或目录对账命令。`ccl status` 是云同步状态；provider 体检使用 `ccl doctor`。根命令支持 `--help` 和 `--version`，每个子命令都支持 `-h/--help`。
 
 ---
 
@@ -285,7 +296,20 @@ ccl log off              # 关闭
 
 `log` 默认关闭，只有显式执行 `ccl log on` 或 `ccl log --level <level>` 后才记录。它是全局阈值设置，写入 `~/.ccl/config.yaml` 的 `log_level`。`ccl log on` 本身不会创建共享的 `ccl-debug.log`；每个由 `ccl` 拉起的 Claude Code 临时会话或独立 provider runtime 才会获得一个带后缀的日志文件，Claude 会话默认命名为 `~/.ccl/logs/ccl-debug-claude_<id>.log`。一个会话内的全部日志级别都写入同一文件。可用 `CCL_LOG_FILE=/path/file.log` 覆盖文件名模板（实际文件仍会加入会话后缀）。日志由 Go 标准库 `slog` 输出，带时间戳、级别和消息；运行结束时会打印 Claude 会话的实际文件路径。
 
-`INFO`（`ccl log on` 的默认值）记录 runtime 启动/退出、模型路由、OAuth refresh 与上下文设置；4xx/cooldown 按 `WARN`、5xx/代理故障按 `ERROR` 记录，成功的逐请求状态只在 `DEBUG` 出现。日志不会记录 access token、refresh token、Authorization header 或 API key。`DEBUG` 对 Responses 兼容层、Copilot 和 Kiro 直接运行时额外记录最终上游请求体与失败响应体；CPA 管理的其他 OAuth backend 只保证请求元数据和筛选后的内部诊断。payload 可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
+`INFO`（`ccl log on` 的默认值）记录 session/runtime 启动退出、数据面类型、模型路由、OAuth refresh 与上下文设置；4xx/cooldown 按 `WARN`、5xx/代理故障按 `ERROR` 记录，成功的逐请求状态只在 `DEBUG` 出现。Kiro、Qoder、Copilot 的请求会获得会话内唯一的 `request_id`，入口、凭据尝试、上游响应、切号/重试和最终结果都可用这个字段串联。常用事件包括 `request_failed`、`upstream_response`、`upstream_retry_decision`、`credential_refresh`、`model_queued` 和 `stream_conversion_failed`。
+
+一次故障建议这样查：
+
+```bash
+grep -E 'level=(WARN|ERROR)' ~/.ccl/logs/ccl-debug-claude_<id>.log
+grep 'request_id=r1' ~/.ccl/logs/ccl-debug-claude_<id>.log
+```
+
+第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。Kiro、Qoder、Copilot 的 429 会记录上游 `retry_after` 和各自适配器采取的动作；CPA 的重试与冷却以筛选后的 CPA 诊断为准。日志中的 endpoint 会移除 userinfo、query 和 fragment。
+
+日志覆盖存在明确边界：普通 Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到，CCL 日志只能记录 session 配置与进程退出结果。OpenAI Chat/Responses、GPT 等 CPA 数据面保留筛选后的 `cpa_diagnostic`；CCL 不再安装结果 Hook 或改写 CPA 冷却，且 CPA 当前没有向 CCL 暴露逐请求 ID，因此不能像 Kiro/Qoder/Copilot 一样完整串联。
+
+日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Copilot、Kiro、Qoder 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
 
 旧的 `debug_mode`/`debug_verbose` 配置会在读取时迁移；DEBUG 的命令入口统一为 `ccl log --level debug`，不保留 `ccl debug verbose`。
 
@@ -357,88 +381,17 @@ Web Portal `ListAvailableModels` 使用同一身份，可返回该账号完整�
 ccl oauth kiro --kiro-auth builder
 ```
 
-组织 IAM Identity Center（IDC）或已有 Kiro IDE 登录也可以直接导入 IDE token：
-
-```bash
-ccl oauth import ~/.aws/sso/cache/kiro-auth-token.json
-```
-
-导入时会自动识别 Kiro IDE 的 camelCase JSON，并规范化为 ccl runtime 使用的凭据格式。
-
 Kiro provider 的本地 `GET /v1/models` 会优先调用 Kiro Web Portal 的
 Smithy RPCv2 CBOR `ListAvailableModels`，返回实际模型、描述、Credit 倍率/单位和支持的输入类型；
-无法建立 Web 会话时回退到 Amazon Q `ListAvailableModels`。账号组会并发查询并合并各账号目录，
-结果按凭据缓存一小时；部分账号刷新失败时继续使用其最后一次成功目录。
+无法建立 Web 会话时回退到 Amazon Q `ListAvailableModels`，结果按凭据缓存一小时。
 
-#### 导入已有授权文件
-
-```bash
-ccl oauth import ~/xai-haiboyuwen@icloud.com.json
-ccl oauth import ~/auth-backup          # 只读取目录第一层的 *.json，不递归
-ccl oauth import ~/copilot.json
-ccl oauth import ~/qoder.json
-ccl oauth import ~/.aws/sso/cache/kiro-auth-token.json
-```
-
-- 导入前会验证 JSON 和 ccl runtime backend 类型。
-- ccl 不依赖源文件名，会按凭据身份生成规范名称（例如 `xai-user@example.com.json`），并在 `~/.ccl/auth/` 保存一份权限为 `0600` 的独立副本。
-- `codex` 文件识别为 `gpt`；Copilot 文件必须是独立的 `type: "copilot"` 凭据，不能再把 Codex/OpenAI token 伪装成 Copilot token。
-- Qoder 文件使用独立的 `type: "qoder"` 凭据，至少包含 `access_token`、`user_id` 与 `machine_id`；有 `refresh_token` 时运行时自动续期。
-- 若曾使用旧版 `ccl oauth copilot`（它实际写入的是 Codex/OpenAI 凭据），升级后请重新运行 `ccl oauth copilot` 完成一次真正的 GitHub 授权；旧 token 不会被自动复用。
-- Kiro IDE 的 `kiro-auth-token.json` 可直接导入；camelCase token 字段会自动规范化。
-- 导入后自动刷新账号 provider。手动向 `~/.ccl/auth/` 移入、移出或删除 JSON 后，可运行：
-
-```bash
-ccl oauth sync
-```
-
-`ccl oauth sync` 会新增未登记账号、删除凭据已不存在的单账号 provider，并从 group 中裁剪失效成员；不会删除仍在磁盘上的授权文件。
-
-#### OAuth 账号组
-
-同一订阅 backend 的多个账号可以组成一个共享 token 池：
-
-```bash
-ccl oauth group                               # 选择已有 group，或新建并输入名称
-ccl oauth group gg                            # 直接编辑指定 group
-ccl oauth group gg --provider-name grok-pool  # 自定义暴露给 ccl use 的 provider 名
-ccl oauth group gg --provider grok \
-  --members xai-a@example.com.json,xai-b@example.com.json
-
-ccl oauth group ls
-ccl oauth group cp gg gg-backup
-ccl oauth group mv gg-backup gg-prod
-ccl oauth group rm gg-prod
-
-ccl use gg
-ccl map gg                                   # 组内账号共享这一份模型映射
-
-# 如需更短的 provider 名，可重命名；仍按 authGroup 识别
-ccl mv gg grok-pool
-ccl use grok-pool
-```
-
-`ccl oauth group ls` 会显示 group 所在的 `config.yaml` 文件名与绝对路径，并以文件列表形式逐项显示组内授权 JSON 的绝对路径。交互编辑页只显示后端、全选/全不选与数量、保存；不再逐条列出账号文件名，避免账号很多时挡住 Save。
-
-设计边界：
-
-- 一个 group 只接受相同 JSON `type`（runtime backend）的授权。Grok、GPT、Gemini 等模型目录不同，不混在同一组；编辑已有 group 时沿用原类型，新建且存在多种类型时由选择页决定。
-- group 保存规范凭据文件名的引用，不复制 token；新 provider 默认与组名相同（`ccl oauth group gg` → provider `gg`）。`ccl` 通过 `authGroup` 字段识别类型，不依赖名称前缀；也可用 `--provider-name` 或 `ccl mv` 改名。
-- `--members` 接受 provider 名或 `~/.ccl/auth` 下的凭据文件名（basename），不是裸邮箱。
-- 模型池和 Opus/Sonnet/Haiku/Custom 映射保存在对应 group provider 上，组成员只负责提供不同 token。
-- 对应 runtime 会对可用成员做轮转，并在失败、限流或配额冷却时换到其他成员。
-- 编辑 group 或执行 `ccl oauth sync` 后不需要重新 `ccl use`。下一次启动会直接读取最新成员；支持热加载的运行时会检测成员清单及授权文件变化并重新加载，后续请求使用新账号池（已经在途的请求不会迁移）。
-- `ccl ls` / `ccl ls --all` 的 `KIND` 列会显示 `normal` 或 `group`，并隐藏已经加入任意 group 的单账号 provider，只保留 group 与未入组账号。
-- `ccl doctor` 会检查 group 定义、成员文件、JSON `type`；OAuth/group 还会启动实际 provider runtime，并在 backend 支持时显示账号健康（healthy / invalid / quota）。额度用尽标记由支持该能力的 backend 写回 `~/.ccl/auth`，后续轮转自动跳过。
-- `ccl set <group-provider>` 可以像普通 provider 一样配置共享模型映射、上下文/Compact 和运行参数；账号成员仍通过 `ccl oauth group <组名>` 管理。
-
-#### 端到端加密云同步
+### `ccl cloud` — 端到端加密云同步
 
 可以使用 iCloud Drive，或直接通过浏览器授权 Google Drive。每个网盘连接都有独立别名：
 
-```bash
-
 > 兼容：根级 `ccl login` / `ccl push` / `ccl pull` / `ccl status` / `ccl key` / `ccl device` / `ccl logout` / `ccl tag` 仍可用，等价于对应的 `ccl cloud ...`。
+
+```bash
 ccl cloud login icloud icloud-main        # macOS 已登录并启用 iCloud Drive
 ccl cloud login google-drive personal     # 自动打开浏览器；不需要 OAuth JSON
 ccl cloud login google-drive work
@@ -532,22 +485,21 @@ ccl set my-provider     # 指定名称
 TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Auto Configure** 后自动识别协议、鉴权方式与模型池（只访问 `/models` 元数据端点，不消耗额度），并推荐 Opus / Sonnet / Haiku / Custom / Subagent 槽位；随后可在同一页逐项修改：
 
 - **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。**Test Model Availability** 行为可选项——会为每个模型发送一次最小请求（消耗额度），测试后槽位旁显示 `✓`/`✗` 状态。
-- **Context**：`←→` 在 Claude default / Custom 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
-- **Runtime**：Protocol / Fast / Max Output / Tools / Tool Search 均可 `←→` 调整。
+- **Context & Compact**：`←→` 在 Default / Balanced 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
+- **Runtime**：Protocol / Fast / Tools / Tool Search 均可 `←→` 调整。
 - 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。新配置未填写连接时，Model Mapping / Runtime 区置灰不可编辑。
 
 Context & Compact：
 
 1. **Extended Context `[1m]`**（按槽位）：声明该模型 ID 支持扩展上下文。
-2. **Auto Compact**（Provider 全局）：设置默认上下文与绝对压缩窗口。
+2. **Context & Compact**（Provider 全局）只有两档：
 
-| 压缩预设 | 默认上下文 | 自动压缩窗口 | 说明 |
-|---------|-----------:|---------------:|------|
-| Custom (preserve) | 保留现值 | 保留现值 | 保护自定义配置 |
-| Claude default | 未管理 | 未管理 | 删除 ccl 覆盖 |
-| Switch-safe 300K / 200K | 300,000 | 200,000 | 常切换标准上下文时较稳妥 |
-| Balanced 500K / 400K | 500,000 | 400,000 | 容量与余量平衡 |
-| Maximum 1M / 900K | 1,000,000 | 900,000 | 超长会话 |
+| 预设 | 行为 | 环境变量 |
+|------|------|----------|
+| Default | 不注入上下文变量，使用 Claude Code 原生的 200K / `[1m]` 1M 行为 | 无 |
+| Balanced 500K / 400K | 500K 上下文，在 80%（约 400K）自动压缩 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS=500000`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW=500000`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` |
+
+旧版 300K、1M、Custom 等组合不再提供；再次保存 provider 时会归入 Default 并清除旧上下文变量。
 
 ### Provider 管理
 
@@ -647,34 +599,19 @@ providers:
     type: openai_responses
     endpoint: oauth://codex
     oauthProvider: gpt
-  gg:
-    name: gg
-    type: openai
-    endpoint: oauth://xai
-    oauthProvider: grok
-    authGroup: gg
-    customModelId: grok-4.5
-    opusModel: grok-4.5
-    sonnetModel: grok-4.3
-    haikuModel: grok-3-mini
-auth_groups:
-  gg:
-    oauthProvider: grok
-    credentials:
-      - xai-a@example.com.json
-      - xai-b@example.com.json
+    oauthAccountCredential: codex-user@example.com.json
 ```
 
 字段要点：
 
 - `type: openai`（显示 `openai(chat)`）：经 CLIProxyAPI 转到上游 Chat Completions。
-- `type: openai_responses`（显示 `openai(responses)`）：经 SDK 走 Responses API；Codex 路径默认选 Responses，可在核对页切换。
+- `type: openai_responses`（显示 `openai(responses)`）：经 SDK 走 Responses API。协议由 `type` 明确选择，不根据 endpoint 路径猜测；可在核对页切换 Chat / Responses。
 - `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用本机 Messages → Amazon Q 适配器；`oauthProvider: qoder` 使用本机 Messages → Qoder 直接适配器。
 - `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
-- `authGroup`：引用 `auth_groups` 中的动态账号池；成员列表不会重复写入 provider。
+- `oauthAccountCredential`：该订阅 provider 精确绑定的 `~/.ccl/auth/` 凭据文件名。
 - `bypass_mode`：全局是否自动附加 `--dangerously-skip-permissions`。
 - Anthropic 直连时 `endpoint` 建议裸域名（如 `https://token.sensenova.cn`），避免拼出 `/v1/v1/messages`。
-- 运行时默认：子代理模型优先 Custom/Sonnet；工具并发默认 `3`；`ENABLE_TOOL_SEARCH=false`；`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认 `32000`。可在 Review & Apply 页或 `ccl env` 覆盖。
+- 运行时默认：子代理模型优先 Custom/Sonnet；工具并发默认 `3`；`ENABLE_TOOL_SEARCH=false`。可在配置页或 `ccl env` 覆盖。输出上限由 Claude Code、协议转换层和上游模型管理，CCL 不设置默认值。
 
 OAuth 凭据目录：`~/.ccl/auth/`（每个账号一个 JSON）。
 
@@ -754,7 +691,6 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 │   ├── advanced_config.go     # TUI 配置向导
 │   ├── auth.go                # 订阅 OAuth 登录
 │   ├── auth_import.go         # 导入并规范化已有 OAuth 文件
-│   ├── auth_group.go          # 多账号组管理（后端 + 全选/数量 + 保存）
 │   ├── auth_sync.go           # auth 目录与配置同步
 │   ├── cloud_sync.go          # iCloud/Google Drive 登录、恢复密钥与同步命令
 │   ├── bypass.go              # ccl bypass（权限旁路开关）

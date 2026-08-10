@@ -29,19 +29,13 @@ func newAuthCommand() *cobra.Command {
 		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|claude> [alias]",
 		Aliases: []string{"auth"},
 		Short:   "Authenticate a subscription-backed provider",
-		Long: `Authenticate subscription-backed providers and manage OAuth credentials.
+		Long: `Authenticate subscription-backed providers.
 
 Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
   ccl oauth gemini|grok|copilot|qoder|kimi|kiro|claude
-
-Subcommands:
-
-  ccl oauth import <file|dir>   Import existing CPA credential JSON
-  ccl oauth group [name]        Multi-account token pool on one backend
-  ccl oauth sync                Reconcile config and delete invalid accounts
 
 Notes:
   - Alias "auth" still works: ccl auth gpt
@@ -62,8 +56,8 @@ Notes:
 	return cmd
 }
 
-// supportsFastMode reports whether the provider's OAuth backend honours the
-// Claude Code fastMode toggle (Codex Responses backends only).
+// supportsFastMode reports whether the GPT subscription backend honours the
+// Claude Code fastMode toggle.
 func supportsFastMode(providerName string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
 	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy:
@@ -148,9 +142,8 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	return nil
 }
 
-// configureOAuthProvider normalizes the shared shape used by login, import,
-// sync, and generated auth-group providers while preserving model mappings and
-// other user-tuned fields already present on p.
+// configureOAuthProvider normalizes the provider created or refreshed by login
+// while preserving model mappings and other user-tuned fields on p.
 func configureOAuthProvider(p provider.Provider, name, oauthProvider, credentialFile string) provider.Provider {
 	backend, _ := oauthproxy.BackendProvider(oauthProvider)
 	p.Name = name
@@ -160,9 +153,6 @@ func configureOAuthProvider(p provider.Provider, name, oauthProvider, credential
 	p.AnthropicAuth = ""
 	p.OAuthProvider = oauthProvider
 	p.OAuthAccountCredential = strings.TrimSpace(credentialFile)
-	if p.AuthGroup == "" {
-		p.OAuthAccountCredentials = nil
-	}
 	if !supportsFastMode(oauthProvider) {
 		p.FastMode = false
 	}
@@ -215,8 +205,5 @@ func derivedProviderName(target, credentialPath string) string {
 }
 
 func init() {
-	authCmd.AddCommand(newOAuthSyncCommand())
 	rootCmd.AddCommand(authCmd)
-	// Compatibility: bare `ccl sync` still works.
-	rootCmd.AddCommand(newOAuthSyncCommand())
 }

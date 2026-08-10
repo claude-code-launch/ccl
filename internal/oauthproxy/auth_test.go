@@ -12,11 +12,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	cliproxy "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -74,7 +74,7 @@ func TestKiroCredentialPoolFiltersExactCredential(t *testing.T) {
 		}
 	}
 
-	pool := newKiroCredentialPool(authDir, []string{"kiro-b.json"}, true, nil)
+	pool := newKiroCredentialPool(authDir, "kiro-b.json")
 	auths, err := pool.load()
 	if err != nil {
 		t.Fatal(err)
@@ -112,41 +112,6 @@ func TestNormalizeOpenAIBaseURLDoesNotRewriteUserBasePath(t *testing.T) {
 		if got := normalizeOpenAIBaseURL(input); got != want {
 			t.Errorf("normalizeOpenAIBaseURL(%q) = %q; want %q", input, got, want)
 		}
-	}
-}
-
-func TestNewerCodexClientVersion(t *testing.T) {
-	tests := []struct {
-		candidate string
-		baseline  string
-		want      bool
-	}{
-		{candidate: "0.144.4", baseline: "0.144.3", want: true},
-		{candidate: "0.145.0", baseline: "0.144.99", want: true},
-		{candidate: "1.0.0", baseline: "0.999.999", want: true},
-		{candidate: "0.144.3", baseline: "0.144.4", want: false},
-		{candidate: "0.144.4", baseline: "0.144.4", want: false},
-	}
-	for _, test := range tests {
-		if got := newerCodexClientVersion(test.candidate, test.baseline); got != test.want {
-			t.Errorf("newerCodexClientVersion(%q, %q) = %t, want %t", test.candidate, test.baseline, got, test.want)
-		}
-	}
-}
-
-func TestTerminalUserAgentTokenFallsBackToUnknown(t *testing.T) {
-	t.Setenv("TERM_PROGRAM", "")
-	t.Setenv("TERM_PROGRAM_VERSION", "")
-	t.Setenv("TERM", "")
-	if got := terminalUserAgentToken(); got != "unknown" {
-		t.Fatalf("terminalUserAgentToken() = %q, want unknown", got)
-	}
-}
-
-func TestStartCodexAPIRejectsCodexV1Endpoint(t *testing.T) {
-	_, err := StartCodexAPI(context.Background(), "https://new.sharedchat.cc/codex/v1", "test-key", "gpt-5.4-mini")
-	if err == nil || !strings.Contains(err.Error(), "https://new.sharedchat.cc/codex") {
-		t.Fatalf("StartCodexAPI() error = %v", err)
 	}
 }
 
@@ -207,7 +172,7 @@ func TestProviderTokenStoreFiltersOtherBackends(t *testing.T) {
 		}
 	}
 
-	store := newProviderTokenStore(authDir, ProviderCodex, "")
+	store := newProviderTokenStore(authDir, ProviderCodex, "codex.json")
 	auths, err := store.List(context.Background())
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
@@ -230,19 +195,9 @@ func TestProviderTokenStoreFiltersByCredentialFile(t *testing.T) {
 		}
 	}
 
-	// No credential file: all backend accounts load (multi-account round-robin pool).
-	store := newProviderTokenStore(authDir, ProviderCodex, "")
-	auths, err := store.List(context.Background())
-	if err != nil {
-		t.Fatalf("List() error: %v", err)
-	}
-	if len(auths) != 2 {
-		t.Fatalf("unfiltered codex auths = %d, want 2", len(auths))
-	}
-
 	// Bound to one credential file: only that account loads.
-	store = newProviderTokenStore(authDir, ProviderCodex, "codex-bob@example.com.json")
-	auths, err = store.List(context.Background())
+	store := newProviderTokenStore(authDir, ProviderCodex, "codex-bob@example.com.json")
+	auths, err := store.List(context.Background())
 	if err != nil {
 		t.Fatalf("filtered List() error: %v", err)
 	}
@@ -252,114 +207,6 @@ func TestProviderTokenStoreFiltersByCredentialFile(t *testing.T) {
 	if got := filepath.Base(auths[0].FileName); got != "codex-bob@example.com.json" {
 		t.Fatalf("selected file = %q, want codex-bob@example.com.json", got)
 	}
-}
-
-func TestProviderTokenStoreFiltersExactCredentialGroup(t *testing.T) {
-	authDir := t.TempDir()
-	credentials := map[string][]byte{
-		"xai-a.json": []byte(`{"type":"xai","access_token":"a","email":"a@example.com"}`),
-		"xai-b.json": []byte(`{"type":"xai","access_token":"b","email":"b@example.com"}`),
-		"xai-c.json": []byte(`{"type":"xai","access_token":"c","email":"c@example.com"}`),
-	}
-	for name, data := range credentials {
-		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	store := newProviderTokenStoreFiles(authDir, backendXAI, []string{"xai-a.json", "xai-c.json"}, true)
-	auths, err := store.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(auths) != 2 {
-		t.Fatalf("group auth count = %d, want 2", len(auths))
-	}
-	files := map[string]bool{}
-	for _, auth := range auths {
-		files[filepath.Base(auth.FileName)] = true
-	}
-	if !files["xai-a.json"] || !files["xai-c.json"] || files["xai-b.json"] {
-		t.Fatalf("group auth files = %+v", files)
-	}
-
-	empty := newProviderTokenStoreFiles(authDir, backendXAI, []string{}, true)
-	auths, err = empty.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(auths) != 0 {
-		t.Fatalf("empty restricted group leaked %d auths", len(auths))
-	}
-}
-
-func TestStartProviderEmptyCredentialGroupDoesNotLoadAllBackendAccounts(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	authDir := filepath.Join(home, ".ccl", "auth")
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(authDir, "xai-a.json"), []byte(`{"type":"xai","access_token":"a","email":"a@example.com"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := StartProvider(context.Background(), StartOptions{
-		OAuthProvider:           ProviderGrok,
-		OAuthAccountCredentials: []string{},
-	})
-	if err == nil || !strings.Contains(err.Error(), "has no credentials") {
-		t.Fatalf("StartProvider(empty group) error = %v", err)
-	}
-}
-
-func TestRunningOAuthGroupReloadsChangedMembership(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	authDir := filepath.Join(home, ".ccl", "auth")
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for name, data := range map[string]string{
-		"codex-a.json": `{"type":"codex","access_token":"a","refresh_token":"ra","email":"a@example.com"}`,
-		"codex-b.json": `{"type":"codex","access_token":"b","refresh_token":"rb","email":"b@example.com"}`,
-	} {
-		if err := os.WriteFile(filepath.Join(authDir, name), []byte(data), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var membersMu sync.RWMutex
-	members := []string{"codex-a.json"}
-	resolver := func() ([]string, error) {
-		membersMu.RLock()
-		defer membersMu.RUnlock()
-		return append([]string{}, members...), nil
-	}
-	proxyRuntime, err := StartProvider(context.Background(), StartOptions{
-		OAuthProvider:           ProviderChatGPT,
-		OAuthAccountCredentials: []string{"codex-a.json"},
-		OAuthCredentialResolver: resolver,
-		ModelSpec:               "gpt-5.4-mini",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer proxyRuntime.Stop()
-	if auths := proxyRuntime.coreManager.List(); len(auths) != 1 || filepath.Base(auths[0].FileName) != "codex-a.json" {
-		t.Fatalf("initial group auths = %+v", auths)
-	}
-
-	membersMu.Lock()
-	members = []string{"codex-b.json"}
-	membersMu.Unlock()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		auths := proxyRuntime.coreManager.List()
-		if len(auths) == 1 && filepath.Base(auths[0].FileName) == "codex-b.json" {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("running group did not reload membership: %+v", proxyRuntime.coreManager.List())
 }
 
 func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
@@ -376,7 +223,7 @@ func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := Start(ctx, ProviderCodex)
+	proxyRuntime, err := StartOAuth(ctx, ProviderCodex, "", "codex-test.json")
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
@@ -442,7 +289,7 @@ func TestEmbeddedProxyKeepsSDKLogsIsolatedAfterStop(t *testing.T) {
 		log.SetLevel(originalLevel)
 	})
 
-	proxyRuntime, err := Start(context.Background(), ProviderCodex)
+	proxyRuntime, err := StartOAuth(context.Background(), ProviderCodex, "", "codex-log-test.json")
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
@@ -459,11 +306,7 @@ func TestEmbeddedProxyKeepsSDKLogsIsolatedAfterStop(t *testing.T) {
 	}
 }
 
-func TestStartCodexAPIAdaptsResponsesRequest(t *testing.T) {
-	t.Setenv(codexClientVersionEnv, "9.8.7")
-	t.Setenv("TERM_PROGRAM", "")
-	t.Setenv("TERM_PROGRAM_VERSION", "")
-	t.Setenv("TERM", "")
+func TestStartOpenAIResponsesAPIDoesNotImpersonateCodexClient(t *testing.T) {
 	type capture struct {
 		header http.Header
 		body   map[string]any
@@ -483,9 +326,9 @@ func TestStartCodexAPIAdaptsResponsesRequest(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartCodexAPI(ctx, upstream.URL+"/v1/responses", "upstream-key", "gpt-5.4-mini")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1/responses", "upstream-key", "gpt-5.4-mini")
 	if err != nil {
-		t.Fatalf("StartCodexAPI() error: %v", err)
+		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
 	runtimeDir := proxyRuntime.runtimeDir
 	defer proxyRuntime.Stop()
@@ -511,25 +354,20 @@ func TestStartCodexAPIAdaptsResponsesRequest(t *testing.T) {
 	if got.header.Get("Authorization") != "Bearer upstream-key" {
 		t.Fatalf("upstream authorization = %q", got.header.Get("Authorization"))
 	}
-	if !strings.HasPrefix(got.header.Get("User-Agent"), "codex_cli_rs/9.8.7 ") ||
-		strings.Contains(got.header.Get("User-Agent"), "(codex_cli_rs;") ||
-		!strings.HasSuffix(got.header.Get("User-Agent"), " unknown") {
-		t.Fatalf("upstream User-Agent = %q", got.header.Get("User-Agent"))
+	if strings.Contains(strings.ToLower(got.header.Get("User-Agent")), "codex_cli_rs") {
+		t.Fatalf("generic Responses gateway received Codex User-Agent: %q", got.header.Get("User-Agent"))
 	}
-	if got.header.Get("Originator") != embeddedCodexOriginator {
-		t.Fatalf("upstream Originator = %q", got.header.Get("Originator"))
+	if got.header.Get("Originator") != "" {
+		t.Fatalf("generic Responses gateway received Originator = %q", got.header.Get("Originator"))
 	}
 	if got.header.Get("Version") != "" {
-		t.Fatalf("custom Codex provider must not receive Version header: %q", got.header.Get("Version"))
+		t.Fatalf("generic Responses gateway must not receive Version header: %q", got.header.Get("Version"))
 	}
-	if got.header.Get("X-Codex-Beta-Features") != "remote_compaction_v2" {
-		t.Fatalf("upstream X-Codex-Beta-Features = %q", got.header.Get("X-Codex-Beta-Features"))
-	}
-	if _, ok := got.body["max_output_tokens"]; ok {
-		t.Fatalf("Codex request retained max_output_tokens: %+v", got.body)
+	if got.header.Get("X-Codex-Beta-Features") != "" {
+		t.Fatalf("generic Responses gateway received X-Codex-Beta-Features = %q", got.header.Get("X-Codex-Beta-Features"))
 	}
 	if stream, _ := got.body["stream"].(bool); !stream {
-		t.Fatalf("Codex request did not force streaming: %+v", got.body)
+		t.Fatalf("Responses request did not force streaming: %+v", got.body)
 	}
 	if got.body["model"] != "gpt-5.4-mini" {
 		t.Fatalf("upstream model = %v, want gpt-5.4-mini", got.body["model"])
@@ -537,7 +375,7 @@ func TestStartCodexAPIAdaptsResponsesRequest(t *testing.T) {
 
 	proxyRuntime.Stop()
 	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
-		t.Fatalf("Codex runtime directory still exists after Stop(): %v", err)
+		t.Fatalf("Responses runtime directory still exists after Stop(): %v", err)
 	}
 }
 
@@ -586,7 +424,7 @@ func TestStartOpenAIChatAPIServesClaudeMessages(t *testing.T) {
 	}
 }
 
-func TestStartCodexAPIServesClaudeMessages(t *testing.T) {
+func TestStartOpenAIResponsesAPIServesClaudeMessages(t *testing.T) {
 	type capture struct {
 		path string
 		body map[string]any
@@ -610,9 +448,9 @@ func TestStartCodexAPIServesClaudeMessages(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartCodexAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test,gpt-test[1m]")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test,gpt-test[1m]")
 	if err != nil {
-		t.Fatalf("StartCodexAPI() error: %v", err)
+		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
 	defer proxyRuntime.Stop()
 	models := runtimeModelIDs(t, ctx, proxyRuntime)
@@ -705,7 +543,7 @@ func TestStopUnregistersRuntimeModels(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := Start(ctx, ProviderCodex)
+	proxyRuntime, err := StartOAuth(ctx, ProviderCodex, "", "codex-cleanup.json")
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
@@ -758,7 +596,7 @@ func TestStartEmbeddedProxyExposesOnlyRequestedProviderModels(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := Start(ctx, ProviderCodex)
+	proxyRuntime, err := StartOAuth(ctx, ProviderCodex, "", "codex.json")
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
@@ -797,7 +635,7 @@ func TestStartEmbeddedProxyExposesOnlyRequestedProviderModels(t *testing.T) {
 
 func TestStartRequiresMatchingCredential(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	_, err := Start(context.Background(), ProviderGemini)
+	_, err := StartOAuth(context.Background(), ProviderGemini, "", "antigravity-missing.json")
 	if err == nil {
 		t.Fatal("Start() should fail without Gemini credentials")
 	}
@@ -862,7 +700,7 @@ func TestStartOpenAIResponsesAPIDelegatesDirectlyToCPA(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
@@ -885,76 +723,44 @@ func TestStartOpenAIResponsesAPIDelegatesDirectlyToCPA(t *testing.T) {
 	}
 }
 
-// TestStartOpenAIResponsesAPIReinjectsMaxOutputTokens verifies that the plain
-// Responses runtime re-injects the ccl-configured output cap onto the upstream
-// body. CLIProxyAPI's Claude→Responses translator drops Anthropic max_tokens,
-// so without the payload rule the value never reaches a plain gateway.
-func TestStartOpenAIResponsesAPIReinjectsMaxOutputTokens(t *testing.T) {
-	type capture struct {
-		body map[string]any
-	}
-	captured := make(chan capture, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		captured <- capture{body: body}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
-		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
-		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
-	}))
-	t.Cleanup(upstream.Close)
-
+func TestAPIKeyRuntimeLeavesRetryAfterToCPA(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 64000)
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, "http://127.0.0.1:1/v1", "upstream-key", "gpt-test")
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
 	defer proxyRuntime.Stop()
 
-	_ = postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
-	got := <-captured
-	if got.body["max_output_tokens"] != float64(64000) {
-		t.Fatalf("upstream max_output_tokens = %v, want 64000 (whole body: %v)", got.body["max_output_tokens"], got.body)
+	auths := proxyRuntime.coreManager.List()
+	if len(auths) != 1 {
+		t.Fatalf("runtime auth count = %d, want 1", len(auths))
+	}
+	retryAfter := 37 * time.Second
+	started := time.Now()
+	proxyRuntime.coreManager.MarkResult(ctx, coreauth.Result{
+		AuthID:     auths[0].ID,
+		Provider:   auths[0].Provider,
+		Model:      "gpt-test",
+		RetryAfter: &retryAfter,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    "rate limited",
+			Retryable:  true,
+		},
+	})
+
+	updated, ok := proxyRuntime.coreManager.GetByID(auths[0].ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-test"] == nil {
+		t.Fatal("CPA did not record model cooldown state")
+	}
+	delay := updated.ModelStates["gpt-test"].NextRetryAfter.Sub(started)
+	if delay < 36*time.Second || delay > 38*time.Second {
+		t.Fatalf("429 Retry-After was overridden: got %s, want about %s", delay, retryAfter)
 	}
 }
 
-// TestStartOpenAIResponsesAPIZeroLeavesUpstreamBodyUntouched verifies that a
-// zero maxOutputTokens (the dedicated Codex base path) does not inject the
-// field onto a plain Responses upstream.
-func TestStartOpenAIResponsesAPIZeroLeavesUpstreamBodyUntouched(t *testing.T) {
-	type capture struct {
-		body map[string]any
-	}
-	captured := make(chan capture, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		captured <- capture{body: body}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n")
-		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
-		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
-	}))
-	t.Cleanup(upstream.Close)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
-	if err != nil {
-		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
-	}
-	defer proxyRuntime.Stop()
-
-	_ = postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
-	got := <-captured
-	if _, exists := got.body["max_output_tokens"]; exists {
-		t.Fatalf("upstream max_output_tokens present with zero option: %v", got.body)
-	}
-}
-
-func TestStartProviderRoutesPlainResponsesAwayFromCodexIdentity(t *testing.T) {
+func TestStartProviderResponsesDoesNotSendCodexIdentity(t *testing.T) {
 	type capture struct {
 		header http.Header
 		body   map[string]any
@@ -987,7 +793,7 @@ func TestStartProviderRoutesPlainResponsesAwayFromCodexIdentity(t *testing.T) {
 	_ = postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
 	got := <-captured
 	if got.header.Get("Originator") != "" || got.body["client_metadata"] != nil {
-		t.Fatalf("StartProvider plain responses still used Codex identity: headers=%v body=%v", got.header, got.body)
+		t.Fatalf("StartProvider Responses used Codex identity: headers=%v body=%v", got.header, got.body)
 	}
 }
 
@@ -1052,7 +858,7 @@ func TestStartOpenAIResponsesAPIToolCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test", 0)
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
@@ -1177,17 +983,17 @@ func assertClaudeToolUse(t *testing.T, responseBody, toolName, argSnippet string
 	}
 }
 
-func TestStartProviderRejectsCodexV1Endpoint(t *testing.T) {
-	_, err := StartProvider(context.Background(), StartOptions{
+func TestStartProviderTreatsCodexV1AsOrdinaryResponsesBase(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(upstream.Close)
+	runtime, err := StartProvider(context.Background(), StartOptions{
 		Protocol:  ProtocolOpenAIResponses,
-		Endpoint:  "https://new.sharedchat.cc/codex/v1",
+		Endpoint:  upstream.URL + "/codex/v1",
 		APIKey:    "test-key",
 		ModelSpec: "gpt-5.4-mini",
 	})
-	if err == nil {
-		t.Fatal("StartProvider() should reject /codex/v1 endpoints")
+	if err != nil {
+		t.Fatalf("StartProvider() rejected ordinary base path: %v", err)
 	}
-	if !strings.Contains(err.Error(), "https://new.sharedchat.cc/codex") {
-		t.Fatalf("error = %v, want suggestion for /codex without /v1", err)
-	}
+	runtime.Stop()
 }

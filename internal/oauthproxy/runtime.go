@@ -12,18 +12,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
-	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
-	"github.com/claude-code-launch/ccl/internal/protocol"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxy "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -34,21 +29,10 @@ import (
 )
 
 const (
-	embeddedCodexOriginator     = "codex_cli_rs"
-	fallbackCodexClientVersion  = "0.144.4"
-	codexClientVersionEnv       = "CCL_CODEX_CLIENT_VERSION"
-	codexClientUserAgentEnv     = "CCL_CODEX_USER_AGENT"
-	codexClientDetectionTimeout = 2 * time.Second
-	codexOSDetectionTimeout     = time.Second
-	credentialGroupPollInterval = 2 * time.Second
-	// credentialGroupLoadTimeout bounds one CPA reload triggered by a group change.
-	credentialGroupLoadTimeout = 30 * time.Second
 	// runtimeStopTimeout bounds each teardown wait in Runtime.Stop.
 	runtimeStopTimeout  = 5 * time.Second
 	runtimeLoopbackHost = "127.0.0.1"
 )
-
-var codexVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
 
 type Runtime struct {
 	endpoint       string
@@ -123,19 +107,6 @@ type StartOptions struct {
 	// OAuthAccountCredential optionally restricts the runtime to a single
 	// credential file (basename under the OAuth auth dir) for this backend.
 	OAuthAccountCredential string
-	// OAuthAccountCredentials restricts the runtime to an exact credential
-	// set. A non-nil empty slice represents an empty auth group and must not
-	// fall back to all backend credentials.
-	OAuthAccountCredentials []string
-	// OAuthCredentialResolver optionally refreshes an auth group's exact file
-	// list while a ccl-launched Claude session is still running.
-	OAuthCredentialResolver func() ([]string, error)
-	// MaxOutputTokens is re-injected onto the plain Responses upstream body.
-	// CLIProxyAPI's Claude→Responses translator drops Anthropic max_tokens, so
-	// without this the value from CLAUDE_CODE_MAX_OUTPUT_TOKENS never reaches a
-	// plain OpenAI Responses gateway. 0 leaves the upstream body unchanged;
-	// dedicated Codex bases are never touched.
-	MaxOutputTokens int
 }
 
 type runtimeModelRoute struct {
@@ -188,31 +159,12 @@ type runtimeConfigFile struct {
 	OAuthModelAlias   map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
 }
 
-type runtimeCodexConfigFile struct {
+// runtimeResponsesConfigFile uses CPA's internal `codex-api-key` executor for
+// Responses translation. The YAML key is an SDK implementation detail, not a
+// distinct CCL provider type or a signal that the upstream is a Codex service.
+type runtimeResponsesConfigFile struct {
 	runtimeConfigBase `yaml:",inline"`
-	CodexAPIKey       []runtimeCodexKey                   `yaml:"codex-api-key"`
-	OAuthModelAlias   map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
-	// Payload carries upstream body overrides. The plain Responses path uses it
-	// to re-inject max_output_tokens (the Claude→Responses translator drops it);
-	// the dedicated Codex base leaves it empty.
-	Payload *runtimePayloadConfig `yaml:"payload,omitempty"`
-}
-
-// runtimePayloadConfig mirrors sdkconfig.PayloadConfig. It is declared here
-// (instead of reusing the CPA type) so the embedded YAML stays self-contained
-// and omits the config when no rule applies.
-type runtimePayloadConfig struct {
-	Override []runtimePayloadRule `yaml:"override"`
-}
-
-type runtimePayloadRule struct {
-	Models []runtimePayloadModelRule `yaml:"models"`
-	Params map[string]any            `yaml:"params"`
-}
-
-type runtimePayloadModelRule struct {
-	Name     string `yaml:"name"`
-	Protocol string `yaml:"protocol,omitempty"`
+	ResponsesAPIKey   []runtimeResponsesKey `yaml:"codex-api-key"`
 }
 
 type runtimeOpenAIConfigFile struct {
@@ -244,103 +196,49 @@ type runtimeOpenAIModel struct {
 	ForceMapping bool   `yaml:"force-mapping,omitempty"`
 }
 
-type runtimeCodexKey struct {
-	APIKey  string              `yaml:"api-key"`
-	BaseURL string              `yaml:"base-url"`
-	Models  []runtimeCodexModel `yaml:"models,omitempty"`
-	Headers map[string]string   `yaml:"headers,omitempty"`
+type runtimeResponsesKey struct {
+	APIKey  string                  `yaml:"api-key"`
+	BaseURL string                  `yaml:"base-url"`
+	Models  []runtimeResponsesModel `yaml:"models,omitempty"`
 }
 
-type runtimeCodexModel struct {
+type runtimeResponsesModel struct {
 	Name  string `yaml:"name"`
 	Alias string `yaml:"alias,omitempty"`
 }
 
 type providerTokenStore struct {
-	backend         string
-	credentialFiles map[string]struct{}
-	restrictToFiles bool
-	resolver        func() ([]string, error)
-	mu              sync.RWMutex
-	store           coreauth.Store
+	backend        string
+	credentialFile string
+	store          coreauth.Store
 }
 
 func newProviderTokenStore(authDir, backend, credentialFile string) *providerTokenStore {
-	var credentialFiles []string
-	if strings.TrimSpace(credentialFile) != "" {
-		credentialFiles = []string{credentialFile}
-	}
-	return newProviderTokenStoreFiles(authDir, backend, credentialFiles, strings.TrimSpace(credentialFile) != "")
-}
-
-func newProviderTokenStoreFiles(authDir, backend string, credentialFiles []string, restrictToFiles bool) *providerTokenStore {
-	return newProviderTokenStoreResolver(authDir, backend, credentialFiles, restrictToFiles, nil)
-}
-
-func newProviderTokenStoreResolver(authDir, backend string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) *providerTokenStore {
 	store := sdkauth.NewFileTokenStore()
 	store.SetBaseDir(authDir)
+	credentialFile = strings.TrimSpace(credentialFile)
+	if credentialFile != "" {
+		credentialFile = strings.ToLower(filepath.Base(credentialFile))
+	}
 	return &providerTokenStore{
-		backend:         backend,
-		credentialFiles: credentialFileSet(credentialFiles),
-		restrictToFiles: restrictToFiles,
-		resolver:        resolver,
-		store:           store,
+		backend:        backend,
+		credentialFile: credentialFile,
+		store:          store,
 	}
-}
-
-func credentialFileSet(credentialFiles []string) map[string]struct{} {
-	allowed := make(map[string]struct{}, len(credentialFiles))
-	for _, file := range credentialFiles {
-		if base := strings.ToLower(filepath.Base(strings.TrimSpace(file))); base != "" && base != "." {
-			allowed[base] = struct{}{}
-		}
-	}
-	return allowed
-}
-
-func (s *providerTokenStore) refreshCredentialFiles() error {
-	if s == nil || s.resolver == nil {
-		return nil
-	}
-	files, err := s.resolver()
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.credentialFiles = credentialFileSet(files)
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *providerTokenStore) allowedCredentialFiles() map[string]struct{} {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	allowed := make(map[string]struct{}, len(s.credentialFiles))
-	for file := range s.credentialFiles {
-		allowed[file] = struct{}{}
-	}
-	return allowed
 }
 
 func (s *providerTokenStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
-	if err := s.refreshCredentialFiles(); err != nil {
-		return nil, err
-	}
 	auths, err := s.store.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	filtered := make([]*coreauth.Auth, 0, len(auths))
-	allowed := s.allowedCredentialFiles()
 	for _, auth := range auths {
 		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), s.backend) {
 			continue
 		}
-		if s.restrictToFiles {
-			if _, ok := allowed[strings.ToLower(filepath.Base(auth.FileName))]; !ok {
-				continue
-			}
+		if s.credentialFile != "" && !strings.EqualFold(filepath.Base(auth.FileName), s.credentialFile) {
+			continue
 		}
 		hydrateAuthHealthFromMetadata(auth)
 		filtered = append(filtered, auth)
@@ -458,19 +356,11 @@ func (s *providerTokenStore) Delete(ctx context.Context, id string) error {
 	return s.store.Delete(ctx, id)
 }
 
-func Start(parent context.Context, providerName string) (*Runtime, error) {
-	return StartOAuth(parent, providerName, "", "")
-}
-
 // StartProvider starts a loopback Anthropic Messages adapter. Most backends use
 // embedded CLIProxyAPI; Kiro uses the direct Amazon Q adapter in kiro_server.go.
 //
-// openai_responses is split:
-//   - dedicated Codex bases (…/codex) → StartCodexAPI with Codex client headers
-//   - plain Responses gateways → StartOpenAIResponsesAPI without those headers
-//
-// Invalid Codex paths such as …/codex/v1 are rejected before routing so they
-// cannot fall through to the plain Responses path and hit …/codex/v1/responses.
+// Every API-key Responses endpoint follows the same path. URL suffixes do not
+// opt a gateway into OAuth semantics or Codex client identity headers.
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	_, ownsLog, logErr := EnsureSessionLog("runtime")
 	if logErr != nil {
@@ -481,9 +371,9 @@ func StartProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		// Successful starts are logged by each start function; failures were only
 		// visible to the caller, which made a session that never launched look
 		// like an empty log.
-		LogErrorf("runtime start failed oauth=%q protocol=%q endpoint=%q credentials=%d error=%v",
-			options.OAuthProvider, options.Protocol, options.Endpoint,
-			len(options.OAuthAccountCredentials), err)
+		LogErrorf("runtime start failed oauth=%q protocol=%q endpoint=%q credential=%q error=%v",
+			options.OAuthProvider, options.Protocol, SafeLogEndpoint(options.Endpoint),
+			options.OAuthAccountCredential, err)
 		if ownsLog {
 			CloseLog()
 		}
@@ -495,22 +385,13 @@ func StartProvider(parent context.Context, options StartOptions) (*Runtime, erro
 
 func startProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	if strings.TrimSpace(options.OAuthProvider) != "" {
-		if options.OAuthAccountCredentials != nil {
-			return startOAuthWithFiles(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredentials, true, options.OAuthCredentialResolver)
-		}
 		return StartOAuth(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredential)
 	}
 	switch options.Protocol {
 	case ProtocolOpenAIChat:
 		return StartOpenAIChatAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	case ProtocolOpenAIResponses:
-		if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(options.Endpoint); invalid {
-			return nil, fmt.Errorf("invalid Codex endpoint %q: use %q without /v1; ccl requests /models separately", options.Endpoint, suggestion)
-		}
-		if protocol.IsCodexBaseEndpoint(options.Endpoint) {
-			return StartCodexAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
-		}
-		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec, options.MaxOutputTokens)
+		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -519,18 +400,8 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile string) (*Runtime, error) {
 	credentialFile = strings.TrimSpace(credentialFile)
 	if credentialFile == "" {
-		return startOAuthWithFiles(parent, providerName, modelSpec, nil, false, nil)
+		return nil, fmt.Errorf("subscription provider %s is not bound to a credential file; authenticate the account again with `ccl oauth %s [alias]`", providerName, providerName)
 	}
-	return startOAuthWithFiles(parent, providerName, modelSpec, []string{credentialFile}, true, nil)
-}
-
-// StartOAuthAccounts starts an OAuth runtime restricted to exactly the supplied
-// canonical credential files. It is the group counterpart to StartOAuth.
-func StartOAuthAccounts(parent context.Context, providerName, modelSpec string, credentialFiles []string) (*Runtime, error) {
-	return startOAuthWithFiles(parent, providerName, modelSpec, credentialFiles, true, nil)
-}
-
-func startOAuthWithFiles(parent context.Context, providerName, modelSpec string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -543,22 +414,19 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 		return nil, err
 	}
 	if backend == ProviderKiro {
-		return startKiroOAuthWithFiles(parent, modelSpec, credentialFiles, restrictToFiles, resolver)
+		return startKiroOAuth(parent, modelSpec, credentialFile)
 	}
 	if backend == ProviderCopilot {
-		return startCopilotOAuthWithFiles(parent, modelSpec, credentialFiles, restrictToFiles, resolver)
+		return startCopilotOAuth(parent, modelSpec, credentialFile)
 	}
 	if backend == ProviderQoder {
-		return startQoderOAuthWithFiles(parent, modelSpec, credentialFiles, restrictToFiles, resolver)
+		return startQoderOAuth(parent, modelSpec, credentialFile)
 	}
-	found, err := hasCredentials(authDir, backend, credentialFiles, restrictToFiles)
+	found, err := hasCredential(authDir, backend, credentialFile)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
-		if restrictToFiles && len(credentialFiles) == 0 {
-			return nil, fmt.Errorf("OAuth group for %s has no credentials; edit it with `ccl oauth group` or run `ccl oauth sync`", providerName)
-		}
 		return nil, fmt.Errorf("no %s credentials found; run `ccl oauth %s` first", backend, providerName)
 	}
 
@@ -571,7 +439,6 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 		return nil, err
 	}
 	aliases := oauthModelAliases(modelSpec)
-	codexOAuthPolicy := usesCodexOAuthCooldownPolicy(providerName)
 	rawConfig, err := yaml.Marshal(runtimeConfigFile{
 		runtimeConfigBase: newRuntimeConfigBase(port, authDir, apiKey),
 		OAuthModelAlias: map[string][]runtimeOAuthModelAlias{
@@ -589,16 +456,13 @@ func startOAuthWithFiles(parent context.Context, providerName, modelSpec string,
 	if err != nil {
 		return nil, err
 	}
-	store := newProviderTokenStoreResolver(authDir, backend, credentialFiles, restrictToFiles, resolver)
-	runtime, err := startRuntime(parent, cfg, configPath, apiKey, store, "", codexOAuthPolicy)
+	store := newProviderTokenStore(authDir, backend, credentialFile)
+	runtime, err := startRuntime(parent, cfg, configPath, apiKey, store, "")
 	if err != nil {
 		return nil, err
 	}
-	if resolver != nil {
-		runtime.watchCredentialGroup(authDir, store)
-	}
-	LogInfof("runtime start oauth provider=%s backend=%s protocol=openai port=%d credential_files=%d restricted=%t model_count=%d",
-		providerName, backend, port, len(credentialFiles), restrictToFiles, len(aliases))
+	LogInfof("runtime start oauth provider=%s backend=%s protocol=openai port=%d credential_file=%s model_count=%d",
+		providerName, backend, port, filepath.Base(credentialFile), len(aliases))
 	return runtime, nil
 }
 
@@ -645,32 +509,14 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 	if err != nil {
 		return nil, err
 	}
-	LogInfof("runtime start openai_chat endpoint=%q port=%d model_count=%d", endpoint, port, len(models))
+	LogInfof("runtime start openai_chat endpoint=%q port=%d model_count=%d", SafeLogEndpoint(endpoint), port, len(models))
 	return proxyRuntime, nil
 }
 
-// StartOpenAIResponsesAPI starts an embedded CLIProxyAPI runtime against a plain
-// OpenAI Responses upstream (not a dedicated Codex base). CPA owns the complete
+// StartOpenAIResponsesAPI starts an embedded CLIProxyAPI runtime against an
+// OpenAI Responses upstream. CPA owns the complete
 // Claude Messages to Responses translation and talks to the upstream directly.
-// maxOutputTokens is re-injected onto the upstream body via a CPA payload rule
-// because the Claude→Responses translator drops Anthropic max_tokens.
-func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, maxOutputTokens int) (*Runtime, error) {
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, false, maxOutputTokens)
-}
-
-// StartCodexAPI starts an embedded CLIProxyAPI runtime for a dedicated Codex
-// Responses endpoint (…/codex). Codex client headers are configured on CPA's
-// executor; CPA owns the request body and sends it directly to the upstream.
-func StartCodexAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
-	if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint); invalid {
-		return nil, fmt.Errorf("invalid Codex endpoint %q: use %q without /v1; ccl requests /models separately", endpoint, suggestion)
-	}
-	// Dedicated Codex bases must leave max_output_tokens unset: they expect ccl
-	// not to override it (the old compatibility layer left Codex mode untouched).
-	return startResponsesRuntime(parent, endpoint, upstreamAPIKey, modelSpec, true, 0)
-}
-
-func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, codexHeaders bool, maxOutputTokens int) (*Runtime, error) {
+func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -683,48 +529,21 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 		return nil, fmt.Errorf("OpenAI Responses runtime requires at least one model")
 	}
 
-	var headers map[string]string
-	if codexHeaders {
-		codexVersion := detectCodexClientVersion()
-		codexUserAgent := buildCodexUserAgent(codexVersion)
-		headers = map[string]string{
-			"User-Agent":            codexUserAgent,
-			"Originator":            embeddedCodexOriginator,
-			"X-Codex-Beta-Features": "remote_compaction_v2",
-		}
-	}
-
 	runtimeDir, port, apiKey, err := prepareAPIKeyRuntime()
 	if err != nil {
 		return nil, err
 	}
-	models := make([]runtimeCodexModel, 0, len(routes))
+	models := make([]runtimeResponsesModel, 0, len(routes))
 	for _, route := range routes {
-		models = append(models, runtimeCodexModel{Name: route.Name, Alias: route.Alias})
+		models = append(models, runtimeResponsesModel{Name: route.Name, Alias: route.Alias})
 	}
-	// Plain Responses only: CLIProxyAPI's Claude→Responses translator drops
-	// Anthropic max_tokens, so re-inject the ccl-configured output cap onto the
-	// upstream body via a payload rule. The rule's "*" model matches every
-	// request; the protocol scopes it to the codex translator that serves the
-	// Responses upstream. Dedicated Codex bases skip this (codexHeaders=true).
-	var payload *runtimePayloadConfig
-	if maxOutputTokens > 0 && !codexHeaders {
-		payload = &runtimePayloadConfig{
-			Override: []runtimePayloadRule{{
-				Models: []runtimePayloadModelRule{{Name: "*", Protocol: "codex"}},
-				Params: map[string]any{"max_output_tokens": maxOutputTokens},
-			}},
-		}
-	}
-	rawConfig, err := yaml.Marshal(runtimeCodexConfigFile{
+	rawConfig, err := yaml.Marshal(runtimeResponsesConfigFile{
 		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
-		CodexAPIKey: []runtimeCodexKey{{
+		ResponsesAPIKey: []runtimeResponsesKey{{
 			APIKey:  upstreamAPIKey,
 			BaseURL: endpoint,
 			Models:  models,
-			Headers: headers,
 		}},
-		Payload: payload,
 	})
 	if err != nil {
 		_ = os.RemoveAll(runtimeDir)
@@ -734,11 +553,7 @@ func startResponsesRuntime(parent context.Context, endpoint, upstreamAPIKey, mod
 	if err != nil {
 		return nil, err
 	}
-	mode := "openai_responses"
-	if codexHeaders {
-		mode = "codex_responses"
-	}
-	LogInfof("runtime start %s endpoint=%q port=%d model_count=%d max_output_tokens=%d", mode, endpoint, port, len(models), maxOutputTokens)
+	LogInfof("runtime start openai_responses endpoint=%q port=%d model_count=%d", SafeLogEndpoint(endpoint), port, len(models))
 	return proxyRuntime, nil
 }
 
@@ -777,7 +592,7 @@ func startAPIKeyRuntime(parent context.Context, rawConfig []byte, apiKey, runtim
 	}
 	store := sdkauth.NewFileTokenStore()
 	store.SetBaseDir(runtimeDir)
-	return startRuntime(parent, cfg, configPath, apiKey, store, runtimeDir, true)
+	return startRuntime(parent, cfg, configPath, apiKey, store, runtimeDir)
 }
 
 func runtimeModelRoutes(modelSpec string) []runtimeModelRoute {
@@ -851,112 +666,11 @@ func stripContextModelSuffix(model string) string {
 	return model
 }
 
-func detectCodexClientVersion() string {
-	if version := parseCodexClientVersion(os.Getenv(codexClientVersionEnv)); version != "" {
-		return version
-	}
-	version := fallbackCodexClientVersion
-	ctx, cancel := context.WithTimeout(context.Background(), codexClientDetectionTimeout)
-	defer cancel()
-	if output, err := exec.CommandContext(ctx, "codex", "--version").Output(); err == nil {
-		if detected := parseCodexClientVersion(string(output)); newerCodexClientVersion(detected, version) {
-			version = detected
-		}
-	}
-	return version
-}
-
-func parseCodexClientVersion(value string) string {
-	return codexVersionPattern.FindString(strings.TrimSpace(value))
-}
-
-func newerCodexClientVersion(candidate, baseline string) bool {
-	parse := func(version string) [3]int {
-		version = strings.SplitN(version, "-", 2)[0]
-		version = strings.SplitN(version, "+", 2)[0]
-		parts := strings.Split(version, ".")
-		var parsed [3]int
-		for i := 0; i < len(parts) && i < len(parsed); i++ {
-			parsed[i], _ = strconv.Atoi(parts[i])
-		}
-		return parsed
-	}
-	candidateParts := parse(candidate)
-	baselineParts := parse(baseline)
-	for i := range candidateParts {
-		if candidateParts[i] != baselineParts[i] {
-			return candidateParts[i] > baselineParts[i]
-		}
-	}
-	return false
-}
-
-func buildCodexUserAgent(version string) string {
-	if override := strings.TrimSpace(os.Getenv(codexClientUserAgentEnv)); override != "" {
-		return override
-	}
-	osType, osVersion := codexOSInfo()
-	userAgent := fmt.Sprintf(
-		"%s/%s (%s %s; %s)",
-		embeddedCodexOriginator,
-		version,
-		osType,
-		osVersion,
-		runtime.GOARCH,
-	)
-	if terminal := terminalUserAgentToken(); terminal != "" {
-		userAgent += " " + terminal
-	}
-	return userAgent
-}
-
-func codexOSInfo() (string, string) {
-	switch runtime.GOOS {
-	case "darwin":
-		ctx, cancel := context.WithTimeout(context.Background(), codexOSDetectionTimeout)
-		defer cancel()
-		if output, err := exec.CommandContext(ctx, "sw_vers", "-productVersion").Output(); err == nil {
-			if version := strings.TrimSpace(string(output)); version != "" {
-				return "Mac OS", version
-			}
-		}
-		return "Mac OS", "unknown"
-	case "windows":
-		return "Windows", "unknown"
-	default:
-		return "Linux", "unknown"
-	}
-}
-
-func terminalUserAgentToken() string {
-	program := sanitizeUserAgentToken(os.Getenv("TERM_PROGRAM"))
-	if program == "" {
-		if terminal := sanitizeUserAgentToken(os.Getenv("TERM")); terminal != "" {
-			return terminal
-		}
-		return "unknown"
-	}
-	if version := sanitizeUserAgentToken(os.Getenv("TERM_PROGRAM_VERSION")); version != "" {
-		return program + "/" + version
-	}
-	return program
-}
-
-func sanitizeUserAgentToken(value string) string {
-	value = strings.TrimSpace(value)
-	var b strings.Builder
-	for _, char := range value {
-		if char >= '!' && char <= '~' && char != '(' && char != ')' {
-			b.WriteRune(char)
-		} else if b.Len() > 0 {
-			b.WriteByte('_')
-		}
-	}
-	return strings.Trim(b.String(), "_")
-}
-
-func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, apiKey string, store coreauth.Store, runtimeDir string, shortCooldownPolicy bool) (*Runtime, error) {
-	coreManager := newRuntimeCoreAuthManager(store, shortCooldownPolicy)
+func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, apiKey string, store coreauth.Store, runtimeDir string) (*Runtime, error) {
+	// CPA owns retry, cooldown, Retry-After, and credential availability for all
+	// CPA-backed protocols. Provider-specific runtimes (Kiro/Qoder/Copilot) keep
+	// their targeted recovery behavior outside this manager.
+	coreManager := coreauth.NewManager(store, nil, nil)
 	restoreLogs := silenceSDKLogs()
 	started := make(chan struct{})
 	service, err := cliproxy.NewBuilder().
@@ -1011,88 +725,6 @@ func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, api
 		return nil, err
 	}
 	return runtime, nil
-}
-
-// watchCredentialGroup reloads CPA only when the selected member list or one
-// of its credential files changes. The general CPA filesystem watcher remains
-// disabled, so unrelated accounts in ~/.ccl/auth can never enter this runtime.
-func (r *Runtime) watchCredentialGroup(authDir string, store *providerTokenStore) {
-	if r == nil || store == nil || store.resolver == nil {
-		return
-	}
-	lastSnapshot, err := credentialGroupSnapshot(authDir, store)
-	if err != nil {
-		// Without a baseline the first readable snapshot looks like a change and
-		// triggers one reload. Surface the reason instead of dropping it.
-		LogWarnf("credential group watch could not take an initial snapshot: %v", err)
-	}
-	go func() {
-		ticker := time.NewTicker(credentialGroupPollInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-r.done:
-				return
-			case <-ticker.C:
-				snapshot, err := credentialGroupSnapshot(authDir, store)
-				if err != nil {
-					LogWarnf("credential group watch snapshot failed: %v", err)
-					continue
-				}
-				if snapshot == lastSnapshot {
-					continue
-				}
-				if err := r.reloadCredentials(); err != nil {
-					LogErrorf("credential group watch reload failed: %v", err)
-					continue
-				}
-				lastSnapshot = snapshot
-			}
-		}
-	}()
-}
-
-// reloadCredentials asks CPA to reload its auth set. The call is bounded by a
-// timeout and by the runtime lifetime, so a stuck reload cannot outlive Stop.
-func (r *Runtime) reloadCredentials() error {
-	ctx, cancel := context.WithTimeout(context.Background(), credentialGroupLoadTimeout)
-	defer cancel()
-	go func() {
-		select {
-		case <-r.done:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return r.coreManager.Load(ctx)
-}
-
-func credentialGroupSnapshot(authDir string, store *providerTokenStore) (string, error) {
-	if err := store.refreshCredentialFiles(); err != nil {
-		return "", err
-	}
-	allowed := store.allowedCredentialFiles()
-	files := make([]string, 0, len(allowed))
-	for file := range allowed {
-		files = append(files, file)
-	}
-	sort.Strings(files)
-	var snapshot strings.Builder
-	for _, file := range files {
-		snapshot.WriteString(file)
-		if info, err := os.Stat(filepath.Join(authDir, file)); err == nil {
-			snapshot.WriteByte(':')
-			snapshot.WriteString(strconv.FormatInt(info.Size(), 10))
-			snapshot.WriteByte(':')
-			snapshot.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
-		} else if os.IsNotExist(err) {
-			snapshot.WriteString(":missing")
-		} else {
-			return "", err
-		}
-		snapshot.WriteByte('\n')
-	}
-	return snapshot.String(), nil
 }
 
 func silenceSDKLogs() func() {
@@ -1167,9 +799,9 @@ func silenceStdout() func() {
 	}
 }
 
-func hasCredentials(authDir, backend string, credentialFiles []string, restrictToFiles bool) (bool, error) {
-	allowed := credentialFileSet(credentialFiles)
-	if restrictToFiles && len(allowed) == 0 {
+func hasCredential(authDir, backend, credentialFile string) (bool, error) {
+	credentialFile = strings.TrimSpace(credentialFile)
+	if credentialFile == "" {
 		return false, nil
 	}
 	entries, err := os.ReadDir(authDir)
@@ -1180,10 +812,8 @@ func hasCredentials(authDir, backend string, credentialFiles []string, restrictT
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		if restrictToFiles {
-			if _, ok := allowed[strings.ToLower(entry.Name())]; !ok {
-				continue
-			}
+		if !strings.EqualFold(entry.Name(), filepath.Base(credentialFile)) {
+			continue
 		}
 		// An unreadable file is reported (it usually means a permission problem the
 		// user must fix), while a file that is simply not valid credential JSON is
@@ -1210,7 +840,7 @@ func hasCredentials(authDir, backend string, credentialFiles []string, restrictT
 func (r *Runtime) Endpoint() string { return r.endpoint }
 
 // ListAuths returns the credentials currently loaded in this runtime, already
-// filtered to the OAuth backend and selected account/group membership.
+// filtered to the OAuth backend and selected account.
 func (r *Runtime) ListAuths() []*coreauth.Auth {
 	if r == nil {
 		return nil
@@ -1251,7 +881,7 @@ func (r *Runtime) Stop() {
 		stopped := waitClosed(r.done, runtimeStopTimeout)
 		defer func() {
 			LogInfof("runtime stop endpoint=%q clean_exit=%t duration=%s",
-				r.endpoint, stopped, time.Since(stopStarted).Round(time.Millisecond))
+				SafeLogEndpoint(r.endpoint), stopped, time.Since(stopStarted).Round(time.Millisecond))
 			if r.ownsLog {
 				CloseLog()
 			}
@@ -1388,7 +1018,6 @@ func writeRuntimeConfigData(data []byte) (string, error) {
 
 // normalizeOpenAIBaseURL strips trailing generation paths (/responses,
 // /chat/completions, /models) so CLIProxyAPI config receives an API root.
-// Used for both plain OpenAI Chat/Responses and dedicated Codex bases.
 func normalizeOpenAIBaseURL(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
 	parsed, err := url.Parse(endpoint)

@@ -15,20 +15,17 @@ import (
 // per slot by the [1m] marker on a model id. It scales its own compaction buffer
 // and trigger point to whichever one a slot uses.
 //
-// ccl therefore declares no context size and no compaction threshold of its own:
+// ccl offers exactly two provider-wide modes:
 //
-//   - The context env vars are session-wide, while [1m] is per slot. A pool that
-//     mixes a 1M model with a 200K one has no correct global value: sized for the
-//     large model the small one's requests are rejected before compaction runs,
-//     sized for the small one the large model is throttled.
-//   - Sizes between the two classes are honored inconsistently, so a 500K model
-//     cannot be declared truthfully anyway; it runs correctly at the 200K default
-//     and simply leaves capacity unused.
-//   - Claude Code's buffer math changes between releases. Competing with it is a
-//     moving target that has produced both premature and impossible compaction.
+//   - Default declares nothing and preserves Claude Code's native 200K/1M
+//     behavior selected per slot by the [1m] marker.
+//   - Balanced declares a 500K context/window and an 80% compact threshold,
+//     which triggers compaction at approximately 400K.
 //
-// What remains configurable is the per-slot [1m] marker, plus deliberate manual
-// env values for users who want to experiment (see Provider.EnvContextBudgetMode).
+// Other historical or hand-written combinations are removed at launch so the
+// effective behavior always matches one of those two choices. The per-slot [1m]
+// marker remains independently configurable; Balanced intentionally applies a
+// single 500K cap to every slot.
 const (
 	// claudeDefaultContextWindow is the window Claude Code assumes for a model it
 	// does not recognize, which is every model behind a gateway.
@@ -124,15 +121,13 @@ func AdvertisedContextWindows(endpoint, apiKey string) (map[string]int, string) 
 	return nil, ""
 }
 
-// applyContextPolicy drops the context presets written by older ccl versions and
-// reports whether it did, so Claude Code is left to size the session itself.
-//
-// Values the user set deliberately are preserved, as is manual mode.
-func applyContextPolicy(env map[string]string, p provider.Provider) bool {
-	if env == nil || provider.ContextBudgetIsManual(p) {
+// applyContextPolicy keeps only the exact Balanced triplet. Any other context
+// override is retired to Default and removed from the launched session.
+func applyContextPolicy(env map[string]string) bool {
+	if env == nil || provider.IsBalancedContextPreset(env) {
 		return false
 	}
-	if !provider.IsCclContextPreset(env) {
+	if !provider.HasManagedContextEnv(env) {
 		return false
 	}
 	for _, key := range provider.ManagedContextEnvKeys() {

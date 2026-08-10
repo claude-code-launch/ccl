@@ -14,29 +14,23 @@ const (
 	// EnvMaxContextTokens is the fallback context size Claude Code assumes for a
 	// model it does not recognize.
 	EnvMaxContextTokens = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
-	// EnvAutoCompactWindow is the absolute token count at which Claude Code
-	// auto-compacts the conversation.
+	// EnvAutoCompactWindow is the window Claude Code uses as the basis for its
+	// auto-compact threshold. EnvAutoCompactPct selects the percentage of it.
 	EnvAutoCompactWindow = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 
-	// EnvContextBudgetMode is a ccl directive, not a Claude Code variable: it
-	// selects who owns the two limits above for a subscription provider.
-	//
-	//	auto   (default) follow the window the backend advertises
-	//	manual keep the configured values, even when they are larger
-	//
-	// The advertised number can itself be a client-side catalog cap rather than
-	// the server's real limit, so "manual" exists to let a larger window be tried.
+	// EnvContextBudgetMode is a retired ccl directive kept only so old provider
+	// env maps can remove it instead of forwarding it to Claude Code.
 	EnvContextBudgetMode = "CCL_CONTEXT_BUDGET"
-
-	// ContextBudgetManual is the EnvContextBudgetMode value that disables
-	// backend-driven context management.
-	ContextBudgetManual = "manual"
 
 	// EnvAutoCompactPct is Claude Code's percentage-based auto-compact threshold.
 	// It only ever lowers the trigger point, and Claude Code has repeatedly
 	// ignored it when it arrives through the settings file, so ccl also exports it
 	// to the child process environment.
 	EnvAutoCompactPct = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+
+	BalancedMaxContextTokens  = "500000"
+	BalancedAutoCompactWindow = "500000"
+	BalancedAutoCompactPct    = "80"
 )
 
 // ManagedContextEnvKeys are the context-sizing variables ccl forwards. They are
@@ -46,56 +40,33 @@ func ManagedContextEnvKeys() []string {
 	return []string{EnvMaxContextTokens, EnvAutoCompactWindow, EnvAutoCompactPct}
 }
 
-// cclContextPresets are the (max context, auto-compact window) pairs that older
-// ccl versions wrote for their 300K/500K/1M compact presets, and the even older
-// percentage-based pairs.
-//
-// ccl no longer declares context sizes: Claude Code offers a 200K default and a
-// per-slot 1M variant, and it sizes its own compaction buffer for whichever
-// applies. A leftover global preset only breaks that, so these exact pairs are
-// recognized in order to drop them, while any other value is treated as a
-// deliberate manual setting and preserved.
-var cclContextPresets = [][3]string{
-	{"1000000", "900000", ""},
-	{"500000", "400000", ""},
-	{"300000", "200000", ""},
-	{"", "1000000", "90"},
-	{"", "500000", "80"},
-	{"", "200000", "70"},
-	{"", "1000000", ""},
+// IsBalancedContextPreset reports whether env contains ccl's one managed
+// override: a 500K window compacted at 80% (approximately 400K).
+func IsBalancedContextPreset(env map[string]string) bool {
+	return strings.TrimSpace(env[EnvMaxContextTokens]) == BalancedMaxContextTokens &&
+		strings.TrimSpace(env[EnvAutoCompactWindow]) == BalancedAutoCompactWindow &&
+		strings.TrimSpace(env[EnvAutoCompactPct]) == BalancedAutoCompactPct
 }
 
-// IsCclContextPreset reports whether env holds one of the context presets a
-// previous ccl version wrote, rather than values the user chose.
-func IsCclContextPreset(env map[string]string) bool {
-	if len(env) == 0 {
-		return false
-	}
-	actual := [3]string{
-		strings.TrimSpace(env[EnvMaxContextTokens]),
-		strings.TrimSpace(env[EnvAutoCompactWindow]),
-		strings.TrimSpace(env[EnvAutoCompactPct]),
-	}
-	if actual == [3]string{"", "", ""} {
-		return false
-	}
-	for _, preset := range cclContextPresets {
-		if actual == preset {
+// HasManagedContextEnv reports whether any Claude Code context variable is set.
+func HasManagedContextEnv(env map[string]string) bool {
+	for _, key := range ManagedContextEnvKeys() {
+		if strings.TrimSpace(env[key]) != "" {
 			return true
 		}
 	}
 	return false
 }
 
-// ContextBudgetIsManual reports whether the provider opted out of backend-driven
-// context management.
-func ContextBudgetIsManual(p Provider) bool {
-	return strings.EqualFold(strings.TrimSpace(p.Env[EnvContextBudgetMode]), ContextBudgetManual)
-}
-
 type Provider struct {
-	Name     string `yaml:"name" mapstructure:"name"`
-	Type     string `yaml:"type" mapstructure:"type"`
+	Name string `yaml:"name" mapstructure:"name"`
+	// Type selects the upstream protocol for a manual gateway. For OAuth
+	// subscriptions it is only the local adapter compatibility type; the real
+	// backend and authentication flow are selected by OAuthProvider.
+	Type string `yaml:"type" mapstructure:"type"`
+	// Endpoint is an HTTP API base for manual gateways and an oauth:// descriptor
+	// for persisted subscriptions. Provider Session replaces the latter with a
+	// loopback address only in its runtime copy.
 	Endpoint string `yaml:"endpoint" mapstructure:"endpoint"`
 	APIKey   string `yaml:"apikey" mapstructure:"apikey"`
 	// Model is ccl's local model pool used for TUI mapping, slot defaults, and
@@ -108,21 +79,13 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
-	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, and claude. The legacy chatgpt
-	// codex value remains readable.
+	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, and claude. The
+	// legacy chatgpt and codex values remain readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
-	// (basename of the JSON under ~/.ccl/auth). The OAuth runtime loads only
-	// that account when set; empty falls back to all backend credentials.
+	// (basename of the JSON under ~/.ccl/auth). Subscription runtimes require
+	// this binding and load only that account.
 	OAuthAccountCredential string `yaml:"oauthAccountCredential,omitempty" mapstructure:"oauthAccountCredential,omitempty"`
-	// AuthGroup points at Config.AuthGroups. Group providers keep their model
-	// mapping here while config.Load hydrates OAuthAccountCredentials from the
-	// latest group membership before each command/launch.
-	AuthGroup string `yaml:"authGroup,omitempty" mapstructure:"authGroup,omitempty"`
-	// OAuthAccountCredentials is runtime-only. A non-nil slice means the OAuth
-	// runtime must load exactly these files; an empty non-nil slice is an empty
-	// group and must never fall back to every account on the backend.
-	OAuthAccountCredentials []string `yaml:"-" mapstructure:"-"`
 
 	// Custom model configuration (Claude Code native features)
 	CustomModelID  string            `yaml:"customModelId,omitempty" mapstructure:"customModelId,omitempty"`   // ANTHROPIC_CUSTOM_MODEL_OPTION
@@ -151,18 +114,9 @@ type Config struct {
 	LogLevel string `yaml:"log_level,omitempty" mapstructure:"log_level,omitempty"`
 	// DebugMode and DebugVerbose remain readable only to migrate configurations
 	// written before `ccl debug` was renamed to `ccl log`.
-	DebugMode    bool                 `yaml:"debug_mode,omitempty" mapstructure:"debug_mode,omitempty"`
-	DebugVerbose bool                 `yaml:"debug_verbose,omitempty" mapstructure:"debug_verbose,omitempty"`
-	Providers    map[string]Provider  `yaml:"providers" mapstructure:"providers"`
-	AuthGroups   map[string]AuthGroup `yaml:"auth_groups,omitempty" mapstructure:"auth_groups,omitempty"`
-}
-
-// AuthGroup is a homogeneous pool of OAuth credentials. Credentials contains
-// canonical basenames under ~/.ccl/auth; models and Claude slot mappings live
-// on the generated group Provider instead of being repeated per token.
-type AuthGroup struct {
-	OAuthProvider string   `yaml:"oauthProvider" mapstructure:"oauthProvider"`
-	Credentials   []string `yaml:"credentials" mapstructure:"credentials"`
+	DebugMode    bool                `yaml:"debug_mode,omitempty" mapstructure:"debug_mode,omitempty"`
+	DebugVerbose bool                `yaml:"debug_verbose,omitempty" mapstructure:"debug_verbose,omitempty"`
+	Providers    map[string]Provider `yaml:"providers" mapstructure:"providers"`
 }
 
 // OAuthRuntimeType returns the internal compatibility type ccl persists for an

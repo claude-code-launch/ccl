@@ -2,6 +2,7 @@ package oauthproxy
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,72 @@ func TestExplicitLogSeverity(t *testing.T) {
 	}
 }
 
+func TestStructuredEventCarriesCorrelationFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.log")
+	if err := SetLogLevel(LogLevelDebug, path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetLogLevel(LogLevelOff, "") })
+
+	ctx, requestID := withRequestLogID(context.Background())
+	if requestID == "" || requestLogID(ctx) != requestID {
+		t.Fatalf("request id was not retained: generated=%q retained=%q", requestID, requestLogID(ctx))
+	}
+	ctxAgain, requestIDAgain := withRequestLogID(ctx)
+	if requestIDAgain != requestID || requestLogID(ctxAgain) != requestID {
+		t.Fatalf("request id changed inside one request: first=%q second=%q", requestID, requestIDAgain)
+	}
+
+	LogWarnEvent("upstream_retry", "component", "kiro", "request_id", requestID,
+		"status", 429, "retry_after", "2")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"level=WARN", "msg=upstream_retry", "component=kiro", "request_id=" + requestID,
+		"status=429", "retry_after=2",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in structured log:\n%s", want, text)
+		}
+	}
+}
+
+func TestCPADiagnosticStatusRaisesSeverity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cpa.log")
+	if err := SetLogLevel(LogLevelDebug, path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetLogLevel(LogLevelOff, "") })
+
+	w := newDebugFilterWriter()
+	for _, line := range []string{
+		`level=info msg="upstream response" status=503`,
+		`level=info msg="upstream response" status=429`,
+		`level=info msg="token refreshed"`,
+	} {
+		if _, err := w.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`level=ERROR msg=cpa_diagnostic detail="level=info msg=\"upstream response\" status=503"`,
+		`level=WARN msg=cpa_diagnostic detail="level=info msg=\"upstream response\" status=429"`,
+		`level=INFO msg=cpa_diagnostic detail="level=info msg=\"token refreshed\""`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in CPA diagnostic log:\n%s", want, text)
+		}
+	}
+}
+
 func TestDebugFilterWriterDropsSecretsKeepsDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "filter.log")
@@ -126,6 +193,8 @@ func TestDebugFilterWriterDropsSecretsKeepsDiagnostics(t *testing.T) {
 		"access_token=eyJhbGciOi... secret=leak":            false,
 		"refresh_token=abc123 must not appear":              false,
 		"authorization: Bearer eyJ...":                      false,
+		"id_token=eyJhbGciOi...":                            false,
+		"set-cookie: session=secret":                        false,
 		"some routine progress line about nothing":          false,
 	}
 	for line := range cases {
@@ -233,6 +302,19 @@ func TestSessionLogPathIsDerivedFromBase(t *testing.T) {
 	}
 	if got, want := SessionLogPath("../../etc/passwd"), "/var/log/ccl/debug-etcpasswd.log"; got != want {
 		t.Fatalf("sanitized session path = %q, want %q", got, want)
+	}
+}
+
+func TestSafeLogEndpointRemovesCredentialBearingURLParts(t *testing.T) {
+	got := SafeLogEndpoint("https://user:password@example.com/v1/responses?api_key=secret#token")
+	if want := "https://example.com/v1/responses"; got != want {
+		t.Fatalf("SafeLogEndpoint = %q, want %q", got, want)
+	}
+	if got := SafeLogEndpoint("oauth://qoder"); got != "oauth://qoder" {
+		t.Fatalf("OAuth endpoint changed: %q", got)
+	}
+	if got := SafeLogEndpoint("https://example.com/%zz"); got != "<invalid>" {
+		t.Fatalf("invalid endpoint = %q, want <invalid>", got)
 	}
 }
 

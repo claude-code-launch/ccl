@@ -298,12 +298,13 @@ func TestPreviewSettingsWithEmbeddedCodexOAuth(t *testing.T) {
 	}
 
 	result := claude.PreviewSettings(provider.Provider{
-		Name:          "gpt",
-		Type:          "openai_responses",
-		Endpoint:      "oauth://codex",
-		OAuthProvider: "gpt",
-		Model:         "gpt-test",
-		CustomModelID: "gpt-test",
+		Name:                   "gpt",
+		Type:                   "openai_responses",
+		Endpoint:               "oauth://codex",
+		OAuthProvider:          "gpt",
+		OAuthAccountCredential: "codex-test.json",
+		Model:                  "gpt-test",
+		CustomModelID:          "gpt-test",
 		Env: map[string]string{
 			"CLAUDE_CODE_MAX_CONTEXT_TOKENS":  "1000000",
 			"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "900000",
@@ -358,13 +359,14 @@ func TestPreviewSettingsPinsFastMode(t *testing.T) {
 	}
 
 	result := claude.PreviewSettings(provider.Provider{
-		Name:          "chatgpt-fast",
-		Type:          "openai_responses",
-		Endpoint:      "oauth://codex",
-		OAuthProvider: "gpt",
-		Model:         "gpt-test",
-		CustomModelID: "gpt-test",
-		FastMode:      true,
+		Name:                   "chatgpt-fast",
+		Type:                   "openai_responses",
+		Endpoint:               "oauth://codex",
+		OAuthProvider:          "gpt",
+		OAuthAccountCredential: "codex-fast.json",
+		Model:                  "gpt-test",
+		CustomModelID:          "gpt-test",
+		FastMode:               true,
 	})
 	var settings settingsJSON
 	if err := json.Unmarshal([]byte(result), &settings); err != nil {
@@ -654,9 +656,6 @@ func TestPreviewSettingsAppliesRuntimeDefaults(t *testing.T) {
 	if settings.Env[claude.ToolSearchEnv] != claude.DefaultToolSearch {
 		t.Fatalf("tool search = %q", settings.Env[claude.ToolSearchEnv])
 	}
-	if settings.Env[claude.MaxOutputTokensEnv] != claude.DefaultMaxOutputTokens {
-		t.Fatalf("max output tokens = %q", settings.Env[claude.MaxOutputTokensEnv])
-	}
 }
 
 func TestPreviewSettingsAppliesExplicitSubagentMapping(t *testing.T) {
@@ -687,7 +686,7 @@ func TestPreviewSettingsRuntimeDefaultsCanBeOverridden(t *testing.T) {
 			claude.SubagentModelEnv:      "override-subagent",
 			claude.ToolUseConcurrencyEnv: "7",
 			claude.ToolSearchEnv:         "true",
-			claude.MaxOutputTokensEnv:    "64000",
+			"CUSTOM_GATEWAY_FLAG":        "enabled",
 		},
 	}
 
@@ -695,24 +694,8 @@ func TestPreviewSettingsRuntimeDefaultsCanBeOverridden(t *testing.T) {
 	if settings.Env[claude.SubagentModelEnv] != "override-subagent" ||
 		settings.Env[claude.ToolUseConcurrencyEnv] != "7" ||
 		settings.Env[claude.ToolSearchEnv] != "true" ||
-		settings.Env[claude.MaxOutputTokensEnv] != "64000" {
+		settings.Env["CUSTOM_GATEWAY_FLAG"] != "enabled" {
 		t.Fatalf("runtime overrides not applied: %+v", settings.Env)
-	}
-}
-
-func TestPreviewSettingsRejectsOversizedMaxOutputTokenOverride(t *testing.T) {
-	p := provider.Provider{
-		Type:     "anthropic",
-		Endpoint: "https://api.anthropic.com",
-		APIKey:   "sk-test",
-		Env: map[string]string{
-			claude.MaxOutputTokensEnv: "1050000",
-		},
-	}
-
-	settings := previewSettingsJSON(t, p)
-	if got := settings.Env[claude.MaxOutputTokensEnv]; got != claude.DefaultMaxOutputTokens {
-		t.Fatalf("oversized max output tokens resolved to %q, want %q", got, claude.DefaultMaxOutputTokens)
 	}
 }
 
@@ -748,7 +731,7 @@ func TestPreviewSettingsModelPoolDoesNotOverrideExplicitSlots(t *testing.T) {
 	}
 }
 
-func TestLauncherCustomEnv(t *testing.T) {
+func TestLauncherDropsUnsupportedContextEnv(t *testing.T) {
 	p := provider.Provider{
 		Name:     "custom-env-test",
 		Type:     "anthropic",
@@ -773,8 +756,8 @@ func TestLauncherCustomEnv(t *testing.T) {
 		t.Fatalf("No env block found in settings: %s", settingsJSONStr)
 	}
 
-	if env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] != "50" {
-		t.Errorf("Expected CLAUDE_AUTOCOMPACT_PCT_OVERRIDE to be 50, got: %q", env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
+	if _, present := env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]; present {
+		t.Errorf("unsupported context percentage reached Claude Code: %q", env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
 	}
 
 	if env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] != "1" {

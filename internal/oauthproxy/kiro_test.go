@@ -732,7 +732,7 @@ func TestKiroMessagesStreamingConversion(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	pool := newKiroCredentialPool(authDir, nil, false, nil)
+	pool := newKiroCredentialPool(authDir, "")
 	service := &kiroService{
 		apiKey: "local-key",
 		models: []string{"claude-sonnet-4-6"},
@@ -1108,7 +1108,7 @@ func TestKiroAvailableModelsMergeAccounts(t *testing.T) {
 	}
 	service := &kiroService{
 		models: kiroRuntimeModels("claude-sonnet-5"),
-		pool:   newKiroCredentialPool(authDir, nil, false, nil),
+		pool:   newKiroCredentialPool(authDir, ""),
 		client: upstream.Client(),
 		modelCatalog: newKiroModelCatalog(func(region string) string {
 			return upstream.URL + "/" + region + "?origin=AI_EDITOR"
@@ -1165,7 +1165,7 @@ func TestKiroModelsRESTFallsBackAfterUSEast403(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := &kiroService{
-		pool:   newKiroCredentialPool(authDir, nil, false, nil),
+		pool:   newKiroCredentialPool(authDir, ""),
 		client: upstream.Client(),
 		modelCatalog: newKiroModelCatalog(func(region string) string {
 			return upstream.URL + "/" + region + "?origin=AI_EDITOR"
@@ -1275,7 +1275,7 @@ func TestKiroWebPortalModelsCBORIncludesCreditMetadata(t *testing.T) {
 		apiKey:       "local-key",
 		models:       kiroRuntimeModels("claude-opus-5[1m]"),
 		modelCatalog: catalog,
-		pool:         newKiroCredentialPool(authDir, nil, false, nil),
+		pool:         newKiroCredentialPool(authDir, ""),
 		client:       upstream.Client(),
 	}
 	server := httptest.NewServer(service.handler())
@@ -1373,7 +1373,7 @@ func TestKiroWebPortalSessionBootstrapsFromCookies(t *testing.T) {
 	catalog.portalModelsEndpoint = upstream.URL + "/service/KiroWebPortalService/operation/ListAvailableModels"
 	service := &kiroService{
 		modelCatalog: catalog,
-		pool:         newKiroCredentialPool(authDir, nil, false, nil),
+		pool:         newKiroCredentialPool(authDir, ""),
 		client:       upstream.Client(),
 	}
 	models, err := service.availableModels(context.Background())
@@ -1425,7 +1425,7 @@ func TestKiroWebPortalFailureFallsBackToAmazonQCatalog(t *testing.T) {
 	catalog.portalModelsEndpoint = upstream.URL + "/service/KiroWebPortalService/operation/ListAvailableModels"
 	service := &kiroService{
 		modelCatalog: catalog,
-		pool:         newKiroCredentialPool(authDir, nil, false, nil),
+		pool:         newKiroCredentialPool(authDir, ""),
 		client:       upstream.Client(),
 	}
 	models, err := service.availableModels(context.Background())
@@ -1474,7 +1474,7 @@ func TestKiroExpiredIDCTokenRefreshesAndPersists(t *testing.T) {
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pool := newKiroCredentialPool(authDir, nil, false, nil)
+	pool := newKiroCredentialPool(authDir, "")
 	loaded, err := pool.load()
 	if err != nil || len(loaded) != 1 {
 		t.Fatalf("load = %#v, %v", loaded, err)
@@ -1537,7 +1537,7 @@ func TestKiroExpiredSocialTokenRefreshesAndPersists(t *testing.T) {
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pool := newKiroCredentialPool(authDir, nil, false, nil)
+	pool := newKiroCredentialPool(authDir, "")
 	loaded, err := pool.load()
 	if err != nil || len(loaded) != 1 {
 		t.Fatalf("load = %#v, %v", loaded, err)

@@ -86,7 +86,6 @@ const (
 	rowSubagent
 	rowTestModels // Test model availability (optional, costs quota)
 	rowContext    // Context & Compact entry
-	rowMaxOutput
 	rowTools
 	rowToolSearch
 	rowActive
@@ -99,17 +98,6 @@ type configRow struct {
 	// editable marks rows adjusted with ←→ (Protocol/Fast/Runtime) or enter
 	// (model rows / save). Endpoint and API Key are always text-editable.
 	editable bool
-}
-
-// compactRadioOrder is the context sizing choice offered to the user.
-//
-// Claude Code has one default window and a per-slot 1M variant, and it scales its
-// own compaction to whichever a slot uses, so ccl no longer offers intermediate
-// context presets: pick the 1M variant per slot with Extended Context, or keep
-// manual env values.
-var compactRadioOrder = []compactPreset{
-	compactPresetDefault,
-	compactPresetPreserve, // Custom (manual env)
 }
 
 type AdvancedConfigModel struct {
@@ -125,7 +113,6 @@ type AdvancedConfigModel struct {
 	modelContextWindows map[string]int
 	oneMSlots           map[string]bool
 	compactPreset       compactPreset
-	compactState        compactConfigState
 
 	probeEndpoint string
 	probeAPIKey   string
@@ -151,7 +138,6 @@ type AdvancedConfigModel struct {
 	// overwrite their choice.
 	autoConfigured bool
 
-	page   int
 	cursor int
 	width  int
 	height int
@@ -171,17 +157,17 @@ type AdvancedConfigModel struct {
 	lastCopyClickAt  time.Time
 	lastCopyClickRow configRowKind
 
-	// detectionError is set when protocol detection AND model fetching both fail on Page 0.
+	// detectionError is set when protocol detection and model fetching both fail.
 	detectionError error
 	detecting      bool
 	detectProgress int
 	detectFrame    int
 
-	// Page 0
+	// Connection
 	urlInput textinput.Model
 	keyInput textarea.Model
 
-	// Page 1
+	// Model mapping
 	activeSlot        int
 	filterInput       textinput.Model
 	filteredPool      []string
@@ -194,7 +180,7 @@ type AdvancedConfigModel struct {
 	modelTestID       uint64
 	modelTestCanceled bool
 
-	// Page 4
+	// Save state
 	IsActiveChosen bool
 	saveConfirmed  bool
 }
@@ -236,16 +222,7 @@ type modelFetchDoneMsg struct {
 	err                 error
 }
 
-// pageDetected reports whether the full single page (Connection + Model Mapping
-// + Runtime) is shown. It is always true: the config page is one page for both
-// new and existing providers. Before detection the Model Mapping rows render
-// empty with an Auto Configure hint; after it they show the discovered models.
-func (m *AdvancedConfigModel) pageDetected() bool {
-	return true
-}
-
-// currentRow returns the configRowKind the page cursor sits on. It is only
-// meaningful when page == 4 (the single configuration page).
+// currentRow returns the configRowKind the page cursor sits on.
 func (m *AdvancedConfigModel) currentRow() configRowKind {
 	rows := m.visibleRows()
 	if m.cursor < 0 || m.cursor >= len(rows) {
@@ -289,7 +266,6 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 	)
 	rows = append(rows, configRow{kind: rowProtocol, editable: ready})
 	rows = append(rows, configRow{kind: rowFast, editable: ready})
-	rows = append(rows, configRow{kind: rowMaxOutput, editable: ready})
 	rows = append(rows,
 		configRow{kind: rowTools, editable: ready},
 		configRow{kind: rowToolSearch, editable: ready},
@@ -548,17 +524,14 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	fi := textinput.New()
 	fi.Placeholder = ""
 
-	compactState := compactStateFromProvider(*p)
 	m := &AdvancedConfigModel{
 		p:                    p,
 		oneMSlots:            make(map[string]bool),
 		modelContextWindows:  make(map[string]int),
 		modelDisplayMetadata: make(map[string]protocol.ModelInfo),
-		compactPreset:        compactState.preset,
-		compactState:         compactState,
+		compactPreset:        compactPresetFromProvider(*p),
 		probeEndpoint:        p.Endpoint,
 		probeAPIKey:          p.APIKey,
-		page:                 4,
 		cursor:               0,
 		urlInput:             ui,
 		keyInput:             ki,
@@ -624,18 +597,11 @@ func (m *AdvancedConfigModel) textInputHasKeyboard() bool {
 // 输入框拥有键盘时必须让位，否则用户打不出这些字母。方向键没有这个歧义。
 var vimNavAliases = map[string]bool{"q": true, "h": true, "j": true, "k": true, "l": true}
 
-// NewAdvancedConfigModelAtPage1 creates a model starting at page 1 (slot mapping)
-// with a pre-populated model pool, skipping the credential page.
-func NewAdvancedConfigModelAtPage1(p *provider.Provider, modelPool []string) *AdvancedConfigModel {
-	return NewAdvancedConfigModelAtPage1WithMetadata(p, modelPool, nil)
-}
-
-// NewAdvancedConfigModelAtPage1WithMetadata opens the slot mapper with rich
-// catalog labels while keeping modelPool IDs as the selectable and persisted
-// values.
-func NewAdvancedConfigModelAtPage1WithMetadata(p *provider.Provider, modelPool []string, metadata map[string]protocol.ModelInfo) *AdvancedConfigModel {
+// NewAdvancedMappingModel opens the slot mapper with a pre-populated catalog.
+// Model IDs remain the selectable and persisted values; metadata supplies only
+// display labels and context hints.
+func NewAdvancedMappingModel(p *provider.Provider, modelPool []string, metadata map[string]protocol.ModelInfo) *AdvancedConfigModel {
 	m := NewAdvancedConfigModel(p)
-	m.page = 4
 	m.modelPool = modelPool
 	m.modelPoolFromDiscovery = true
 	m.modelDisplayMetadata = copyModelInfoIndex(metadata)
@@ -1034,7 +1000,7 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 
 // canToggleOpenAIProtocol is true when the provider is a manual OpenAI-compatible
 // API-key endpoint. OAuth backends ignore options.Protocol in StartProvider and
-// always use their fixed Chat/Responses path, so the review page must not offer
+// always use their fixed Chat/Responses path, so the page must not offer
 // a toggle that only changes a label.
 func (m *AdvancedConfigModel) canToggleOpenAIProtocol() bool {
 	if m.p == nil || !provider.IsOpenAICompatibleType(m.p.Type) {
@@ -1043,27 +1009,8 @@ func (m *AdvancedConfigModel) canToggleOpenAIProtocol() bool {
 	return strings.TrimSpace(m.p.OAuthProvider) == ""
 }
 
-// maxOutputUpstreamManaged is true when the selected path has no supported
-// upstream output-limit field. ChatGPT OAuth remains editable because the value
-// still configures Claude Code's client limit; Kiro's Amazon Q request schema
-// has no equivalent for Anthropic max_tokens.
-func (m *AdvancedConfigModel) maxOutputUpstreamManaged() bool {
-	if m.p == nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "codex", "copilot", "kiro":
-		return true
-	}
-	// Gemini OAuth (antigravity) maps Claude max_tokens → generationConfig.maxOutputTokens.
-	if provider.IsOpenAIResponsesType(m.p.Type) && protocol.IsCodexBaseEndpoint(m.p.Endpoint) {
-		return true
-	}
-	return false
-}
-
 func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
-	if m.p == nil || !m.canToggleOpenAIProtocol() {
+	if !m.canToggleOpenAIProtocol() {
 		return
 	}
 	if provider.IsOpenAIResponsesType(m.p.Type) {
@@ -1071,12 +1018,10 @@ func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 	} else {
 		m.p.Type = "openai_responses"
 	}
-	setDebugf("page4 protocol toggled type=%q label=%q", m.p.Type, provider.ProtocolLabel(m.p.Type))
+	setDebugf("protocol toggled type=%q label=%q", m.p.Type, provider.ProtocolLabel(m.p.Type))
 }
 
-// Page 4 cursor model (editable summary):
-// optional protocol, optional Fast, then Compact / MaxOutput / Tools / ToolSearch,
-// active checkbox, Apply, Back.
+// Single-page cursor model.
 //
 // Color + control language on this page:
 //
@@ -1107,22 +1052,8 @@ func (m *AdvancedConfigModel) advertisedWindow(modelVal string) (int, bool) {
 	return window, true
 }
 
-// slotModelForIndex returns the model configured in the page-2 row order.
-// canEditFastMode reports whether the Fast (Claude Code /fast) pin can be
-// toggled. It is a settings.json fastMode flag that every provider can carry; it
-// only has a speed effect for the GPT/Codex OAuth backend, but setting it for
-// others is harmless.
-func (m *AdvancedConfigModel) canEditFastMode() bool {
-	return m.p != nil
-}
-
-// Context sizing has no row here: it is expressed per slot by [1m] on page 2,
-// and ccl writes no session-wide context value that could be edited.
-// skipDisabledPage4Cursor moves past rows that are not interactive.
-// direction: +1 when moving down/tab, -1 when moving up/shift-tab.
 // Runtime option cycles. Index 0 is always "Default" (delete managed env).
 var (
-	reviewMaxOutOptions = []string{"", "16000", "32000", "64000", "128000"}
 	reviewToolsOptions  = []string{"", "1", "2", "3", "4", "6", "8"}
 	reviewSearchOptions = []string{"", "true", "false"} // Default / On / Off
 )
@@ -1168,22 +1099,6 @@ func cycleStringOption(current string, options []string, delta int) string {
 	return options[idx]
 }
 
-func (m *AdvancedConfigModel) reviewMaxOutValue() string {
-	if m.p.Env == nil {
-		return ""
-	}
-	if v, err := claude.NormalizeMaxOutputTokens(m.p.Env[claude.MaxOutputTokensEnv]); err == nil {
-		// Only treat known cycle values as selected; custom stays as-is via display.
-		for _, opt := range reviewMaxOutOptions {
-			if opt == v {
-				return v
-			}
-		}
-		return v
-	}
-	return ""
-}
-
 func (m *AdvancedConfigModel) reviewToolsValue() string {
 	if m.p.Env == nil {
 		return ""
@@ -1212,23 +1127,6 @@ func formatEditableValue(label string, isDefault bool) string {
 		return "‹ Default · " + label + " ›"
 	}
 	return "‹ " + label + " ›"
-}
-
-func formatMaxOutLabel(value string) string {
-	switch value {
-	case "":
-		return formatEditableValue("32K", true)
-	case "16000":
-		return formatEditableValue("16K", false)
-	case "32000":
-		return formatEditableValue("32K", false)
-	case "64000":
-		return formatEditableValue("64K", false)
-	case "128000":
-		return formatEditableValue("128K", false)
-	default:
-		return formatEditableValue(value, false)
-	}
 }
 
 func formatToolsLabel(value string) string {
@@ -1268,30 +1166,9 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 	case rowProtocol:
 		m.toggleOpenAIProtocol()
 	case rowFast:
-		if !m.canEditFastMode() {
-			return
-		}
 		// Toggle like Protocol; left/right/enter all flip the pin.
 		m.p.FastMode = !m.p.FastMode
 		setDebugf("fast toggled fast_mode=%t", m.p.FastMode)
-	case rowMaxOutput:
-		if m.maxOutputUpstreamManaged() {
-			return
-		}
-		cur := m.reviewMaxOutValue()
-		// Snap unknown custom values into the cycle at Default.
-		known := false
-		for _, opt := range reviewMaxOutOptions {
-			if opt == cur {
-				known = true
-				break
-			}
-		}
-		if !known {
-			cur = ""
-		}
-		next := cycleStringOption(cur, reviewMaxOutOptions, delta)
-		setProviderEnvValue(m.p, claude.MaxOutputTokensEnv, next)
 	case rowTools:
 		cur := m.reviewToolsValue()
 		known := false
@@ -1329,65 +1206,18 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 	}
 }
 
-// workflowStep keeps the visible flow independent from the internal page IDs.
-// Page 5 is the config-mode choice shown immediately after credentials.
-// Reasoning Effort (old page 3) is no longer part of ccl set — Claude Code
-// manages effort natively via /effort, --effort, and settings.
-// selectedCompactRadioIndex maps the current compact state onto the radio list.
-// Custom/legacy/unknown states land on the Custom radio.
-// selectCompactPreset sets the provider-wide compact budget from a radio index.
-// Per-slot [1m] markers are independent and never cleared here.
 // cycleCompactPreset moves the provider-wide compact budget one step through the
-// radio order (Claude default ↔ Custom). Used by the Context row on the single
-// page; per-slot [1m] markers are independent and never cleared here.
+// two choices. Per-slot [1m] markers remain independent.
 func (m *AdvancedConfigModel) cycleCompactPreset(delta int) {
 	if delta == 0 {
 		return
 	}
-	current := m.compactPreset
-	if m.compactState.custom || m.compactState.legacy {
-		current = compactPresetPreserve
+	if m.compactPreset == compactPresetBalanced {
+		m.compactPreset = compactPresetDefault
+	} else {
+		m.compactPreset = compactPresetBalanced
 	}
-	idx := -1
-	for i, p := range compactRadioOrder {
-		if p == current {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		idx = 0
-	}
-	next := (idx + delta) % len(compactRadioOrder)
-	if next < 0 {
-		next += len(compactRadioOrder)
-	}
-	m.selectCompactPreset(next)
 	setDebugf("cycle compact preset delta=%d preset=%v summary=%s", delta, m.compactPreset, m.compactSummary())
-}
-
-func (m *AdvancedConfigModel) selectCompactPreset(radioIdx int) {
-	if radioIdx < 0 || radioIdx >= len(compactRadioOrder) {
-		return
-	}
-	m.compactPreset = compactRadioOrder[radioIdx]
-	m.compactState = compactConfigState{preset: m.compactPreset}
-	// Custom promises the hand-set context env survives; the launcher only honors
-	// that promise when the provider opts out of ccl's context policy.
-	if m.p == nil {
-		return
-	}
-	if m.compactPreset == compactPresetPreserve {
-		ensureProviderEnvMap(m.p)
-		m.p.Env[provider.EnvContextBudgetMode] = provider.ContextBudgetManual
-		return
-	}
-	if m.p.Env != nil {
-		delete(m.p.Env, provider.EnvContextBudgetMode)
-		if len(m.p.Env) == 0 {
-			m.p.Env = nil
-		}
-	}
 }
 
 // syncOneMForSameModels prompts-free: when a slot toggles [1m], apply the same
@@ -1422,17 +1252,7 @@ func (m *AdvancedConfigModel) syncOneMForSameModels(sourceSlot string, enabled b
 }
 
 func (m *AdvancedConfigModel) compactSummary() string {
-	state := m.compactState
-	state.preset = m.compactPreset
-	if m.compactPreset != compactPresetPreserve {
-		state.legacy = false
-		state.custom = false
-	}
-	summary := compactStateSummary(state, m.oneMSlots)
-	if m.p != nil {
-		summary += backendManagedContextNote(*m.p)
-	}
-	return summary
+	return compactPresetLabel(m.compactPreset)
 }
 
 func reviewOneMSummary(oneMSlots map[string]bool) string {
@@ -1470,9 +1290,6 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 	}
 	if !m.usesOAuth() && detectedType != "" {
 		m.p.Type = detectedType
-		if detectedType == "openai" && protocol.IsCodexBaseEndpoint(m.p.Endpoint) {
-			m.p.Type = "openai_responses"
-		}
 		m.p.AnthropicAuth = ""
 	}
 	if !m.usesOAuth() && detectedType == "anthropic" {
@@ -1704,7 +1521,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					setDebugf("click save blocked: connection dirty or undetected")
 					return m, nil
 				}
-				m.compactState = compactConfigState{preset: m.compactPreset}
 				m.saveConfirmed = true
 				setDebugf("click save requested provider=%q", m.p.Name)
 				return m, tea.Quit
@@ -1892,7 +1708,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toggleOneMAtRow(m.currentRow())
 			} else {
 				switch m.currentRow() {
-				case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
+				case rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
 					m.adjustReviewField(-1)
 				}
 			}
@@ -1905,7 +1721,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toggleOneMAtRow(m.currentRow())
 			} else {
 				switch m.currentRow() {
-				case rowContext, rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch, rowActive:
+				case rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
 					m.adjustReviewField(1)
 				}
 			}
@@ -2005,7 +1821,7 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				setDebugf("enter api key -> test api_key_len=%d", len(m.keyInput.Value()))
 			case rowTest:
 				return m, m.activateRow(rowTest)
-			case rowProtocol, rowFast, rowMaxOutput, rowTools, rowToolSearch:
+			case rowProtocol, rowFast, rowTools, rowToolSearch:
 				m.adjustReviewField(1)
 			case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
 				if !m.connectionReady() {
@@ -2030,7 +1846,6 @@ func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					setDebugf("save blocked: connection dirty or undetected")
 					return m, nil
 				}
-				m.compactState = compactConfigState{preset: m.compactPreset}
 				m.saveConfirmed = true
 				setDebugf("save requested provider=%q type=%q model_count=%d slots=%s one_m=%s compact=%s active_chosen=%t fast_mode=%t", m.p.Name, m.p.Type, countCSV(m.p.Model), slotDebugSummary(*m.p), reviewOneMSummary(m.oneMSlots), m.compactSummary(), m.IsActiveChosen, m.p.FastMode)
 				return m, tea.Quit
@@ -2175,10 +1990,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 	body.WriteString(titleStyle.Render("Connection") + "\n")
 	if m.usesOAuth() {
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Provider", cyanText.Render(m.p.OAuthProvider)))
-		if m.p.AuthGroup != "" {
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Group", cyanText.Render(m.p.AuthGroup)))
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Accounts", cyanText.Render(fmt.Sprintf("%d", len(m.p.OAuthAccountCredentials)))))
-		}
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", cyanText.Render(providerFastSummary(*m.p))))
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
 		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
@@ -2308,7 +2119,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 			ctxPrefix = selectedStyle.Render("> ")
 			ctxVal = selectedStyle.Render("‹ " + m.compactSummary() + " ›")
 		}
-		body.WriteString(fmt.Sprintf("%s%-12s %s\n", ctxPrefix, "Context", ctxVal))
+		body.WriteString(fmt.Sprintf("%s%-18s %s\n", ctxPrefix, "Context & Compact", ctxVal))
 
 		// ── Runtime ──────────────────────────────────────────────────────
 		body.WriteString("\n" + titleStyle.Render("Runtime") + "\n")
@@ -2333,11 +2144,6 @@ func (m *AdvancedConfigModel) View() tea.View {
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
 		}
 		renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
-		if m.maxOutputUpstreamManaged() {
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Max Output", availableStyle.Render(locale.T("上游管理", "Upstream managed"))))
-		} else {
-			renderEditable(rowMaxOutput, "Max Output", formatMaxOutLabel(m.reviewMaxOutValue()))
-		}
 		renderEditable(rowTools, "Tools", formatToolsLabel(m.reviewToolsValue()))
 		renderEditable(rowToolSearch, "Tool Search", formatSearchLabel(m.reviewSearchValue()))
 
@@ -2388,10 +2194,7 @@ func (m *AdvancedConfigModel) View() tea.View {
 		)) + "\n")
 	}
 
-	panelStyle := windowStyle.Width(m.panelWidth())
-	if m.page == 4 {
-		panelStyle = panelStyle.Padding(0, 2)
-	}
+	panelStyle := windowStyle.Width(m.panelWidth()).Padding(0, 2)
 	// Scroll the page body when it exceeds the terminal. The offset is derived
 	// from the cursor row so the focused row stays visible; View does not mutate
 	// model state. Fixed chrome (panel border + footer tip) leaves the rest.
@@ -2616,8 +2419,7 @@ var rowClickLabels = map[configRowKind]string{
 	rowCustom:     "Custom",
 	rowSubagent:   "Subagent",
 	rowTestModels: "Test Model Availability",
-	rowContext:    "Context",
-	rowMaxOutput:  "Max Output",
+	rowContext:    "Context & Compact",
 	rowTools:      "Tools",
 	rowToolSearch: "Tool Search",
 	rowActive:     "Set as active provider",

@@ -62,7 +62,7 @@ func TestProviderTokenStorePersistsQuotaMarkers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := newProviderTokenStoreResolver(authDir, "xai", []string{file}, true, nil)
+	store := newProviderTokenStore(authDir, "xai", file)
 	auths, err := store.List(context.Background())
 	if err != nil || len(auths) != 1 {
 		t.Fatalf("list = %v, %v", auths, err)
@@ -93,7 +93,7 @@ func TestProviderTokenStorePersistsQuotaMarkers(t *testing.T) {
 		t.Fatalf("file quota = %#v", meta["quota"])
 	}
 
-	_, info, err := parseCredential(raw, "grok")
+	info, err := parseCredential(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

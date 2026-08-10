@@ -12,73 +12,19 @@ import (
 	"unicode"
 )
 
-// CredentialInfo is the non-secret identity ccl needs for import, sync, and
-// group selection. FileName is always a basename under ~/.ccl/auth.
+// CredentialInfo is the non-secret state doctor reads from ~/.ccl/auth.
 // Disabled / Unavailable / QuotaExceeded reflect CPA-persisted account health
 // when present in the credential JSON (runtime may also keep these in memory only).
 type CredentialInfo struct {
 	FileName      string
 	Backend       string
-	OAuthProvider string
-	Email         string
 	Disabled      bool
 	Unavailable   bool
 	QuotaExceeded bool
-	Status        string
-	StatusMessage string
-}
-
-// ImportCredential validates an existing ccl-supported auth JSON, normalizes
-// its backend type and filename, and stores an independent 0600 copy in
-// ~/.ccl/auth. providerHint can disambiguate legacy aliases, but cannot change
-// one backend into another.
-func ImportCredential(sourcePath, providerHint string) (CredentialInfo, string, error) {
-	sourcePath = strings.TrimSpace(sourcePath)
-	if sourcePath == "" {
-		return CredentialInfo{}, "", fmt.Errorf("credential path is empty")
-	}
-	info, err := os.Stat(sourcePath)
-	if err != nil {
-		return CredentialInfo{}, "", fmt.Errorf("stat credential %q: %w", sourcePath, err)
-	}
-	if !info.Mode().IsRegular() {
-		return CredentialInfo{}, "", fmt.Errorf("credential %q is not a regular file", sourcePath)
-	}
-	raw, err := os.ReadFile(sourcePath)
-	if err != nil {
-		return CredentialInfo{}, "", fmt.Errorf("read credential %q: %w", sourcePath, err)
-	}
-	metadata, credential, err := parseCredential(raw, providerHint)
-	if err != nil {
-		return CredentialInfo{}, "", fmt.Errorf("%s: %w", filepath.Base(sourcePath), err)
-	}
-
-	identity := credentialIdentity(metadata, raw)
-	fileName := credential.Backend + "-" + identity + ".json"
-	credential.FileName = fileName
-
-	// CPA reads the backend from the JSON body, not the filename.
-	metadata["type"] = credential.Backend
-	normalized, err := json.Marshal(metadata)
-	if err != nil {
-		return CredentialInfo{}, "", fmt.Errorf("encode normalized credential: %w", err)
-	}
-	normalized = append(normalized, '\n')
-
-	authDir, err := ensureAuthDir()
-	if err != nil {
-		return CredentialInfo{}, "", err
-	}
-	targetPath := filepath.Join(authDir, fileName)
-	if err := writeCredentialAtomic(targetPath, normalized); err != nil {
-		return CredentialInfo{}, "", err
-	}
-	return credential, targetPath, nil
 }
 
 // ListCredentials reads supported JSON files directly inside ~/.ccl/auth.
-// Subdirectories are deliberately ignored so import/sync have the same
-// one-level scope.
+// Subdirectories and unrelated JSON files are ignored.
 func ListCredentials() ([]CredentialInfo, error) {
 	authDir, err := ensureAuthDir()
 	if err != nil {
@@ -97,43 +43,37 @@ func ListCredentials() ([]CredentialInfo, error) {
 		if readErr != nil {
 			return nil, fmt.Errorf("read credential %s: %w", entry.Name(), readErr)
 		}
-		_, credential, parseErr := parseCredential(raw, "")
+		credential, parseErr := parseCredential(raw)
 		if parseErr != nil {
-			// Keep sync resilient to unrelated or partially-written JSON files.
+			// Keep diagnostics resilient to unrelated or partially-written files.
 			continue
 		}
 		credential.FileName = entry.Name()
 		credentials = append(credentials, credential)
 	}
 	sort.Slice(credentials, func(i, j int) bool {
-		if credentials[i].OAuthProvider != credentials[j].OAuthProvider {
-			return credentials[i].OAuthProvider < credentials[j].OAuthProvider
+		if credentials[i].Backend != credentials[j].Backend {
+			return credentials[i].Backend < credentials[j].Backend
 		}
 		return strings.ToLower(credentials[i].FileName) < strings.ToLower(credentials[j].FileName)
 	})
 	return credentials, nil
 }
 
-func parseCredential(raw []byte, providerHint string) (map[string]any, CredentialInfo, error) {
+func parseCredential(raw []byte) (CredentialInfo, error) {
 	metadata := make(map[string]any)
 	if err := json.Unmarshal(raw, &metadata); err != nil {
-		return nil, CredentialInfo{}, fmt.Errorf("invalid credential JSON: %w", err)
+		return CredentialInfo{}, fmt.Errorf("invalid credential JSON: %w", err)
 	}
 	normalizeKiroCredentialMetadata(metadata)
 	rawType, _ := metadata["type"].(string)
 	backend, err := normalizeCredentialBackend(rawType)
 	if err != nil {
-		return nil, CredentialInfo{}, err
+		return CredentialInfo{}, err
 	}
-	publicProvider, err := publicProviderForBackend(backend, providerHint)
-	if err != nil {
-		return nil, CredentialInfo{}, err
-	}
-	email, _ := metadata["email"].(string)
 	disabled, _ := metadata["disabled"].(bool)
 	unavailable, _ := metadata["unavailable"].(bool)
 	status, _ := metadata["status"].(string)
-	statusMessage, _ := metadata["status_message"].(string)
 	quotaExceeded := credentialQuotaExceeded(metadata)
 	if !unavailable {
 		// Some CPA builds only surface unavailability via status/quota.
@@ -142,15 +82,11 @@ func parseCredential(raw []byte, providerHint string) (map[string]any, Credentia
 			unavailable = true
 		}
 	}
-	return metadata, CredentialInfo{
+	return CredentialInfo{
 		Backend:       backend,
-		OAuthProvider: publicProvider,
-		Email:         strings.TrimSpace(email),
 		Disabled:      disabled,
 		Unavailable:   unavailable,
 		QuotaExceeded: quotaExceeded,
-		Status:        strings.TrimSpace(status),
-		StatusMessage: strings.TrimSpace(statusMessage),
 	}, nil
 }
 
@@ -213,56 +149,6 @@ func normalizeCredentialBackend(value string) (string, error) {
 	}
 }
 
-func publicProviderForBackend(backend, hint string) (string, error) {
-	hint = strings.ToLower(strings.TrimSpace(hint))
-	switch backend {
-	case ProviderCodex:
-		switch hint {
-		case "", ProviderChatGPT, ProviderChatGPTLegacy:
-			return ProviderChatGPT, nil
-		default:
-			return "", fmt.Errorf("credential provider hint %q is incompatible with codex backend", hint)
-		}
-	case ProviderCopilot:
-		if hint != "" && hint != ProviderCopilot {
-			return "", fmt.Errorf("credential provider hint %q is incompatible with copilot backend", hint)
-		}
-		return ProviderCopilot, nil
-	case ProviderQoder:
-		if hint != "" && hint != ProviderQoder {
-			return "", fmt.Errorf("credential provider hint %q is incompatible with qoder backend", hint)
-		}
-		return ProviderQoder, nil
-	case backendXAI:
-		if hint != "" && hint != ProviderGrok {
-			return "", fmt.Errorf("credential provider hint %q is incompatible with xai backend", hint)
-		}
-		return ProviderGrok, nil
-	case "antigravity":
-		if hint != "" && hint != ProviderGemini {
-			return "", fmt.Errorf("credential provider hint %q is incompatible with antigravity backend", hint)
-		}
-		return ProviderGemini, nil
-	case ProviderKimi:
-		if hint != "" && hint != ProviderKimi {
-			return "", fmt.Errorf("credential provider hint %q is incompatible with kimi backend", hint)
-		}
-		return ProviderKimi, nil
-	case ProviderKiro:
-		if hint != "" && hint != ProviderKiro {
-			return "", fmt.Errorf("credential provider hint %q is incompatible with kiro backend", hint)
-		}
-		return ProviderKiro, nil
-	case ProviderClaude:
-		if hint != "" && hint != ProviderClaude {
-			return "", fmt.Errorf("credential provider hint %q is incompatible with claude backend", hint)
-		}
-		return ProviderClaude, nil
-	default:
-		return "", fmt.Errorf("unsupported credential backend %q", backend)
-	}
-}
-
 func credentialIdentity(metadata map[string]any, raw []byte) string {
 	keys := []string{"email", "login", "user_id", "sub", "subject", "account_id", "profile_arn", "client_id", "project_id", "device_id"}
 	rawType, _ := metadata["type"].(string)
@@ -286,7 +172,7 @@ func credentialIdentity(metadata map[string]any, raw []byte) string {
 // normalizeKiroCredentialMetadata accepts both ccl's snake_case credential
 // shape and the camelCase token file written by Kiro IDE under
 // ~/.aws/sso/cache/kiro-auth-token.json. The direct Kiro runtime consumes
-// snake_case metadata, so imports normalize before persistence.
+// snake_case metadata, so loading normalizes it first.
 func normalizeKiroCredentialMetadata(metadata map[string]any) {
 	if metadata == nil {
 		return

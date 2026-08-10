@@ -219,26 +219,13 @@ func TestNormalizeVersionedURLs(t *testing.T) {
 	}
 }
 
-func TestDedicatedCodexEndpointClassification(t *testing.T) {
-	if !protocol.IsCodexBaseEndpoint("https://new.sharedchat.cc/codex") {
-		t.Fatal("expected /codex to be classified as a dedicated Codex base endpoint")
+func TestResponsesURLsTreatCodexAsOrdinaryBasePath(t *testing.T) {
+	base := "https://new.sharedchat.cc/codex/v1"
+	if got := protocol.NormalizeOpenAIModelsURL(base); got != base+"/models" {
+		t.Fatalf("models URL = %q", got)
 	}
-	if protocol.IsCodexBaseEndpoint("https://new.sharedchat.cc/codex/v1") {
-		t.Fatal("/codex/v1 must not be classified as a valid Codex base endpoint")
-	}
-
-	for _, endpoint := range []string{
-		"https://new.sharedchat.cc/codex/v1",
-		"https://new.sharedchat.cc/codex/v1/models",
-		"https://new.sharedchat.cc/codex/v1/responses",
-	} {
-		suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint)
-		if !invalid || suggestion != "https://new.sharedchat.cc/codex" {
-			t.Errorf("InvalidCodexV1EndpointSuggestion(%q) = %q, %t", endpoint, suggestion, invalid)
-		}
-	}
-	if _, invalid := protocol.InvalidCodexV1EndpointSuggestion("https://api.openai.com/v1"); invalid {
-		t.Fatal("ordinary OpenAI /v1 endpoint was incorrectly rejected")
+	if got := protocol.NormalizeOpenAIResponsesURL(base); got != base+"/responses" {
+		t.Fatalf("responses URL = %q", got)
 	}
 }
 

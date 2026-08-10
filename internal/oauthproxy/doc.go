@@ -1,10 +1,18 @@
 // Package oauthproxy implements ccl's local subscription and protocol runtimes.
 //
-// Production traffic for openai / openai_responses / OAuth providers goes
-// through this package only. Claude Code talks to a loopback Anthropic
-// Messages endpoint. Most providers use embedded CLIProxyAPI; Kiro uses ccl's
-// direct Messages-to-Amazon-Q adapter and AWS EventStream decoder; Qoder uses
-// ccl's direct OAuth/COSY/SSE adapter and never invokes Qoder CLI.
+// Claude Code talks to an Anthropic Messages endpoint. Manual OpenAI Chat and
+// Responses gateways plus GPT/Gemini/Grok/Kimi/Claude subscriptions use the
+// embedded CLIProxyAPI SDK for their data plane. Copilot is a hybrid: ccl owns
+// auth, model discovery, token exchange, retry, and upstream routing while CPA
+// owns protocol conversion. Kiro and Qoder use ccl's direct runtimes and their
+// request data planes never enter CPA. Direct Anthropic API-key gateways bypass
+// this package entirely.
+//
+// Error recovery follows the data-plane owner. CPA-backed providers use CPA's
+// native retry/cooldown and Retry-After handling without a CCL result hook.
+// Copilot, Qoder, and Kiro keep only the recovery behavior required by their
+// upstreams; notably Kiro rotates credentials and retries burst 429s after
+// 1s, 2s, and 4s.
 //
 // # Compatibility boundary with CLIProxyAPI
 //
@@ -40,13 +48,7 @@
 //     Stop unregisters every auth ID from cliproxy.GlobalModelRegistry so a
 //     later provider does not inherit another backend's routes.
 //
-//  6. CCL cooldown override (codex_cooldown.go)
-//     GPT OAuth and ordinary API-key runtimes shorten 408/5xx failures to 2s
-//     and 401/429 failures to 10s. The result hook updates the SDK manager after
-//     MarkResult and clears the SDK registry's longer 401/429 side effects.
-//     Kiro has an independent direct adapter and does not use this policy.
-//
-//  7. GitHub Copilot direct gateway (copilot_runtime.go)
+//  6. GitHub Copilot direct gateway (copilot_runtime.go)
 //     Copilot does not use CLIProxyAPI OAuth credentials. ccl authenticates
 //     with GitHub, discovers the account's authoritative model catalog, and
 //     routes each model to its advertised Chat, Responses, or Messages
@@ -54,11 +56,17 @@
 //     testing the real Copilot API: they can change model visibility or
 //     entitlement decisions.
 //
-//  8. Qoder direct runtime (qoder_*.go)
+//  7. Qoder direct runtime (qoder_*.go)
 //     Qoder browser OAuth, refresh, COSY signing, WAF body encoding, model
 //     discovery, and Anthropic Messages translation all run in this process.
 //     The upstream request's session_type="qodercli" is a protocol identity
 //     field only; do not replace the direct runtime with a qodercli subprocess.
+//
+//  8. Kiro direct runtime (kiro_*.go)
+//     Kiro Portal PKCE / Builder ID auth, credential refresh, model discovery,
+//     Messages-to-Amazon-Q conversion, retry, and AWS EventStream decoding all
+//     run in ccl. Do not route Kiro traffic through CPA unless the complete
+//     direct-runtime behavior is deliberately replaced and regression-tested.
 //
 // When upgrading CLIProxyAPI, run at least:
 //
@@ -69,7 +77,7 @@
 // openai_responses API-key provider, and a plain openai(chat) provider with
 // streaming + tool calls.
 //
-// Note: dedicated Codex bases still set Originator to embeddedCodexOriginator
-// ("codex_cli_rs") for custom API-key Codex endpoints. That is independent of
-// CLIProxyAPI's default codex-tui User-Agent for OAuth/SDK-managed requests.
+// CPA names its API-key Responses executor and YAML block "codex" internally.
+// ccl treats that as an SDK implementation detail: every API-key Responses
+// gateway follows the same path and receives no synthetic Codex client headers.
 package oauthproxy

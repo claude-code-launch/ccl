@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -50,7 +51,7 @@ func (e *kiroUpstreamError) Error() string {
 	return fmt.Sprintf("Kiro upstream returned HTTP %d: %s", e.status, e.body)
 }
 
-func startKiroOAuthWithFiles(parent context.Context, modelSpec string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) (*Runtime, error) {
+func startKiroOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -58,15 +59,12 @@ func startKiroOAuthWithFiles(parent context.Context, modelSpec string, credentia
 	if err != nil {
 		return nil, err
 	}
-	pool := newKiroCredentialPool(authDir, credentialFiles, restrictToFiles, resolver)
+	pool := newKiroCredentialPool(authDir, credentialFile)
 	credentials, err := pool.load()
 	if err != nil {
 		return nil, err
 	}
 	if len(credentials) == 0 {
-		if restrictToFiles && len(credentialFiles) == 0 {
-			return nil, fmt.Errorf("OAuth group for %s has no credentials; edit it with `ccl oauth group` or run `ccl oauth sync`", ProviderKiro)
-		}
 		return nil, fmt.Errorf("no %s credentials found; run `ccl oauth %s` first", ProviderKiro, ProviderKiro)
 	}
 
@@ -133,8 +131,8 @@ func startKiroOAuthWithFiles(parent context.Context, modelSpec string, credentia
 		case <-proxyRuntime.done:
 		}
 	}()
-	LogInfof("runtime start oauth provider=kiro backend=kiro protocol=anthropic port=%s credential_files=%d restricted=%t model_count=%d",
-		listener.Addr().String(), len(credentialFiles), restrictToFiles, len(models))
+	LogInfof("runtime start oauth provider=kiro backend=kiro protocol=anthropic port=%s credential_file=%s model_count=%d",
+		listener.Addr().String(), filepath.Base(credentialFile), len(models))
 	return proxyRuntime, nil
 }
 
@@ -243,50 +241,71 @@ func (s *kiroService) handleCountTokens(writer http.ResponseWriter, request *htt
 }
 
 func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+	requestCtx, requestID := withRequestLogID(request.Context())
+	started := time.Now()
 	if !s.authorized(request) {
+		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
+			"path", request.URL.Path, "status", http.StatusUnauthorized, "reason", "invalid_local_api_key")
 		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
 	if request.Method != http.MethodPost {
+		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
+			"path", request.URL.Path, "method", request.Method, "status", http.StatusMethodNotAllowed,
+			"reason", "unsupported_method")
 		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
-	LogDebugf("kiro messages inbound path=%q content_length=%d transfer_encoding_count=%d content_type=%q content_encoding=%q",
-		request.URL.RequestURI(), request.ContentLength, len(request.TransferEncoding),
-		request.Header.Get("Content-Type"), request.Header.Get("Content-Encoding"))
+	LogDebugEvent("request_received", "component", "kiro", "request_id", requestID,
+		"path", request.URL.RequestURI(), "content_length", request.ContentLength,
+		"transfer_encoding_count", len(request.TransferEncoding), "content_type", request.Header.Get("Content-Type"),
+		"content_encoding", request.Header.Get("Content-Encoding"))
 	raw, err := readAnthropicInboundBody(writer, request, kiroMaxInboundRequestBytes)
 	if err != nil {
+		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
+			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "read_body", "error", err)
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	LogDebugf("kiro messages body bytes=%d", len(raw))
+	LogDebugEvent("request_body_read", "component", "kiro", "request_id", requestID, "body_bytes", len(raw))
 	if len(bytes.TrimSpace(raw)) == 0 {
+		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
+			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "empty_body")
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Anthropic Messages request: request body is empty")
 		return
 	}
 	converted, err := convertAnthropicToKiro(raw)
 	if err != nil {
+		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
+			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "request_conversion", "error", err)
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	if converted.droppedMedia > 0 || converted.dedupedMedia > 0 ||
 		converted.resizedMedia > 0 || converted.correctedMedia > 0 {
-		LogWarnf("kiro inline media normalized kept=%d capped=%d deduplicated=%d resized=%d mime_corrected=%d limit=%d",
-			converted.inlineMedia, converted.droppedMedia, converted.dedupedMedia,
-			converted.resizedMedia, converted.correctedMedia, kiroMaxInlineMediaSegments)
+		LogWarnEvent("request_normalized", "component", "kiro", "request_id", requestID,
+			"kind", "inline_media", "kept", converted.inlineMedia, "capped", converted.droppedMedia,
+			"deduplicated", converted.dedupedMedia, "resized", converted.resizedMedia,
+			"mime_corrected", converted.correctedMedia, "limit", kiroMaxInlineMediaSegments)
 	}
 	if converted.droppedToolUses > 0 || converted.droppedToolRuns > 0 || converted.emptyToolRuns > 0 {
 		// dropped_results > 0 means the model will not see those tool outputs at
 		// all, which it reports as the tooling being broken; empty_results are
 		// forwarded with a placeholder instead of an empty string.
-		LogWarnf("kiro tool pairing normalized dropped_uses=%d dropped_results=%d empty_results=%d",
-			converted.droppedToolUses, converted.droppedToolRuns, converted.emptyToolRuns)
+		LogWarnEvent("request_normalized", "component", "kiro", "request_id", requestID,
+			"kind", "tool_pairing", "dropped_uses", converted.droppedToolUses,
+			"dropped_results", converted.droppedToolRuns, "empty_results", converted.emptyToolRuns)
 	}
 	if converted.truncatedTexts > 0 {
-		LogWarnf("kiro content fields truncated fields=%d dropped_bytes=%d largest_original_bytes=%d limit=%d",
-			converted.truncatedTexts, converted.droppedText, converted.largestText, kiroMaxTextFieldBytes)
+		LogWarnEvent("request_normalized", "component", "kiro", "request_id", requestID,
+			"kind", "content_truncation", "fields", converted.truncatedTexts,
+			"dropped_bytes", converted.droppedText, "largest_original_bytes", converted.largestText,
+			"limit", kiroMaxTextFieldBytes)
 	}
-	upstream, err := s.callUpstream(request.Context(), converted)
+	LogDebugEvent("request_converted", "component", "kiro", "request_id", requestID,
+		"client_model", converted.clientModel, "upstream_model", converted.model, "stream", converted.stream,
+		"body_bytes", len(raw))
+	upstream, err := s.callUpstream(requestCtx, converted)
 	if err != nil {
 		// Forward upstream client errors unchanged (status and Anthropic error
 		// type) so Claude Code can apply its own handling: back off on 429,
@@ -295,15 +314,18 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		var upstreamErr *kiroUpstreamError
 		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
 			errorType := anthropicErrorType(upstreamErr.status)
-			LogUpstreamStatusf(upstreamErr.status, "kiro messages forwarded client error model=%q status=%d type=%s stream=%t",
-				converted.model, upstreamErr.status, errorType, converted.stream)
+			LogUpstreamEvent(upstreamErr.status, "request_failed", "component", "kiro", "request_id", requestID,
+				"model", converted.model, "status", upstreamErr.status, "returned_status", upstreamErr.status,
+				"error_type", errorType, "stream", converted.stream, "duration", logDuration(started))
 			// err, not upstreamErr: the wrapper carries extra context such as a
 			// failed token refresh.
 			writeAnthropicError(writer, upstreamErr.status, errorType, err.Error())
 			return
 		}
 		// Everything else is a proxy-side or upstream server failure.
-		LogErrorf("kiro messages failed model=%q stream=%t error=%v", converted.model, converted.stream, err)
+		LogErrorEvent("request_failed", "component", "kiro", "request_id", requestID,
+			"model", converted.model, "returned_status", http.StatusBadGateway, "stream", converted.stream,
+			"duration", logDuration(started), "error", err)
 		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
@@ -320,6 +342,8 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		streamErr := processKiroEventStream(upstream.Body, assembler)
 		s.recordKiroUsage(converted, assembler)
 		if streamErr != nil {
+			LogErrorEvent("stream_conversion_failed", "component", "kiro", "request_id", requestID,
+				"model", converted.model, "duration", logDuration(started), "error", streamErr)
 			_ = assembler.emit("error", map[string]any{
 				"type": "error",
 				"error": map[string]any{
@@ -328,17 +352,26 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 				},
 			})
 		}
+		if streamErr == nil {
+			LogDebugEvent("request_complete", "component", "kiro", "request_id", requestID,
+				"model", converted.model, "status", http.StatusOK, "stream", true, "duration", logDuration(started))
+		}
 		return
 	}
 
 	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
 	if err := processKiroEventStream(upstream.Body, assembler); err != nil {
+		LogErrorEvent("stream_conversion_failed", "component", "kiro", "request_id", requestID,
+			"model", converted.model, "returned_status", http.StatusBadGateway,
+			"duration", logDuration(started), "error", err)
 		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	s.recordKiroUsage(converted, assembler)
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(assembler.response())
+	LogDebugEvent("request_complete", "component", "kiro", "request_id", requestID,
+		"model", converted.model, "status", http.StatusOK, "stream", false, "duration", logDuration(started))
 }
 
 // recordKiroUsage adds the token totals of one completed turn to the runtime's
@@ -374,13 +407,13 @@ func readAnthropicInboundBody(writer http.ResponseWriter, request *http.Request,
 
 // drainKiroErrorBody reads a bounded prefix of an upstream error body and closes
 // it, so the diagnostics survive after the response is discarded.
-func drainKiroErrorBody(response *http.Response) string {
+func drainKiroErrorBody(ctx context.Context, response *http.Response) string {
 	if response == nil || response.Body == nil {
 		return ""
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, kiroMaxUpstreamErrorBytes))
 	_ = response.Body.Close()
-	DebugHTTPBody(fmt.Sprintf("kiro response status=%d", response.StatusCode), body)
+	DebugHTTPBody(fmt.Sprintf("kiro response request_id=%s status=%d", requestLogID(ctx), response.StatusCode), body)
 	return strings.TrimSpace(string(body))
 }
 
@@ -401,7 +434,7 @@ func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConverted
 		backoff = kiroRateLimitBackoff
 	}
 	for attempt := 0; ; attempt++ {
-		response, err := s.callUpstreamOnce(ctx, converted)
+		response, err := s.callUpstreamOnce(ctx, converted, attempt+1)
 		if err == nil {
 			return response, nil
 		}
@@ -409,7 +442,9 @@ func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConverted
 			return nil, err
 		}
 		delay := backoff[attempt]
-		LogWarnf("kiro upstream rate limited model=%q retry=%d/%d wait=%s", converted.model, attempt+1, len(backoff), delay)
+		LogWarnEvent("upstream_retry", "component", "kiro", "request_id", requestLogID(ctx),
+			"model", converted.model, "status", http.StatusTooManyRequests,
+			"retry", attempt+1, "retry_limit", len(backoff), "wait", delay, "action", "retry_all_credentials")
 		if waitErr := sleepContext(ctx, delay); waitErr != nil {
 			// The client gave up: report the rate limit, not the cancellation.
 			return nil, err
@@ -436,7 +471,7 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 
 // callUpstreamOnce tries every selected credential once and returns the first
 // successful response.
-func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConvertedRequest) (*http.Response, error) {
+func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConvertedRequest, round int) (*http.Response, error) {
 	credentials, err := s.pool.orderedCredentials()
 	if err != nil {
 		return nil, err
@@ -447,15 +482,25 @@ func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConve
 	var lastErr error
 	var rateLimitErr error
 	otherFailure := false
-	for _, candidate := range credentials {
+	for index, candidate := range credentials {
+		attempt := index + 1
 		credential, err := s.pool.usableCredential(ctx, candidate, false)
 		if err != nil {
+			LogWarnEvent("credential_unavailable", "component", "kiro", "request_id", requestLogID(ctx),
+				"round", round, "attempt", attempt, "credential_count", len(credentials),
+				"credential", candidate.fileName, "error", err)
 			lastErr = err
 			otherFailure = true
 			continue
 		}
+		LogDebugEvent("upstream_attempt", "component", "kiro", "request_id", requestLogID(ctx),
+			"round", round, "attempt", attempt, "credential_count", len(credentials),
+			"credential", credential.fileName, "model", converted.model)
 		response, err := s.doUpstreamRequest(ctx, converted, credential)
 		if err != nil {
+			LogWarnEvent("upstream_attempt_failed", "component", "kiro", "request_id", requestLogID(ctx),
+				"round", round, "attempt", attempt, "credential_count", len(credentials),
+				"credential", credential.fileName, "model", converted.model, "error", err)
 			lastErr = err
 			otherFailure = true
 			continue
@@ -463,7 +508,10 @@ func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConve
 		if response.StatusCode == http.StatusUnauthorized {
 			// Drain the rejected response before closing it: if the refresh then
 			// fails we still have the upstream diagnostics to report.
-			unauthorized := drainKiroErrorBody(response)
+			unauthorized := drainKiroErrorBody(ctx, response)
+			LogWarnEvent("credential_refresh", "component", "kiro", "request_id", requestLogID(ctx),
+				"round", round, "attempt", attempt, "credential", credential.fileName,
+				"status", http.StatusUnauthorized, "action", "force_refresh")
 			refreshed, refreshErr := s.pool.usableCredential(ctx, credential, true)
 			if refreshErr != nil {
 				lastErr = fmt.Errorf("%w (credential refresh failed: %v)",
@@ -481,7 +529,7 @@ func (s *kiroService) callUpstreamOnce(ctx context.Context, converted *kiroConve
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			return response, nil
 		}
-		upstreamErr := &kiroUpstreamError{status: response.StatusCode, body: drainKiroErrorBody(response)}
+		upstreamErr := &kiroUpstreamError{status: response.StatusCode, body: drainKiroErrorBody(ctx, response)}
 		if response.StatusCode == http.StatusBadRequest {
 			return nil, upstreamErr
 		}
@@ -536,17 +584,22 @@ func (s *kiroService) doUpstreamRequest(ctx context.Context, converted *kiroConv
 	if strings.EqualFold(credential.authMethod, "external_idp") {
 		request.Header.Set("tokentype", "EXTERNAL_IDP")
 	}
-	LogDebugf("kiro upstream request host=%q model=%q credential=%q body_bytes=%d media=%d budget_original_bytes=%d budget_final_bytes=%d budget_original_tokens=%d budget_final_tokens=%d budget_dropped_media=%d budget_dropped_history=%d budget_truncated_texts=%d budget_dropped_text_bytes=%d budget_dropped_tools=%d",
-		request.URL.Host, converted.model, credential.fileName, len(raw), converted.inlineMedia,
-		converted.originalBody, converted.finalBody, converted.originalTokens, converted.finalTokens,
-		converted.budgetMedia, converted.budgetHistory,
-		converted.budgetTexts, converted.budgetTextBytes, converted.budgetTools)
-	DebugHTTPBody("kiro request "+request.URL.Path, raw)
+	LogDebugEvent("upstream_request", "component", "kiro", "request_id", requestLogID(ctx),
+		"host", request.URL.Host, "model", converted.model, "credential", credential.fileName,
+		"body_bytes", len(raw), "media", converted.inlineMedia, "budget_original_bytes", converted.originalBody,
+		"budget_final_bytes", converted.finalBody, "budget_original_tokens", converted.originalTokens,
+		"budget_final_tokens", converted.finalTokens, "budget_dropped_media", converted.budgetMedia,
+		"budget_dropped_history", converted.budgetHistory, "budget_truncated_texts", converted.budgetTexts,
+		"budget_dropped_text_bytes", converted.budgetTextBytes, "budget_dropped_tools", converted.budgetTools)
+	DebugHTTPBody(fmt.Sprintf("kiro request request_id=%s path=%s", requestLogID(ctx), request.URL.Path), raw)
+	started := time.Now()
 	response, err := s.client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("call Kiro upstream: %w", err)
 	}
-	LogUpstreamStatusf(response.StatusCode, "kiro upstream response status=%d model=%q credential=%q", response.StatusCode, converted.model, credential.fileName)
+	LogUpstreamEvent(response.StatusCode, "upstream_response", "component", "kiro", "request_id", requestLogID(ctx),
+		"status", response.StatusCode, "model", converted.model, "credential", credential.fileName,
+		"retry_after", response.Header.Get("Retry-After"), "duration", logDuration(started))
 	return response, nil
 }
 

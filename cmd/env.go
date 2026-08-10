@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/spf13/cobra"
@@ -70,14 +69,6 @@ func runEnvSet(args []string) error {
 	if key == "" {
 		return fmt.Errorf("key cannot be empty")
 	}
-	if key == claude.MaxOutputTokensEnv {
-		normalized, err := claude.NormalizeMaxOutputTokens(val)
-		if err != nil {
-			return fmt.Errorf("%s %w", key, err)
-		}
-		val = normalized
-	}
-
 	p.Env[key] = val
 	cfg.Providers[cfg.ActiveProvider] = p
 	if err := config.Save(cfg); err != nil {

@@ -7,10 +7,14 @@ import (
 	"io"
 	stdlog "log"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // defaultLogName is the base name for ccl's per-session runtime logs. The full
@@ -36,7 +40,10 @@ var (
 	logPath    string
 	logFile    *os.File
 	logger     = slog.New(slog.NewTextHandler(io.Discard, nil))
+	requestSeq atomic.Uint64
 )
+
+type requestLogIDKey struct{}
 
 // sensitiveMarkers identifies log lines that likely carry credentials. The
 // whole line is dropped from third-party logger output to avoid leaking refresh
@@ -46,8 +53,15 @@ var sensitiveMarkers = []string{
 	"refresh token",
 	"access_token",
 	"access token",
+	"id_token",
+	"id token",
+	"client_secret",
+	"client secret",
 	"authorization:",
 	"authorization =",
+	"proxy-authorization:",
+	"cookie:",
+	"set-cookie:",
 	"api_key",
 	"apikey",
 	"api-key",
@@ -63,12 +77,20 @@ var interestingMarkers = []string{
 	"refresh",
 	"cooldown",
 	"unauthorized",
+	"400",
 	"401",
+	"403",
+	"404",
+	"408",
+	"409",
+	"413",
+	"422",
 	"429",
 	"500",
 	"502",
 	"503",
 	"504",
+	"529",
 	"rate limit",
 	"ratelimit",
 	"quota",
@@ -85,6 +107,7 @@ var interestingMarkers = []string{
 	"context_too_large",
 	"request_too_large",
 	"too large",
+	"overloaded",
 	"invalid_request",
 }
 
@@ -171,6 +194,8 @@ func SetLogLevel(level LogLevel, path string) error {
 	logPath = path
 	logFile = f
 	logger = slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level.slogLevel()}))
+	logger.Log(context.Background(), slog.LevelInfo, "log_session_start",
+		"configured_level", level, "path", path, "pid", os.Getpid())
 	return nil
 }
 
@@ -280,11 +305,56 @@ func sanitizeLogSessionName(session string) string {
 	return strings.Trim(builder.String(), ".-_")
 }
 
+// SafeLogEndpoint keeps a URL useful for routing diagnostics without retaining
+// userinfo, query parameters, or fragments, which commonly carry API keys on
+// third-party gateways.
+func SafeLogEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid>"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 // LogDebugEnabled reports whether DEBUG entries are collected. HTTP payloads
 // are deliberately DEBUG only because they can contain full prompts, tools, and
 // user-provided secrets.
 func LogDebugEnabled() bool {
 	return CurrentLogLevel() == LogLevelDebug
+}
+
+// withRequestLogID gives every request handled by a ccl-owned data plane a
+// compact correlation ID. IDs only need to be unique inside one process: every
+// Claude session already owns a separate log file.
+func withRequestLogID(ctx context.Context) (context.Context, string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id := requestLogID(ctx); id != "" {
+		return ctx, id
+	}
+	id := "r" + strconv.FormatUint(requestSeq.Add(1), 36)
+	return context.WithValue(ctx, requestLogIDKey{}, id), id
+}
+
+func requestLogID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(requestLogIDKey{}).(string)
+	return id
+}
+
+func logDuration(start time.Time) time.Duration {
+	return time.Since(start).Round(time.Millisecond)
 }
 
 func logf(level slog.Level, format string, args ...any) {
@@ -302,6 +372,17 @@ func logMessage(level slog.Level, message string) {
 	l.Log(ctx, level, message)
 }
 
+func logEvent(level slog.Level, event string, attrs ...any) {
+	logStateMu.RLock()
+	l := logger
+	logStateMu.RUnlock()
+	ctx := context.Background()
+	if !l.Enabled(ctx, level) {
+		return
+	}
+	l.Log(ctx, level, event, attrs...)
+}
+
 // LogInfof writes a normal runtime event. Existing ccl diagnostics use this
 // level so `ccl log on` is useful without exposing request payloads.
 func LogInfof(format string, args ...any) { logf(slog.LevelInfo, format, args...) }
@@ -314,6 +395,13 @@ func LogDebugf(format string, args ...any) { logf(slog.LevelDebug, format, args.
 func LogWarnf(format string, args ...any)  { logf(slog.LevelWarn, format, args...) }
 func LogErrorf(format string, args ...any) { logf(slog.LevelError, format, args...) }
 
+// Event helpers keep the hot-path diagnostics machine-searchable while the
+// older printf helpers remain available for low-volume lifecycle messages.
+func LogDebugEvent(event string, attrs ...any) { logEvent(slog.LevelDebug, event, attrs...) }
+func LogInfoEvent(event string, attrs ...any)  { logEvent(slog.LevelInfo, event, attrs...) }
+func LogWarnEvent(event string, attrs ...any)  { logEvent(slog.LevelWarn, event, attrs...) }
+func LogErrorEvent(event string, attrs ...any) { logEvent(slog.LevelError, event, attrs...) }
+
 // LogUpstreamStatusf classifies HTTP status records consistently. Successful
 // per-request records are DEBUG; client failures are WARN; server failures are
 // ERROR.
@@ -325,6 +413,17 @@ func LogUpstreamStatusf(status int, format string, args ...any) {
 		LogWarnf(format, args...)
 	default:
 		LogDebugf(format, args...)
+	}
+}
+
+func LogUpstreamEvent(status int, event string, attrs ...any) {
+	switch {
+	case status >= 500:
+		LogErrorEvent(event, attrs...)
+	case status >= 400:
+		LogWarnEvent(event, attrs...)
+	default:
+		LogDebugEvent(event, attrs...)
 	}
 }
 
@@ -372,6 +471,47 @@ func debugLineIsInteresting(lower string) bool {
 	return false
 }
 
+func diagnosticLogLevel(lower string) slog.Level {
+	switch {
+	case strings.Contains(lower, "level=error"), strings.Contains(lower, "level=fatal"), strings.Contains(lower, "level=panic"):
+		return slog.LevelError
+	case containsDiagnosticStatus(lower, 500), containsDiagnosticStatus(lower, 502),
+		containsDiagnosticStatus(lower, 503), containsDiagnosticStatus(lower, 504),
+		containsDiagnosticStatus(lower, 529), strings.Contains(lower, "500 internal server error"),
+		strings.Contains(lower, "502 bad gateway"), strings.Contains(lower, "503 service unavailable"),
+		strings.Contains(lower, "504 gateway timeout"),
+		strings.Contains(lower, "529 overloaded"):
+		return slog.LevelError
+	case strings.Contains(lower, "level=warn"), strings.Contains(lower, "level=warning"):
+		return slog.LevelWarn
+	case containsDiagnosticStatus(lower, 400), containsDiagnosticStatus(lower, 401),
+		containsDiagnosticStatus(lower, 403), containsDiagnosticStatus(lower, 404),
+		containsDiagnosticStatus(lower, 408), containsDiagnosticStatus(lower, 409),
+		containsDiagnosticStatus(lower, 413), containsDiagnosticStatus(lower, 422),
+		containsDiagnosticStatus(lower, 429), strings.Contains(lower, "429 too many requests"),
+		strings.Contains(lower, "401 unauthorized"), strings.Contains(lower, "403 forbidden"),
+		strings.Contains(lower, "unauthorized"), strings.Contains(lower, "rate limit"),
+		strings.Contains(lower, "ratelimit"), strings.Contains(lower, "quota"),
+		strings.Contains(lower, "cooldown"):
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func containsDiagnosticStatus(line string, status int) bool {
+	code := strconv.Itoa(status)
+	for _, prefix := range []string{
+		"http ", "status=", "status:", "status ", "status_code=", "status_code:",
+		"statuscode=", "statuscode:", `"status":`, `"status_code":`, `"statuscode":`,
+	} {
+		if strings.Contains(line, prefix+code) {
+			return true
+		}
+	}
+	return false
+}
+
 // debugFilterWriter screens noisy CLIProxyAPI logrus output before it reaches
 // ccl's slog sink and maps explicit logrus severities onto slog.
 type debugFilterWriter struct{}
@@ -388,14 +528,7 @@ func (debugFilterWriter) Write(p []byte) (int, error) {
 		}
 	}
 	if debugLineIsInteresting(lower) {
-		switch {
-		case strings.Contains(lower, "level=error"), strings.Contains(lower, "level=fatal"), strings.Contains(lower, "level=panic"):
-			LogErrorf("[cpa] %s", line)
-		case strings.Contains(lower, "level=warn"), strings.Contains(lower, "level=warning"):
-			LogWarnf("[cpa] %s", line)
-		default:
-			LogInfof("[cpa] %s", line)
-		}
+		logEvent(diagnosticLogLevel(lower), "cpa_diagnostic", "detail", line)
 	}
 	return len(p), nil
 }

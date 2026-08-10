@@ -23,14 +23,12 @@ Common commands:
   ccl ls / ccl use <name>     List or switch providers
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
   ccl oauth <gpt|grok|...>    Log in with a subscription account
-  ccl oauth group / sync      Multi-account pools and credential cleanup
-  ccl doctor                  Environment + provider + CPA account health
+  ccl doctor                  Environment + provider + subscription health
   ccl cloud login|push|pull   Encrypted multi-remote config sync
   ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)
 
 Compatibility aliases still work for older scripts:
   ccl auth ...        → ccl oauth ...
-  ccl sync            → ccl oauth sync
   ccl login/push/...  → ccl cloud login/push/...
 
 Run "ccl <command> --help" for details. Extra args after ccl are passed through

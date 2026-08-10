@@ -73,58 +73,45 @@ func TestMappedContextClassesDiffer(t *testing.T) {
 	}
 }
 
-func TestApplyContextPolicyDropsCclPresets(t *testing.T) {
-	presets := []map[string]string{
+func TestApplyContextPolicyDropsUnsupportedOverrides(t *testing.T) {
+	overrides := []map[string]string{
 		{provider.EnvMaxContextTokens: "1000000", provider.EnvAutoCompactWindow: "900000"},
 		{provider.EnvMaxContextTokens: "500000", provider.EnvAutoCompactWindow: "400000"},
 		{provider.EnvMaxContextTokens: "300000", provider.EnvAutoCompactWindow: "200000"},
 		{provider.EnvAutoCompactWindow: "1000000", provider.EnvAutoCompactPct: "90"},
 		{provider.EnvAutoCompactWindow: "1000000"},
+		{provider.EnvMaxContextTokens: "1050000", provider.EnvAutoCompactWindow: "840000"},
 	}
-	for _, preset := range presets {
+	for _, override := range overrides {
 		env := map[string]string{"KEEP": "yes"}
-		for key, value := range preset {
+		for key, value := range override {
 			env[key] = value
 		}
-		if !applyContextPolicy(env, provider.Provider{Name: "p"}) {
-			t.Fatalf("preset %#v was not recognized", preset)
+		if !applyContextPolicy(env) {
+			t.Fatalf("override %#v was not removed", override)
 		}
 		for _, key := range provider.ManagedContextEnvKeys() {
 			if _, present := env[key]; present {
-				t.Errorf("preset %#v left %s behind", preset, key)
+				t.Errorf("override %#v left %s behind", override, key)
 			}
 		}
 		if env["KEEP"] != "yes" {
-			t.Errorf("preset %#v removed unrelated env", preset)
+			t.Errorf("override %#v removed unrelated env", override)
 		}
 	}
 }
 
-func TestApplyContextPolicyKeepsDeliberateValues(t *testing.T) {
-	// Not one of the presets ccl used to write, so it is the user's own number.
+func TestApplyContextPolicyKeepsBalanced(t *testing.T) {
 	env := map[string]string{
-		provider.EnvMaxContextTokens:  "1050000",
-		provider.EnvAutoCompactWindow: "840000",
+		provider.EnvMaxContextTokens:  "500000",
+		provider.EnvAutoCompactWindow: "500000",
+		provider.EnvAutoCompactPct:    "80",
 	}
-	if applyContextPolicy(env, provider.Provider{Name: "p"}) {
-		t.Fatal("a custom value must not be treated as a ccl preset")
+	if applyContextPolicy(env) {
+		t.Fatal("Balanced must survive the launcher policy")
 	}
-	if env[provider.EnvMaxContextTokens] != "1050000" || env[provider.EnvAutoCompactWindow] != "840000" {
-		t.Fatalf("custom values were modified: %#v", env)
-	}
-
-	// Manual mode protects even a value that looks like an old preset.
-	manual := map[string]string{
-		provider.EnvContextBudgetMode: provider.ContextBudgetManual,
-		provider.EnvMaxContextTokens:  "1000000",
-		provider.EnvAutoCompactWindow: "900000",
-	}
-	p := provider.Provider{Name: "p", Env: manual}
-	if applyContextPolicy(manual, p) {
-		t.Fatal("manual mode must keep the configured values")
-	}
-	if manual[provider.EnvMaxContextTokens] != "1000000" {
-		t.Fatalf("manual values were dropped: %#v", manual)
+	if !provider.IsBalancedContextPreset(env) {
+		t.Fatalf("Balanced values were modified: %#v", env)
 	}
 }
 
@@ -150,12 +137,35 @@ func TestSettingsDoNotDeclareContextByDefault(t *testing.T) {
 			t.Errorf("%s = %q, want it absent from the settings file", key, value)
 		}
 	}
-	if !ctx.droppedContextPreset {
+	if !ctx.droppedContextOverride {
 		t.Error("dropping the preset was not recorded for the log")
 	}
 	// The [1m] marker is the sizing signal and must survive.
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "gpt-5.6-sol[1m]" {
 		t.Errorf("opus model = %q, want the [1m] marker preserved", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+}
+
+func TestSettingsKeepBalancedContextTriplet(t *testing.T) {
+	ctx := &providerContext{
+		provider: provider.Provider{
+			Name:   "balanced",
+			Type:   "anthropic",
+			APIKey: "test-key",
+			Env: map[string]string{
+				provider.EnvMaxContextTokens:  "500000",
+				provider.EnvAutoCompactWindow: "500000",
+				provider.EnvAutoCompactPct:    "80",
+			},
+		},
+		baseURL: "https://example.test",
+	}
+	settings := ctx.settings()
+	if !provider.IsBalancedContextPreset(settings.Env) {
+		t.Fatalf("Balanced settings were not retained: %#v", settings.Env)
+	}
+	if ctx.droppedContextOverride {
+		t.Fatal("Balanced was incorrectly treated as an unsupported preset")
 	}
 }
 
@@ -166,7 +176,7 @@ func TestBuildEnvDropsCclDirectives(t *testing.T) {
 		Endpoint: "https://example.test/v1",
 		APIKey:   "sk-test",
 		Env: map[string]string{
-			provider.EnvContextBudgetMode: provider.ContextBudgetManual,
+			provider.EnvContextBudgetMode: "manual",
 			provider.EnvMaxContextTokens:  "1050000",
 		},
 	}
@@ -180,10 +190,9 @@ func TestBuildEnvDropsCclDirectives(t *testing.T) {
 }
 
 func TestBuildProcessEnvDropsInheritedSettingsKeys(t *testing.T) {
-	// ccl writes no context env any more, so an ambient value would silently
-	// reinstate the session-wide window this policy removed.
+	// Default writes no context env, so ambient values must not silently replace it.
 	settings := settingsJSON{Env: map[string]string{
-		MaxOutputTokensEnv:  "32000",
+		"CUSTOM_SETTING":    "from-ccl",
 		"ANTHROPIC_API_KEY": "sk-from-ccl",
 	}}
 	inherited := []string{
@@ -192,7 +201,7 @@ func TestBuildProcessEnvDropsInheritedSettingsKeys(t *testing.T) {
 		provider.EnvAutoCompactWindow + "=900000",
 		provider.EnvMaxContextTokens + "=1000000",
 		provider.EnvAutoCompactPct + "=90",
-		MaxOutputTokensEnv + "=8000",
+		"CUSTOM_SETTING=from-shell",
 		"ANTHROPIC_API_KEY=sk-from-shell",
 		"CCL_DEBUG_LOG=/tmp/mine.log",
 	}
@@ -206,7 +215,7 @@ func TestBuildProcessEnvDropsInheritedSettingsKeys(t *testing.T) {
 		provider.EnvAutoCompactWindow,
 		provider.EnvMaxContextTokens,
 		provider.EnvAutoCompactPct,
-		MaxOutputTokensEnv,
+		"CUSTOM_SETTING",
 		"ANTHROPIC_API_KEY",
 	} {
 		if value, present := values[dropped]; present {
@@ -224,9 +233,9 @@ func TestBuildProcessEnvDropsInheritedSettingsKeys(t *testing.T) {
 
 func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 	settings := settingsJSON{Env: map[string]string{
-		provider.EnvMaxContextTokens:  "1050000",
-		provider.EnvAutoCompactWindow: "840000",
-		provider.EnvAutoCompactPct:    "70",
+		provider.EnvMaxContextTokens:  "500000",
+		provider.EnvAutoCompactWindow: "500000",
+		provider.EnvAutoCompactPct:    "80",
 	}}
 	inherited := []string{"PATH=/usr/bin", provider.EnvAutoCompactPct + "=10", "HOME=/root"}
 
@@ -238,12 +247,12 @@ func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 		values[key] = value
 		seen[key]++
 	}
-	if values[provider.EnvMaxContextTokens] != "1050000" ||
-		values[provider.EnvAutoCompactWindow] != "840000" {
+	if values[provider.EnvMaxContextTokens] != "500000" ||
+		values[provider.EnvAutoCompactWindow] != "500000" {
 		t.Fatalf("managed context vars were not exported: %#v", values)
 	}
 	// A ccl-managed value must replace the ambient one, not duplicate it.
-	if values[provider.EnvAutoCompactPct] != "70" || seen[provider.EnvAutoCompactPct] != 1 {
+	if values[provider.EnvAutoCompactPct] != "80" || seen[provider.EnvAutoCompactPct] != 1 {
 		t.Fatalf("pct override = %q (%d entries), want a single managed value", values[provider.EnvAutoCompactPct], seen[provider.EnvAutoCompactPct])
 	}
 	if values["PATH"] != "/usr/bin" || values["HOME"] != "/root" {

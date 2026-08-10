@@ -47,22 +47,18 @@ type copilotCachedToken struct {
 }
 
 type copilotCredentialPool struct {
-	authDir         string
-	credentialFiles map[string]struct{}
-	restrictToFiles bool
-	resolver        func() ([]string, error)
-	client          *http.Client
-	next            atomic.Uint64
-	tokenMu         sync.Mutex
-	tokens          map[string]copilotCachedToken
+	authDir        string
+	credentialFile string
+	client         *http.Client
+	next           atomic.Uint64
+	tokenMu        sync.Mutex
+	tokens         map[string]copilotCachedToken
 }
 
-func newCopilotCredentialPool(authDir string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) *copilotCredentialPool {
+func newCopilotCredentialPool(authDir, credentialFile string) *copilotCredentialPool {
 	return &copilotCredentialPool{
-		authDir:         authDir,
-		credentialFiles: credentialFileSet(credentialFiles),
-		restrictToFiles: restrictToFiles,
-		resolver:        resolver,
+		authDir:        authDir,
+		credentialFile: strings.TrimSpace(credentialFile),
 		client: &http.Client{Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			ForceAttemptHTTP2:     true,
@@ -72,29 +68,7 @@ func newCopilotCredentialPool(authDir string, credentialFiles []string, restrict
 	}
 }
 
-func (p *copilotCredentialPool) selectedFiles() (map[string]struct{}, error) {
-	if p.resolver != nil {
-		files, err := p.resolver()
-		if err != nil {
-			return nil, err
-		}
-		return credentialFileSet(files), nil
-	}
-	selected := make(map[string]struct{}, len(p.credentialFiles))
-	for file := range p.credentialFiles {
-		selected[file] = struct{}{}
-	}
-	return selected, nil
-}
-
 func (p *copilotCredentialPool) load() ([]*copilotCredential, error) {
-	selected, err := p.selectedFiles()
-	if err != nil {
-		return nil, err
-	}
-	if p.restrictToFiles && len(selected) == 0 {
-		return nil, nil
-	}
 	entries, err := os.ReadDir(p.authDir)
 	if err != nil {
 		return nil, fmt.Errorf("read Copilot auth directory: %w", err)
@@ -104,10 +78,8 @@ func (p *copilotCredentialPool) load() ([]*copilotCredential, error) {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 			continue
 		}
-		if p.restrictToFiles {
-			if _, ok := selected[strings.ToLower(entry.Name())]; !ok {
-				continue
-			}
+		if p.credentialFile != "" && !strings.EqualFold(entry.Name(), filepath.Base(p.credentialFile)) {
+			continue
 		}
 		path := filepath.Join(p.authDir, entry.Name())
 		raw, err := os.ReadFile(path)
@@ -314,26 +286,45 @@ func (g *copilotGateway) Stop() {
 }
 
 func (g *copilotGateway) serveHTTP(writer http.ResponseWriter, request *http.Request) {
+	requestCtx, requestID := withRequestLogID(request.Context())
+	started := time.Now()
 	if request.Method != http.MethodGet && request.Method != http.MethodPost {
+		LogWarnEvent("request_rejected", "component", "copilot", "request_id", requestID,
+			"path", request.URL.Path, "method", request.Method, "status", http.StatusMethodNotAllowed,
+			"reason", "unsupported_method")
 		writeCopilotGatewayError(writer, http.StatusMethodNotAllowed, "unsupported method")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, copilotMaxBodyBytes+1))
 	if err != nil {
+		LogWarnEvent("request_rejected", "component", "copilot", "request_id", requestID,
+			"path", request.URL.Path, "method", request.Method, "status", http.StatusBadRequest,
+			"reason", "read_body", "error", err)
 		writeCopilotGatewayError(writer, http.StatusBadRequest, "read request body: "+err.Error())
 		return
 	}
 	if int64(len(body)) > copilotMaxBodyBytes {
+		LogWarnEvent("request_rejected", "component", "copilot", "request_id", requestID,
+			"path", request.URL.Path, "method", request.Method, "status", http.StatusRequestEntityTooLarge,
+			"reason", "body_too_large", "body_bytes", len(body), "limit_bytes", copilotMaxBodyBytes)
 		writeCopilotGatewayError(writer, http.StatusRequestEntityTooLarge, "request body is too large")
 		return
 	}
-	response, err := g.do(request.Context(), request.Method, copilotUpstreamPath(request.URL.Path), request.URL.RawQuery, request.Header, body)
+	model := copilotRequestModel(body)
+	LogDebugEvent("request_received", "component", "copilot", "request_id", requestID,
+		"method", request.Method, "path", request.URL.Path, "model", model, "body_bytes", len(body))
+	response, err := g.do(requestCtx, request.Method, copilotUpstreamPath(request.URL.Path), request.URL.RawQuery, request.Header, body)
 	if err != nil {
-		LogErrorf("Copilot gateway request failed path=%q error=%v", request.URL.Path, err)
+		LogErrorEvent("request_failed", "component", "copilot", "request_id", requestID,
+			"path", request.URL.Path, "model", model, "status", http.StatusBadGateway,
+			"duration", logDuration(started), "error", err)
 		writeCopilotGatewayError(writer, http.StatusBadGateway, err.Error())
 		return
 	}
 	defer response.Body.Close()
+	LogUpstreamEvent(response.StatusCode, "request_complete", "component", "copilot", "request_id", requestID,
+		"path", request.URL.Path, "model", model, "status", response.StatusCode,
+		"retry_after", response.Header.Get("Retry-After"), "duration", logDuration(started))
 	copyCopilotHeaders(writer.Header(), response.Header)
 	writer.WriteHeader(response.StatusCode)
 	copyCopilotResponse(writer, response.Body)
@@ -349,26 +340,40 @@ func (g *copilotGateway) do(ctx context.Context, method, path, rawQuery string, 
 	}
 	var lastResponse *http.Response
 	var lastErr error
-	for _, credential := range credentials {
+	for index, credential := range credentials {
+		attempt := index + 1
 		token := g.pool.cachedToken(credential)
 		exchanged := token != ""
 		if token == "" {
 			token = credential.githubToken
 		}
-		response, requestErr := g.doOne(ctx, method, path, rawQuery, headers, body, token, exchanged)
+		LogDebugEvent("upstream_attempt", "component", "copilot", "request_id", requestLogID(ctx),
+			"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+			"path", path, "token_kind", map[bool]string{true: "ide", false: "github"}[exchanged])
+		response, requestErr := g.doOne(ctx, method, path, rawQuery, headers, body, token, exchanged, credential.fileName)
 		if requestErr != nil {
+			LogWarnEvent("upstream_attempt_failed", "component", "copilot", "request_id", requestLogID(ctx),
+				"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+				"path", path, "error", requestErr)
 			lastErr = requestErr
 			continue
 		}
 		if (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) && !exchanged {
 			closeCopilotResponse(response)
+			LogWarnEvent("credential_token_exchange", "component", "copilot", "request_id", requestLogID(ctx),
+				"attempt", attempt, "credential", credential.fileName, "status", response.StatusCode)
 			token, exchangeErr := g.pool.exchangeToken(ctx, credential)
 			if exchangeErr != nil {
+				LogWarnEvent("credential_token_exchange_failed", "component", "copilot", "request_id", requestLogID(ctx),
+					"attempt", attempt, "credential", credential.fileName, "error", exchangeErr)
 				lastErr = exchangeErr
 				continue
 			}
-			response, requestErr = g.doOne(ctx, method, path, rawQuery, headers, body, token, true)
+			response, requestErr = g.doOne(ctx, method, path, rawQuery, headers, body, token, true, credential.fileName)
 			if requestErr != nil {
+				LogWarnEvent("upstream_attempt_failed", "component", "copilot", "request_id", requestLogID(ctx),
+					"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+					"path", path, "phase", "after_token_exchange", "error", requestErr)
 				lastErr = requestErr
 				continue
 			}
@@ -376,6 +381,9 @@ func (g *copilotGateway) do(ctx context.Context, method, path, rawQuery string, 
 		}
 		if (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) && exchanged {
 			g.pool.invalidateToken(credential)
+			LogWarnEvent("credential_rejected", "component", "copilot", "request_id", requestLogID(ctx),
+				"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+				"status", response.StatusCode, "action", "invalidate_and_try_next")
 			if lastResponse != nil {
 				closeCopilotResponse(lastResponse)
 			}
@@ -383,6 +391,14 @@ func (g *copilotGateway) do(ctx context.Context, method, path, rawQuery string, 
 			continue
 		}
 		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+			action := "return_last_response"
+			if attempt < len(credentials) {
+				action = "try_next_credential"
+			}
+			LogUpstreamEvent(response.StatusCode, "upstream_retry_decision", "component", "copilot", "request_id", requestLogID(ctx),
+				"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+				"status", response.StatusCode, "retry_after", response.Header.Get("Retry-After"),
+				"action", action)
 			if lastResponse != nil {
 				closeCopilotResponse(lastResponse)
 			}
@@ -403,7 +419,7 @@ func (g *copilotGateway) do(ctx context.Context, method, path, rawQuery string, 
 	return nil, lastErr
 }
 
-func (g *copilotGateway) doOne(ctx context.Context, method, path, rawQuery string, headers http.Header, body []byte, token string, ideToken bool) (*http.Response, error) {
+func (g *copilotGateway) doOne(ctx context.Context, method, path, rawQuery string, headers http.Header, body []byte, token string, ideToken bool, credentialID string) (*http.Response, error) {
 	target := strings.TrimRight(copilotAPIBaseURL, "/") + path
 	if rawQuery != "" {
 		target += "?" + rawQuery
@@ -431,16 +447,21 @@ func (g *copilotGateway) doOne(ctx context.Context, method, path, rawQuery strin
 	if req.Header.Get("Content-Type") == "" && len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	LogDebugf("Copilot upstream request method=%s path=%q model=%q", method, path, copilotRequestModel(body))
+	LogDebugEvent("upstream_request", "component", "copilot", "request_id", requestLogID(ctx),
+		"method", method, "path", path, "model", copilotRequestModel(body), "credential", credentialID)
 	if len(body) > 0 {
-		DebugHTTPBody("copilot request "+path, body)
+		DebugHTTPBody(fmt.Sprintf("copilot request request_id=%s path=%s", requestLogID(ctx), path), body)
 	}
+	started := time.Now()
 	response, err := g.pool.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	LogUpstreamStatusf(response.StatusCode, "Copilot upstream response path=%q status=%d", path, response.StatusCode)
-	debugCopilotFailureBody(path, response)
+	LogUpstreamEvent(response.StatusCode, "upstream_response", "component", "copilot", "request_id", requestLogID(ctx),
+		"path", path, "model", copilotRequestModel(body), "credential", credentialID,
+		"status", response.StatusCode, "retry_after", response.Header.Get("Retry-After"),
+		"duration", logDuration(started))
+	debugCopilotFailureBody(ctx, path, response)
 	return response, nil
 }
 
@@ -449,16 +470,17 @@ func setCopilotClientHeaders(headers http.Header) {
 	headers.Set("X-GitHub-Api-Version", "2026-06-01")
 }
 
-func debugCopilotFailureBody(path string, response *http.Response) {
+func debugCopilotFailureBody(ctx context.Context, path string, response *http.Response) {
 	if response == nil || response.Body == nil || response.StatusCode < 400 || !LogDebugEnabled() {
 		return
 	}
 	prefix, err := io.ReadAll(io.LimitReader(response.Body, copilotMaxErrorBytes))
 	if err != nil {
-		LogDebugf("Copilot failed response payload read path=%q status=%d error=%v", path, response.StatusCode, err)
+		LogDebugEvent("upstream_error_body_read_failed", "component", "copilot", "request_id", requestLogID(ctx),
+			"path", path, "status", response.StatusCode, "error", err)
 		return
 	}
-	DebugHTTPBody(fmt.Sprintf("copilot response %s status=%d", path, response.StatusCode), prefix)
+	DebugHTTPBody(fmt.Sprintf("copilot response request_id=%s path=%s status=%d", requestLogID(ctx), path, response.StatusCode), prefix)
 	response.Body = struct {
 		io.Reader
 		io.Closer
@@ -655,7 +677,7 @@ func copilotModelProtocol(model copilotModel) string {
 
 type copilotRouteSet struct {
 	chat      []runtimeOpenAIModel
-	responses []runtimeCodexModel
+	responses []runtimeResponsesModel
 	anthropic []runtimeClaudeModel
 	models    []string
 }
@@ -697,7 +719,7 @@ func buildCopilotRoutes(modelSpec string, catalog []copilotModel) (copilotRouteS
 		case "anthropic":
 			result.anthropic = append(result.anthropic, runtimeClaudeModel{Name: model.ID, Alias: route.Alias, ForceMapping: true})
 		case "responses":
-			result.responses = append(result.responses, runtimeCodexModel{Name: model.ID, Alias: route.Alias})
+			result.responses = append(result.responses, runtimeResponsesModel{Name: model.ID, Alias: route.Alias})
 		case "chat":
 			result.chat = append(result.chat, runtimeOpenAIModel{Name: model.ID, Alias: route.Alias, ForceMapping: true})
 		}
@@ -727,13 +749,13 @@ type runtimeClaudeModel struct {
 
 type runtimeCopilotConfigFile struct {
 	runtimeConfigBase      `yaml:",inline"`
-	CodexAPIKey            []runtimeCodexKey            `yaml:"codex-api-key,omitempty"`
+	ResponsesAPIKey        []runtimeResponsesKey        `yaml:"codex-api-key,omitempty"`
 	OpenAICompatibility    []runtimeOpenAICompatibility `yaml:"openai-compatibility,omitempty"`
 	ClaudeAPIKey           []runtimeClaudeKey           `yaml:"claude-api-key,omitempty"`
 	DisableClaudeCloakMode bool                         `yaml:"disable-claude-cloak-mode"`
 }
 
-func startCopilotOAuthWithFiles(parent context.Context, modelSpec string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) (*Runtime, error) {
+func startCopilotOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -741,16 +763,13 @@ func startCopilotOAuthWithFiles(parent context.Context, modelSpec string, creden
 	if err != nil {
 		return nil, err
 	}
-	pool := newCopilotCredentialPool(authDir, credentialFiles, restrictToFiles, resolver)
+	pool := newCopilotCredentialPool(authDir, credentialFile)
 	credentials, err := pool.load()
 	if err != nil {
 		return nil, err
 	}
 	credentials = activeCopilotCredentials(credentials)
 	if len(credentials) == 0 {
-		if restrictToFiles && len(credentialFiles) == 0 {
-			return nil, fmt.Errorf("OAuth group for %s has no credentials; edit it with `ccl oauth group` or run `ccl oauth sync`", ProviderCopilot)
-		}
 		return nil, fmt.Errorf("no %s credentials found; run `ccl oauth %s` first", ProviderCopilot, ProviderCopilot)
 	}
 
@@ -789,7 +808,7 @@ func startCopilotOAuthWithFiles(parent context.Context, modelSpec string, creden
 		DisableClaudeCloakMode: true,
 	}
 	if len(routes.responses) > 0 {
-		configFile.CodexAPIKey = []runtimeCodexKey{{APIKey: "copilot", BaseURL: gateway.endpoint, Models: routes.responses}}
+		configFile.ResponsesAPIKey = []runtimeResponsesKey{{APIKey: "copilot", BaseURL: gateway.endpoint, Models: routes.responses}}
 	}
 	if len(routes.chat) > 0 {
 		configFile.OpenAICompatibility = []runtimeOpenAICompatibility{{
@@ -814,7 +833,7 @@ func startCopilotOAuthWithFiles(parent context.Context, modelSpec string, creden
 	proxyRuntime.copilotGateway = gateway
 	proxyRuntime.listAuths = pool.listAuths
 	proxyRuntime.models = append([]string(nil), routes.models...)
-	LogInfof("runtime start oauth provider=copilot backend=copilot protocol=mixed port=%d credential_files=%d restricted=%t models_chat=%d models_responses=%d models_anthropic=%d",
-		port, len(credentialFiles), restrictToFiles, len(routes.chat), len(routes.responses), len(routes.anthropic))
+	LogInfof("runtime start oauth provider=copilot backend=copilot protocol=mixed port=%d credential_file=%s models_chat=%d models_responses=%d models_anthropic=%d",
+		port, filepath.Base(credentialFile), len(routes.chat), len(routes.responses), len(routes.anthropic))
 	return proxyRuntime, nil
 }

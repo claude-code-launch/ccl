@@ -12,9 +12,6 @@ import (
 
 func providerAuthLabel(p provider.Provider) string {
 	if p.OAuthProvider != "" {
-		if p.AuthGroup != "" {
-			return fmt.Sprintf("oauth/%s group(%d)", p.OAuthProvider, len(p.OAuthAccountCredentials))
-		}
 		return "oauth/" + p.OAuthProvider
 	}
 	if provider.IsOpenAICompatibleType(p.Type) {
@@ -27,13 +24,6 @@ func providerAuthLabel(p provider.Provider) string {
 		return "x-api-key"
 	}
 	return "unknown"
-}
-
-func providerKindLabel(p provider.Provider) string {
-	if strings.TrimSpace(p.AuthGroup) != "" {
-		return "group"
-	}
-	return "normal"
 }
 
 func providerEffortSummary(p provider.Provider) string {
@@ -94,41 +84,12 @@ func providerCatalogModelLabel(model string, names map[string]string) string {
 	return label
 }
 
-// backendManagedContextNote marks the compact/context summary of subscription
-// providers, whose limits come from the backend catalog at launch. The stored
-// preset only applies when the backend advertises nothing.
-func backendManagedContextNote(p provider.Provider) string {
-	if strings.TrimSpace(p.OAuthProvider) == "" {
-		return ""
-	}
-	if provider.ContextBudgetIsManual(p) {
-		return " · manual override"
-	}
-	return " · per slot (Claude Code sizes the session)"
-}
-
 func providerOneMSummary(p provider.Provider) string {
-	state := compactStateFromProvider(p)
-	slots := oneMSlotsFromProvider(p)
-	contextPart := reviewOneMSummary(slots) + backendManagedContextNote(p)
-	if state.legacy {
-		return "legacy 1M · " + contextPart
-	}
-	if state.custom {
-		return "custom · " + contextPart
-	}
-	switch state.preset {
-	case compactPreset1M:
-		return "1M/900K · " + contextPart
-	case compactPreset500K:
+	contextPart := reviewOneMSummary(oneMSlotsFromProvider(p))
+	if provider.IsBalancedContextPreset(p.Env) {
 		return "500K/400K · " + contextPart
-	case compactPreset300K:
-		return "300K/200K · " + contextPart
-	case compactPresetDefault:
-		return "default · " + contextPart
-	default:
-		return "custom · " + contextPart
 	}
+	return "default (200K/1M) · " + contextPart
 }
 
 func setProviderAuthHeaders(req *http.Request, p provider.Provider) {

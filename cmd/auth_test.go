@@ -617,7 +617,7 @@ func TestPrepareProviderRuntimeStartsClaudeOAuth(t *testing.T) {
 	}
 }
 
-func TestPrepareProviderRuntimeRoutesManualResponsesThroughCodexAdapter(t *testing.T) {
+func TestPrepareProviderRuntimeRoutesManualResponsesThroughSharedAdapter(t *testing.T) {
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(upstream.Close)
 	original := provider.Provider{
@@ -638,7 +638,7 @@ func TestPrepareProviderRuntimeRoutesManualResponsesThroughCodexAdapter(t *testi
 		t.Fatalf("runtime endpoint = %q", runtimeProvider.Endpoint)
 	}
 	if runtimeProvider.Endpoint == original.Endpoint {
-		t.Fatal("manual Responses provider bypassed the embedded Codex adapter")
+		t.Fatal("manual Responses provider bypassed the embedded adapter")
 	}
 	if runtimeProvider.APIKey == "" || runtimeProvider.APIKey == original.APIKey {
 		t.Fatalf("runtime API key was not isolated: %q", runtimeProvider.APIKey)
@@ -692,10 +692,11 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 	}
 
 	p := provider.Provider{
-		Name:          "chatgpt",
-		Type:          "openai_responses",
-		Endpoint:      "oauth://codex",
-		OAuthProvider: "gpt",
+		Name:                   "chatgpt",
+		Type:                   "openai_responses",
+		Endpoint:               "oauth://codex",
+		OAuthProvider:          "gpt",
+		OAuthAccountCredential: "codex-set.json",
 	}
 	runtimeProvider, _, cleanup, err := prepareProviderRuntime(p)
 	if err != nil {
@@ -715,9 +716,6 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 
 	if m.detectionError != nil || !m.autoConfigured || !m.modelPoolFromDiscovery || p.Model == "" {
 		t.Fatalf("OAuth set discovery failed: auto=%t detected=%t models=%q err=%v", m.autoConfigured, m.modelPoolFromDiscovery, p.Model, m.detectionError)
-	}
-	if m.page != 4 {
-		t.Fatalf("single-page discovery should stay on the main page, got page=%d", m.page)
 	}
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("OAuth runtime values leaked into stored provider: %+v", p)
@@ -769,19 +767,5 @@ func TestRunAuthChatGPTLegacyAliasCanonicalizesToGPT(t *testing.T) {
 	p := cfg.Providers["legacy"]
 	if p.OAuthProvider != "gpt" {
 		t.Fatalf("legacy chatgpt login should canonicalize oauthProvider to gpt, got %+v", p)
-	}
-}
-
-func TestConfigureOAuthProviderPreservesGroupCredentialSelection(t *testing.T) {
-	p := provider.Provider{
-		AuthGroup:               "grok-team",
-		OAuthAccountCredentials: []string{"xai-a.json", "xai-b.json"},
-	}
-	got := configureOAuthProvider(p, "grok-pool", "grok", "")
-	if got.AuthGroup != "grok-team" || len(got.OAuthAccountCredentials) != 2 {
-		t.Fatalf("group credential selection was cleared: %+v", got)
-	}
-	if got.OAuthAccountCredential != "" || got.Endpoint != "oauth://xai" {
-		t.Fatalf("group provider was not normalized: %+v", got)
 	}
 }

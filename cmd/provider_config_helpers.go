@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -10,112 +9,36 @@ import (
 const (
 	maxContextTokensEnv  = provider.EnvMaxContextTokens
 	autoCompactWindowEnv = provider.EnvAutoCompactWindow
-	// autoCompactPctEnv is kept only to recognize and clean up configurations
-	// written by ccl versions that used percentage-based compact presets.
-	autoCompactPctEnv = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
-
-	maxContext300K = "300000"
-	maxContext500K = "500000"
-	maxContext1M   = "1000000"
-
-	compactWindow300K = "200000"
-	compactWindow500K = "400000"
-	compactWindow1M   = "900000"
-
-	legacyCompactWindow200K = "200000"
-	legacyCompactWindow500K = "500000"
-	legacyCompactWindow1M   = "1000000"
-	legacyCompactPct200K    = "70"
-	legacyCompactPct500K    = "80"
-	legacyCompactPct1M      = "90"
+	autoCompactPctEnv    = provider.EnvAutoCompactPct
 )
 
-// compactPreset selects the provider-wide fallback context size and absolute
-// auto-compact window.
-// It is independent of per-slot [1m] extended-context markers: a model may
-// support 1M context while an unrecognized model uses a smaller fallback.
+// compactPreset selects the provider-wide context behavior exposed by the TUI.
 type compactPreset uint8
 
 const (
-	// compactPresetPreserve keeps existing compact env values as-is.
-	compactPresetPreserve compactPreset = iota
-	// compactPreset300K is switch-safe: 300K fallback, compact at 200K.
-	compactPreset300K
-	// compactPreset500K is balanced: 500K fallback, compact at 400K.
-	compactPreset500K
-	// compactPreset1M maximizes depth: 1M fallback, compact at 900K.
-	compactPreset1M
-	// compactPresetDefault removes ccl-managed context and compact env so Claude
-	// Code uses its built-in defaults (it does NOT disable compact).
-	compactPresetDefault
+	compactPresetDefault compactPreset = iota
+	// Balanced declares a 500K window and an 80% compact threshold (~400K).
+	compactPresetBalanced
 )
 
-type compactConfigState struct {
-	preset  compactPreset
-	legacy  bool
-	custom  bool
-	context string
-	window  string
-	pct     string
+func compactPresetFromProvider(p provider.Provider) compactPreset {
+	if provider.IsBalancedContextPreset(p.Env) {
+		return compactPresetBalanced
+	}
+	return compactPresetDefault
 }
 
-func compactStateFromProvider(p provider.Provider) compactConfigState {
-	contextSize, window, pct := "", "", ""
-	if p.Env != nil {
-		contextSize = strings.TrimSpace(p.Env[maxContextTokensEnv])
-		window = strings.TrimSpace(p.Env[autoCompactWindowEnv])
-		pct = strings.TrimSpace(p.Env[autoCompactPctEnv])
-	}
-
-	// Values ccl itself wrote in earlier versions are reported as the default
-	// choice: ccl no longer declares context sizes, so the next save clears them.
-	// Anything else is the user's own and is preserved as Custom.
-	switch {
-	case contextSize == "" && window == "" && pct == "":
-		return compactConfigState{preset: compactPresetDefault}
-	case provider.IsCclContextPreset(p.Env):
-		// Written by an older ccl version: report the default choice so saving
-		// clears it, and do not surface the stale numbers.
-		return compactConfigState{preset: compactPresetDefault}
-	default:
-		return compactConfigState{preset: compactPresetPreserve, custom: true, context: contextSize, window: window, pct: pct}
-	}
+func hasUnsupportedContextConfig(p provider.Provider) bool {
+	return provider.HasManagedContextEnv(p.Env) && !provider.IsBalancedContextPreset(p.Env)
 }
 
 func compactPresetLabel(preset compactPreset) string {
 	switch preset {
-	case compactPreset300K:
-		return "Switch-safe 300K / 200K"
-	case compactPreset500K:
+	case compactPresetBalanced:
 		return "Balanced 500K / 400K"
-	case compactPreset1M:
-		return "Maximum 1M / 900K"
-	case compactPresetDefault:
-		return "Claude default"
 	default:
-		return "Custom (preserve)"
+		return "Default (Claude Code 200K / 1M)"
 	}
-}
-
-func compactStateSummary(state compactConfigState, oneMSlots map[string]bool) string {
-	if state.legacy {
-		return fmt.Sprintf("1M / pct unset (legacy; context %s)", reviewOneMSummary(oneMSlots))
-	}
-	if state.custom {
-		contextSize, window := state.context, state.window
-		if contextSize == "" {
-			contextSize = "unset"
-		}
-		if window == "" {
-			window = "unset"
-		}
-		summary := fmt.Sprintf("custom context %s / compact %s", contextSize, window)
-		if state.pct != "" {
-			summary += " / legacy pct " + state.pct + "%"
-		}
-		return summary + " (preserved)"
-	}
-	return compactPresetLabel(state.preset)
 }
 
 func recommendedOneMModel(model string) bool {
@@ -157,23 +80,25 @@ func applyOneMSuffixes(p *provider.Provider, oneMSlots map[string]bool) {
 // applyCompactConfig applies the per-slot [1m] markers and the context sizing
 // choice.
 //
-// ccl no longer writes a context size or an auto-compact threshold: Claude Code
-// sizes a session from the slot's model (its default window, or 1M when the slot
-// carries [1m]) and scales its own compaction buffer to it. A session-wide
-// override cannot express that — with a mixed model pool it is wrong for at least
-// one slot — so every non-custom choice clears those variables. Custom keeps
-// whatever the user put there by hand.
+// Default clears every context override so Claude Code uses its native 200K/1M
+// behavior. Balanced writes the exact 500K/500K/80 triplet requested by the UI.
 func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset compactPreset) {
 	applyOneMSuffixes(p, oneMSlots)
+	applyCompactPreset(p, preset)
+}
 
-	if preset == compactPresetPreserve {
-		// Keep existing compact env values; only suffixes were normalized.
-		return
-	}
+func applyCompactPreset(p *provider.Provider, preset compactPreset) {
 	if p.Env != nil {
 		delete(p.Env, maxContextTokensEnv)
 		delete(p.Env, autoCompactWindowEnv)
 		delete(p.Env, autoCompactPctEnv)
+		delete(p.Env, provider.EnvContextBudgetMode)
+	}
+	if preset == compactPresetBalanced {
+		ensureProviderEnv(p)
+		p.Env[maxContextTokensEnv] = provider.BalancedMaxContextTokens
+		p.Env[autoCompactWindowEnv] = provider.BalancedAutoCompactWindow
+		p.Env[autoCompactPctEnv] = provider.BalancedAutoCompactPct
 	}
 	if len(p.Env) == 0 {
 		p.Env = nil
@@ -184,17 +109,6 @@ func ensureProviderEnv(p *provider.Provider) {
 	if p.Env == nil {
 		p.Env = make(map[string]string)
 	}
-}
-
-// applyOneMConfig preserves the legacy helper contract for callers that make an
-// explicit on/off choice for 1M context. The maximum preset is selected when
-// at least one slot enables extended context; otherwise Claude default.
-func applyOneMConfig(p *provider.Provider, oneMSlots map[string]bool) {
-	if len(oneMSlots) == 0 {
-		applyCompactConfig(p, oneMSlots, compactPresetDefault)
-		return
-	}
-	applyCompactConfig(p, oneMSlots, compactPreset1M)
 }
 
 func oneMSlotsFromProvider(p provider.Provider) map[string]bool {

@@ -270,81 +270,6 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	}
 }
 
-func TestPrintProvidersHidesSingleAccountProvidersInAuthGroups(t *testing.T) {
-	cfg := &provider.Config{
-		Providers: map[string]provider.Provider{
-			"gg": {
-				Name:      "gg",
-				Type:      "openai",
-				AuthGroup: "gg",
-			},
-			"grok-a": {
-				Name:                   "grok-a",
-				Type:                   "openai",
-				OAuthAccountCredential: "xai-a.json",
-			},
-			"grok-b": {
-				Name:                   "grok-b",
-				Type:                   "openai",
-				OAuthAccountCredential: "xai-b.json",
-			},
-			"grok-c": {
-				Name:                   "grok-c",
-				Type:                   "openai",
-				OAuthAccountCredential: "xai-c.json",
-			},
-		},
-		AuthGroups: map[string]provider.AuthGroup{
-			"gg": {OAuthProvider: "grok", Credentials: []string{"xai-a.json", "XAI-B.JSON"}},
-		},
-	}
-
-	for _, showAll := range []bool{false, true} {
-		buf := new(bytes.Buffer)
-		if err := printProviders(buf, cfg, showAll, "empty", "Registered providers:"); err != nil {
-			t.Fatalf("printProviders(showAll=%t) failed: %v", showAll, err)
-		}
-		out := buf.String()
-		for _, hidden := range []string{"grok-a", "grok-b"} {
-			if contains(out, hidden) {
-				t.Fatalf("group member %q should be hidden (showAll=%t):\n%s", hidden, showAll, out)
-			}
-		}
-		for _, visible := range []string{"gg", "grok-c"} {
-			if !contains(out, visible) {
-				t.Fatalf("provider %q should remain visible (showAll=%t):\n%s", visible, showAll, out)
-			}
-		}
-	}
-}
-
-func TestPrintProvidersDistinguishesGroupFromNormalByConfiguration(t *testing.T) {
-	cfg := &provider.Config{
-		Providers: map[string]provider.Provider{
-			"ordinary": {
-				Name: "ordinary",
-				Type: "openai",
-			},
-			"shared-grok": {
-				Name:      "shared-grok",
-				Type:      "openai",
-				AuthGroup: "grok-team",
-			},
-		},
-	}
-
-	buf := new(bytes.Buffer)
-	if err := printProviders(buf, cfg, false, "empty", "Registered providers:"); err != nil {
-		t.Fatalf("printProviders failed: %v", err)
-	}
-	out := buf.String()
-	for _, want := range []string{"KIND", "ordinary", "normal", "shared-grok", "group"} {
-		if !contains(out, want) {
-			t.Fatalf("expected provider output to contain %q, got:\n%s", want, out)
-		}
-	}
-}
-
 func TestMapAutoAssignsAvailableModelsInOrder(t *testing.T) {
 	p := testProviderWithOldMappings()
 	assigned := applySequentialSlotMapping(sequentialSlotPointers(&p), []string{
@@ -449,8 +374,8 @@ func TestMapAutoClearsStaleContextPreset(t *testing.T) {
 				APIKey:    "test-key",
 				OpusModel: "old-opus[1m]",
 				Env: map[string]string{
-					maxContextTokensEnv:  maxContext1M,
-					autoCompactWindowEnv: compactWindow1M,
+					maxContextTokensEnv:  "1000000",
+					autoCompactWindowEnv: "900000",
 				},
 			},
 		},
@@ -475,6 +400,42 @@ func TestMapAutoClearsStaleContextPreset(t *testing.T) {
 	}
 }
 
+func TestMapAutoPreservesBalancedContextPreset(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
+
+	cfg := &provider.Config{
+		ActiveProvider: "mock",
+		Providers: map[string]provider.Provider{
+			"mock": {
+				Name:      "mock",
+				Type:      "openai",
+				Endpoint:  server.URL + "/v1",
+				APIKey:    "test-key",
+				OpusModel: "old-opus",
+				Env: map[string]string{
+					maxContextTokensEnv:  provider.BalancedMaxContextTokens,
+					autoCompactWindowEnv: provider.BalancedAutoCompactWindow,
+					autoCompactPctEnv:    provider.BalancedAutoCompactPct,
+				},
+			},
+		},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Providers["mock"]; !provider.IsBalancedContextPreset(got.Env) {
+		t.Fatalf("map auto changed Balanced context preset: %+v", got.Env)
+	}
+}
+
 func TestCloudAndOAuthCommandTrees(t *testing.T) {
 	for _, args := range [][]string{
 		{"cloud", "--help"},
@@ -483,9 +444,7 @@ func TestCloudAndOAuthCommandTrees(t *testing.T) {
 		{"cloud", "status", "--help"},
 		{"cloud", "key", "export", "--help"},
 		{"cloud", "device", "--help"},
-		{"oauth", "sync", "--help"},
-		{"oauth", "group", "--help"},
-		{"oauth", "import", "--help"},
+		{"oauth", "--help"},
 		// root compatibility aliases
 		{"login", "--help"},
 		{"push", "--help"},
@@ -493,13 +452,26 @@ func TestCloudAndOAuthCommandTrees(t *testing.T) {
 		{"status", "--help"},
 		{"key", "--help"},
 		{"device", "--help"},
-		{"sync", "--help"},
 		{"logout", "--help"},
 		{"tag", "--help"},
 	} {
 		out, err := executeCommand(RootCmd(), args...)
 		if err != nil {
 			t.Fatalf("expected %v to be registered, got error: %v\n%s", args, err, out)
+		}
+	}
+}
+
+func TestObsoleteOAuthManagementCommandsAreRemoved(t *testing.T) {
+	for _, command := range authCmd.Commands() {
+		switch command.Name() {
+		case "group", "import", "sync":
+			t.Fatalf("obsolete oauth %s command is still registered", command.Name())
+		}
+	}
+	for _, command := range rootCmd.Commands() {
+		if command.Name() == "sync" {
+			t.Fatal("obsolete root sync compatibility command is still registered")
 		}
 	}
 }

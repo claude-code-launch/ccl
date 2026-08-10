@@ -20,7 +20,7 @@ func TestEncryptedICloudSyncLifecycle(t *testing.T) {
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	firstConfig := []byte("active_provider: group-grok1\nsecret: local-api-key\n")
+	firstConfig := []byte("active_provider: grok1\nsecret: local-api-key\n")
 	if err := os.WriteFile(filepath.Join(cclDir, "config.yaml"), firstConfig, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestEncryptedICloudSyncLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range [][]byte{[]byte("local-api-key"), []byte("super-secret-token"), []byte("group-grok1")} {
+	for _, secret := range [][]byte{[]byte("local-api-key"), []byte("super-secret-token"), []byte("grok1")} {
 		if bytes.Contains(indexCipher, secret) || bytes.Contains(snapshotCipher, secret) {
 			t.Fatalf("remote encrypted files expose %q", secret)
 		}
@@ -81,7 +81,7 @@ func TestEncryptedICloudSyncLifecycle(t *testing.T) {
 	if tagPush.Uploaded {
 		t.Fatal("tagging unchanged contents should reuse the encrypted snapshot")
 	}
-	secondConfig := []byte("active_provider: group-grok1\nsecret: newer-local-key\n")
+	secondConfig := []byte("active_provider: grok1\nsecret: newer-local-key\n")
 	if err := os.WriteFile(filepath.Join(cclDir, "config.yaml"), secondConfig, 0o600); err != nil {
 		t.Fatal(err)
 	}

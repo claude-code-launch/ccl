@@ -151,7 +151,7 @@ func TestCopilotGatewayFallsBackToExchangedToken(t *testing.T) {
 
 	authDir := t.TempDir()
 	writeCopilotTestCredential(t, authDir, "copilot-test.json", "github-token")
-	pool := newCopilotCredentialPool(authDir, nil, false, nil)
+	pool := newCopilotCredentialPool(authDir, "")
 	gateway, err := startCopilotGateway(context.Background(), pool)
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestCopilotCredentialPoolListsButDoesNotUseDisabledCredentials(t *testing.T
 	if err := os.WriteFile(filepath.Join(authDir, "copilot-disabled.json"), disabled, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pool := newCopilotCredentialPool(authDir, nil, false, nil)
+	pool := newCopilotCredentialPool(authDir, "")
 	ordered, err := pool.ordered()
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +271,7 @@ func TestStartCopilotRuntimeDiscoversAndPublishesModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCopilotTestCredential(t, authDir, "copilot-test.json", "github-token")
-	runtime, err := startCopilotOAuthWithFiles(context.Background(), "", nil, false, nil)
+	runtime, err := startCopilotOAuth(context.Background(), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

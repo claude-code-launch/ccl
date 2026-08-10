@@ -48,13 +48,11 @@ type kiroCredential struct {
 }
 
 type kiroCredentialPool struct {
-	authDir         string
-	credentialFiles map[string]struct{}
-	restrictToFiles bool
-	resolver        func() ([]string, error)
-	client          *http.Client
-	next            atomic.Uint64
-	cache           kiroCredentialCache
+	authDir        string
+	credentialFile string
+	client         *http.Client
+	next           atomic.Uint64
+	cache          kiroCredentialCache
 }
 
 // kiroCredentialRefreshLocks serializes token refreshes per credential file.
@@ -64,13 +62,11 @@ type kiroCredentialPool struct {
 // is bounded by the number of credential files the process has seen.
 var kiroCredentialRefreshLocks sync.Map
 
-func newKiroCredentialPool(authDir string, credentialFiles []string, restrictToFiles bool, resolver func() ([]string, error)) *kiroCredentialPool {
+func newKiroCredentialPool(authDir, credentialFile string) *kiroCredentialPool {
 	return &kiroCredentialPool{
-		authDir:         authDir,
-		credentialFiles: credentialFileSet(credentialFiles),
-		restrictToFiles: restrictToFiles,
-		resolver:        resolver,
-		client:          &http.Client{Timeout: 60 * time.Second},
+		authDir:        authDir,
+		credentialFile: strings.TrimSpace(credentialFile),
+		client:         &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -152,29 +148,7 @@ func (credential *kiroCredential) clone() *kiroCredential {
 	return &copied
 }
 
-func (p *kiroCredentialPool) selectedFiles() (map[string]struct{}, error) {
-	if p.resolver != nil {
-		files, err := p.resolver()
-		if err != nil {
-			return nil, err
-		}
-		return credentialFileSet(files), nil
-	}
-	selected := make(map[string]struct{}, len(p.credentialFiles))
-	for file := range p.credentialFiles {
-		selected[file] = struct{}{}
-	}
-	return selected, nil
-}
-
 func (p *kiroCredentialPool) load() ([]*kiroCredential, error) {
-	selected, err := p.selectedFiles()
-	if err != nil {
-		return nil, err
-	}
-	if p.restrictToFiles && len(selected) == 0 {
-		return nil, nil
-	}
 	entries, err := os.ReadDir(p.authDir)
 	if err != nil {
 		return nil, fmt.Errorf("read Kiro auth directory: %w", err)
@@ -185,10 +159,8 @@ func (p *kiroCredentialPool) load() ([]*kiroCredential, error) {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 			continue
 		}
-		if p.restrictToFiles {
-			if _, ok := selected[strings.ToLower(entry.Name())]; !ok {
-				continue
-			}
+		if p.credentialFile != "" && !strings.EqualFold(entry.Name(), filepath.Base(p.credentialFile)) {
+			continue
 		}
 		path := filepath.Join(p.authDir, entry.Name())
 		live[path] = struct{}{}
@@ -322,10 +294,12 @@ func (p *kiroCredentialPool) usableCredential(ctx context.Context, credential *k
 		return nil, fmt.Errorf("Kiro credential %s has no refresh token", latest.fileName)
 	}
 	if err := p.refreshCredential(ctx, latest); err != nil {
-		LogErrorf("kiro credential refresh failed credential=%q forced=%t error=%v", latest.fileName, forceRefresh, err)
+		LogErrorEvent("credential_refresh_failed", "component", "kiro", "request_id", requestLogID(ctx),
+			"credential", latest.fileName, "forced", forceRefresh, "error", err)
 		return nil, err
 	}
-	LogInfof("kiro credential refreshed credential=%q forced=%t", latest.fileName, forceRefresh)
+	LogInfoEvent("credential_refreshed", "component", "kiro", "request_id", requestLogID(ctx),
+		"credential", latest.fileName, "forced", forceRefresh)
 	// The file was just rewritten: read it back directly so a coarse filesystem
 	// timestamp can never hand back the pre-refresh token.
 	p.cache.invalidate(latest.path)

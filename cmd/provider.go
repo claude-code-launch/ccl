@@ -18,7 +18,7 @@ var providerCmd = &cobra.Command{
 
 Subcommands:
   set [name]     Interactive add/update (TUI)
-  ls             List providers (hides single accounts already in a group)
+  ls             List providers
   use [name]     Switch active provider
   cp/mv/rm       Copy, rename, delete
   map            Slot → model mapping (Opus/Sonnet/Haiku/Custom)
@@ -284,9 +284,6 @@ func cloneProvider(p provider.Provider, name string) provider.Provider {
 		for k, v := range p.Env {
 			cloned.Env[k] = v
 		}
-	}
-	if p.OAuthAccountCredentials != nil {
-		cloned.OAuthAccountCredentials = append([]string{}, p.OAuthAccountCredentials...)
 	}
 	if p.ModelOverrides != nil {
 		cloned.ModelOverrides = make(map[string]string, len(p.ModelOverrides))

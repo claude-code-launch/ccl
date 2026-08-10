@@ -70,94 +70,12 @@ func TestReviewShowsFastStatus(t *testing.T) {
 	}
 }
 
-func TestMaxOutputEditableForChatGPTOAuthAndManagedForCodexAndKiro(t *testing.T) {
-	chatgpt := providerFrom("gpt", "https://api.openai.com/v1", "openai_responses")
-	chatgpt.OAuthProvider = "gpt"
-	m := NewAdvancedConfigModel(&chatgpt)
-	if m.maxOutputUpstreamManaged() {
-		t.Fatal("ChatGPT OAuth should allow client max output editing")
-	}
-	if m.canToggleOpenAIProtocol() {
-		t.Fatal("OAuth protocol must be read-only on review")
-	}
-	enterDetectedReview(m, "m")
-	view := m.View().Content
-	if strings.Contains(view, "Upstream managed") || !strings.Contains(view, "Max Output") {
-		t.Fatalf("ChatGPT OAuth review did not render editable Max Output: %q", view)
-	}
-	m.cursor = m.mainRowIndex(rowMaxOutput)
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
-	m = next.(*AdvancedConfigModel)
-	if got := m.p.Env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]; got != "16000" {
-		t.Fatalf("ChatGPT OAuth max output after right = %q, want 16000", got)
-	}
-	legacyChatGPT := providerFrom("chatgpt", "https://api.openai.com/v1", "openai_responses")
-	legacyChatGPT.OAuthProvider = "chatgpt"
-	if NewAdvancedConfigModel(&legacyChatGPT).maxOutputUpstreamManaged() {
-		t.Fatal("legacy chatgpt OAuth alias should allow client max output editing")
-	}
-
-	copilot := providerFrom("copilot", "oauth://copilot", "openai_responses")
-	copilot.OAuthProvider = "copilot"
-	m = NewAdvancedConfigModel(&copilot)
-	if !m.maxOutputUpstreamManaged() {
-		t.Fatal("Copilot OAuth should treat max output as upstream-managed")
-	}
-	if m.availabilitySmokeTestModel() != "" {
-		t.Fatalf("Copilot should use its discovered model catalog, got smoke model %q", m.availabilitySmokeTestModel())
-	}
-
-	gemini := providerFrom("gemini", "oauth://gemini", "openai")
-	gemini.OAuthProvider = "gemini"
-	m = NewAdvancedConfigModel(&gemini)
-	if m.maxOutputUpstreamManaged() {
-		t.Fatal("Gemini OAuth should allow max output editing")
-	}
-
-	kiro := providerFrom("kiro", "oauth://kiro", "anthropic")
-	kiro.OAuthProvider = "kiro"
-	m = NewAdvancedConfigModel(&kiro)
-	if !m.maxOutputUpstreamManaged() {
-		t.Fatal("Kiro OAuth should treat max output as upstream-managed")
-	}
-	enterDetectedReview(m, "m")
-	view = m.View().Content
-	if !strings.Contains(view, "Upstream managed") {
-		t.Fatalf("Kiro review should show Upstream managed, got %q", view)
-	}
-
-	codex := providerFrom("codex", "https://example.com/codex", "openai_responses")
-	m = NewAdvancedConfigModel(&codex)
-	if !m.maxOutputUpstreamManaged() {
-		t.Fatal("dedicated /codex endpoint should be upstream-managed")
-	}
-
-	plain := providerFrom("plain", "https://example.com/v1", "openai_responses")
-	m = NewAdvancedConfigModel(&plain)
-	if m.maxOutputUpstreamManaged() {
-		t.Fatal("plain responses should allow max output editing")
-	}
-
-	enterDetectedReview(m, "m")
-	view = m.View().Content
-	if strings.Contains(view, "Upstream managed") {
-		t.Fatalf("plain responses unexpectedly shows Upstream managed: %q", view)
-	}
-
-	m = NewAdvancedConfigModel(&codex)
-	enterDetectedReview(m, "m")
-	view = m.View().Content
-	if !strings.Contains(view, "Upstream managed") {
-		t.Fatalf("codex review should show Upstream managed, got %q", view)
-	}
-}
-
 func TestPageUpDownStaysWithinVisibleRows(t *testing.T) {
 	// Moving up/down must stay inside the single page's visible row set, wrapping
 	// at the ends instead of drifting into a disabled row.
-	cp := providerFrom("codex", "https://example.com/codex", "openai_responses")
+	cp := providerFrom("path-gateway", "https://example.com/codex", "openai_responses")
 	m := NewAdvancedConfigModel(&cp)
-	enterDetectedReview(m, "codex-max")
+	enterDetectedReview(m, "path-max")
 	rows := len(m.visibleRows())
 	m.cursor = 0
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
@@ -177,14 +95,12 @@ func providerFrom(name, endpoint, typ string) provider.Provider {
 	return provider.Provider{Name: name, Endpoint: endpoint, Type: typ, APIKey: "k", Model: "m"}
 }
 
-// enterDetectedReview puts a model into the post-detection single-page state:
-// a populated pool, discovered flag set, and the cursor on a model row. It is the
-// single-page equivalent of the old "m.page = 4" idiom.
+// enterDetectedReview puts a model into the post-detection state: a populated
+// pool, discovered flag set, and the cursor on a model row.
 func enterDetectedReview(m *AdvancedConfigModel, models ...string) *AdvancedConfigModel {
 	m.modelPool = append([]string(nil), models...)
 	m.modelPoolFromDiscovery = true
 	m.p.Model = strings.Join(models, ",")
-	m.page = 4
 	if len(models) > 0 {
 		m.cursor = m.mainRowIndex(rowOpus)
 	}
@@ -264,32 +180,29 @@ func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 	}
 }
 
-func TestPage2DefaultsToClaudeAutoCompact(t *testing.T) {
-	// A provider carrying the old Switch-safe preset must open on Claude default,
-	// because ccl no longer writes context env at all.
+func TestPage2MapsOldContextPresetToDefault(t *testing.T) {
 	p := provider.Provider{
 		Type:     "openai_responses",
 		Endpoint: "https://example.test/v1",
 		Env: map[string]string{
-			maxContextTokensEnv:  maxContext300K,
-			autoCompactWindowEnv: compactWindow300K,
+			maxContextTokensEnv:  "300000",
+			autoCompactWindowEnv: "200000",
 		},
 	}
 	m := NewAdvancedConfigModel(&p)
 	if m.compactPreset != compactPresetDefault {
-		t.Fatalf("compact preset = %v, want Claude default", m.compactPreset)
+		t.Fatalf("compact preset = %v, want Default", m.compactPreset)
 	}
 	// The legacy preset is dropped, not surfaced, so the saved provider clears the
 	// stale context env on apply.
-	if m.compactState.legacy {
-		t.Fatalf("legacy compact state should be recognized as default, got %+v", m.compactState)
+	if !hasUnsupportedContextConfig(*m.p) {
+		t.Fatal("old compact env should be retired on save")
 	}
 }
 
 func TestCredentialsPageResolvesClickToField(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "sk-test"}
 	m := NewAdvancedConfigModel(&p)
-	m.page = 4
 	m.width = 100
 	m.height = 30
 
@@ -383,7 +296,7 @@ func TestOAuthPageSupportsMouseClick(t *testing.T) {
 func TestSinglePageBlocksOneMForMixedCaseModelIDs(t *testing.T) {
 	// The catalog is keyed by lowercased model id; a gateway serving mixed-case ids
 	// must not slip past the check. On the single page the 1M marker is toggled by
-	// Space on a model row, not by Enter on the removed page 2.
+	// Space on a model row toggles the per-slot marker.
 	p := provider.Provider{
 		Type:      "openai",
 		Endpoint:  "https://example.test/v1",
@@ -401,26 +314,6 @@ func TestSinglePageBlocksOneMForMixedCaseModelIDs(t *testing.T) {
 	m = next.(*AdvancedConfigModel)
 	if m.oneMSlots["opus"] {
 		t.Fatal("1M was enabled for a 200K model with a mixed-case id")
-	}
-}
-
-func TestSelectingCustomCompactOptsOutOfContextPolicy(t *testing.T) {
-	// Custom promises hand-set context env survives, which only holds when the
-	// provider opts out of ccl's context policy.
-	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
-	m := NewAdvancedConfigModel(&p)
-
-	m.selectCompactPreset(1) // Custom
-	if m.compactPreset != compactPresetPreserve {
-		t.Fatalf("compact preset = %v, want Custom", m.compactPreset)
-	}
-	if !provider.ContextBudgetIsManual(*m.p) {
-		t.Fatalf("Custom did not opt out of the context policy: %#v", m.p.Env)
-	}
-
-	m.selectCompactPreset(0) // Claude Code default
-	if provider.ContextBudgetIsManual(*m.p) {
-		t.Fatalf("the default choice must not keep the opt-out: %#v", m.p.Env)
 	}
 }
 
@@ -458,7 +351,6 @@ func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
 			for _, r := range []rune{'q', 'k', 'j', 'h', 'l'} {
 				p := provider.Provider{Type: "openai"}
 				m := NewAdvancedConfigModel(&p)
-				m.page = 4
 				m.cursor = tc.cursor
 
 				next, cmd := m.Update(typeKey(r))
@@ -482,7 +374,7 @@ func TestSlotFilterTypesLettersThatAreAlsoShortcuts(t *testing.T) {
 	// The slot picker navigates with j/k, but only until the filter is focused:
 	// there, "kimi" has to be typeable. Arrow keys stay unambiguous.
 	p := provider.Provider{Type: "openai"}
-	m := NewAdvancedConfigModelAtPage1(&p, []string{"kimi-k2", "qwen3-coder", "glm-4.6"})
+	m := NewAdvancedMappingModel(&p, []string{"kimi-k2", "qwen3-coder", "glm-4.6"}, nil)
 	m.cursor = 0
 	m.filterInput.Focus()
 
@@ -522,7 +414,7 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 		},
 		{ID: "dfmodel", DisplayName: "DeepSeek-V4-Flash", ContextWindow: 1_000_000, RateMultiplier: &flashRate, IsNew: true},
 	})
-	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, []string{"qmodel_38max", "dfmodel"}, metadata)
+	m := NewAdvancedMappingModel(&p, []string{"qmodel_38max", "dfmodel"}, metadata)
 	m.cursor = m.mainRowIndex(rowOpus)
 
 	// Enter on a model row opens the slot picker overlay on the single page.
@@ -572,7 +464,7 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 // would send a non-1M model with the [1m] suffix at save time.
 func TestChangingModelClearsBlockedOneMMarker(t *testing.T) {
 	p := provider.Provider{Type: "openai", OpusModel: "gpt-5.6-sol"}
-	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, []string{"gpt-5.6-sol", "small-window-model"}, indexModelInfos([]protocol.ModelInfo{
+	m := NewAdvancedMappingModel(&p, []string{"gpt-5.6-sol", "small-window-model"}, indexModelInfos([]protocol.ModelInfo{
 		{ID: "gpt-5.6-sol", ContextWindow: 1_000_000},
 		{ID: "small-window-model", ContextWindow: 128_000},
 	}))
@@ -608,7 +500,7 @@ func TestChangingModelClearsBlockedOneMMarker(t *testing.T) {
 // when the new model is not backend-blocked (the advisory path).
 func TestChangingModelKeepsOneMMarkerOnNonBlockedModel(t *testing.T) {
 	p := provider.Provider{Type: "openai", OpusModel: "gpt-5.6-sol"}
-	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, []string{"gpt-5.6-sol", "other-model"}, indexModelInfos([]protocol.ModelInfo{
+	m := NewAdvancedMappingModel(&p, []string{"gpt-5.6-sol", "other-model"}, indexModelInfos([]protocol.ModelInfo{
 		{ID: "gpt-5.6-sol", ContextWindow: 1_000_000},
 		{ID: "other-model"}, // no advertised window → not blocked
 	}))
@@ -643,7 +535,6 @@ func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewAdvancedConfigModel(&tc.p)
-			m.page = 4
 			m.cursor = tc.cursor
 			if _, cmd := m.Update(typeKey('q')); !quits(cmd) {
 				t.Fatal("q no longer quits")
@@ -654,25 +545,18 @@ func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 
 func TestViewDoesNotMutateTheModel(t *testing.T) {
 	// View is a renderer: bubbletea may call it without a following Update, so
-	// state changed here makes the frame and the model disagree. The single page
-	// renders identically regardless of any stale page value; View must never
-	// assign m.page or m.cursor.
-	for _, page := range []int{0, 1, 2, 3, 4, 5, 99} {
-		p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", Model: "model-a,model-b"}
-		m := NewAdvancedConfigModel(&p)
-		m.page = page
-		m.cursor = 1
-		m.width = 100
-		m.height = 30
+	// state changed here makes the frame and the model disagree.
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", Model: "model-a,model-b"}
+	m := NewAdvancedConfigModel(&p)
+	m.cursor = 1
+	m.width = 100
+	m.height = 30
 
-		beforePage, beforeCursor := m.page, m.cursor
-		view := m.View()
-
-		if m.page != beforePage || m.cursor != beforeCursor {
-			t.Fatalf("View() on page %d moved the model to page=%d cursor=%d", page, m.page, m.cursor)
-		}
-		if strings.TrimSpace(view.Content) == "" {
-			t.Fatalf("View() on page %d rendered a blank frame", page)
-		}
+	view := m.View()
+	if m.cursor != 1 {
+		t.Fatalf("View() moved the cursor to %d", m.cursor)
+	}
+	if strings.TrimSpace(view.Content) == "" {
+		t.Fatal("View() rendered a blank frame")
 	}
 }

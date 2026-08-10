@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -14,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/providersession"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,11 +39,8 @@ const (
 	SubagentModelEnv          = "CLAUDE_CODE_SUBAGENT_MODEL"
 	ToolUseConcurrencyEnv     = "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"
 	ToolSearchEnv             = "ENABLE_TOOL_SEARCH"
-	MaxOutputTokensEnv        = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 	DefaultToolUseConcurrency = "3"
 	DefaultToolSearch         = "false"
-	DefaultMaxOutputTokens    = "32000"
-	MaxOutputTokensUpperLimit = 128000
 )
 
 // RuntimeSettings are ccl's Claude Code process defaults. Provider Env values
@@ -53,7 +49,6 @@ type RuntimeSettings struct {
 	SubagentModel      string
 	ToolUseConcurrency string
 	ToolSearch         string
-	MaxOutputTokens    string
 }
 
 func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
@@ -65,7 +60,6 @@ func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
 		SubagentModel:      subagentModel,
 		ToolUseConcurrency: DefaultToolUseConcurrency,
 		ToolSearch:         DefaultToolSearch,
-		MaxOutputTokens:    DefaultMaxOutputTokens,
 	}
 	if value, ok := p.Env[SubagentModelEnv]; ok {
 		settings.SubagentModel = value
@@ -76,24 +70,7 @@ func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
 	if value, ok := p.Env[ToolSearchEnv]; ok {
 		settings.ToolSearch = value
 	}
-	if value, ok := p.Env[MaxOutputTokensEnv]; ok {
-		if normalized, err := NormalizeMaxOutputTokens(value); err == nil {
-			settings.MaxOutputTokens = normalized
-		}
-	}
 	return settings
-}
-
-// NormalizeMaxOutputTokens validates Claude Code's per-response output cap.
-// Context window sizes such as 200K or 1M are separate settings and must not
-// be used here.
-func NormalizeMaxOutputTokens(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	tokens, err := strconv.Atoi(value)
-	if err != nil || tokens < 1 || tokens > MaxOutputTokensUpperLimit {
-		return "", fmt.Errorf("must be an integer between 1 and %d", MaxOutputTokensUpperLimit)
-	}
-	return strconv.Itoa(tokens), nil
 }
 
 func defaultSubagentModel(p provider.Provider) string {
@@ -189,7 +166,6 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 	}
 	env[ToolUseConcurrencyEnv] = runtimeSettings.ToolUseConcurrency
 	env[ToolSearchEnv] = runtimeSettings.ToolSearch
-	env[MaxOutputTokensEnv] = runtimeSettings.MaxOutputTokens
 
 	// Provider-level overrides take final precedence except for embedded-proxy
 	// transport values, which must match the runtime started for this session.
@@ -209,9 +185,6 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 		env["ANTHROPIC_BASE_URL"] = baseURL
 		env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
 	}
-	// Keep this safety-critical value validated even when an older config
-	// contains an invalid context-window-sized override.
-	env[MaxOutputTokensEnv] = runtimeSettings.MaxOutputTokens
 	return env
 }
 
@@ -261,9 +234,8 @@ func isProxyTransportEnv(key string) bool {
 func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) []string {
 	// The settings file is authoritative for everything ccl configures, so an
 	// inherited copy of one of those keys is dropped rather than left to compete
-	// with it. The context keys are dropped too, even though ccl no longer writes
-	// them: a value exported in the user's shell would otherwise silently reinstate
-	// the session-wide window that ccl deliberately stopped declaring. ccl's own
+	// with it. Context keys are dropped too: Default must not inherit a shell
+	// override, while Balanced re-exports its exact settings below. ccl's own
 	// CCL_* variables, and everything unrelated, are inherited untouched.
 	suppressed := make(map[string]struct{}, len(settings.Env)+4)
 	for key := range settings.Env {
@@ -412,68 +384,30 @@ type providerContext struct {
 	provider provider.Provider // copy, not reference — safe to mutate
 	baseURL  string
 	useProxy bool
-	oauth    *oauthproxy.Runtime
+	session  *providersession.Session
 	// modelNames carries provider catalog labels used by Claude Code's UI and
 	// request aliases; the direct adapter resolves aliases to technical IDs.
 	modelNames map[string]string
-	// droppedContextPreset records that a context preset from an older ccl version
-	// was removed from this session's env.
-	droppedContextPreset bool
+	// droppedContextOverride records that an unsupported context combination was
+	// removed from this session's env.
+	droppedContextOverride bool
 }
 
 // setupProvider starts a proxy if needed and resolves the final model list.
 // The caller must call cleanup() to release any proxy resources.
 func setupProvider(p provider.Provider) (*providerContext, error) {
-	// Make a COPY to avoid mutating the original provider (fixes mutation bug)
-	providerCopy := p
-	// OpenAI-family providers and all OAuth backends (including Claude OAuth)
-	// go through the embedded CPA runtime so Claude Code always hits a local
-	// /v1/messages endpoint with a session token.
-	useProxy := provider.IsOpenAICompatibleType(p.Type) || strings.TrimSpace(p.OAuthProvider) != ""
-	ctx := &providerContext{provider: providerCopy, useProxy: useProxy}
-	if ctx.useProxy {
-		if providerCopy.OAuthProvider == "" && strings.TrimSpace(providerCopy.Model) == "" {
-			models, err := protocol.GetOpenAIModels(providerCopy.Endpoint, providerCopy.APIKey)
-			if err != nil {
-				return nil, fmt.Errorf("discover OpenAI models before starting CLIProxyAPI: %w", err)
-			}
-			providerCopy.Model = models
-		}
-		upstreamProtocol := oauthproxy.ProtocolOpenAIChat
-		if provider.IsOpenAIResponsesType(providerCopy.Type) {
-			upstreamProtocol = oauthproxy.ProtocolOpenAIResponses
-		}
-		maxOut := 0
-		if provider.IsOpenAIResponsesType(providerCopy.Type) {
-			if n, err := strconv.Atoi(ResolveRuntimeSettings(providerCopy).MaxOutputTokens); err == nil {
-				maxOut = n
-			}
-		}
-		runtime, err := oauthproxy.StartProvider(context.Background(), oauthproxy.StartOptions{
-			Protocol:                upstreamProtocol,
-			Endpoint:                providerCopy.Endpoint,
-			APIKey:                  providerCopy.APIKey,
-			ModelSpec:               provider.RuntimeModelSpec(providerCopy),
-			OAuthProvider:           providerCopy.OAuthProvider,
-			OAuthAccountCredential:  providerCopy.OAuthAccountCredential,
-			OAuthAccountCredentials: providerCopy.OAuthAccountCredentials,
-			OAuthCredentialResolver: groupCredentialResolver(providerCopy.AuthGroup),
-			MaxOutputTokens:         maxOut,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("start embedded provider runtime: %w", err)
-		}
-		ctx.oauth = runtime
-		ctx.modelNames = runtime.ModelDisplayNames()
-		providerCopy.Endpoint = runtime.Endpoint()
-		providerCopy.APIKey = runtime.APIKey()
-		if strings.TrimSpace(providerCopy.Model) == "" && len(runtime.Models()) > 0 {
-			providerCopy.Model = strings.Join(runtime.Models(), ",")
-		}
-		ctx.provider = providerCopy
-		ctx.baseURL = runtime.ClaudeBaseURL()
-	} else {
-		ctx.baseURL = providerCopy.Endpoint
+	session, err := providersession.Prepare(nil, p)
+	if err != nil {
+		return nil, err
+	}
+	ctx := &providerContext{
+		provider: session.Provider,
+		baseURL:  session.BaseURL,
+		useProxy: session.UseProxy,
+		session:  session,
+	}
+	if session.Runtime != nil {
+		ctx.modelNames = session.Runtime.ModelDisplayNames()
 	}
 
 	if err := ctx.resolveModel(); err != nil {
@@ -481,24 +415,6 @@ func setupProvider(p provider.Provider) (*providerContext, error) {
 		return nil, err
 	}
 	return ctx, nil
-}
-
-func groupCredentialResolver(groupName string) func() ([]string, error) {
-	groupName = strings.TrimSpace(groupName)
-	if groupName == "" {
-		return nil
-	}
-	return func() ([]string, error) {
-		cfg, err := config.Load()
-		if err != nil {
-			return nil, err
-		}
-		group, ok := cfg.AuthGroups[groupName]
-		if !ok {
-			return []string{}, nil
-		}
-		return append([]string{}, group.Credentials...), nil
-	}
 }
 
 // resolveModel seeds preferred OAuth slot defaults for empty tiers, discovers
@@ -509,7 +425,7 @@ func (c *providerContext) resolveModel() error {
 	// Apply first so existing Grok providers without saved slot pins still get
 	// the preferred mapping before catalog validation.
 	provider.ApplyOAuthSlotDefaults(&c.provider)
-	if c.provider.Model == "" && c.oauth != nil {
+	if c.provider.Model == "" && c.session != nil && c.session.Runtime != nil {
 		models, err := protocol.GetOpenAIModels(c.provider.Endpoint, c.provider.APIKey)
 		if err != nil {
 			return fmt.Errorf("discover embedded provider runtime models: %w", err)
@@ -523,8 +439,8 @@ func (c *providerContext) resolveModel() error {
 }
 
 func (c *providerContext) cleanup() {
-	if c.oauth != nil {
-		c.oauth.Stop()
+	if c.session != nil {
+		c.session.Close()
 	}
 }
 
@@ -532,7 +448,7 @@ func (c *providerContext) settings() settingsJSON {
 	env := buildEnvWithModelNames(c.provider, c.baseURL, c.useProxy, c.modelNames)
 	// Applied after the provider Env overrides: a preset an older ccl stored must
 	// not survive into a session Claude Code should size itself.
-	c.droppedContextPreset = applyContextPolicy(env, c.provider)
+	c.droppedContextOverride = applyContextPolicy(env)
 	return settingsJSON{
 		Env:                    env,
 		HasCompletedOnboarding: true,
@@ -576,24 +492,34 @@ func Run(p provider.Provider, args []string) error {
 		if err := oauthproxy.SetLogLevel(oauthproxy.CurrentLogLevel(), oauthproxy.SessionLogPath(session)); err != nil {
 			return fmt.Errorf("open session log: %w", err)
 		}
-		oauthproxy.LogInfof("session start name=%q provider=%q oauth=%q", session, p.Name, p.OAuthProvider)
+		oauthproxy.LogInfoEvent("session_start", "session", session, "provider", p.Name,
+			"oauth", p.OAuthProvider, "protocol", provider.ProtocolLabelForProvider(p))
 	}
 
 	ctx, err := setupProvider(p)
 	if err != nil {
-		oauthproxy.LogErrorf("session setup failed name=%q provider=%q oauth=%q error=%v", session, p.Name, p.OAuthProvider, err)
+		oauthproxy.LogErrorEvent("session_setup_failed", "session", session, "provider", p.Name,
+			"oauth", p.OAuthProvider, "protocol", provider.ProtocolLabelForProvider(p), "error", err)
 		return err
 	}
 	defer ctx.cleanup()
+	dataPlane := "direct"
+	if ctx.useProxy {
+		dataPlane = "ccl_proxy"
+	}
+	oauthproxy.LogInfoEvent("provider_ready", "session", session, "provider", p.Name,
+		"oauth", p.OAuthProvider, "protocol", provider.ProtocolLabelForProvider(p),
+		"data_plane", dataPlane, "upstream_errors_visible", ctx.useProxy,
+		"base", oauthproxy.SafeLogEndpoint(ctx.baseURL))
 
 	sessionSettings := ctx.settings()
 	settingsPath, err := writeSettingsFile(sessionSettings, session)
 	if err != nil {
-		oauthproxy.LogErrorf("session settings write failed name=%q error=%v", session, err)
+		oauthproxy.LogErrorEvent("session_settings_failed", "session", session, "error", err)
 		return fmt.Errorf("create settings file: %w", err)
 	}
 	defer os.Remove(settingsPath)
-	logSessionContextBudget(p, sessionSettings, ctx.droppedContextPreset)
+	logSessionContextBudget(p, sessionSettings, ctx.droppedContextOverride)
 
 	fmt.Println("Using provider-specific claude config:", settingsPath)
 
@@ -614,11 +540,11 @@ func Run(p provider.Provider, args []string) error {
 	runErr := cmd.Run()
 
 	// Token usage, unlike the debug log, is printed unconditionally: it is
-	// information about what the session cost, not a diagnostic. ctx.oauth is
-	// nil for providers that never start an embedded runtime (plain Anthropic
+	// information about what the session cost, not a diagnostic. Runtime is nil
+	// for providers that never start an embedded runtime (plain Anthropic
 	// endpoints), and Usage()/Snapshot() are nil-safe, so this is a no-op for
 	// them rather than a special case here.
-	if summary := oauthproxy.FormatUsageSummary(usageSnapshot(ctx.oauth)); summary != "" {
+	if summary := oauthproxy.FormatUsageSummary(usageSnapshot(ctx.session.Runtime)); summary != "" {
 		fmt.Fprintln(os.Stderr, "\n"+summary)
 	}
 
@@ -635,10 +561,11 @@ func Run(p provider.Provider, args []string) error {
 		if runErr != nil {
 			outcome = runErr.Error()
 		}
-		oauthproxy.LogInfof("launcher exit provider=%q oauth=%q protocol=%q base=%q use_proxy=%t model_count=%d env_override=%d custom_model=%q fast=%t outcome=%s duration=%s",
-			p.Name, p.OAuthProvider, provider.ProtocolLabelForProvider(p), ctx.baseURL,
-			ctx.useProxy, modelCount, len(p.Env), p.CustomModelID, p.FastMode,
-			outcome, time.Since(start).Round(time.Millisecond))
+		oauthproxy.LogInfoEvent("session_exit", "provider", p.Name, "oauth", p.OAuthProvider,
+			"protocol", provider.ProtocolLabelForProvider(p), "base", oauthproxy.SafeLogEndpoint(ctx.baseURL),
+			"use_proxy", ctx.useProxy, "model_count", modelCount, "env_override", len(p.Env),
+			"custom_model", p.CustomModelID, "fast", p.FastMode, "outcome", outcome,
+			"duration", time.Since(start).Round(time.Millisecond))
 	}
 	return runErr
 }
@@ -662,7 +589,7 @@ func usageSnapshot(runtime *oauthproxy.Runtime) []oauthproxy.UsageModelTotals {
 // told it could grow further than the backend allows, and nothing else records
 // which numbers were in effect. Compare these against `ccl doctor` →
 // "Context budget", which reads the window the backend advertises.
-func logSessionContextBudget(p provider.Provider, settings settingsJSON, droppedPreset bool) {
+func logSessionContextBudget(p provider.Provider, settings settingsJSON, droppedOverride bool) {
 	if !oauthproxy.LogEnabled() {
 		return
 	}
@@ -680,14 +607,13 @@ func logSessionContextBudget(p provider.Provider, settings settingsJSON, dropped
 			mapped = append(mapped, slot.name+"="+slot.model)
 		}
 	}
-	oauthproxy.LogInfof("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q auto_compact_pct=%q dropped_ccl_preset=%t manual=%t effort=%q max_output=%q slots=[%s]",
+	oauthproxy.LogInfof("launcher context budget provider=%q oauth=%q max_context_tokens=%q auto_compact_window=%q auto_compact_pct=%q dropped_unsupported_preset=%t effort=%q slots=[%s]",
 		p.Name, p.OAuthProvider,
 		settings.Env[provider.EnvMaxContextTokens],
 		settings.Env[provider.EnvAutoCompactWindow],
 		settings.Env[provider.EnvAutoCompactPct],
-		droppedPreset, provider.ContextBudgetIsManual(p),
+		droppedOverride,
 		settings.Env["CLAUDE_CODE_EFFORT_LEVEL"],
-		settings.Env[MaxOutputTokensEnv],
 		strings.Join(mapped, " "))
 }
 

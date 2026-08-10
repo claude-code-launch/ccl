@@ -106,7 +106,7 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 		}
 	}
 
-	applyCompactConfig(&p, oneMSlotsFromProvider(p), compactPresetPreserve)
+	applyOneMSuffixes(&p, oneMSlotsFromProvider(p))
 
 	cfg.Providers[providerName] = p
 	if err := config.Save(cfg); err != nil {
@@ -173,30 +173,25 @@ func runMapAuto(ctx context.Context, args []string) error {
 	slots := sequentialSlotPointers(&p)
 	assigned := applySequentialSlotMapping(slots, available)
 	// Drop [1m] only for slots that no longer map to a recommended model.
-	// Compact stays independent except for pure legacy 1M window with no pct
-	// once every [1m] slot has been cleared (old coupling residue).
+	// Compact stays independent from per-slot [1m] cleanup.
 	for _, slot := range advancedSlotRefs(&p) {
 		if oneMSlots[slot.key] && !recommendedOneMModel(*slot.ptr) {
 			delete(oneMSlots, slot.key)
 		}
 	}
-	state := compactStateFromProvider(p)
-	// Compact is fully independent of [1m] slot cleanup.
-	// Only migrate pure legacy residue (window=1M without percentage) after
-	// every [1m] marker has been removed. Modern presets — including explicit
-	// Maximum 1M/900K — are preserved as-is.
-	preset := state.preset
 	if allConfiguredModelsRecommendOneM(p) {
 		for _, slot := range advancedSlotRefs(&p) {
 			if strings.TrimSpace(*slot.ptr) != "" {
 				oneMSlots[slot.key] = true
 			}
 		}
-		// Do not force Balanced 500K here; leave the user's compact budget alone.
-	} else if len(oneMSlots) == 0 && state.legacy {
-		preset = compactPresetDefault
 	}
-	applyCompactConfig(&p, oneMSlots, preset)
+	// Mapping does not change Default/Balanced, but retires unsupported old or
+	// hand-written context combinations when encountered.
+	applyOneMSuffixes(&p, oneMSlots)
+	if hasUnsupportedContextConfig(p) {
+		applyCompactPreset(&p, compactPresetDefault)
+	}
 
 	if assigned < 4 {
 		fmt.Printf("⚠ Only %d model(s) available, assigned in order to first %d slot(s).\n", assigned, assigned)
@@ -270,7 +265,7 @@ func runMapTUI(args []string) error {
 	}
 
 	// Launch TUI at page 1
-	m := NewAdvancedConfigModelAtPage1WithMetadata(&p, modelPool, metadata)
+	m := NewAdvancedMappingModel(&p, modelPool, metadata)
 	program := tea.NewProgram(m)
 	finalModel, err := program.Run()
 	if err != nil {

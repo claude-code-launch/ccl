@@ -101,12 +101,10 @@ func RunProviderSet(args []string) error {
 	}
 
 	var p provider.Provider
-	var original provider.Provider
 	isUpdate := false
 	if targetName != "" {
 		if existing, exists := cfg.Providers[targetName]; exists {
 			p = existing
-			original = existing
 			isUpdate = true
 		} else {
 			p.Name = targetName
@@ -136,12 +134,6 @@ func RunProviderSet(args []string) error {
 
 	updatedModel := finalModel.(*AdvancedConfigModel)
 	p = *updatedModel.p
-	if original.AuthGroup != "" {
-		p, err = preserveGroupBindingAfterSet(cfg, original, p)
-		if err != nil {
-			return err
-		}
-	}
 	setDebugf(
 		"advanced config finished name=%q endpoint_empty=%t api_key_len=%d type=%q model_count=%d effort=%q slots=%s one_m=%s detecting=%t detection_error=%v model_pool_count=%d connection_dirty=%t auto_configured=%t",
 		p.Name,
@@ -234,19 +226,6 @@ func RunProviderSet(args []string) error {
 	return nil
 }
 
-func preserveGroupBindingAfterSet(cfg *provider.Config, original, updated provider.Provider) (provider.Provider, error) {
-	group, exists := cfg.AuthGroups[original.AuthGroup]
-	if !exists {
-		return provider.Provider{}, fmt.Errorf("auth group %q no longer exists; run `ccl sync`", original.AuthGroup)
-	}
-	updated.AuthGroup = original.AuthGroup
-	updated = configureOAuthProvider(updated, original.Name, group.OAuthProvider, "")
-	updated.AuthGroup = original.AuthGroup
-	updated.OAuthAccountCredential = ""
-	updated.OAuthAccountCredentials = append([]string{}, group.Credentials...)
-	return updated, nil
-}
-
 func providerConfigurationComplete(p provider.Provider) bool {
 	if strings.TrimSpace(p.Type) == "" || strings.TrimSpace(p.Model) == "" {
 		return false
@@ -326,12 +305,6 @@ const (
 func detectProtocolAndModelsDetailed(endpoint, apiKey string) protocolDetectionResult {
 	endpoint = strings.TrimSuffix(endpoint, "/")
 	setDebugf("detectProtocolAndModelsDetailed start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
-	if suggestion, invalid := protocol.InvalidCodexV1EndpointSuggestion(endpoint); invalid {
-		return protocolDetectionResult{err: fmt.Errorf("%s", locale.T(
-			fmt.Sprintf("Codex endpoint 应填写为 %s，不要包含 /v1；获取模型时 ccl 会请求 %s/models", suggestion, suggestion),
-			fmt.Sprintf("Codex endpoint must be %s without /v1; ccl will request %s/models for model discovery", suggestion, suggestion),
-		))}
-	}
 
 	var failures []modelProbeFailure
 	for _, candidate := range buildModelProbeCandidates(endpoint) {

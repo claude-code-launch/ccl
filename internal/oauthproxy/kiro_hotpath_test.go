@@ -72,7 +72,7 @@ func TestKiroCredentialCacheReloadsChangedFiles(t *testing.T) {
 	path := filepath.Join(authDir, "kiro-a.json")
 	writeKiroTestCredential(t, path, map[string]any{"access_token": "first"})
 
-	pool := newKiroCredentialPool(authDir, nil, false, nil)
+	pool := newKiroCredentialPool(authDir, "")
 	credentials, err := pool.load()
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestKiroCallUpstreamKeepsUnauthorizedDiagnosticsWhenRefreshFails(t *testing
 
 	service := &kiroService{
 		models:      []string{"claude-sonnet-4.6"},
-		pool:        newKiroCredentialPool(authDir, nil, false, nil),
+		pool:        newKiroCredentialPool(authDir, ""),
 		client:      upstream.Client(),
 		upstreamURL: func(*kiroCredential) string { return upstream.URL },
 	}
@@ -167,7 +167,7 @@ func newKiroUpstreamTestService(t *testing.T, handler http.HandlerFunc) (*kiroSe
 	service := &kiroService{
 		apiKey:           "ccl-test-key",
 		models:           kiroRuntimeModels("claude-sonnet-4.6"),
-		pool:             newKiroCredentialPool(authDir, nil, false, nil),
+		pool:             newKiroCredentialPool(authDir, ""),
 		client:           upstream.Client(),
 		upstreamURL:      func(*kiroCredential) string { return upstream.URL },
 		rateLimitBackoff: []time.Duration{time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond},

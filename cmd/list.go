@@ -21,11 +21,8 @@ func newProviderListCommand(use string) *cobra.Command {
 		Short: "List registered providers",
 		Long: `List providers from ~/.ccl/config.yaml.
 
-A single-account OAuth provider whose credential already belongs to an auth
-group is never listed: the group's own provider represents it. -a/--all does not
-change that, it switches the table for a detailed view with full model pools and
-slot details. To see what a group is made of, use ccl oauth group ls, or read
-~/.ccl/config.yaml.
+-a/--all switches the table to a detailed view with full model pools and slot
+details.
 
 Examples:
   ccl ls
@@ -41,7 +38,7 @@ Examples:
 			return printProviders(cmd.OutOrStdout(), cfg, showAll, "No providers added yet. Use 'ccl set' to add one.", "Registered providers:")
 		},
 	}
-	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Detailed view with full model pools (does not reveal auth group members)")
+	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Detailed view with full model pools")
 	return cmd
 }
 
@@ -51,22 +48,8 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 		return nil
 	}
 
-	groupCredentials := make(map[string]bool)
-	for _, group := range cfg.AuthGroups {
-		for _, credential := range group.Credentials {
-			credential = strings.ToLower(strings.TrimSpace(credential))
-			if credential != "" {
-				groupCredentials[credential] = true
-			}
-		}
-	}
-
 	var names []string
-	for name, p := range cfg.Providers {
-		credential := strings.ToLower(strings.TrimSpace(p.OAuthAccountCredential))
-		if credential != "" && groupCredentials[credential] {
-			continue
-		}
+	for name := range cfg.Providers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -81,7 +64,7 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, " \tNAME\tKIND\tTYPE\tAUTH\tEFFORT\tCONTEXT\tMODELS\tSLOTS")
+	fmt.Fprintln(tw, " \tNAME\tTYPE\tAUTH\tEFFORT\tCONTEXT\tMODELS\tSLOTS")
 	for _, name := range names {
 		mark := " "
 		if name == cfg.ActiveProvider {
@@ -90,10 +73,9 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 		p := cfg.Providers[name]
 		fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			mark,
 			name,
-			providerKindLabel(p),
 			provider.ProtocolLabelForProvider(p),
 			providerAuthLabel(p),
 			providerEffortSummary(p),
@@ -114,12 +96,8 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 		}
 		p := cfg.Providers[name]
 		fmt.Fprintf(out, "%s %s\n", mark, name)
-		fmt.Fprintf(out, "    Kind     : %s\n", providerKindLabel(p))
 		fmt.Fprintf(out, "    Type     : %s\n", provider.ProtocolLabelForProvider(p))
 		fmt.Fprintf(out, "    Auth     : %s\n", providerAuthLabel(p))
-		if p.AuthGroup != "" {
-			fmt.Fprintf(out, "    Group    : %s (%d account(s))\n", p.AuthGroup, len(p.OAuthAccountCredentials))
-		}
 		if p.OAuthProvider != "" {
 			fmt.Fprintf(out, "    OAuth    : %s\n", p.OAuthProvider)
 		}

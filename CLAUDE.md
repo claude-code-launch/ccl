@@ -2,88 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 项目概述
+## Common Commands for Development
 
-`ccl`（Claude Code 多网关启动器）是一个 Go CLI：用户继续用 Claude Code 的界面，`ccl` 负责接入不同的模型来源（OpenAI 兼容网关、ChatGPT/Gemini/Grok/Copilot/Qoder/Kimi/Kiro/Claude 订阅账号等），需要时自动做协议翻译。用户配置在 `~/.ccl/config.yaml`（明文 API key），OAuth 凭据在 `~/.ccl/auth/`（每账号一个 JSON，0600 权限），会话诊断日志在 `~/.ccl/logs/`（每会话一个文件）。
+- **Build the binary**: `go build -o ccl .` (or `-o /tmp/ccl-verify` for local verification as suggested in README)
+- **Run all tests**: `go test ./...` (CI uses `go test -race ./...`)
+- **Run specific test**: `go test ./cmd -run TestRunAuthGrokWithoutAliasDerivesName`
+- **Regression after CLIProxyAPI upgrade**: `go test ./internal/oauthproxy ./internal/claude ./cmd`
+- **Check formatting**: `gofmt -l .` (must output nothing)
+- **Vet**: `go vet ./...`
+- **CI workflow**: See `.github/workflows/ci.yml` for sequence: gofmt → race test → vet → build
 
-## 常用命令
+## High-Level Architecture
 
-```bash
-go build -o ccl .                 # 编译（README 建议 -o /tmp/ccl-verify 做本地验证）
-go test ./...                     # 全部测试（CI 用 go test -race ./...）
-go vet ./...                      # CI 会跑
-gofmt -l .                        # CI 检查格式（必须零输出）
-go test ./cmd -run TestRunAuthGrokWithoutAliasDerivesName   # 单个测试
-go test ./internal/oauthproxy ./internal/claude ./cmd       # 升级 CLIProxyAPI 后的回归包
-```
+The `ccl` is a Go CLI that acts as a multi-model gateway launcher for Claude Code.
 
-升级 `github.com/router-for-me/CLIProxyAPI/v7` 后必须跑 `go test ./internal/oauthproxy ./internal/claude ./cmd`（见 `internal/oauthproxy/doc.go` 的兼容性边界清单）。
+**Data flow**:
+- `cmd/` (Cobra commands) → `internal/claude` (session launcher with settings JSON and proxy) → `internal/oauthproxy` (backend runtime with protocol translation)
 
-CI（`.github/workflows/ci.yml`）依次执行：gofmt 检查 → `go test -race ./...` → `go vet ./...` → `go build ./...`。推 `v*` tag 触发多平台发布（`.github/workflows/release.yml`）：构建各平台二进制 + GitHub Release，并用 OIDC 可信发布 npm 包 `@claudecodelaunch/ccl`（`bin/wrapper.js` 只是二进制包装器）。tag 必须是 `vMAJOR.MINOR.PATCH`（兼容旧四段式），npm 版本号取 tag 最后一段。
+**Key entry points** (read these first for big picture):
+- `cmd/root.go`: Command tree, alias handling, argument passthrough to Claude Code, provider resolution.
+- `internal/claude/launcher.go`: Core session startup - provider setup, env building, settings file generation, process execution.
+- `internal/oauthproxy/`: Runtime for different providers (CLIProxyAPI for most, direct adapters for Copilot/Qoder/Kiro).
+- `internal/provider/provider.go`: Model mapping and provider types.
+- `internal/cloudsync/`: For `ccl cloud` sync features.
 
-## 架构
+**Two launch paths**:
+1. Explicit ccl commands (white-listed in `isCclCommand`).
+2. Passthrough of unknown args to real Claude Code (use `--help` or correct subcommands for testing).
 
-数据流：`cmd/`（cobra 命令）→ `internal/claude`（拉起 Claude Code 进程 + 生成每会话 settings JSON）→ `internal/oauthproxy`（本机代理运行时）。`main.go` 只是 `cmd.Execute()`。
+**Configuration**: `~/.ccl/config.yaml` (providers), `~/.ccl/auth/` (credentials), logs in `~/.ccl/logs/`.
 
-### 两条启动路径（`cmd/root.go` 的 `Execute`）
-
-- 第一个参数是已知 ccl 命令（或别名）→ 走 cobra 命令树。
-- **否则所有参数原样透传给 Claude Code**（`ccl resume`、`ccl -p "..."` 都走这里）。`isCclCommand` 是显式白名单；`-v` 故意不拦截（属于 Claude Code），`--version`/`--help` 拦截。**任何参数拼错都会启动真实计费会话** — 测试/验证时永远用 `--help` 或正确的子命令，别把参数当字符串传给 `./ccl`。
-- `resolveProvider`：config.yaml 的 `active_provider` 优先于环境变量；无配置时才回退 `ANTHROPIC_*` / `OPENAI_*` 环境变量。
-
-### 会话启动（`internal/claude/launcher.go`）
-
-每个会话的核心流程（`Run`）：
-1. `setupProvider`：OpenAI 系 provider 和所有 OAuth backend 启动内嵌 `oauthproxy.Runtime`（本机 127.0.0.1 + 每会话随机 API key，不写回配置）；纯 Anthropic 直连 provider 不启动代理。
-2. `buildEnv` 生成环境变量（`ANTHROPIC_*_MODEL` 槽位映射、`ANTHROPIC_CUSTOM_MODEL_OPTION`、运行时默认 `CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000`、`ENABLE_TOOL_SEARCH=false`、`CLAUDE_CODE_SUBAGENT_MODEL` 默认 Custom/Sonnet 等）。
-3. 写每会话 settings 临时文件（`/tmp/claude_<id>_settings.json`，O_EXCL + 0600，`--settings` 传给 claude CLI）。
-4. `buildProcessEnv` 抑制继承的、由 settings 文件权威管理的环境变量（防止 shell 里残留的 `ANTHROPIC_API_KEY` 覆盖代理传输值）。
-5. `cmd.Run()` 结束后打印 token 用量摘要和会话日志路径。
-
-除 `Run` 的 `setupProvider` 外还有一条临时 runtime 路径：`cmd/oauth_runtime.go` 的 `prepareProviderRuntime` 被 `ccl map` / `ccl models` / `ccl doctor` / `ccl set` 复用，只为查询模型目录或测连通性启动内嵌 runtime，不写回配置、用完即 `Stop`。两条路径的 `OAuthCredentialResolver` 都是运行时从 `config.Load` 的 `auth_groups` 实时解析组员文件清单。
-
-Provider 槽位模型（`internal/provider/provider.go`）：`OpusModel`/`SonnetModel`/`HaikuModel`/`CustomModelID`/`SubagentModel` 对应 Claude Code 的 `ANTHROPIC_DEFAULT_*_MODEL` 环境变量；`Type` 是稳定的机器可读值（`anthropic` / `openai` / `openai_responses`），显示标签（`openai(chat)` / `openai(responses)`）由 `ProtocolLabel` 派生。`OAuthProvider` 值决定 runtime backend：`gpt|gemini|grok|kimi` 走 CLIProxyAPI，`copilot`/`qoder`/`kiro` 是 ccl 直连适配器（不调用任何第三方 CLI 子进程）；`chatgpt` 是 `gpt` 的旧名。`AuthGroup` 是同 backend 多账号 token 池，`config.Load` 时把组成员水合进 `OAuthAccountCredentials`（仅运行时字段）。
-
-模型名落地（`internal/modelrouting` 的 `MapModel`，被 launcher / runtime / provider 共用）：单个 configuredModel 完全覆盖映射；逗号分隔时是唯一候选池；否则用上游可用模型列表，按精确名 → tier 启发（opus/sonnet/haiku）→ 池首项匹配。空候选池返回 `""`，调用方不得发明厂商默认模型名。
-
-### 内嵌运行时（`internal/oauthproxy/`）
-
-Claude Code 只面对本机 Anthropic Messages 端点；上游协议在包内翻译：
-- **CLIProxyAPI**（`runtime.go`）承载 openai(chat) / openai(responses) 和大部分 OAuth backend。
-- Responses 请求序列化与流转换完全由 CLIProxyAPI 负责；ccl 将真实上游 base URL 直接交给 CPA，不在其后增加请求重写代理。
-- **Copilot**（`copilot_runtime.go`）：GitHub OAuth + 账号实时模型目录，按每个模型声明的端点选择 Responses/Chat/Messages。
-- **Qoder**（`qoder_*.go`）：COSY 签名、WAF body 编码、SSE→Anthropic 转换全部内嵌。
-- **Kiro**（`kiro_*.go`）：Messages→Amazon Q 适配器 + AWS EventStream 解码 + Smithy RPCv2 CBOR 模型目录。
-- **codex_cooldown.go**：ccl 缩短 408/5xx→2s、401/429→10s 的冷却覆盖。
-- **usage.go**：每会话结束报告按模型的 token 用量摘要。
-
-### 协议与端点规范化（`internal/protocol`）
-
-launcher 与 runtime 共用的 URL 助手：把配置的 base URL 规范化为 `/v1/messages`、`/chat/completions`、`/responses`、`/models`（OpenAI 与 Anthropic 两套，`urls.go`）；`NormalizeAnthropicBaseURLForClaude` 负责剥掉已带 `/v1` 的 endpoint，避免 Claude 拼出 `/v1/v1/messages`（README 要求 Anthropic 直连 endpoint 用裸域名）；`IsCodexBaseEndpoint` / `InvalidCodexV1EndpointSuggestion` 识别 `…/codex` 专用 base 并建议用户改正 `…/codex/v1`，ccl 从不改写用户设置的 endpoint。
-
-### 云同步（`internal/cloudsync`）
-
-`ccl cloud login|push|pull`、`ccl device`、`ccl key`、`ccl tag`、`ccl status`、`ccl logout` 的实现：把 `~/.ccl` 配置加密后同步到多个 Remote（Google Drive OAuth，或 iCloud 本地同步目录）。三层模型——**Profile**（一套配置 + 一把 256-bit 主密钥）、**Remote**（具体网盘账号/目录，一个 Profile 可镜像到多个）、**Device**（持密钥的设备，支持配对传钥）。默认操作只作用于 primary remote，跨网盘必须显式 `--all` / `--to` / `--from`；`logout` 只断本地连接，不删远端密文和主密钥。主密钥存系统 keychain（`keychain_darwin.go`），云端永不保存明文密钥或配置。设计约定与迁移规则见 `docs/cloud-sync-v2-design.md`（Phase 5 密钥轮换尚未实现）。
-
-### 日志子系统（`internal/oauthproxy/debug.go`）
-
-`ccl log`（`debug` 是其兼容别名）配置每会话日志阈值：`off`/`info`/`warn`/`error`/`debug`。模板路径 `~/.ccl/logs/ccl-debug.log`（`CCL_LOG_FILE` 或旧 `CCL_DEBUG_LOG` 覆盖），每个 Claude 会话或临时 runtime 打开自己的带后缀文件（`SessionLogPath`/`EnsureSessionLog`）。基于 `log/slog`（`LogInfof`/`LogDebugf`/`LogWarnf`/`LogErrorf`/`LogUpstreamStatusf`）。`debug` 级别会记录 HTTP payload（`DebugHTTPBody`），可含 prompt/tool 结果/用户秘密——仅保留在本机。对第三方噪声（CLIProxyAPI logrus、ReverseProxy stdlog）用 `debugFilterWriter`/`debugPrefixWriter` 过滤：丢弃含凭据标记（refresh_token/access_token/authorization:/api_key/bearer/token=）的行，只保留 refresh/cooldown/4xx/5xx/context 相关行。config 里的旧 `debug_mode`/`debug_verbose` 字段只读迁移到 `log_level`。
-
-### 上下文管理
-
-ccl 不再声明上下文大小：`CLAUDE_CODE_MAX_CONTEXT_TOKENS` / `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 只在 provider 明确 `CCL_CONTEXT_BUDGET=manual` 时生效；旧版 context preset（300K/500K/1M 组合）在 `IsCclContextPreset` 识别后被丢弃。这些 key 同时写入 settings 文件并导出到子进程环境（settings 文件通道对它们不可靠）。
-
-## 测试注意事项
-
-- 测试用 `t.Setenv("HOME", t.TempDir())` 隔离，不碰真实 `~/.ccl`。仓库里有 `CCL_TEST_HOME` 的说法但只存在于 README 的手动验证示例中，Go 测试不用它。
-- 命令测试多为源码级（直接调 cobra 命令的 RunE 或 helper），不是 exec 子进程。
-- 手动验证命令时（`./ccl ...`）：未知参数会透传启动真实 Claude Code 计费会话；裸 `ccl lang` / `ccl set` / `ccl map` 是交互式 TUI，非终端下行为不同。只跑 `--help` / `ccl doctor` / `ccl preview` 这类只读命令，或设置 `HOME` 到临时目录。**不要**对用户真实配置执行 `map auto`、`set`、`oauth sync` 等写操作。
-- `~/.ccl/config.yaml` 含明文 API key，不要把配置内容整段回显到输出。
-- `oauthproxy` 测试需要真实凭据文件时，直接在 `~/.ccl/auth` 写带 `"type"` 字段的 JSON 桩（见 `auth_test.go` 的 fixture 模式）。
-
-## 其他约定
-
-- 中文是项目的一等语言：README、TUI 文案、注释混用中英文；`internal/locale/` 处理语言检测（`CCL_LANG` 环境变量 > config.yaml > 系统语言）。新增面向用户的字符串通常要双语文案。但**分层约束**：`internal/` 下的库包不得 import `internal/locale`（翻译在 `cmd/` 表现层做），`internal/protocol/no_chinese_strings_test.go` 用 AST 检查强制库包零中文字面量——往 `internal/` 写面向用户的中文消息会直接挂 CI，应改为英文或把消息移到 `cmd/` 用 `locale.T` 包裹。
-- 命令兼容别名（`ccl auth` → `oauth`，`ccl login/push/pull` → `cloud` 系，`bypass` 取代 `auto`，`debug` → `log`，`chatgpt` → `gpt`）在 `cmd/root.go` 和各命令里维护，改动别名时保持旧脚本可用。
-- 配置文件读写是原子的（`writeFileAtomic`，临时文件 + rename + 0600）。
-- 发布流程：`git tag vX.Y.Z && git push origin vX.Y.Z` 触发 release workflow。推送前先 `go test ./...` 全绿。
+This structure requires reading the above files to understand the multi-provider translation, runtime proxies, and session management.
