@@ -15,8 +15,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxy "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/claude-code-launch/ccl/internal/codexidentity"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -231,10 +230,8 @@ func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
 	if proxyRuntime.APIKey() == "" {
 		t.Fatal("Start() returned an empty session API key")
 	}
-	if info, err := os.Stat(proxyRuntime.configPath); err != nil {
-		t.Fatalf("stat runtime config: %v", err)
-	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("runtime config mode = %o, want 600", info.Mode().Perm())
+	if proxyRuntime.coreManager != nil || proxyRuntime.httpServer == nil {
+		t.Fatal("GPT subscription must use the CCL-owned HTTP runtime, not CPA")
 	}
 
 	unauthorizedResp, err := http.Get(proxyRuntime.Endpoint() + "/models")
@@ -260,14 +257,14 @@ func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
 		t.Fatalf("models status = %d, want 200", resp.StatusCode)
 	}
 
-	configPath := proxyRuntime.configPath
+	endpoint := proxyRuntime.Endpoint()
 	proxyRuntime.Stop()
-	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
-		t.Fatalf("runtime config still exists after Stop(): %v", err)
+	if _, err := http.Get(endpoint + "/models"); err == nil {
+		t.Fatal("Codex runtime still accepts connections after Stop()")
 	}
 }
 
-func TestEmbeddedProxyKeepsSDKLogsIsolatedAfterStop(t *testing.T) {
+func TestDirectCodexRuntimeDoesNotChangeSDKLogger(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	authDir := filepath.Join(home, ".ccl", "auth")
@@ -294,19 +291,20 @@ func TestEmbeddedProxyKeepsSDKLogsIsolatedAfterStop(t *testing.T) {
 		t.Fatalf("Start() error: %v", err)
 	}
 	log.Warn("hidden while embedded runtime is active")
-	if output.Len() != 0 {
+	if !strings.Contains(output.String(), "hidden while embedded runtime is active") {
 		proxyRuntime.Stop()
-		t.Fatalf("SDK log reached terminal output while runtime was active: %q", output.String())
+		t.Fatalf("direct runtime unexpectedly changed the process logger: %q", output.String())
 	}
 
+	output.Reset()
 	proxyRuntime.Stop()
 	log.Warn("still hidden after embedded runtime stops")
-	if output.Len() != 0 {
-		t.Fatalf("late SDK log reached terminal output after runtime stopped: %q", output.String())
+	if !strings.Contains(output.String(), "still hidden after embedded runtime stops") {
+		t.Fatalf("direct runtime did not preserve the process logger after stop: %q", output.String())
 	}
 }
 
-func TestStartOpenAIResponsesAPIDoesNotImpersonateCodexClient(t *testing.T) {
+func TestStartOpenAIResponsesAPIUsesCCLOwnedCodexIdentity(t *testing.T) {
 	type capture struct {
 		header http.Header
 		body   map[string]any
@@ -330,7 +328,6 @@ func TestStartOpenAIResponsesAPIDoesNotImpersonateCodexClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
-	runtimeDir := proxyRuntime.runtimeDir
 	defer proxyRuntime.Stop()
 
 	payload := []byte(`{"model":"gpt-5.4-mini","input":"hi","stream":true,"max_output_tokens":8,"metadata":{"source":"claude"}}`)
@@ -354,17 +351,29 @@ func TestStartOpenAIResponsesAPIDoesNotImpersonateCodexClient(t *testing.T) {
 	if got.header.Get("Authorization") != "Bearer upstream-key" {
 		t.Fatalf("upstream authorization = %q", got.header.Get("Authorization"))
 	}
-	if strings.Contains(strings.ToLower(got.header.Get("User-Agent")), "codex_cli_rs") {
-		t.Fatalf("generic Responses gateway received Codex User-Agent: %q", got.header.Get("User-Agent"))
+	if !strings.HasPrefix(strings.ToLower(got.header.Get("User-Agent")), "codex_cli_rs/") {
+		t.Fatalf("Responses gateway did not receive CCL's Codex User-Agent: %q", got.header.Get("User-Agent"))
 	}
-	if got.header.Get("Originator") != "" {
-		t.Fatalf("generic Responses gateway received Originator = %q", got.header.Get("Originator"))
+	if got.header.Get("Originator") != codexidentity.Originator {
+		t.Fatalf("Responses gateway Originator = %q, want %s", got.header.Get("Originator"), codexidentity.Originator)
 	}
-	if got.header.Get("Version") != "" {
-		t.Fatalf("generic Responses gateway must not receive Version header: %q", got.header.Get("Version"))
+	if got.header.Get("Version") != codexidentity.ClientVersion {
+		t.Fatalf("Responses gateway Version = %q, want %s", got.header.Get("Version"), codexidentity.ClientVersion)
 	}
 	if got.header.Get("X-Codex-Beta-Features") != "" {
 		t.Fatalf("generic Responses gateway received X-Codex-Beta-Features = %q", got.header.Get("X-Codex-Beta-Features"))
+	}
+	sessionID := got.header.Get("Session-Id")
+	if sessionID == "" || got.header.Get("Thread-Id") != sessionID || got.header.Get("X-Client-Request-Id") != sessionID {
+		t.Fatalf("Responses turn identity is inconsistent: headers=%v", got.header)
+	}
+	if got.header.Get("Session_id") != "" {
+		t.Fatalf("legacy Session_id unexpectedly present: headers=%v", got.header)
+	}
+	metadata, _ := got.body["client_metadata"].(map[string]any)
+	if metadata["session_id"] != sessionID || metadata["thread_id"] != sessionID ||
+		metadata["x-codex-window-id"] != got.header.Get("X-Codex-Window-Id") || metadata["x-codex-installation-id"] == "" {
+		t.Fatalf("Responses client_metadata does not match headers: headers=%v body=%v", got.header, got.body)
 	}
 	if stream, _ := got.body["stream"].(bool); !stream {
 		t.Fatalf("Responses request did not force streaming: %+v", got.body)
@@ -373,9 +382,8 @@ func TestStartOpenAIResponsesAPIDoesNotImpersonateCodexClient(t *testing.T) {
 		t.Fatalf("upstream model = %v, want gpt-5.4-mini", got.body["model"])
 	}
 
-	proxyRuntime.Stop()
-	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
-		t.Fatalf("Responses runtime directory still exists after Stop(): %v", err)
+	if proxyRuntime.coreManager != nil || proxyRuntime.httpServer == nil {
+		t.Fatal("Responses API key runtime unexpectedly depends on CPA")
 	}
 }
 
@@ -529,7 +537,7 @@ func postClaudeMessage(t *testing.T, ctx context.Context, proxyRuntime *Runtime,
 	return string(body)
 }
 
-func TestStopUnregistersRuntimeModels(t *testing.T) {
+func TestStopClosesDirectCodexRuntime(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	authDir := filepath.Join(home, ".ccl", "auth")
@@ -548,32 +556,20 @@ func TestStopUnregistersRuntimeModels(t *testing.T) {
 		t.Fatalf("Start() error: %v", err)
 	}
 
-	auths := proxyRuntime.coreManager.List()
+	auths := proxyRuntime.ListAuths()
 	if len(auths) != 1 {
 		proxyRuntime.Stop()
 		t.Fatalf("runtime auth count = %d, want 1", len(auths))
 	}
-	models := cliproxy.GlobalModelRegistry().GetAvailableModelsByProvider(ProviderCodex)
-	if len(models) == 0 {
+	if proxyRuntime.coreManager != nil || proxyRuntime.httpServer == nil {
 		proxyRuntime.Stop()
-		t.Fatal("Codex runtime registered no models")
+		t.Fatal("Codex subscription unexpectedly started a CPA runtime")
 	}
 
-	registeredModel := ""
-	for _, model := range models {
-		if model != nil && cliproxy.GlobalModelRegistry().ClientSupportsModel(auths[0].ID, model.ID) {
-			registeredModel = model.ID
-			break
-		}
-	}
-	if registeredModel == "" {
-		proxyRuntime.Stop()
-		t.Fatal("runtime auth does not support any registered Codex model")
-	}
-
+	endpoint := proxyRuntime.Endpoint()
 	proxyRuntime.Stop()
-	if cliproxy.GlobalModelRegistry().ClientSupportsModel(auths[0].ID, registeredModel) {
-		t.Fatalf("model %q is still registered for auth %q after Stop()", registeredModel, auths[0].ID)
+	if _, err := http.Get(endpoint + "/models"); err == nil {
+		t.Fatal("direct Codex runtime still accepts connections after Stop()")
 	}
 }
 
@@ -677,7 +673,7 @@ func TestSilenceStdoutNestedReferenceCount(t *testing.T) {
 	}
 }
 
-func TestStartOpenAIResponsesAPIDelegatesDirectlyToCPA(t *testing.T) {
+func TestStartOpenAIResponsesAPIUsesCCLDataPlane(t *testing.T) {
 	type capture struct {
 		path   string
 		header http.Header
@@ -721,46 +717,40 @@ func TestStartOpenAIResponsesAPIDelegatesDirectlyToCPA(t *testing.T) {
 	if got.body["model"] != "gpt-test" {
 		t.Fatalf("upstream model = %v, want gpt-test", got.body["model"])
 	}
+	if proxyRuntime.coreManager != nil || proxyRuntime.service != nil || proxyRuntime.httpServer == nil {
+		t.Fatal("Responses request was not served by CCL's direct data plane")
+	}
 }
 
-func TestAPIKeyRuntimeLeavesRetryAfterToCPA(t *testing.T) {
+func TestAPIKeyResponsesPreservesRetryAfterWithoutGlobalCooldown(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "37")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"slow down"}}`)
+	}))
+	defer upstream.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, "http://127.0.0.1:1/v1", "upstream-key", "gpt-test")
+	proxyRuntime, err := StartOpenAIResponsesAPI(ctx, upstream.URL+"/v1", "upstream-key", "gpt-test")
 	if err != nil {
 		t.Fatalf("StartOpenAIResponsesAPI() error: %v", err)
 	}
 	defer proxyRuntime.Stop()
 
-	auths := proxyRuntime.coreManager.List()
-	if len(auths) != 1 {
-		t.Fatalf("runtime auth count = %d, want 1", len(auths))
+	payload := []byte(`{"model":"gpt-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/messages", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+proxyRuntime.APIKey())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	retryAfter := 37 * time.Second
-	started := time.Now()
-	proxyRuntime.coreManager.MarkResult(ctx, coreauth.Result{
-		AuthID:     auths[0].ID,
-		Provider:   auths[0].Provider,
-		Model:      "gpt-test",
-		RetryAfter: &retryAfter,
-		Error: &coreauth.Error{
-			HTTPStatus: http.StatusTooManyRequests,
-			Message:    "rate limited",
-			Retryable:  true,
-		},
-	})
-
-	updated, ok := proxyRuntime.coreManager.GetByID(auths[0].ID)
-	if !ok || updated == nil || updated.ModelStates["gpt-test"] == nil {
-		t.Fatal("CPA did not record model cooldown state")
-	}
-	delay := updated.ModelStates["gpt-test"].NextRetryAfter.Sub(started)
-	if delay < 36*time.Second || delay > 38*time.Second {
-		t.Fatalf("429 Retry-After was overridden: got %s, want about %s", delay, retryAfter)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") != "37" {
+		t.Fatalf("response = HTTP %d Retry-After %q", resp.StatusCode, resp.Header.Get("Retry-After"))
 	}
 }
 
-func TestStartProviderResponsesDoesNotSendCodexIdentity(t *testing.T) {
+func TestStartProviderResponsesUsesCCLOwnedCodexIdentity(t *testing.T) {
 	type capture struct {
 		header http.Header
 		body   map[string]any
@@ -792,8 +782,9 @@ func TestStartProviderResponsesDoesNotSendCodexIdentity(t *testing.T) {
 
 	_ = postClaudeMessage(t, ctx, proxyRuntime, "gpt-test")
 	got := <-captured
-	if got.header.Get("Originator") != "" || got.body["client_metadata"] != nil {
-		t.Fatalf("StartProvider Responses used Codex identity: headers=%v body=%v", got.header, got.body)
+	if got.header.Get("Originator") != codexidentity.Originator || got.header.Get("Version") != codexidentity.ClientVersion ||
+		!strings.HasPrefix(got.header.Get("User-Agent"), codexidentity.Originator+"/") {
+		t.Fatalf("StartProvider Responses missing CCL Codex identity: headers=%v body=%v", got.header, got.body)
 	}
 }
 

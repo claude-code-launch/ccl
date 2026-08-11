@@ -42,6 +42,7 @@ type Runtime struct {
 	httpServer     *http.Server
 	listAuths      func() []*coreauth.Auth
 	copilotGateway *copilotGateway
+	children       []*Runtime
 	cancel         context.CancelFunc
 	done           chan struct{}
 	runErr         chan error
@@ -159,14 +160,6 @@ type runtimeConfigFile struct {
 	OAuthModelAlias   map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
 }
 
-// runtimeResponsesConfigFile uses CPA's internal `codex-api-key` executor for
-// Responses translation. The YAML key is an SDK implementation detail, not a
-// distinct CCL provider type or a signal that the upstream is a Codex service.
-type runtimeResponsesConfigFile struct {
-	runtimeConfigBase `yaml:",inline"`
-	ResponsesAPIKey   []runtimeResponsesKey `yaml:"codex-api-key"`
-}
-
 type runtimeOpenAIConfigFile struct {
 	runtimeConfigBase   `yaml:",inline"`
 	OpenAICompatibility []runtimeOpenAICompatibility `yaml:"openai-compatibility"`
@@ -194,12 +187,6 @@ type runtimeOpenAIModel struct {
 	Name         string `yaml:"name"`
 	Alias        string `yaml:"alias"`
 	ForceMapping bool   `yaml:"force-mapping,omitempty"`
-}
-
-type runtimeResponsesKey struct {
-	APIKey  string                  `yaml:"api-key"`
-	BaseURL string                  `yaml:"base-url"`
-	Models  []runtimeResponsesModel `yaml:"models,omitempty"`
 }
 
 type runtimeResponsesModel struct {
@@ -356,11 +343,9 @@ func (s *providerTokenStore) Delete(ctx context.Context, id string) error {
 	return s.store.Delete(ctx, id)
 }
 
-// StartProvider starts a loopback Anthropic Messages adapter. Most backends use
-// embedded CLIProxyAPI; Kiro uses the direct Amazon Q adapter in kiro_server.go.
-//
-// Every API-key Responses endpoint follows the same path. URL suffixes do not
-// opt a gateway into OAuth semantics or Codex client identity headers.
+// StartProvider starts a loopback Anthropic Messages adapter. Responses
+// gateways use CCL's Codex Responses implementation; CPA remains responsible
+// only for protocol families that have not moved to a CCL-owned data plane.
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	_, ownsLog, logErr := EnsureSessionLog("runtime")
 	if logErr != nil {
@@ -421,6 +406,9 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	}
 	if backend == ProviderQoder {
 		return startQoderOAuth(parent, modelSpec, credentialFile)
+	}
+	if backend == ProviderCodex {
+		return startCodexOAuth(parent, modelSpec, credentialFile)
 	}
 	found, err := hasCredential(authDir, backend, credentialFile)
 	if err != nil {
@@ -513,9 +501,9 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 	return proxyRuntime, nil
 }
 
-// StartOpenAIResponsesAPI starts an embedded CLIProxyAPI runtime against an
-// OpenAI Responses upstream. CPA owns the complete
-// Claude Messages to Responses translation and talks to the upstream directly.
+// StartOpenAIResponsesAPI starts CCL's Codex Responses adapter against an API
+// key gateway. Request conversion, Codex identity, SSE conversion, errors, and
+// usage accounting are all owned by CCL and cannot change with a CPA upgrade.
 func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -529,31 +517,12 @@ func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, m
 		return nil, fmt.Errorf("OpenAI Responses runtime requires at least one model")
 	}
 
-	runtimeDir, port, apiKey, err := prepareAPIKeyRuntime()
+	proxyRuntime, err := startCodexResponsesAPI(parent, endpoint, upstreamAPIKey, modelSpec)
 	if err != nil {
 		return nil, err
 	}
-	models := make([]runtimeResponsesModel, 0, len(routes))
-	for _, route := range routes {
-		models = append(models, runtimeResponsesModel{Name: route.Name, Alias: route.Alias})
-	}
-	rawConfig, err := yaml.Marshal(runtimeResponsesConfigFile{
-		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
-		ResponsesAPIKey: []runtimeResponsesKey{{
-			APIKey:  upstreamAPIKey,
-			BaseURL: endpoint,
-			Models:  models,
-		}},
-	})
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return nil, fmt.Errorf("encode OpenAI Responses runtime config: %w", err)
-	}
-	proxyRuntime, err := startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
-	if err != nil {
-		return nil, err
-	}
-	LogInfof("runtime start openai_responses endpoint=%q port=%d model_count=%d", SafeLogEndpoint(endpoint), port, len(models))
+	LogInfof("runtime start codex_responses auth=api_key endpoint=%q local_endpoint=%q model_count=%d",
+		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(routes))
 	return proxyRuntime, nil
 }
 
@@ -903,6 +872,11 @@ func (r *Runtime) Stop() {
 				if auth != nil && auth.ID != "" {
 					registry.UnregisterClient(auth.ID)
 				}
+			}
+		}
+		for _, child := range r.children {
+			if child != nil {
+				child.Stop()
 			}
 		}
 		if r.copilotGateway != nil {

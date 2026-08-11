@@ -37,6 +37,8 @@ type anthropicMessagesRequest struct {
 	Thinking     *anthropicThinking        `json:"thinking"`
 	OutputConfig *anthropicOutput          `json:"output_config"`
 	Metadata     *anthropicRequestMetadata `json:"metadata"`
+	ServiceTier  string                    `json:"service_tier"`
+	Speed        string                    `json:"speed"`
 }
 
 type anthropicMessage struct {

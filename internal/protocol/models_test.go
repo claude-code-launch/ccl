@@ -3,8 +3,10 @@ package protocol_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/claude-code-launch/ccl/internal/codexidentity"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
@@ -281,6 +283,10 @@ func TestGetCodexClientModelInfosRequiresClientVersion(t *testing.T) {
 			return
 		}
 		sawClientVersion = true
+		if r.Header.Get("Originator") != codexidentity.Originator || r.Header.Get("Version") != codexidentity.ClientVersion ||
+			!strings.HasPrefix(r.Header.Get("User-Agent"), codexidentity.Originator+"/") {
+			t.Errorf("Codex catalog identity headers = %v", r.Header)
+		}
 		_, _ = w.Write([]byte(`{"models":[
 			{"slug":"gpt-5.6-sol","context_window":272000},
 			{"id":"legacy-id","max_context_window":128000},

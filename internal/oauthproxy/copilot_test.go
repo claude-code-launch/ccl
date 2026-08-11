@@ -298,23 +298,9 @@ func TestStartCopilotRuntimeDiscoversAndPublishesModels(t *testing.T) {
 			t.Fatalf("published models missing %q: %s", model, body)
 		}
 	}
-	for _, model := range runtime.Models() {
-		payload := strings.NewReader(fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":1,"store":false}`, model))
-		request, err := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
-		request.Header.Set("Content-Type", "application/json")
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		responseBody, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			t.Fatalf("Responses probe model=%q status=%d body=%s", model, response.StatusCode, responseBody)
-		}
+	responseBody := postClaudeMessage(t, context.Background(), runtime, "response-model")
+	if !strings.Contains(responseBody, `"type":"message_stop"`) {
+		t.Fatalf("Copilot Responses model did not use the CCL Messages adapter: %s", responseBody)
 	}
 	if auths := runtime.ListAuths(); len(auths) != 1 || auths[0].Provider != ProviderCopilot {
 		t.Fatalf("runtime auths = %+v", auths)

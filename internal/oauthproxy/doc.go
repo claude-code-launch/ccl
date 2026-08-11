@@ -1,18 +1,19 @@
 // Package oauthproxy implements ccl's local subscription and protocol runtimes.
 //
-// Claude Code talks to an Anthropic Messages endpoint. Manual OpenAI Chat and
-// Responses gateways plus GPT/Gemini/Grok/Kimi/Claude subscriptions use the
-// embedded CLIProxyAPI SDK for their data plane. Copilot is a hybrid: ccl owns
-// auth, model discovery, token exchange, retry, and upstream routing while CPA
-// owns protocol conversion. Kiro and Qoder use ccl's direct runtimes and their
-// request data planes never enter CPA. Direct Anthropic API-key gateways bypass
-// this package entirely.
+// Claude Code talks to an Anthropic Messages endpoint. CCL directly owns every
+// Codex Responses data plane: API-key gateways, GPT subscriptions, and Copilot
+// models whose catalog endpoint is Responses. Manual OpenAI Chat plus
+// Gemini/Grok/Kimi/Claude subscriptions still use the embedded CLIProxyAPI SDK.
+// Copilot Chat and native Messages models use CPA behind CCL's protocol router.
+// Kiro and Qoder use CCL's direct runtimes. Direct Anthropic API-key gateways
+// bypass this package entirely.
 //
 // Error recovery follows the data-plane owner. CPA-backed providers use CPA's
 // native retry/cooldown and Retry-After handling without a CCL result hook.
-// Copilot, Qoder, and Kiro keep only the recovery behavior required by their
-// upstreams; notably Kiro rotates credentials and retries burst 429s after
-// 1s, 2s, and 4s.
+// Codex Responses refreshes GPT OAuth once after a 401 and otherwise preserves
+// upstream status/Retry-After. Copilot, Qoder, and Kiro keep only the recovery
+// behavior required by their upstreams; notably Kiro rotates credentials and
+// retries burst 429s after 1s, 2s, and 4s.
 //
 // # Compatibility boundary with CLIProxyAPI
 //
@@ -20,11 +21,11 @@
 // as a regression checklist whenever the pinned
 // github.com/router-for-me/CLIProxyAPI/v7 version changes:
 //
-//  1. Responses translation ownership (runtime.go)
-//     CPA's codex-api-key executor owns Claude Messages to Responses request
-//     translation, upstream request serialization, and Responses-to-Claude
-//     streaming conversion. CCL passes the real upstream base URL directly to
-//     CPA and must not place another request-rewriting proxy after it.
+//  1. Codex Responses ownership (codex_responses_*.go)
+//     CCL owns Messages-to-Responses translation, Codex identity headers, GPT
+//     token refresh, upstream errors, Responses SSE decoding, and usage. CPA's
+//     codex executor must never be inserted into these paths. Its source may be
+//     consulted for compatibility, but a CPA upgrade must not change the wire.
 //
 //  2. Runtime.Stop shutdown ordering (runtime.go)
 //     Service.Run performs its own deferred Shutdown after the run context is
@@ -42,19 +43,22 @@
 //     All runtimes bind 127.0.0.1 only and use a random per-session API
 //     key that is never written back to ~/.ccl/config.yaml. OAuth credentials
 //     live under ~/.ccl/auth and are filtered per backend so multi-login
-//     providers do not share models or refresh tokens.
+//     providers do not share models or refresh tokens. GPT login is initiated
+//     by CPA's authenticator, but CCL reads and refreshes the selected token in
+//     its direct Responses runtime.
 //
 //  5. Model registration cleanup
-//     Stop unregisters every auth ID from cliproxy.GlobalModelRegistry so a
-//     later provider does not inherit another backend's routes.
+//     CPA runtime Stop unregisters every auth ID from
+//     cliproxy.GlobalModelRegistry so a later provider does not inherit another
+//     backend's routes. CCL direct runtimes do not register global models.
 //
 //  6. GitHub Copilot direct gateway (copilot_runtime.go)
 //     Copilot does not use CLIProxyAPI OAuth credentials. ccl authenticates
 //     with GitHub, discovers the account's authoritative model catalog, and
-//     routes each model to its advertised Chat, Responses, or Messages
-//     endpoint directly. Do not add synthetic request identity headers without
-//     testing the real Copilot API: they can change model visibility or
-//     entitlement decisions.
+//     routes each model according to its advertised Chat, Responses, or
+//     Messages endpoint. Responses models use CCL's Codex converter; only Chat
+//     and native Messages use a CPA compatibility child. Do not bypass the
+//     Copilot gateway's own client identity or credential rotation.
 //
 //  7. Qoder direct runtime (qoder_*.go)
 //     Qoder browser OAuth, refresh, COSY signing, WAF body encoding, model
@@ -73,11 +77,7 @@
 //	go test ./internal/oauthproxy ./internal/claude ./cmd
 //
 // and manually exercise ccl oauth gpt, ccl oauth copilot, ccl oauth qoder,
-// ccl oauth kiro, an
-// openai_responses API-key provider, and a plain openai(chat) provider with
+// ccl oauth kiro, an openai_responses API-key provider, and a plain
+// openai(chat) provider with
 // streaming + tool calls.
-//
-// CPA names its API-key Responses executor and YAML block "codex" internally.
-// ccl treats that as an SDK implementation detail: every API-key Responses
-// gateway follows the same path and receives no synthetic Codex client headers.
 package oauthproxy

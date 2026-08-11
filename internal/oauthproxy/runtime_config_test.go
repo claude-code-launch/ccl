@@ -7,15 +7,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// The three runtime config files inline runtimeConfigBase. Without the inline tag
+// The CPA runtime config files inline runtimeConfigBase. Without the inline tag
 // the shared block would be emitted as a nested "runtimeconfigbase" mapping and
 // CLIProxyAPI would silently start with defaults, so pin the encoded shape.
 func TestRuntimeConfigFilesInlineSharedBase(t *testing.T) {
 	base := newRuntimeConfigBase(45678, "/tmp/ccl-auth", "ccl-test-key")
 	configs := map[string]any{
-		"oauth":     runtimeConfigFile{runtimeConfigBase: base},
-		"responses": runtimeResponsesConfigFile{runtimeConfigBase: base},
-		"openai":    runtimeOpenAIConfigFile{runtimeConfigBase: base},
+		"oauth":  runtimeConfigFile{runtimeConfigBase: base},
+		"openai": runtimeOpenAIConfigFile{runtimeConfigBase: base},
 	}
 
 	for name, config := range configs {

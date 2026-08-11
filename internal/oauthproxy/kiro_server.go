@@ -618,7 +618,14 @@ func anthropicErrorType(status int) string {
 		return "request_too_large"
 	case http.StatusTooManyRequests:
 		return "rate_limit_error"
+	case http.StatusRequestTimeout:
+		return "request_timeout_error"
+	case 529:
+		return "overloaded_error"
 	default:
+		if status >= 500 {
+			return "api_error"
+		}
 		return "invalid_request_error"
 	}
 }

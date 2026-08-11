@@ -151,7 +151,7 @@ ccl bypass off      # 关闭
    用 `ccl set` / `ccl map` 手动指定后，对应档位以手动为准。
 
 2. **协议翻译与流式代理**  
-   OpenAI Chat、OpenAI Responses 与订阅 provider 统一暴露本机 `/v1/messages`。通用转换内嵌 CLIProxyAPI Go SDK；Kiro 由 ccl 直接转换 Amazon Q 请求和 AWS EventStream；Qoder 由 ccl 直接完成 COSY 签名、请求编码和 SSE 转换；Anthropic 兼容网关保持直连。
+   OpenAI Chat、Codex Responses 与订阅 provider 统一暴露本机 `/v1/messages`。Responses 的请求转换、Codex 身份、SSE 解析和错误透传由 CCL 自研实现；OpenAI Chat 及部分订阅协议内嵌 CLIProxyAPI Go SDK；Kiro、Qoder 使用各自的 CCL 直接适配器；Anthropic 兼容网关保持直连。
 
 3. **交互式 TUI 配置**  
    全屏向导配置 endpoint、协议、模型槽位、上下文压缩等；支持中文 / English（`ccl lang`）。
@@ -173,18 +173,18 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 |---|---|---|---|---|
 | Anthropic API Key 网关 | CCL 保存用户 API Key | CCL 直查 Anthropic `/v1/models` | Claude Code 直连 Messages | 不参与 |
 | OpenAI Chat API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CPA `openai-compatibility` 完成 Messages ↔ Chat Completions | 完整数据面转换 |
-| OpenAI Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CPA `codex-api-key` executor 完成 Messages ↔ Responses | 完整数据面转换；executor 名仅是 CPA 内部术语 |
-| GPT 订阅 | CPA Codex authenticator 登录、刷新；CCL 只绑定单个凭据文件 | CPA backend 注册模型，CCL 从本机 `/models` 读取 | CPA Codex executor 完成 Messages ↔ Responses | 登录、刷新、模型注册和数据面均由 CPA |
+| Codex Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查上游 `/models` | CCL 完成 Messages ↔ Responses、Codex 身份头、SSE 与错误透传 | 不参与数据面 |
+| GPT 订阅 | CPA authenticator 仅负责登录；CCL 绑定凭据、刷新 token | CCL 使用 provider 槽位构建本机会话模型目录 | CCL 完成 Messages ↔ Responses，并携带账号 ID | CPA 仅负责登录入口，不参与运行时数据面 |
 | Gemini / Grok / Kimi / Claude 订阅 | CPA 对应 authenticator 登录、刷新；CCL 只绑定单个凭据文件 | CPA backend 注册模型，CCL 从本机 `/models` 读取 | CPA 对应 executor 完成 Messages ↔ 各自上游协议 | 登录、刷新、模型注册和数据面均由 CPA |
-| GitHub Copilot 订阅 | CCL 自研 GitHub device flow、Copilot 换票与凭据状态 | CCL 直查 Copilot 模型目录并读取每个模型声明的 endpoint | CCL gateway 选择 Messages / Chat / Responses 上游并负责换票、重试；CPA 负责三类协议与 Messages 的转换 | 仅使用 CPA 的协议转换与 loopback 服务，是混合栈 |
+| GitHub Copilot 订阅 | CCL 自研 GitHub device flow、Copilot 换票与凭据状态 | CCL 直查 Copilot 模型目录并读取每个模型声明的 endpoint | CCL 按模型路由；Responses 使用 CCL Codex 转换，Chat / 原生 Messages 使用 CPA | CPA 只参与非 Responses 模型，是混合栈 |
 | Kiro 订阅 | CCL 自研 Portal PKCE / Builder ID、刷新和单凭据运行时 | CCL 调 Kiro Portal / Amazon Q 模型接口并缓存 | CCL 完成 Messages → Amazon Q、重试、AWS EventStream → Messages | 请求数据面不经过 CPA |
 | Qoder 订阅 | CCL 自研浏览器 OAuth、刷新和单凭据运行时 | CCL 直查 Qoder 模型目录，失败时使用最小兼容目录 | CCL 完成 COSY 签名、WAF 编码、Messages → Qoder、Qoder SSE → Messages | 请求数据面不经过 CPA |
 
 CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上下文元数据、日志、usage 汇总和 runtime 生命周期。CPA runtime 由 Go SDK 内嵌启动，不依赖外部 `CLIProxyAPI` 进程。
 
-错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：CPA-backed provider 的 401、429、5xx、`Retry-After`、凭据可用性和冷却全部由 CPA 管理；Copilot gateway 自己负责换票与切换凭据；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。这样每个适配器可以保留上游真正需要的恢复方式，而不会被统一冷却覆盖。
+错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；其他 CPA-backed provider 继续由 CPA 管理；Copilot gateway 自己负责换票与切换凭据；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
 
-API Key Responses 网关只有一种 CCL 行为，不存在单独的“Codex API Key 网关”模式。endpoint 的 `/codex` 或 `/codex/v1` 只是普通路径，不会触发协议判断或注入 `Originator`、Codex User-Agent 等身份头。GPT 订阅则通过 `oauthProvider: gpt` 使用 OpenAI OAuth 凭据，底层 CPA backend 名为 `codex`；它和 API Key Responses 网关共享 Messages ↔ Responses 的协议形态，但鉴权、模型来源和上游 executor 不同。
+所有 `openai_responses` 网关都按 **Codex Responses** 处理，不再区分 `codex-api-key` / `generic-api-key` executor：CCL 统一注入自己维护的 `Originator: codex_cli_rs`、Codex User-Agent、`Version`、`session-id` / `thread-id` / request ID，以及当前 Codex `client_metadata`，并固定 `stream=true`、`store=false`。这些值不再由 CPA 版本间接决定。协议仍由 provider `type` 明确选择，不根据 endpoint 的 `/codex` 路径猜测。GPT 订阅与 API Key 网关共享同一套转换和 SSE 实现，区别只在鉴权：GPT 使用 OAuth token 与 `Chatgpt-Account-Id`，网关使用用户 API Key。
 
 ---
 
@@ -305,11 +305,11 @@ grep -E 'level=(WARN|ERROR)' ~/.ccl/logs/ccl-debug-claude_<id>.log
 grep 'request_id=r1' ~/.ccl/logs/ccl-debug-claude_<id>.log
 ```
 
-第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。Kiro、Qoder、Copilot 的 429 会记录上游 `retry_after` 和各自适配器采取的动作；CPA 的重试与冷却以筛选后的 CPA 诊断为准。日志中的 endpoint 会移除 userinfo、query 和 fragment。
+第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。Codex Responses、Kiro、Qoder、Copilot 都会记录上游状态、`retry_after` 和适配器采取的动作；其余 CPA 数据面以筛选后的 CPA 诊断为准。日志中的 endpoint 会移除 userinfo、query 和 fragment。
 
-日志覆盖存在明确边界：普通 Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到，CCL 日志只能记录 session 配置与进程退出结果。OpenAI Chat/Responses、GPT 等 CPA 数据面保留筛选后的 `cpa_diagnostic`；CCL 不再安装结果 Hook 或改写 CPA 冷却，且 CPA 当前没有向 CCL 暴露逐请求 ID，因此不能像 Kiro/Qoder/Copilot 一样完整串联。
+日志覆盖存在明确边界：普通 Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到。Codex Responses、Kiro、Qoder、Copilot 的 CCL 数据面可用 `request_id` 串联入口、转换、上游响应、刷新/重试和最终状态；OpenAI Chat 及其余 CPA 数据面只保留筛选后的 `cpa_diagnostic`，CPA 当前没有向 CCL 暴露逐请求 ID。
 
-日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Copilot、Kiro、Qoder 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
+日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Codex Responses、Copilot、Kiro、Qoder 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
 
 旧的 `debug_mode`/`debug_verbose` 配置会在读取时迁移；DEBUG 的命令入口统一为 `ccl log --level debug`，不保留 `ccl debug verbose`。
 
@@ -605,7 +605,7 @@ providers:
 字段要点：
 
 - `type: openai`（显示 `openai(chat)`）：经 CLIProxyAPI 转到上游 Chat Completions。
-- `type: openai_responses`（显示 `openai(responses)`）：经 SDK 走 Responses API。协议由 `type` 明确选择，不根据 endpoint 路径猜测；可在核对页切换 Chat / Responses。
+- `type: openai_responses`（显示 `openai(responses)`）：经 CCL 自研 Codex Responses runtime 走 Responses API。协议由 `type` 明确选择，不根据 endpoint 路径猜测；可在核对页切换 Chat / Responses。
 - `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用本机 Messages → Amazon Q 适配器；`oauthProvider: qoder` 使用本机 Messages → Qoder 直接适配器。
 - `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
 - `oauthAccountCredential`：该订阅 provider 精确绑定的 `~/.ccl/auth/` 凭据文件名。

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/codexidentity"
 )
 
 // ModelInfo is one entry from an OpenAI-compatible /models response.
@@ -86,6 +88,10 @@ func GetOpenAIModels(baseURL, apiKey string) (string, error) {
 // fetchModelsPayload performs an authenticated GET against a models endpoint and
 // decodes the JSON body into out.
 func fetchModelsPayload(url, apiKey string, out any) error {
+	return fetchModelsPayloadWithHeaders(url, apiKey, nil, out)
+}
+
+func fetchModelsPayloadWithHeaders(url, apiKey string, headers http.Header, out any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -93,6 +99,11 @@ func fetchModelsPayload(url, apiKey string, out any) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
 
 	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
 	if err != nil {
@@ -133,10 +144,9 @@ func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 	return models, nil
 }
 
-// codexClientVersionQuery is any non-empty client_version value. CLIProxyAPI only
-// checks that the query parameter is present before switching /v1/models to the
-// Codex client catalog, which is the only shape that carries context windows.
-const codexClientVersionQuery = "ccl"
+// codexClientVersionQuery selects the Codex client catalog, which is the only
+// shape some subscription and compatible gateways expose with context windows.
+const codexClientVersionQuery = codexidentity.ClientVersion
 
 // codexClientModelsResponse is the Codex client catalog payload. Entries reuse
 // the Codex model template, where the id lives in "slug".
@@ -163,7 +173,9 @@ func GetCodexClientModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 		separator = "&"
 	}
 	var payload codexClientModelsResponse
-	if err := fetchModelsPayload(url+separator+"client_version="+codexClientVersionQuery, apiKey, &payload); err != nil {
+	headers := make(http.Header)
+	codexidentity.ApplyClientHeaders(headers)
+	if err := fetchModelsPayloadWithHeaders(url+separator+"client_version="+codexClientVersionQuery, apiKey, headers, &payload); err != nil {
 		return nil, err
 	}
 	models := make([]ModelInfo, 0, len(payload.Models))

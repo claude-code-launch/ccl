@@ -8,7 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/google/uuid v1.6.0
-	github.com/router-for-me/CLIProxyAPI/v7 v7.2.95
+	github.com/router-for-me/CLIProxyAPI/v7 v7.2.128
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.2
 	github.com/ugorji/go/codec v1.2.12
@@ -18,6 +18,27 @@ require (
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
+)
+
+require (
+	github.com/pion/datachannel v1.6.2 // indirect
+	github.com/pion/dtls/v3 v3.1.5 // indirect
+	github.com/pion/ice/v4 v4.3.0 // indirect
+	github.com/pion/interceptor v0.1.45 // indirect
+	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/mdns/v2 v2.1.0 // indirect
+	github.com/pion/randutil v0.1.0 // indirect
+	github.com/pion/rtcp v1.2.17 // indirect
+	github.com/pion/rtp v1.10.4 // indirect
+	github.com/pion/sctp v1.11.0 // indirect
+	github.com/pion/sdp/v3 v3.0.19 // indirect
+	github.com/pion/srtp/v3 v3.0.12 // indirect
+	github.com/pion/stun/v3 v3.1.6 // indirect
+	github.com/pion/transport/v4 v4.0.2 // indirect
+	github.com/pion/turn/v5 v5.0.12 // indirect
+	github.com/pion/webrtc/v4 v4.2.17 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
+	golang.org/x/time v0.14.0 // indirect
 )
 
 require (
@@ -77,6 +98,5 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
-	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
