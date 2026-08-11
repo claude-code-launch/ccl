@@ -1,0 +1,82 @@
+internal/oauthproxy/copilot_test.go
+  s_a4fddc80fc8ebc::t_a706d9ef0fd8dd 301-303
+go.mod
+  s_a4fddc80fc8ebc::t_b13234025ac7ec 11
+  s_a4fddc80fc8ebc::t_36d38eff657279 24-43
+  s_a4fddc80fc8ebc::t_e058d8dc75fb42 23
+internal/oauthproxy/kiro_server.go
+  s_a4fddc80fc8ebc::t_7e3bcc479d6710 621-624,626-628
+internal/protocol/openai.go
+  s_a4fddc80fc8ebc::t_696eca62f0e0c8 91-94,102-106,147-148,176-178
+  s_a4fddc80fc8ebc::t_473d2f906866ae 11-12,149
+internal/oauthproxy/copilot_runtime.go
+  s_a4fddc80fc8ebc::t_15eb00bd1ce87c 794-824,826-828,831-836
+  s_a4fddc80fc8ebc::t_3f30711e674109 837-907,910-926,928-930,932-938,940-942,944-955,957-965,967-968,970-993,995-996,998-1009
+internal/oauthproxy/doc.go
+  s_a4fddc80fc8ebc::t_e45f8f62511a83 3-9,13-16,24-28,46-48,51-53,58-61,80-81
+internal/oauthproxy/kiro_converter.go
+  s_a4fddc80fc8ebc::t_7e3bcc479d6710 40-41
+internal/oauthproxy/codex_responses_stream.go
+  s_a4fddc80fc8ebc::t_292213edd3bd61 157-159
+  s_a4fddc80fc8ebc::t_03cb07914d82a1 263-264
+  s_a4fddc80fc8ebc::t_91efb5d5d90e39 35-39,51-52,73,78-81,86-88,90-96,98-101,108-117
+  s_a4fddc80fc8ebc::t_4dca33d7fb12dc 128,130-142
+  s_a4fddc80fc8ebc::t_c76a9b1b9101b6 227-230
+  s_a4fddc80fc8ebc::t_232521a62ee496 21-25
+  s_a4fddc80fc8ebc::t_6117f5f019eb2a 1-20,26-34,40-50,53-72,74-77,82-85,89,102-107,118-127,129,143-156,160-226,231-262,265-347
+  s_a4fddc80fc8ebc::t_0dc8ca9d72a2cd 97
+internal/oauthproxy/auth_test.go
+  s_a4fddc80fc8ebc::t_6e0612422d3121 233-234,260,262-263,267,294,296,299,302-303,307,354-355,385-386,540,559,564,566,569,571-572,676,720-722,725-731,734,740-745,747-749,753,787
+  s_a4fddc80fc8ebc::t_b1e6b096c85b91 18,357-358,360-361,366-377,785-786
+internal/codexidentity/identity.go
+  s_a4fddc80fc8ebc::t_844a48a90c1671 9-11,13-14,24-29,32-118
+  s_a4fddc80fc8ebc::t_473d2f906866ae 1-8,12,15-23,30-31,119
+internal/oauthproxy/runtime.go
+  s_a4fddc80fc8ebc::t_53f36e1550bf22 346-348,410-412,504-506,520,524-525
+  s_a4fddc80fc8ebc::t_6fc666062a5fb2 881
+  s_a4fddc80fc8ebc::t_1c0864476cc102 45,877-880
+internal/oauthproxy/codex_responses_converter.go
+  s_a4fddc80fc8ebc::t_4dca33d7fb12dc 51-54,60,76-77,96-114
+  s_a4fddc80fc8ebc::t_7e3bcc479d6710 65-67,89,198,266,271,279,282,286-289,431-442,444-448
+  s_a4fddc80fc8ebc::t_810b525d1bce7e 1-50,55-59,61-64,68-75,78-88,90-95,115-197,199-265,267-270,272-278,280-281,283-285,290-430,443,449-454
+internal/oauthproxy/codex_responses_runtime.go
+  s_a4fddc80fc8ebc::t_183d1f7071d381 432-433
+  s_a4fddc80fc8ebc::t_a775f7f4aaa972 1-73,83-160,162-171,173-191,213-373,379-390,399,404-421,429,434-445,463,465-628,630,633-745,747-754
+  s_a4fddc80fc8ebc::t_82cc6a9b489e56 74-82,207,374-378,422-428,430-431,446-462,464
+  s_a4fddc80fc8ebc::t_4dca33d7fb12dc 400-403
+  s_a4fddc80fc8ebc::t_3743d282ec4694 629,631-632,746
+  s_a4fddc80fc8ebc::t_1c0864476cc102 161,172,192-206,208-212
+  s_a4fddc80fc8ebc::t_7e3bcc479d6710 391-398
+internal/protocol/models_test.go
+  s_a4fddc80fc8ebc::t_b7dc3bb348a18f 6
+  s_a4fddc80fc8ebc::t_b1e6b096c85b91 9,286-289
+internal/oauthproxy/codex_responses_test.go
+  s_a4fddc80fc8ebc::t_b1aea2dd910a98 1-144,147-164,172-182,187-206
+  s_a4fddc80fc8ebc::t_13263bb2447832 183-186
+  s_a4fddc80fc8ebc::t_f14794a01153a7 145-146,165-171
+internal/oauthproxy/runtime_config_test.go
+  s_a4fddc80fc8ebc::t_eb1ed5b255f0cd 10,16-17
+internal/codexidentity/identity_test.go
+  s_a4fddc80fc8ebc::t_844a48a90c1671 1-34
+README.md
+  s_a4fddc80fc8ebc::t_696eca62f0e0c8 187
+  s_a4fddc80fc8ebc::t_e45f8f62511a83 154,176-177,179,185,308,310,312,608
+go.sum
+  s_a4fddc80fc8ebc::t_31287b7d7b8375 114-147,160-161,183-184,200-201,230-231
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "3b38cb87dc9e64887b2fabff534990187c8b252f",
+  "prompts": {},
+  "sessions": {
+    "s_a4fddc80fc8ebc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fe962-cb21-7a13-848e-efe8a5710e62",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
