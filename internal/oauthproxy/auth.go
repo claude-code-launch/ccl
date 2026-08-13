@@ -24,6 +24,7 @@ const (
 	ProviderKimi          = "kimi"
 	ProviderKiro          = "kiro"
 	ProviderClaude        = "claude"
+	ProviderWorkBuddy     = "workbuddy"
 	// backendXAI is the CLIProxyAPI authenticator provider key for xAI/Grok.
 	backendXAI = "xai"
 )
@@ -85,6 +86,9 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 	if target == ProviderQoder {
 		return loginQoder(ctx, authDir, opts)
 	}
+	if target == ProviderWorkBuddy {
+		return loginWorkBuddy(ctx, authDir, opts)
+	}
 	_, authenticator, err := authenticatorFor(target)
 	if err != nil {
 		return LoginResult{}, err
@@ -118,13 +122,13 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderClaude:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderClaude, ProviderWorkBuddy:
 		return target, nil
 	case ProviderChatGPTLegacy:
 		// Keep accepting "chatgpt" as a login alias; canonicalize to "gpt".
 		return ProviderChatGPT, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, or claude)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, claude, or workbuddy)", providerName)
 	}
 }
 
@@ -146,6 +150,8 @@ func BackendProvider(providerName string) (string, error) {
 		return ProviderKiro, nil
 	case ProviderClaude:
 		return ProviderClaude, nil
+	case ProviderWorkBuddy:
+		return ProviderWorkBuddy, nil
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}

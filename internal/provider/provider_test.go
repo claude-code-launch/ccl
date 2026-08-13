@@ -63,6 +63,7 @@ func TestInferOAuthProvider(t *testing.T) {
 		{name: "Kimi backend", providerName: "kimi", endpoint: "oauth://kimi", want: "kimi"},
 		{name: "Kiro backend", providerName: "kiro-work", endpoint: "oauth://kiro", want: "kiro"},
 		{name: "Claude backend", providerName: "claude", endpoint: "oauth://claude", want: "claude"},
+		{name: "WorkBuddy backend", providerName: "work-account", endpoint: "oauth://workbuddy", want: "workbuddy"},
 		{name: "ordinary HTTP provider", providerName: "chatgpt", endpoint: "https://example.test/v1", want: ""},
 		{name: "unknown OAuth backend", providerName: "other", endpoint: "oauth://other", want: ""},
 	}
@@ -168,6 +169,10 @@ func TestOAuthRuntimeType(t *testing.T) {
 	got, ok = provider.OAuthRuntimeType("kiro")
 	if !ok || got != "anthropic" {
 		t.Fatalf("kiro = %q %v", got, ok)
+	}
+	got, ok = provider.OAuthRuntimeType("workbuddy")
+	if !ok || got != "openai" {
+		t.Fatalf("workbuddy = %q %v", got, ok)
 	}
 	if _, ok := provider.OAuthRuntimeType(""); ok {
 		t.Fatal("empty should not fix")

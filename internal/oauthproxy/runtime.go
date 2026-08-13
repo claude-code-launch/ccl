@@ -35,25 +35,25 @@ const (
 )
 
 type Runtime struct {
-	endpoint       string
-	apiKey         string
-	service        *cliproxy.Service
-	coreManager    *coreauth.Manager
-	httpServer     *http.Server
-	listAuths      func() []*coreauth.Auth
-	copilotGateway *copilotGateway
-	children       []*Runtime
-	cancel         context.CancelFunc
-	done           chan struct{}
-	runErr         chan error
-	started        chan struct{}
-	configPath     string
-	runtimeDir     string
-	restoreLogs    func()
-	models         []string
-	modelNames     map[string]string
-	ownsLog        bool
-	stopOnce       sync.Once
+	endpoint    string
+	apiKey      string
+	service     *cliproxy.Service
+	coreManager *coreauth.Manager
+	httpServer  *http.Server
+	listAuths   func() []*coreauth.Auth
+	children    []*Runtime
+	cleanup     []func()
+	cancel      context.CancelFunc
+	done        chan struct{}
+	runErr      chan error
+	started     chan struct{}
+	configPath  string
+	runtimeDir  string
+	restoreLogs func()
+	models      []string
+	modelNames  map[string]string
+	ownsLog     bool
+	stopOnce    sync.Once
 	// usage accumulates per-model token totals for this runtime. It is never nil:
 	// StartProvider always installs one, even when the backend cannot report
 	// usage, so callers do not need a nil check.
@@ -173,10 +173,11 @@ type runtimeOAuthModelAlias struct {
 }
 
 type runtimeOpenAICompatibility struct {
-	Name          string                          `yaml:"name"`
-	BaseURL       string                          `yaml:"base-url"`
-	APIKeyEntries []runtimeOpenAICompatibilityKey `yaml:"api-key-entries"`
-	Models        []runtimeOpenAIModel            `yaml:"models"`
+	Name           string                          `yaml:"name"`
+	BaseURL        string                          `yaml:"base-url"`
+	APIKeyEntries  []runtimeOpenAICompatibilityKey `yaml:"api-key-entries"`
+	Models         []runtimeOpenAIModel            `yaml:"models"`
+	DisableCooling bool                            `yaml:"disable-cooling,omitempty"`
 }
 
 type runtimeOpenAICompatibilityKey struct {
@@ -409,6 +410,9 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	}
 	if backend == ProviderCodex {
 		return startCodexOAuth(parent, modelSpec, credentialFile)
+	}
+	if backend == ProviderWorkBuddy {
+		return startWorkBuddyOAuth(parent, modelSpec, credentialFile)
 	}
 	found, err := hasCredential(authDir, backend, credentialFile)
 	if err != nil {
@@ -879,8 +883,10 @@ func (r *Runtime) Stop() {
 				child.Stop()
 			}
 		}
-		if r.copilotGateway != nil {
-			r.copilotGateway.Stop()
+		for _, cleanup := range r.cleanup {
+			if cleanup != nil {
+				cleanup()
+			}
 		}
 		_ = os.Remove(r.configPath)
 		if r.runtimeDir != "" {

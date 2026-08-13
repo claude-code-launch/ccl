@@ -22,7 +22,8 @@ Common commands:
   ccl                         Start Claude Code with the active provider
   ccl ls / ccl use <name>     List or switch providers
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
-  ccl oauth <gpt|grok|...>    Log in with a subscription account
+  ccl oauth <gpt|grok|workbuddy|...>
+                              Log in with a subscription account
   ccl doctor                  Environment + provider + subscription health
   ccl cloud login|push|pull   Encrypted multi-remote config sync
   ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)

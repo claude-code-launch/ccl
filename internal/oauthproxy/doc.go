@@ -5,13 +5,15 @@
 // models whose catalog endpoint is Responses. Manual OpenAI Chat plus
 // Gemini/Grok/Kimi/Claude subscriptions still use the embedded CLIProxyAPI SDK.
 // Copilot Chat and native Messages models use CPA behind CCL's protocol router.
-// Kiro and Qoder use CCL's direct runtimes. Direct Anthropic API-key gateways
-// bypass this package entirely.
+// WorkBuddy uses CCL-owned auth, refresh, catalog, and upstream headers around
+// a CPA Chat compatibility child. Kiro and Qoder use CCL's direct runtimes.
+// Direct Anthropic API-key gateways bypass this package entirely.
 //
 // Error recovery follows the data-plane owner. CPA-backed providers use CPA's
 // native retry/cooldown and Retry-After handling without a CCL result hook.
 // Codex Responses refreshes GPT OAuth once after a 401 and otherwise preserves
-// upstream status/Retry-After. Copilot, Qoder, and Kiro keep only the recovery
+// upstream status/Retry-After. WorkBuddy refreshes once after a 401/403 and
+// leaves 429/5xx untouched. Copilot, Qoder, and Kiro keep only the recovery
 // behavior required by their upstreams; notably Kiro rotates credentials and
 // retries burst 429s after 1s, 2s, and 4s.
 //
@@ -72,12 +74,18 @@
 //     run in ccl. Do not route Kiro traffic through CPA unless the complete
 //     direct-runtime behavior is deliberately replaced and regression-tested.
 //
+//  9. WorkBuddy hybrid runtime (workbuddy_*.go)
+//     CCL owns the official external-link login polling, credential refresh,
+//     /v3/config model catalog, and WorkBuddy identity/session headers. CPA owns
+//     only Anthropic Messages <-> OpenAI Chat Completions conversion. Do not
+//     move WorkBuddy auth or provider-specific error recovery into CPA.
+//
 // When upgrading CLIProxyAPI, run at least:
 //
 //	go test ./internal/oauthproxy ./internal/claude ./cmd
 //
 // and manually exercise ccl oauth gpt, ccl oauth copilot, ccl oauth qoder,
-// ccl oauth kiro, an openai_responses API-key provider, and a plain
+// ccl oauth kiro, ccl oauth workbuddy, an openai_responses API-key provider, and a plain
 // openai(chat) provider with
 // streaming + tool calls.
 package oauthproxy

@@ -127,7 +127,7 @@ func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
 	case "gpt", "chatgpt", "codex", "copilot":
 		return "openai_responses", true
-	case "gemini", "grok", "kimi":
+	case "gemini", "grok", "kimi", "workbuddy":
 		return "openai", true
 	case "kiro", "qoder", "claude":
 		return "anthropic", true
@@ -170,6 +170,8 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "kiro"
 	case "claude":
 		return "claude"
+	case "workbuddy":
+		return "workbuddy"
 	default:
 		return ""
 	}

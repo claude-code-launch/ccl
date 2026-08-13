@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 const codexResponsesMaxSSEEventBytes = 16 << 20
@@ -23,25 +24,42 @@ type codexResponsesStreamState struct {
 	textDeltaSeen bool
 	reasoningSeen bool
 	terminalSeen  bool
+	metrics       codexResponsesStreamMetrics
+}
+
+type codexResponsesStreamMetrics struct {
+	events               int
+	textDeltaEvents      int
+	reasoningDeltaEvents int
+	textBytes            int
+	reasoningBytes       int
+	firstEventAt         time.Time
+	firstContentAt       time.Time
+	terminalType         string
 }
 
 func processCodexResponsesStream(reader io.Reader, assembler *anthropicResponseAssembler) error {
+	_, err := processCodexResponsesStreamObserved(reader, assembler)
+	return err
+}
+
+func processCodexResponsesStreamObserved(reader io.Reader, assembler *anthropicResponseAssembler) (codexResponsesStreamMetrics, error) {
 	state := &codexResponsesStreamState{
 		assembler: assembler,
 		functions: make(map[string]*codexFunctionCall),
 	}
 	if err := readCodexSSE(reader, state.process); err != nil {
-		return err
+		return state.metrics, err
 	}
 	if !assembler.started {
 		if err := assembler.start(); err != nil {
-			return err
+			return state.metrics, err
 		}
 	}
 	if !state.terminalSeen {
-		return assembler.finish()
+		return state.metrics, assembler.finish()
 	}
-	return nil
+	return state.metrics, nil
 }
 
 func readCodexSSE(reader io.Reader, consume func([]byte) error) error {
@@ -117,6 +135,29 @@ func (s *codexResponsesStreamState) process(payload []byte) error {
 		}
 	}
 	eventType := stringValue(event["type"])
+	now := time.Now()
+	s.metrics.events++
+	if s.metrics.firstEventAt.IsZero() {
+		s.metrics.firstEventAt = now
+	}
+	switch eventType {
+	case "response.output_text.delta", "response.refusal.delta":
+		delta := stringValue(event["delta"])
+		s.metrics.textDeltaEvents++
+		s.metrics.textBytes += len(delta)
+		if s.metrics.firstContentAt.IsZero() && delta != "" {
+			s.metrics.firstContentAt = now
+		}
+	case "response.reasoning_summary_text.delta":
+		delta := stringValue(event["delta"])
+		s.metrics.reasoningDeltaEvents++
+		s.metrics.reasoningBytes += len(delta)
+		if s.metrics.firstContentAt.IsZero() && delta != "" {
+			s.metrics.firstContentAt = now
+		}
+	case "response.completed", "response.incomplete", "response.failed", "error":
+		s.metrics.terminalType = eventType
+	}
 	switch eventType {
 	case "response.created", "response.in_progress":
 		return nil

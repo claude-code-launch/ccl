@@ -28,6 +28,7 @@ func TestOAuthRuntimeTypeDefaults(t *testing.T) {
 		{oauthproxy.ProviderQoder, "anthropic"},
 		{oauthproxy.ProviderClaude, "anthropic"},
 		{oauthproxy.ProviderCopilot, "openai_responses"},
+		{oauthproxy.ProviderWorkBuddy, "openai"},
 	}
 	for _, test := range tests {
 		got := oauthRuntimeType(test.provider)
@@ -455,6 +456,28 @@ func TestRunAuthKimiUsesOpenAIChatBackend(t *testing.T) {
 	}
 	if p.OAuthAccountCredential != "kimi-123.json" {
 		t.Fatalf("credential = %q", p.OAuthAccountCredential)
+	}
+}
+
+func TestRunAuthWorkBuddyUsesOpenAIChatBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		return oauthproxy.LoginResult{Provider: target, Backend: oauthproxy.ProviderWorkBuddy, Path: "workbuddy-user-123.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"workbuddy", "wb"}, authOptions{}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Providers["wb"]
+	if p.Type != "openai" || p.Endpoint != "oauth://workbuddy" || p.OAuthProvider != "workbuddy" ||
+		p.OAuthAccountCredential != "workbuddy-user-123.json" {
+		t.Fatalf("WorkBuddy provider = %+v", p)
 	}
 }
 

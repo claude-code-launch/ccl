@@ -4,12 +4,12 @@
 
 用一句话理解它：
 
-> 你继续用 Claude Code 的界面和习惯，`ccl` 负责帮你接上不同的模型来源（DeepSeek / OpenRouter / ChatGPT 订阅 / Gemini / Grok / Copilot / Kimi 等），并在需要时自动做协议翻译。
+> 你继续用 Claude Code 的界面和习惯，`ccl` 负责帮你接上不同的模型来源（DeepSeek / OpenRouter / ChatGPT 订阅 / Gemini / Grok / Copilot / Kimi / WorkBuddy 等），并在需要时自动做协议翻译。
 
 适合这些场景：
 
 - 想用更便宜的 OpenAI 兼容网关跑 Claude Code
-- 想用 ChatGPT / Gemini / Grok / Copilot / Kimi 等订阅账号
+- 想用 ChatGPT / Gemini / Grok / Copilot / Kimi / WorkBuddy 等订阅账号
 - 需要在多个网关 / 多个账号之间快速切换
 - 不想手写复杂的环境变量和模型映射
 
@@ -73,6 +73,7 @@ ccl oauth qoder      # Qoder 浏览器 OAuth（不需要 Qoder CLI）
 ccl oauth kimi       # Kimi / Moonshot
 ccl oauth kiro       # Kiro Portal（Google / GitHub）
 ccl oauth claude     # Anthropic Claude 订阅
+ccl oauth workbuddy  # WorkBuddy 网页登录
 
 # 登录成功后直接启动
 ccl
@@ -163,7 +164,7 @@ ccl bypass off      # 关闭
    配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
 
 6. **订阅 OAuth 一键接入**  
-   `gpt` / `gemini` / `grok` / `copilot` / `qoder` / `kimi` / `kiro` / `claude`，支持多账号别名；token 会在运行时刷新。
+   `gpt` / `gemini` / `grok` / `copilot` / `qoder` / `kimi` / `kiro` / `claude` / `workbuddy`，支持多账号别名；token 会在运行时刷新。
 
 ### 协议与运行时边界
 
@@ -176,13 +177,14 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 | Codex Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查上游 `/models` | CCL 完成 Messages ↔ Responses、Codex 身份头、SSE 与错误透传 | 不参与数据面 |
 | GPT 订阅 | CPA authenticator 仅负责登录；CCL 绑定凭据、刷新 token | CCL 使用 provider 槽位构建本机会话模型目录 | CCL 完成 Messages ↔ Responses，并携带账号 ID | CPA 仅负责登录入口，不参与运行时数据面 |
 | Gemini / Grok / Kimi / Claude 订阅 | CPA 对应 authenticator 登录、刷新；CCL 只绑定单个凭据文件 | CPA backend 注册模型，CCL 从本机 `/models` 读取 | CPA 对应 executor 完成 Messages ↔ 各自上游协议 | 登录、刷新、模型注册和数据面均由 CPA |
+| WorkBuddy 订阅 | CCL 自研网页登录轮询、凭据绑定与刷新 | CCL 使用认证账号直查 WorkBuddy `/v3/config` | CCL gateway 注入 WorkBuddy 账号/客户端/会话头；CPA 完成 Messages ↔ Chat Completions | CPA 只负责协议转换，不拥有登录、token、模型目录或错误策略 |
 | GitHub Copilot 订阅 | CCL 自研 GitHub device flow、Copilot 换票与凭据状态 | CCL 直查 Copilot 模型目录并读取每个模型声明的 endpoint | CCL 按模型路由；Responses 使用 CCL Codex 转换，Chat / 原生 Messages 使用 CPA | CPA 只参与非 Responses 模型，是混合栈 |
 | Kiro 订阅 | CCL 自研 Portal PKCE / Builder ID、刷新和单凭据运行时 | CCL 调 Kiro Portal / Amazon Q 模型接口并缓存 | CCL 完成 Messages → Amazon Q、重试、AWS EventStream → Messages | 请求数据面不经过 CPA |
 | Qoder 订阅 | CCL 自研浏览器 OAuth、刷新和单凭据运行时 | CCL 直查 Qoder 模型目录，失败时使用最小兼容目录 | CCL 完成 COSY 签名、WAF 编码、Messages → Qoder、Qoder SSE → Messages | 请求数据面不经过 CPA |
 
 CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上下文元数据、日志、usage 汇总和 runtime 生命周期。CPA runtime 由 Go SDK 内嵌启动，不依赖外部 `CLIProxyAPI` 进程。
 
-错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；其他 CPA-backed provider 继续由 CPA 管理；Copilot gateway 自己负责换票与切换凭据；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
+错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；其他 CPA-backed provider 继续由 CPA 管理；WorkBuddy 只在 401/403 后尝试刷新一次，刷新失败保留原始响应，429/5xx 不重试；Copilot gateway 自己负责换票与切换凭据；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
 
 所有 `openai_responses` 网关都按 **Codex Responses** 处理，不再区分 `codex-api-key` / `generic-api-key` executor：CCL 统一注入自己维护的 `Originator: codex_cli_rs`、Codex User-Agent、`Version`、`session-id` / `thread-id` / request ID，以及当前 Codex `client_metadata`，并固定 `stream=true`、`store=false`。这些值不再由 CPA 版本间接决定。协议仍由 provider `type` 明确选择，不根据 endpoint 的 `/codex` 路径猜测。GPT 订阅与 API Key 网关共享同一套转换和 SSE 实现，区别只在鉴权：GPT 使用 OAuth token 与 `Chatgpt-Account-Id`，网关使用用户 API Key。
 
@@ -218,7 +220,7 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 │  └─ env <KEY> <VALUE> | ls | rm | mv
 │
 ├─ oauth <provider> [alias]           登录订阅；别名：auth
-│  └─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | claude
+│  └─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | claude | workbuddy
 │
 ├─ bypass [on|off]                    权限确认旁路
 ├─ log [on|off]                       运行时日志；别名：debug
@@ -296,7 +298,7 @@ ccl log off              # 关闭
 
 `log` 默认关闭，只有显式执行 `ccl log on` 或 `ccl log --level <level>` 后才记录。它是全局阈值设置，写入 `~/.ccl/config.yaml` 的 `log_level`。`ccl log on` 本身不会创建共享的 `ccl-debug.log`；每个由 `ccl` 拉起的 Claude Code 临时会话或独立 provider runtime 才会获得一个带后缀的日志文件，Claude 会话默认命名为 `~/.ccl/logs/ccl-debug-claude_<id>.log`。一个会话内的全部日志级别都写入同一文件。可用 `CCL_LOG_FILE=/path/file.log` 覆盖文件名模板（实际文件仍会加入会话后缀）。日志由 Go 标准库 `slog` 输出，带时间戳、级别和消息；运行结束时会打印 Claude 会话的实际文件路径。
 
-`INFO`（`ccl log on` 的默认值）记录 session/runtime 启动退出、数据面类型、模型路由、OAuth refresh 与上下文设置；4xx/cooldown 按 `WARN`、5xx/代理故障按 `ERROR` 记录，成功的逐请求状态只在 `DEBUG` 出现。Kiro、Qoder、Copilot 的请求会获得会话内唯一的 `request_id`，入口、凭据尝试、上游响应、切号/重试和最终结果都可用这个字段串联。常用事件包括 `request_failed`、`upstream_response`、`upstream_retry_decision`、`credential_refresh`、`model_queued` 和 `stream_conversion_failed`。
+`INFO`（`ccl log on` 的默认值）记录 session/runtime 启动退出、数据面类型、模型路由、OAuth refresh 与上下文设置；4xx/cooldown 按 `WARN`、5xx/代理故障按 `ERROR` 记录，成功的逐请求状态只在 `DEBUG` 出现。Kiro、Qoder、Copilot、WorkBuddy 的请求会获得会话内唯一的 `request_id`，入口、凭据尝试、上游响应、切号/刷新/重试和最终结果都可用这个字段串联。常用事件包括 `request_failed`、`upstream_response`、`upstream_retry_decision`、`token_refresh_start`、`model_queued` 和 `stream_conversion_failed`。
 
 一次故障建议这样查：
 
@@ -305,11 +307,11 @@ grep -E 'level=(WARN|ERROR)' ~/.ccl/logs/ccl-debug-claude_<id>.log
 grep 'request_id=r1' ~/.ccl/logs/ccl-debug-claude_<id>.log
 ```
 
-第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。Codex Responses、Kiro、Qoder、Copilot 都会记录上游状态、`retry_after` 和适配器采取的动作；其余 CPA 数据面以筛选后的 CPA 诊断为准。日志中的 endpoint 会移除 userinfo、query 和 fragment。
+第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。Codex Responses、Kiro、Qoder、Copilot、WorkBuddy 都会记录上游状态、`retry_after` 和适配器采取的动作；其余 CPA 数据面以筛选后的 CPA 诊断为准。日志中的 endpoint 会移除 userinfo、query 和 fragment。
 
-日志覆盖存在明确边界：普通 Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到。Codex Responses、Kiro、Qoder、Copilot 的 CCL 数据面可用 `request_id` 串联入口、转换、上游响应、刷新/重试和最终状态；OpenAI Chat 及其余 CPA 数据面只保留筛选后的 `cpa_diagnostic`，CPA 当前没有向 CCL 暴露逐请求 ID。
+日志覆盖存在明确边界：普通 Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到。Codex Responses、Kiro、Qoder、Copilot 的 CCL 数据面可用 `request_id` 串联入口、转换、上游响应、刷新/重试和最终状态；WorkBuddy 虽由 CPA 转换协议，但上游经过 CCL gateway，因此同样能记录逐请求状态与刷新动作；其他 OpenAI Chat / CPA 数据面只保留筛选后的 `cpa_diagnostic`。
 
-日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Codex Responses、Copilot、Kiro、Qoder 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
+日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Codex Responses、Copilot、Kiro、Qoder、WorkBuddy 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
 
 旧的 `debug_mode`/`debug_verbose` 配置会在读取时迁移；DEBUG 的命令入口统一为 `ccl log --level debug`，不保留 `ccl debug verbose`。
 
@@ -324,6 +326,7 @@ ccl oauth qoder
 ccl oauth kimi
 ccl oauth kiro
 ccl oauth claude
+ccl oauth workbuddy
 
 # 多账号别名
 ccl oauth gpt work
@@ -345,6 +348,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 | `kimi` | kimi | `openai(chat)` | Kimi/Moonshot device-code |
 | `kiro` | kiro | `anthropic` | Kiro Portal PKCE（默认，Google / GitHub）或 AWS Builder ID device-code |
 | `claude` | claude | `anthropic` | Anthropic OAuth 回调 |
+| `workbuddy` | workbuddy | `openai(chat)` | WorkBuddy 网页登录 + token/account 轮询 |
 
 说明：
 
@@ -372,6 +376,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 - **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：可在 `ccl set` 单页的 Runtime 区用 `←→` 调整，也可在 Claude Code 内用 `/fast` 开关。
 - **Copilot** 使用独立的 GitHub OAuth 凭据和 `api.githubcopilot.com`；登录写盘前会验证账号确实拥有可用的 Copilot 模型。启动时读取账号实际模型目录，并根据每个模型声明的端点选择 Responses、Chat Completions 或 Anthropic Messages；该目录是 `ccl models --all` 的权威来源，不会混入本地兼容层的内建模型。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `copilot(auto)`。
 - **Qoder** 完全由 ccl 直接接入：`ccl oauth qoder` 打开 Qoder 授权页并轮询 OAuth token；运行时直接刷新 token、读取账号模型目录、生成 COSY 签名、编码请求并把 Qoder SSE 转换为 Anthropic Messages。不会调用、探测或读取 `qodercli`，系统无需安装 Qoder CLI。模型目录由账号实时返回；`ccl models` 会显示 Qoder 展示名、内部模型 ID、Credit 倍率以及 New / 错峰优惠标记。暂时无法读取目录时使用最小兼容目录启动。
+- **WorkBuddy** 使用公网 `www.workbuddy.ai` 的官方网页登录轮询流程。登录时由 CCL 获取新的 state 并轮询 token/account；运行时 CCL 刷新凭据、读取 `/v3/config` 模型目录，并把请求发送到 `/v2/chat/completions`。Claude Code Messages 与 OpenAI Chat Completions 的转换由内嵌 CPA 完成；WorkBuddy 的鉴权头、用户/租户头、客户端身份和会话追踪头由 CCL 注入。
 
 `ccl oauth kiro` 默认打开 Kiro Portal，通过 PKCE 登录 Google / GitHub 账号；这样运行时和
 Web Portal `ListAvailableModels` 使用同一身份，可返回该账号完整的模型及 Credit 倍率。
@@ -500,6 +505,10 @@ Context & Compact：
 | Balanced 500K / 400K | 500K 上下文，在 80%（约 400K）自动压缩 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS=500000`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW=500000`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` |
 
 旧版 300K、1M、Custom 等组合不再提供；再次保存 provider 时会归入 Default 并清除旧上下文变量。
+
+GPT/Codex runtime 的 `/messages/count_tokens` 使用 `o200k_base` 对实际 Responses 请求计数，不使用字符比例估算。超大的 Claude Code 压缩请求会在本地删除最旧消息，只保留 system/compact 指令和最新约 120K token，因而普通 200K 模型也能处理；压缩使用低 reasoning 且不携带无用工具定义。若 Codex 在 SSE 中继续报告超限，CCL 会进一步缩到不超过约 80K（且至少再减少约三分之一）并在本地重试一次，避免 Claude Code 长时间循环重试。普通对话请求不会被静默裁剪，CCL 也不会替压缩请求切换模型。
+
+开启 `ccl log --level debug` 后，可用 `grep -E 'compaction_|token_counted|upstream_(response|transport_failed)' <log-file>` 查看一次压缩的结构化时间线。`compaction_detected` 记录命中的 Claude Code prompt 指纹；`compaction_context_trimmed` 记录裁剪 token、消息数和本地耗时；`upstream_response` 细分连接等待、DNS/TCP/TLS、请求写入与 TTFB；`compaction_stream_complete` / `compaction_stream_failed` 记录首个 SSE、首段内容、生成耗时、事件数和 input/output token。各阶段由同一个 `request_id` 关联，`body_fingerprint` 可判断 Claude Code 是否反复发送同一请求。compact 请求不会把数 MB 正文写进 DEBUG 日志。
 
 ### Provider 管理
 
@@ -690,8 +699,6 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 ├── cmd/
 │   ├── advanced_config.go     # TUI 配置向导
 │   ├── auth.go                # 订阅 OAuth 登录
-│   ├── auth_import.go         # 导入并规范化已有 OAuth 文件
-│   ├── auth_sync.go           # auth 目录与配置同步
 │   ├── cloud_sync.go          # iCloud/Google Drive 登录、恢复密钥与同步命令
 │   ├── bypass.go              # ccl bypass（权限旁路开关）
 │   ├── log.go                 # ccl log（统一 slog 日志配置）
@@ -716,7 +723,7 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 │   ├── config/                # yaml 配置读写
 │   ├── locale/                # 多语言
 │   ├── modelrouting/          # 档位启发式映射
-│   ├── oauthproxy/            # OAuth 登录、CLIProxyAPI、Kiro/Qoder Messages 运行时
+│   ├── oauthproxy/            # OAuth、CPA 与 Codex/Kiro/Qoder/WorkBuddy 运行时
 │   ├── protocol/              # endpoint 规范化与探测
 │   └── provider/              # Provider / Config 结构
 └── main.go

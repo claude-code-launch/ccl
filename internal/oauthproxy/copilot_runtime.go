@@ -829,7 +829,7 @@ func startCopilotOAuth(parent context.Context, modelSpec, credentialFile string)
 		return nil, err
 	}
 	stopGateway = false
-	proxyRuntime.copilotGateway = gateway
+	proxyRuntime.cleanup = append(proxyRuntime.cleanup, gateway.Stop)
 	proxyRuntime.listAuths = pool.listAuths
 	proxyRuntime.models = append([]string(nil), routes.models...)
 	LogInfof("runtime start oauth provider=copilot backend=copilot protocol=mixed local_endpoint=%q credential_file=%s models_chat=%d models_responses=%d models_anthropic=%d responses_owner=ccl",

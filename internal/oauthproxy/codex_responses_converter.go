@@ -14,9 +14,15 @@ const codexResponsesNameLimit = 64
 // Anthropic Messages request. No CPA translator or executor participates in it.
 type codexResponsesConvertedRequest struct {
 	anthropicAdapterRequest
-	body      []byte
-	model     string
-	sessionID string
+	body              []byte
+	model             string
+	sessionID         string
+	compaction        bool
+	compactionReason  string
+	compactionSignals string
+	sourceMessages    int
+	compactionTokens  int
+	droppedItems      int
 }
 
 func convertAnthropicToCodexResponses(raw []byte) (*codexResponsesConvertedRequest, error) {
@@ -31,6 +37,8 @@ func convertAnthropicToCodexResponses(raw []byte) (*codexResponsesConvertedReque
 	if len(request.Messages) == 0 {
 		return nil, fmt.Errorf("messages must not be empty")
 	}
+	compactionReason, compactionSignals := codexClassifyCompactionRequest(&request)
+	compaction := compactionReason != ""
 
 	upstreamModel := stripContextModelSuffix(request.Model)
 	originalToShort, shortToOriginal := codexToolNameMaps(request.Tools)
@@ -48,15 +56,21 @@ func convertAnthropicToCodexResponses(raw []byte) (*codexResponsesConvertedReque
 		input = append(input, items...)
 	}
 
-	reasoning := map[string]any{"effort": codexReasoningEffort(request.Thinking, request.OutputConfig)}
-	if request.Thinking != nil && !strings.EqualFold(strings.TrimSpace(request.Thinking.Type), "disabled") {
+	reasoningEffort := codexReasoningEffort(request.Thinking, request.OutputConfig)
+	if compaction {
+		// Conversation summarization benefits much less from deep reasoning than a
+		// normal coding turn. Avoid spending latency and output tokens on it.
+		reasoningEffort = "low"
+	}
+	reasoning := map[string]any{"effort": reasoningEffort}
+	if !compaction && request.Thinking != nil && !strings.EqualFold(strings.TrimSpace(request.Thinking.Type), "disabled") {
 		reasoning["summary"] = "auto"
 	}
 	body := map[string]any{
 		"model":               upstreamModel,
 		"instructions":        "",
 		"input":               input,
-		"parallel_tool_calls": codexParallelToolCalls(request.ToolChoice),
+		"parallel_tool_calls": !compaction && codexParallelToolCalls(request.ToolChoice),
 		"reasoning":           reasoning,
 		"stream":              true,
 		"store":               false,
@@ -65,7 +79,7 @@ func convertAnthropicToCodexResponses(raw []byte) (*codexResponsesConvertedReque
 	if tier := codexServiceTier(request.ServiceTier, request.Speed); tier != "" {
 		body["service_tier"] = tier
 	}
-	if len(request.Tools) > 0 {
+	if len(request.Tools) > 0 && !compaction {
 		tools, err := codexTools(request.Tools, originalToShort)
 		if err != nil {
 			return nil, err
@@ -92,7 +106,110 @@ func convertAnthropicToCodexResponses(raw []byte) (*codexResponsesConvertedReque
 			toolNameMap:       shortToOriginal,
 		},
 		body: encoded, model: upstreamModel, sessionID: sessionID,
+		compaction: compaction, compactionReason: compactionReason,
+		compactionSignals: compactionSignals, sourceMessages: len(request.Messages),
 	}, nil
+}
+
+// codexClassifyCompactionRequest returns both the positive match reason and a
+// privacy-safe list of prompt signals. The signals make prompt drift visible in
+// DEBUG logs without recording the user's conversation text.
+func codexClassifyCompactionRequest(request *anthropicMessagesRequest) (reason, signals string) {
+	if request == nil {
+		return "", "none"
+	}
+	if codexIsCompactionSystem(request.System) {
+		return "system_summarizer", "system_summarizer"
+	}
+	// Claude Code 2.1.223 keeps its normal system prompt and puts the internal
+	// compaction instructions in one of the final user messages. Require two
+	// stable prompt phrases so a normal discussion about summaries cannot enter
+	// the destructive history-trimming path.
+	first := len(request.Messages) - 3
+	if first < 0 {
+		first = 0
+	}
+	seen := make(map[string]bool)
+	addSignal := func(name string, matched bool) {
+		if matched {
+			seen[name] = true
+		}
+	}
+	for index := len(request.Messages) - 1; index >= first; index-- {
+		message := request.Messages[index]
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			continue
+		}
+		content := strings.ToLower(string(message.Content))
+		legacyDetailed := strings.Contains(content, "your task is to create a detailed summary of this conversation")
+		legacyContinuation := strings.Contains(content, "this summary will be placed at the start of a continuing session")
+		legacyTranscript := strings.Contains(content, "summarize this portion of a claude code session transcript")
+		focusMarker := strings.Contains(content, "focus on:")
+		sectionsMarker := strings.Contains(content, "your summary should include the following sections")
+		primaryRequestMarker := strings.Contains(content, "primary request and intent:")
+		plainTextMarker := strings.Contains(content, "respond with plain text only")
+		additionalInstructionsMarker := strings.Contains(content, "additional summarization instructions")
+		noToolsMarker := strings.Contains(content, "do not call any tools")
+		compactCommandMarker := strings.Contains(content, "<command-name>/compact</command-name>") ||
+			strings.Contains(content, `\u003ccommand-name\u003e/compact\u003c/command-name\u003e`)
+		addSignal("legacy_detailed", legacyDetailed)
+		addSignal("legacy_continuation", legacyContinuation)
+		addSignal("legacy_transcript", legacyTranscript)
+		addSignal("focus", focusMarker)
+		addSignal("summary_sections", sectionsMarker)
+		addSignal("primary_request", primaryRequestMarker)
+		addSignal("plain_text_only", plainTextMarker)
+		addSignal("additional_instructions", additionalInstructionsMarker)
+		addSignal("no_tools", noToolsMarker)
+		addSignal("compact_command", compactCommandMarker)
+		if legacyDetailed && legacyContinuation {
+			return "user_detailed_summary", joinCodexCompactionSignals(seen)
+		}
+		if legacyTranscript && focusMarker {
+			return "user_transcript_summary", joinCodexCompactionSignals(seen)
+		}
+		// Claude Code prompt wording changes across builds. These three
+		// structural labels describe the private compact protocol rather than a
+		// normal user request to summarize text.
+		if sectionsMarker && primaryRequestMarker && plainTextMarker &&
+			(additionalInstructionsMarker || noToolsMarker) {
+			return "user_structured_summary", joinCodexCompactionSignals(seen)
+		}
+	}
+	return "", joinCodexCompactionSignals(seen)
+}
+
+func joinCodexCompactionSignals(seen map[string]bool) string {
+	order := []string{
+		"system_summarizer", "legacy_detailed", "legacy_continuation", "legacy_transcript", "focus",
+		"summary_sections", "primary_request", "plain_text_only", "additional_instructions", "no_tools", "compact_command",
+	}
+	matched := make([]string, 0, len(seen))
+	for _, name := range order {
+		if seen[name] {
+			matched = append(matched, name)
+		}
+	}
+	if len(matched) == 0 {
+		return "none"
+	}
+	return strings.Join(matched, ",")
+}
+
+func codexRequestFingerprint(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:6])
+}
+
+func codexIsCompactionSystem(raw json.RawMessage) bool {
+	const marker = "tasked with summarizing conversations"
+	for _, item := range codexSystemContent(raw) {
+		block, _ := item.(map[string]any)
+		if strings.Contains(strings.ToLower(stringValue(block["text"])), marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexRequestIdentity(metadata *anthropicRequestMetadata) (sessionID, promptCacheKey string) {
