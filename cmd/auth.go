@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -194,14 +196,49 @@ func isReservedProviderName(name string) bool {
 func derivedProviderName(target, credentialPath string) string {
 	base := filepath.Base(credentialPath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
+	identity := ""
 	fragments := strings.SplitN(base, "-", 2)
 	if len(fragments) == 2 && strings.TrimSpace(fragments[1]) != "" {
-		return target + "-" + fragments[1]
+		identity = fragments[1]
+	} else if strings.TrimSpace(base) != "" && base != target {
+		identity = base
 	}
-	if strings.TrimSpace(base) != "" && base != target {
-		return target + "-" + base
+	if identity == "" {
+		return target
 	}
-	return target
+	return compactDerivedProviderName(target, identity)
+}
+
+// maxDerivedProviderName bounds auto-derived provider names. Identities like
+// Kiro's "d-9067c98495.<uuid>" OIDC client id are 40+ characters and make
+// every provider listing unwieldy; typical email identities still fit.
+const maxDerivedProviderName = 32
+
+// compactDerivedProviderName shortens target+"-"+identity to the budget when
+// it overruns: the identity is cut at the nearest separator boundary and
+// disambiguated with a short hash of the full identity, so distinct accounts
+// still derive distinct names and re-login derives the same name again.
+func compactDerivedProviderName(target, identity string) string {
+	candidate := target + "-" + identity
+	if len(candidate) <= maxDerivedProviderName {
+		return candidate
+	}
+	// Final shape is target + "-" + prefix + "-" + 6 hash chars.
+	cut := maxDerivedProviderName - len(target) - 8
+	if cut < 1 {
+		cut = 1
+	}
+	if cut > len(identity) {
+		cut = len(identity)
+	}
+	// Prefer cutting at the earliest natural boundary ("." or "-") that keeps
+	// at least 8 characters of identity, instead of slicing through an
+	// identifier segment.
+	if boundary := strings.IndexAny(identity[8:cut+1], ".-"); boundary >= 0 && 8+boundary <= cut {
+		cut = 8 + boundary
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return target + "-" + identity[:cut] + "-" + hex.EncodeToString(sum[:3])
 }
 
 func init() {

@@ -706,3 +706,40 @@ func TestRunAuthChatGPTLegacyAliasCanonicalizesToGPT(t *testing.T) {
 		t.Fatalf("legacy chatgpt login should canonicalize oauthProvider to gpt, got %+v", p)
 	}
 }
+
+// TestDerivedProviderNameCompactsLongIdentities verifies Kiro-style OIDC
+// client ids ("d-<hex>.<uuid>") derive a bounded, readable provider name
+// instead of the full 40+ character identifier.
+func TestDerivedProviderNameCompactsLongIdentities(t *testing.T) {
+	path := "kiro-d-9067c98495.8448b4d8-a021-7083-2992-abce567bf62d.json"
+	name := derivedProviderName("kiro", path)
+	if len(name) > maxDerivedProviderName {
+		t.Fatalf("derived name %q exceeds budget %d", name, maxDerivedProviderName)
+	}
+	if !strings.HasPrefix(name, "kiro-d-9067c98495-") {
+		t.Fatalf("derived name %q lost the readable instance prefix", name)
+	}
+	// Deterministic: the same credential derives the same name again.
+	if again := derivedProviderName("kiro", path); again != name {
+		t.Fatalf("derived name is not deterministic: %q vs %q", name, again)
+	}
+	// Distinct accounts under the same org stay distinct.
+	other := derivedProviderName("kiro", "kiro-d-9067c98495.deadbeef-0000-1111-2222-333333333333.json")
+	if other == name {
+		t.Fatalf("distinct identities derived the same name %q", name)
+	}
+	if !strings.HasPrefix(other, "kiro-d-9067c98495-") {
+		t.Fatalf("second account name %q lost the instance prefix", other)
+	}
+}
+
+// TestDerivedProviderNameKeepsShortIdentities pins the untouched behavior for
+// providers whose credential identity already fits the budget.
+func TestDerivedProviderNameKeepsShortIdentities(t *testing.T) {
+	if got := derivedProviderName("grok", "grok-work@x.ai.json"); got != "grok-work@x.ai" {
+		t.Fatalf("grok derived name = %q", got)
+	}
+	if got := derivedProviderName("copilot", "copilot-copilot@example.com.json"); got != "copilot-copilot@example.com" {
+		t.Fatalf("copilot derived name = %q", got)
+	}
+}
