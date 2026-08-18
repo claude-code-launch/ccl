@@ -64,8 +64,10 @@ const (
 	preferredPanelWidth   = 82
 	minimumPanelWidth     = 54
 	minimumTerminalMargin = 4
-	slotTestConcurrency   = 50
-	lowCostProbeModel     = "gpt-5.4-mini"
+	// 8 workers, not 50: a concurrent burst against one gateway trips per-key
+	// rate limits and marks healthy models unavailable.
+	slotTestConcurrency = 8
+	lowCostProbeModel   = "gpt-5.4-mini"
 )
 
 // configRowKind enumerates the focusable rows of the single configuration page.
@@ -1183,7 +1185,7 @@ func modelAvailabilityTickCmd(testID uint64) tea.Cmd {
 	})
 }
 
-func modelAvailabilityTestCmd(ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth, smokeTestModel string) tea.Cmd {
+func modelAvailabilityTestCmd(ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, smokeTestModel string) tea.Cmd {
 	models = append([]string(nil), models...)
 	return func() tea.Msg {
 		statuses := make(map[string]modelAvailability, len(models))
@@ -1192,7 +1194,7 @@ func modelAvailabilityTestCmd(ctx context.Context, testID uint64, models []strin
 		}
 		if smokeTestModel != "" {
 			status := modelAvailabilityUnavailable
-			if testSingleModelContext(ctx, smokeTestModel, endpoint, apiKey, providerType, anthropicAuth, 10*time.Second) {
+			if testSingleModelWithProtocolsContext(ctx, smokeTestModel, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
 				status = modelAvailabilityAvailable
 			}
 			if ctx.Err() == nil {
@@ -1225,7 +1227,7 @@ func modelAvailabilityTestCmd(ctx context.Context, testID uint64, models []strin
 							return
 						}
 						status := modelAvailabilityUnavailable
-						if testSingleModelContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, 10*time.Second) {
+						if testSingleModelWithProtocolsContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
 							status = modelAvailabilityAvailable
 						}
 						if ctx.Err() != nil {
@@ -1988,7 +1990,7 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
 		m.modelTestCanceled = false
 		setDebugf("model availability test started model_count=%d", len(m.live().modelPool))
 		return tea.Batch(
-			modelAvailabilityTestCmd(ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.availabilitySmokeTestModel()),
+			modelAvailabilityTestCmd(ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel()),
 			modelAvailabilityTickCmd(testID),
 		)
 	}

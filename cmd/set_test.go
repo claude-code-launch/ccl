@@ -853,6 +853,7 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 		"test-key",
 		"openai_responses",
 		"",
+		nil,
 		lowCostProbeModel,
 	)
 	msg := cmd().(modelAvailabilityDoneMsg)

@@ -184,7 +184,7 @@ func runDoctor(ctx context.Context) error {
 			configuredModels := parseModelList(p.Model)
 			if len(configuredModels) > 0 {
 				doctorSection("Model verification")
-				availableSet := testModelsConcurrently(ctx, configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
+				availableSet := testModelsConcurrently(ctx, configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth, p.ModelProtocols)
 				available, unavailable := classifyModels(configuredModels, availableSet)
 				doctorKV("Summary", modelVerificationSummary(available, unavailable))
 				if len(unavailable) > 0 {
@@ -458,14 +458,18 @@ func printCloudSyncDiagnostics() {
 	}
 }
 
-// testModelsConcurrently tests multiple models in batches of 50 concurrent workers.
-// Each worker sends a lightweight provider-specific POST to verify the model works.
+// testModelsConcurrently tests multiple models in small concurrent batches.
+// Each worker sends a lightweight provider-specific POST to verify the model
+// works. protocols carries the per-model wire table for mixed-protocol
+// models.dev gateways (nil for single-protocol providers).
 // Returns a set of model IDs that passed the test.
-func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiKey, providerType, anthropicAuth string) map[string]bool {
+func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string) map[string]bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	const batchSize = 50
+	// 8 workers, not 50: a large concurrent burst against one gateway trips
+	// per-key rate limits and marks healthy models unavailable.
+	const batchSize = 8
 	const requestTimeout = 10 * time.Second
 
 	available := make(map[string]bool)
@@ -496,7 +500,7 @@ func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiK
 			wg.Add(1)
 			go func(m string) {
 				defer wg.Done()
-				ok := testSingleModelContext(ctx, m, endpoint, apiKey, providerType, anthropicAuth, requestTimeout)
+				ok := testSingleModelWithProtocolsContext(ctx, m, endpoint, apiKey, providerType, anthropicAuth, protocols, requestTimeout)
 				if ok {
 					mu.Lock()
 					available[m] = true
@@ -514,17 +518,55 @@ func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiK
 }
 
 func testSingleModelContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, timeout time.Duration) bool {
+	return testSingleModelWithProtocolsContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, nil, timeout)
+}
+
+// testSingleModelWithProtocolsContext is testSingleModelContext with a
+// per-model protocol table. Mixed-protocol models.dev gateways expose chat,
+// Responses and native-Anthropic models behind one endpoint, so the probe for
+// each model must follow that model's declared wire protocol — probing them
+// all as Chat Completions marks working models unavailable.
+func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, timeout time.Duration) bool {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
-	if provider.IsAnthropicType(providerType) {
+	wire := "openai"
+	switch {
+	case provider.IsAnthropicType(providerType):
+		wire = "anthropic"
+	case provider.IsOpenAIResponsesType(providerType):
+		wire = "openai_responses"
+	case provider.IsModelsDevType(providerType):
+		wire = probeProtocolForModel(protocols, model)
+	}
+	return testSingleModelForProtocolContext(ctx, model, endpoint, apiKey, wire, anthropicAuth, timeout)
+}
+
+// probeProtocolForModel resolves the wire protocol a mixed-protocol models.dev
+// gateway uses for one model; unknown models fall back to chat, mirroring the
+// runtime's mixedProtocolForModel fallback.
+func probeProtocolForModel(protocols map[string]string, model string) string {
+	if proto, ok := protocols[strings.ToLower(strings.TrimSpace(model))]; ok && proto != "" {
+		return proto
+	}
+	return "openai"
+}
+
+// testSingleModelForProtocolContext probes one model over an explicit wire
+// protocol: "anthropic", "openai_responses", or Chat Completions for anything
+// else. A trailing [1m] context marker is stripped first — it is a ccl slot
+// directive, not part of the upstream model name.
+func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, apiKey, wireProtocol, anthropicAuth string, timeout time.Duration) bool {
+	model = stripOneMSuffix(model)
+	switch wireProtocol {
+	case "anthropic":
 		if strings.TrimSpace(anthropicAuth) == "" {
 			anthropicAuth = "x-api-key"
 		}
 		return testSingleAnthropicModelWithAuthContext(ctx, model, endpoint, apiKey, anthropicAuth, timeout)
-	}
-	if provider.IsOpenAIResponsesType(providerType) {
+	case "openai_responses":
 		return testSingleOpenAIResponsesModelContext(ctx, model, endpoint, apiKey, timeout)
+	default:
+		return testSingleOpenAIModelContext(ctx, model, endpoint, apiKey, timeout)
 	}
-	return testSingleOpenAIModelContext(ctx, model, endpoint, apiKey, timeout)
 }
 
 // probeModel sends one minimal completion request and reports whether the
@@ -570,11 +612,31 @@ func probeModelStatus(parent context.Context, url string, payload map[string]any
 }
 
 func testSingleOpenAIModelContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) bool {
-	return probeModel(parent, buildChatURL(endpoint), map[string]any{
-		"model":      model,
-		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-		"max_tokens": 1,
-	}, map[string]string{"Authorization": "Bearer " + apiKey}, timeout)
+	headers := map[string]string{"Authorization": "Bearer " + apiKey}
+	payload := func(tokenField string) map[string]any {
+		return map[string]any{
+			"model":    model,
+			"messages": []map[string]string{{"role": "user", "content": "hi"}},
+			tokenField: 1,
+		}
+	}
+	status, err := probeModelStatus(parent, buildChatURL(endpoint), payload("max_tokens"), headers, timeout)
+	if err != nil {
+		return false
+	}
+	if status >= 200 && status < 300 {
+		return true
+	}
+	// Reasoning-model families renamed max_tokens to max_completion_tokens and
+	// reject the old parameter with a 400; retry once before declaring the
+	// model unavailable.
+	if status == http.StatusBadRequest {
+		status, err = probeModelStatus(parent, buildChatURL(endpoint), payload("max_completion_tokens"), headers, timeout)
+		if err != nil {
+			return false
+		}
+	}
+	return status >= 200 && status < 300
 }
 
 func testSingleAnthropicModelWithAuthContext(parent context.Context, model, endpoint, apiKey, authStyle string, timeout time.Duration) bool {

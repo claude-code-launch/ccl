@@ -158,7 +158,7 @@ func runMapAuto(ctx context.Context, args []string) error {
 	}
 	defer cleanup()
 
-	availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, runtimeProvider.Type, runtimeProvider.AnthropicAuth)
+	availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, runtimeProvider.Type, runtimeProvider.AnthropicAuth, runtimeProvider.ModelProtocols)
 	available, unavailable := classifyModels(models, availableSet)
 
 	if len(available) == 0 {

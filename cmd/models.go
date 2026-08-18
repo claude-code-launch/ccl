@@ -74,7 +74,7 @@ func runModels(ctx context.Context, showAll bool) error {
 	fmt.Printf("Models · %s\n", p.Name)
 	fmt.Printf("Source: %s · %d model(s)\n\n", source, len(modelList))
 
-	availableSet := testModelsConcurrently(ctx, modelList, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth)
+	availableSet := testModelsConcurrently(ctx, modelList, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth, p.ModelProtocols)
 	available, unavailable := classifyModels(modelList, availableSet)
 	fmt.Println()
 	printModelReportWithMetadata(available, unavailable, indexModelInfos(catalog))
