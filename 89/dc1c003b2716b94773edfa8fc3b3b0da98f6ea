@@ -1,0 +1,40 @@
+cmd/model_probe_test.go
+  s_0b9722801eabd2::t_704f50b5d8a9a0 71-73
+  s_0b9722801eabd2::t_2db67c42d83049 1-54,56-70,74-130
+  s_0b9722801eabd2::t_c2857cd75fb9fa 55
+cmd/advanced_config.go
+  s_0b9722801eabd2::t_b191ec744cf47b 69-70
+  s_0b9722801eabd2::t_55ef2aeccd97f6 67-68
+  s_0b9722801eabd2::t_cd6051dcd42344 1993
+  s_0b9722801eabd2::t_052f1305fd954a 1230
+  s_0b9722801eabd2::t_9c04e2876be1db 1188,1197
+cmd/models.go
+  s_0b9722801eabd2::t_8e05aed8ce800b 77
+cmd/doctor.go
+  s_0b9722801eabd2::t_befc5e57719d4a 521-529,531-560,565,567-568
+  s_0b9722801eabd2::t_e80fb7f6a9dcf0 187
+  s_0b9722801eabd2::t_8c7e72f88f7399 503
+  s_0b9722801eabd2::t_059176916ac857 461-464,466,470-472
+  s_0b9722801eabd2::t_a3a1bebfdd60ae 615-617,620-639
+  s_0b9722801eabd2::t_b191ec744cf47b 618-619
+cmd/map.go
+  s_0b9722801eabd2::t_8e05aed8ce800b 161
+cmd/set_test.go
+  s_0b9722801eabd2::t_052f1305fd954a 856
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "89dc1c003b2716b94773edfa8fc3b3b0da98f6ea",
+  "prompts": {},
+  "sessions": {
+    "s_0b9722801eabd2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ae34ad1c-8677-44fe-9659-fe7fd7e3b514",
+        "model": "GLM-5.3"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
