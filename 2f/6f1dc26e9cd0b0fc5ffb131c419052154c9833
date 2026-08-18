@@ -1,0 +1,31 @@
+cmd/provider.go
+  s_0b9722801eabd2::t_f0ef68cb0a6a29 124-135,150-182
+  s_0b9722801eabd2::t_5d21d593a6fe1d 52,54-58
+  s_0b9722801eabd2::t_992d42f32111ff 183-184
+cmd/root.go
+  s_0b9722801eabd2::t_dddc7e733370dc 23
+CLAUDE.md
+  s_0b9722801eabd2::t_357224080c8830 86
+cmd/use_test.go
+  s_0b9722801eabd2::t_e7ff8d5f31f6dc 49-50
+  s_0b9722801eabd2::t_59df58e24d7e75 20-22
+  s_0b9722801eabd2::t_1fd37717ec4580 1-19,23-48,51-71
+cmd/use.go
+  s_0b9722801eabd2::t_d188b7869f7133 10,12-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "2f6f1dc26e9cd0b0fc5ffb131c419052154c9833",
+  "prompts": {},
+  "sessions": {
+    "s_0b9722801eabd2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ae34ad1c-8677-44fe-9659-fe7fd7e3b514",
+        "model": "GLM-5.3"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
