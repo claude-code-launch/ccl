@@ -49,9 +49,13 @@ func newProviderUseCommand(use string) *cobra.Command {
 	return &cobra.Command{
 		Use:   use,
 		Short: "Switch the active provider",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runProviderUse(args[0])
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			return runProviderUse(name)
 		},
 	}
 }
@@ -117,6 +121,18 @@ func runProviderUse(name string) error {
 	}
 
 	target := strings.TrimSpace(name)
+	if target == "" {
+		// 没有传 provider name：弹出与 `ccl set` 一致的已有 Provider 过滤列
+		// 表，选中即切换；取消则静默退出。
+		target, err = selectProviderToUse(cfg)
+		if err != nil {
+			return err
+		}
+		if target == "" {
+			return nil
+		}
+	}
+
 	if _, exists := cfg.Providers[target]; !exists {
 		return fmt.Errorf("provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'", target)
 	}
@@ -129,6 +145,41 @@ func runProviderUse(name string) error {
 
 	fmt.Printf("Switched to active provider: %s\n", target)
 	return nil
+}
+
+// selectProviderToUse runs the filter selector over the configured providers so
+// `ccl use` without arguments can switch interactively, mirroring the selection
+// list `ccl set` shows (but without the create-new entry — use only switches
+// between existing providers). It returns "" when the user cancels.
+func selectProviderToUse(cfg *provider.Config) (string, error) {
+	names := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "", fmt.Errorf("%s", locale.T("没有可用的 Provider，请先用 'ccl set' 添加", "no providers configured. Add one first using 'ccl set'"))
+	}
+	labelFor := func(name string) string {
+		if name == cfg.ActiveProvider {
+			return fmt.Sprintf("%s %s", name, locale.T("(当前使用)", "(active)"))
+		}
+		return name
+	}
+	items := make([]string, 0, len(names))
+	for _, name := range names {
+		items = append(items, labelFor(name))
+	}
+	chosen, err := runSelect(locale.T("选择要切换的 Provider:", "Select a provider to switch to:"), items)
+	if err != nil {
+		return "", err
+	}
+	for _, name := range names {
+		if chosen == labelFor(name) {
+			return name, nil
+		}
+	}
+	return "", nil
 }
 
 // confirmed prints prompt and reports whether the answer was an explicit yes.

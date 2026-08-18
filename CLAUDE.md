@@ -83,7 +83,7 @@ Claude Code 始终以 Anthropic Messages 请求进入。`internal/providersessio
 `ccl` 不是普通 CLI——错误调用会启动真实的 Claude Code 会话（计费）或静默改写用户配置，且输出看起来像「通过了」。
 
 - 未知首参会被透传给 Claude Code 并启动一次真实会话。`ccl list` 不是有效命令（正确是 `ccl ls`），`ccl "provider --help"` 这类误引用也不会报错而是进会话。
-- 裸 `ccl lang`、`ccl set`、`ccl map`（无 flag）是交互式 TUI/提示，别在非交互环境跑；`ccl lang` 尤其会改写 `~/.ccl/config.yaml`。
+- 裸 `ccl lang`、`ccl set`、`ccl use`、`ccl map`（无参数/flag）是交互式 TUI/提示，别在非交互环境跑；`ccl lang` 尤其会改写 `~/.ccl/config.yaml`。
 - `~/.ccl/config.yaml` 与 `~/.ccl/auth/*.json` 含明文 API key/refresh token，验证输出前要 whitelist/redact，不要整段 echo。
 - 隔离验证用临时 `HOME`（见上方命令），TUI 表面用 `tmux` 驱动——仓库自带 `.claude/skills/verify`，描述了完整流程（隔离 HOME + 假凭据 + tmux send-keys/capture-pane 取证，绝不指向真实 `~/.ccl`）。
 

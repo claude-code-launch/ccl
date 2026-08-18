@@ -7,9 +7,13 @@ import (
 var useCmd = &cobra.Command{
 	Use:   "use [provider]",
 	Short: "Switch the active provider",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runProviderUse(args[0])
+		name := ""
+		if len(args) > 0 {
+			name = args[0]
+		}
+		return runProviderUse(name)
 	},
 }
 

@@ -20,7 +20,7 @@ var rootCmd = &cobra.Command{
 
 Common commands:
   ccl                         Start Claude Code with the active provider
-  ccl ls / ccl use <name>     List or switch providers
+  ccl ls / ccl use [name]     List or switch providers
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
   ccl oauth <gpt|grok|workbuddy|...>
                               Log in with a subscription account
