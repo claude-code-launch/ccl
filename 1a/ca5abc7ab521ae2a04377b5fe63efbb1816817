@@ -1,0 +1,25 @@
+cmd/auth.go
+  s_0b9722801eabd2::t_fb92bc97a805f1 214-215
+  s_0b9722801eabd2::t_ba60fddfd4422a 234-238
+  s_0b9722801eabd2::t_07cb2c229cb27c 199,202-204,206-207,209-213,216-233,239-241
+  s_0b9722801eabd2::t_7991fa5bed94e2 5-6
+cmd/auth_test.go
+  s_0b9722801eabd2::t_204de4ea0b769a 709-718,720-730,732-745
+  s_0b9722801eabd2::t_46cd8794df0af6 719,731
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "1aca5abc7ab521ae2a04377b5fe63efbb1816817",
+  "prompts": {},
+  "sessions": {
+    "s_0b9722801eabd2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ae34ad1c-8677-44fe-9659-fe7fd7e3b514",
+        "model": "GLM-5.3"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
