@@ -34,7 +34,7 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 	session := &Session{
 		Provider: resolved,
 		BaseURL:  resolved.Endpoint,
-		UseProxy: provider.IsOpenAICompatibleType(resolved.Type) || strings.TrimSpace(resolved.OAuthProvider) != "",
+		UseProxy: provider.IsOpenAICompatibleType(resolved.Type) || provider.IsModelsDevType(resolved.Type) || strings.TrimSpace(resolved.OAuthProvider) != "",
 	}
 	if !session.UseProxy {
 		return session, nil
@@ -55,6 +55,7 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 		ModelSpec:              provider.RuntimeModelSpec(resolved),
 		OAuthProvider:          resolved.OAuthProvider,
 		OAuthAccountCredential: resolved.OAuthAccountCredential,
+		ModelProtocols:         resolved.ModelProtocols,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start embedded provider runtime: %w", err)

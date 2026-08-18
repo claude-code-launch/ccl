@@ -21,6 +21,7 @@ func TestProtocolLabel(t *testing.T) {
 		{"openai responses bare", "responses", "openai(responses)"},
 		{"openai responses display label", "openai(responses)", "openai(responses)"},
 		{"openai responses legacy display label", "openai(agent)", "openai(responses)"},
+		{"modelsdev", "modelsdev", "models.dev (auto)"},
 		{"empty", "", ""},
 	}
 
@@ -44,6 +45,40 @@ func TestProtocolLabelForCopilotShowsAutomaticRouting(t *testing.T) {
 	}
 }
 
+func TestProtocolForAISdkNPM(t *testing.T) {
+	tests := []struct {
+		npm    string
+		want   string
+		wantOK bool
+	}{
+		{"@ai-sdk/anthropic", "anthropic", true},
+		{"@ai-sdk/openai", "openai_responses", true},
+		{"@ai-sdk/openai-compatible", "openai", true},
+		{"@ai-sdk/google", "", false},
+		{"", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.npm, func(t *testing.T) {
+			got, ok := provider.ProtocolForAISdkNPM(tc.npm)
+			if ok != tc.wantOK || got != tc.want {
+				t.Errorf("ProtocolForAISdkNPM(%q) = (%q, %v), want (%q, %v)", tc.npm, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestIsModelsDevType(t *testing.T) {
+	if !provider.IsModelsDevType("modelsdev") {
+		t.Fatal("IsModelsDevType(modelsdev) = false")
+	}
+	if !provider.IsModelsDevType(" ModelsDev ") {
+		t.Fatal("IsModelsDevType should be case/space insensitive")
+	}
+	if provider.IsModelsDevType("anthropic") {
+		t.Fatal("IsModelsDevType(anthropic) = true")
+	}
+}
+
 func TestInferOAuthProvider(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -62,7 +97,6 @@ func TestInferOAuthProvider(t *testing.T) {
 		{name: "Qoder backend", providerName: "qoder-work", endpoint: "oauth://qoder", want: "qoder"},
 		{name: "Kimi backend", providerName: "kimi", endpoint: "oauth://kimi", want: "kimi"},
 		{name: "Kiro backend", providerName: "kiro-work", endpoint: "oauth://kiro", want: "kiro"},
-		{name: "Claude backend", providerName: "claude", endpoint: "oauth://claude", want: "claude"},
 		{name: "WorkBuddy backend", providerName: "work-account", endpoint: "oauth://workbuddy", want: "workbuddy"},
 		{name: "ordinary HTTP provider", providerName: "chatgpt", endpoint: "https://example.test/v1", want: ""},
 		{name: "unknown OAuth backend", providerName: "other", endpoint: "oauth://other", want: ""},
@@ -161,10 +195,6 @@ func TestOAuthRuntimeType(t *testing.T) {
 	got, ok = provider.OAuthRuntimeType("kimi")
 	if !ok || got != "openai" {
 		t.Fatalf("kimi = %q %v", got, ok)
-	}
-	got, ok = provider.OAuthRuntimeType("claude")
-	if !ok || got != "anthropic" {
-		t.Fatalf("claude = %q %v", got, ok)
 	}
 	got, ok = provider.OAuthRuntimeType("kiro")
 	if !ok || got != "anthropic" {

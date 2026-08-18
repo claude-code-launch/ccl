@@ -1,15 +1,11 @@
 package oauthproxy
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 const (
@@ -23,7 +19,6 @@ const (
 	ProviderQoder         = "qoder"
 	ProviderKimi          = "kimi"
 	ProviderKiro          = "kiro"
-	ProviderClaude        = "claude"
 	ProviderWorkBuddy     = "workbuddy"
 	// backendXAI is the CLIProxyAPI authenticator provider key for xAI/Grok.
 	backendXAI = "xai"
@@ -68,51 +63,31 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 	if err != nil {
 		return LoginResult{}, err
 	}
-	backend, err := BackendProvider(target)
-	if err != nil {
-		return LoginResult{}, err
-	}
 
 	authDir, err := ensureAuthDir()
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if target == ProviderKiro {
+	switch target {
+	case ProviderKiro:
 		return loginKiro(ctx, authDir, opts)
-	}
-	if target == ProviderCopilot {
+	case ProviderCopilot:
 		return loginCopilot(ctx, authDir, opts)
-	}
-	if target == ProviderQoder {
+	case ProviderQoder:
 		return loginQoder(ctx, authDir, opts)
-	}
-	if target == ProviderWorkBuddy {
+	case ProviderWorkBuddy:
 		return loginWorkBuddy(ctx, authDir, opts)
+	case ProviderChatGPT:
+		return loginCodex(ctx, authDir, opts)
+	case ProviderGemini:
+		return loginGemini(ctx, authDir, opts)
+	case ProviderGrok:
+		return loginXai(ctx, authDir, opts)
+	case ProviderKimi:
+		return loginKimi(ctx, authDir, opts)
+	default:
+		return LoginResult{}, fmt.Errorf("unsupported OAuth provider %q", target)
 	}
-	_, authenticator, err := authenticatorFor(target)
-	if err != nil {
-		return LoginResult{}, err
-	}
-
-	store := sdkauth.NewFileTokenStore()
-	store.SetBaseDir(authDir)
-	manager := sdkauth.NewManager(store, authenticator)
-	cfg := &sdkconfig.Config{AuthDir: authDir}
-
-	sdkOpts := &sdkauth.LoginOptions{
-		NoBrowser:    opts.NoBrowser,
-		CallbackPort: opts.CallbackPort,
-		Prompt:       promptLine,
-	}
-	record, path, err := manager.Login(ctx, backend, cfg, sdkOpts)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if record == nil || strings.TrimSpace(path) == "" {
-		return LoginResult{}, fmt.Errorf("%s authentication did not persist credentials", target)
-	}
-
-	return LoginResult{Provider: target, Backend: backend, Path: path}, nil
 }
 
 // ValidateLoginProvider returns the canonical public OAuth provider name.
@@ -122,13 +97,13 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderClaude, ProviderWorkBuddy:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy:
 		return target, nil
 	case ProviderChatGPTLegacy:
 		// Keep accepting "chatgpt" as a login alias; canonicalize to "gpt".
 		return ProviderChatGPT, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, claude, or workbuddy)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, or workbuddy)", providerName)
 	}
 }
 
@@ -148,44 +123,9 @@ func BackendProvider(providerName string) (string, error) {
 		return ProviderKimi, nil
 	case ProviderKiro:
 		return ProviderKiro, nil
-	case ProviderClaude:
-		return ProviderClaude, nil
 	case ProviderWorkBuddy:
 		return ProviderWorkBuddy, nil
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}
-}
-
-func authenticatorFor(providerName string) (string, sdkauth.Authenticator, error) {
-	backend, err := BackendProvider(providerName)
-	if err != nil {
-		return "", nil, err
-	}
-	switch backend {
-	case ProviderCodex:
-		return ProviderCodex, sdkauth.NewCodexAuthenticator(), nil
-	case "antigravity":
-		// CLIProxyAPI exposes Gemini subscription models through its Google
-		// Antigravity OAuth backend.
-		return "antigravity", sdkauth.NewAntigravityAuthenticator(), nil
-	case backendXAI:
-		// CLIProxyAPI exposes xAI/Grok subscription models through its xAI
-		// OAuth device-code backend.
-		return backendXAI, sdkauth.NewXAIAuthenticator(), nil
-	case ProviderKimi:
-		return ProviderKimi, sdkauth.NewKimiAuthenticator(), nil
-	case ProviderClaude:
-		return ProviderClaude, sdkauth.NewClaudeAuthenticator(), nil
-	}
-	return "", nil, fmt.Errorf("unsupported auth backend %q", backend)
-}
-
-func promptLine(prompt string) (string, error) {
-	fmt.Print(prompt)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(line), nil
 }

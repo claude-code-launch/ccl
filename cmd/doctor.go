@@ -531,9 +531,21 @@ func testSingleModelContext(ctx context.Context, model, endpoint, apiKey, provid
 // upstream accepted it. The OpenAI and Anthropic probes differ only in URL,
 // payload and auth headers.
 func probeModel(parent context.Context, url string, payload map[string]any, headers map[string]string, timeout time.Duration) bool {
-	body, err := json.Marshal(payload)
+	status, err := probeModelStatus(parent, url, payload, headers, timeout)
 	if err != nil {
 		return false
+	}
+	return status >= 200 && status < 300
+}
+
+// probeModelStatus is probeModel but reports the upstream HTTP status code (0 on
+// transport error) instead of a boolean. The models.dev key verifier relies on
+// the distinction between an auth rejection (401/403) and a valid key that hits a
+// model/parameter/rate-limit problem (any other 4xx).
+func probeModelStatus(parent context.Context, url string, payload map[string]any, headers map[string]string, timeout time.Duration) (int, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
 	}
 
 	ctx, cancel := context.WithTimeout(parent, timeout)
@@ -541,7 +553,7 @@ func probeModel(parent context.Context, url string, payload map[string]any, head
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return false
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for name, value := range headers {
@@ -550,11 +562,11 @@ func probeModel(parent context.Context, url string, payload map[string]any, head
 
 	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
-		return false
+		return 0, err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	return resp.StatusCode, nil
 }
 
 func testSingleOpenAIModelContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) bool {

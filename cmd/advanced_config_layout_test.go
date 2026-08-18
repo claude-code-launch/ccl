@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -98,8 +99,8 @@ func providerFrom(name, endpoint, typ string) provider.Provider {
 // enterDetectedReview puts a model into the post-detection state: a populated
 // pool, discovered flag set, and the cursor on a model row.
 func enterDetectedReview(m *AdvancedConfigModel, models ...string) *AdvancedConfigModel {
-	m.modelPool = append([]string(nil), models...)
-	m.modelPoolFromDiscovery = true
+	m.live().modelPool = append([]string(nil), models...)
+	m.live().modelPoolFromDiscovery = true
 	m.p.Model = strings.Join(models, ",")
 	if len(models) > 0 {
 		m.cursor = m.mainRowIndex(rowOpus)
@@ -141,7 +142,7 @@ func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "small-window", "big-window", "unknown-window")
-	m.modelContextWindows = map[string]int{
+	m.live().modelContextWindows = map[string]int{
 		"small-window": 272_000,
 		"big-window":   1_050_000,
 	}
@@ -150,7 +151,7 @@ func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowOpus)
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
-	if m.oneMSlots["opus"] {
+	if m.live().oneMSlots["opus"] {
 		t.Fatal("1M was enabled for a model whose backend window is 272K")
 	}
 
@@ -158,7 +159,7 @@ func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowSonnet)
 	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
-	if !m.oneMSlots["sonnet"] {
+	if !m.live().oneMSlots["sonnet"] {
 		t.Fatal("1M must remain selectable for a 1M-class model")
 	}
 
@@ -166,16 +167,16 @@ func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowHaiku)
 	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
-	if !m.oneMSlots["haiku"] {
+	if !m.live().oneMSlots["haiku"] {
 		t.Fatal("1M must stay editable when the window is unknown")
 	}
 
 	// An existing marker on a blocked slot can still be cleared.
-	m.oneMSlots["opus"] = true
+	m.live().oneMSlots["opus"] = true
 	m.cursor = m.mainRowIndex(rowOpus)
 	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
-	if m.oneMSlots["opus"] {
+	if m.live().oneMSlots["opus"] {
 		t.Fatal("a stale [1m] marker on a blocked slot must be removable")
 	}
 }
@@ -190,8 +191,8 @@ func TestPage2MapsOldContextPresetToDefault(t *testing.T) {
 		},
 	}
 	m := NewAdvancedConfigModel(&p)
-	if m.compactPreset != compactPresetDefault {
-		t.Fatalf("compact preset = %v, want Default", m.compactPreset)
+	if m.live().compactPreset != compactPresetDefault {
+		t.Fatalf("compact preset = %v, want Default", m.live().compactPreset)
 	}
 	// The legacy preset is dropped, not surfaced, so the saved provider clears the
 	// stale context env on apply.
@@ -303,7 +304,7 @@ func TestSinglePageBlocksOneMForMixedCaseModelIDs(t *testing.T) {
 		OpusModel: "GLM-4.6",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.modelContextWindows = map[string]int{"glm-4.6": 200_000}
+	m.live().modelContextWindows = map[string]int{"glm-4.6": 200_000}
 
 	if !m.oneMSlotBlocked("GLM-4.6") {
 		t.Fatal("a 200K model must block 1M regardless of id casing")
@@ -312,7 +313,7 @@ func TestSinglePageBlocksOneMForMixedCaseModelIDs(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowOpus)
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
-	if m.oneMSlots["opus"] {
+	if m.live().oneMSlots["opus"] {
 		t.Fatal("1M was enabled for a 200K model with a mixed-case id")
 	}
 }
@@ -338,20 +339,18 @@ func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
 	// containing "q", or filtering for "qwen"/"kimi", used to quit the TUI or
 	// silently move the cursor and insert the letter at the same time.
 	for _, tc := range []struct {
-		name   string
-		cursor int
-		field  func(*AdvancedConfigModel) string
+		name  string
+		row   configRowKind
+		field func(*AdvancedConfigModel) string
 	}{
-		{"endpoint", 0, func(m *AdvancedConfigModel) string { return m.urlInput.Value() }},
-		// rowAPIKey is at visible-row index 1 (the Show/Hide button row was
-		// removed when the key became a plaintext textarea).
-		{"api key", 1, func(m *AdvancedConfigModel) string { return m.keyInput.Value() }},
+		{"endpoint", rowEndpoint, func(m *AdvancedConfigModel) string { return m.urlInput.Value() }},
+		{"api key", rowAPIKey, func(m *AdvancedConfigModel) string { return m.keyInput.Value() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, r := range []rune{'q', 'k', 'j', 'h', 'l'} {
 				p := provider.Provider{Type: "openai"}
 				m := NewAdvancedConfigModel(&p)
-				m.cursor = tc.cursor
+				m.cursor = m.mainRowIndex(tc.row)
 
 				next, cmd := m.Update(typeKey(r))
 				m = next.(*AdvancedConfigModel)
@@ -359,8 +358,8 @@ func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
 				if quits(cmd) {
 					t.Fatalf("typing %q into the %s quit the TUI", r, tc.name)
 				}
-				if m.cursor != tc.cursor {
-					t.Fatalf("typing %q moved the cursor %d -> %d", r, tc.cursor, m.cursor)
+				if m.cursor != m.mainRowIndex(tc.row) {
+					t.Fatalf("typing %q moved the cursor %d -> %d", r, tc.row, m.cursor)
 				}
 				if got := tc.field(m); got != string(r) {
 					t.Fatalf("%s = %q after typing %q, want the character inserted", tc.name, got, r)
@@ -469,7 +468,7 @@ func TestChangingModelClearsBlockedOneMMarker(t *testing.T) {
 		{ID: "small-window-model", ContextWindow: 128_000},
 	}))
 	m.cursor = m.mainRowIndex(rowOpus)
-	m.oneMSlots["opus"] = true // user enabled [1m] on Opus (allowlist-confirmed)
+	m.live().oneMSlots["opus"] = true // user enabled [1m] on Opus (allowlist-confirmed)
 	if m.oneMSlotBlocked("gpt-5.6-sol") {
 		t.Fatalf("gpt-5.6-sol should not be blocked; its 1M window allows the marker")
 	}
@@ -491,7 +490,7 @@ func TestChangingModelClearsBlockedOneMMarker(t *testing.T) {
 	if p.OpusModel != "small-window-model" {
 		t.Fatalf("Opus model = %q, want small-window-model", p.OpusModel)
 	}
-	if m.oneMSlots["opus"] {
+	if m.live().oneMSlots["opus"] {
 		t.Fatalf("1M marker should be cleared after picking a blocked model, but it is still enabled")
 	}
 }
@@ -505,7 +504,7 @@ func TestChangingModelKeepsOneMMarkerOnNonBlockedModel(t *testing.T) {
 		{ID: "other-model"}, // no advertised window → not blocked
 	}))
 	m.cursor = m.mainRowIndex(rowOpus)
-	m.oneMSlots["opus"] = true
+	m.live().oneMSlots["opus"] = true
 
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
@@ -517,7 +516,7 @@ func TestChangingModelKeepsOneMMarkerOnNonBlockedModel(t *testing.T) {
 	if p.OpusModel != "other-model" {
 		t.Fatalf("Opus model = %q, want other-model", p.OpusModel)
 	}
-	if !m.oneMSlots["opus"] {
+	if !m.live().oneMSlots["opus"] {
 		t.Fatalf("1M marker should stay for a non-blocked model, but it was cleared")
 	}
 }
@@ -526,16 +525,16 @@ func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 	// The shortcut must keep working on buttons and for OAuth providers, whose
 	// credentials page has no editable field at all.
 	for _, tc := range []struct {
-		name   string
-		p      provider.Provider
-		cursor int
+		name string
+		p    provider.Provider
+		row  configRowKind
 	}{
-		{"api key provider, cursor on a button", provider.Provider{Type: "openai"}, 2},
-		{"oauth provider", provider.Provider{Type: "openai", OAuthProvider: "codex"}, 0},
+		{"api key provider, cursor on a button", provider.Provider{Type: "openai"}, rowTest},
+		{"oauth provider", provider.Provider{Type: "openai", OAuthProvider: "codex"}, rowTest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewAdvancedConfigModel(&tc.p)
-			m.cursor = tc.cursor
+			m.cursor = m.mainRowIndex(tc.row)
 			if _, cmd := m.Update(typeKey('q')); !quits(cmd) {
 				t.Fatal("q no longer quits")
 			}
@@ -558,5 +557,247 @@ func TestViewDoesNotMutateTheModel(t *testing.T) {
 	}
 	if strings.TrimSpace(view.Content) == "" {
 		t.Fatal("View() rendered a blank frame")
+	}
+}
+
+// testModelsDevProvider returns a minimal models.dev catalog entry with one
+// model, enough to exercise applyModelsDevProvider and the picker flow.
+func testModelsDevProvider() modelsdev.Provider {
+	return modelsdev.Provider{
+		ID:   "test-gw",
+		Name: "Test Gateway",
+		NPM:  "@ai-sdk/openai-compatible",
+		API:  "https://gw.example/v1",
+		Models: map[string]modelsdev.Model{
+			"test-model": {ID: "test-model", Name: "Test Model"},
+		},
+	}
+}
+
+// TestSourceStepperPresentForManualAndAbsentForOAuth verifies the Source row
+// leads the Connection section for a manual provider and is absent for OAuth
+// (whose Connection block is subscription metadata with no source choice).
+func TestSourceStepperPresentForManualAndAbsentForOAuth(t *testing.T) {
+	manual := NewAdvancedConfigModel(&provider.Provider{Type: "openai"})
+	if manual.mainRowIndex(rowSource) != 0 {
+		t.Fatalf("manual provider: rowSource index = %d, want 0", manual.mainRowIndex(rowSource))
+	}
+	oauth := NewAdvancedConfigModel(&provider.Provider{Type: "openai", OAuthProvider: "gpt"})
+	if oauth.mainRowIndex(rowSource) != -1 {
+		t.Fatalf("OAuth provider: rowSource index = %d, want -1 (absent)", oauth.mainRowIndex(rowSource))
+	}
+}
+
+// TestSwitchSourcePreservesBothDrafts verifies the Custom ↔ models.dev toggle
+// keeps each side's endpoint/key independently across a full round trip.
+func TestSwitchSourcePreservesBothDrafts(t *testing.T) {
+	p := provider.Provider{Type: "openai", Endpoint: "https://custom.example/v1", APIKey: "custom-key"}
+	m := NewAdvancedConfigModel(&p)
+
+	// Custom → models.dev (empty side).
+	m.switchSource(sourceModelsDev)
+	if m.source != sourceModelsDev || m.p != m.modelsDevDraft.p {
+		t.Fatalf("did not switch to models.dev: source=%v p=%p modelsDev.p=%p", m.source, m.p, m.modelsDevDraft.p)
+	}
+	m.keyInput.SetValue("md-key")
+
+	// models.dev → Custom: the manual endpoint/key must survive.
+	m.switchSource(sourceCustom)
+	if m.urlInput.Value() != "https://custom.example/v1" {
+		t.Fatalf("custom endpoint lost: %q", m.urlInput.Value())
+	}
+	if m.keyInput.Value() != "custom-key" {
+		t.Fatalf("custom key lost: %q", m.keyInput.Value())
+	}
+
+	// Custom → models.dev again: the models.dev key must survive too.
+	m.switchSource(sourceModelsDev)
+	if m.keyInput.Value() != "md-key" {
+		t.Fatalf("models.dev key lost: %q", m.keyInput.Value())
+	}
+}
+
+// TestModelsDevSourceHasNoEditableEndpoint verifies the models.dev source drops
+// the editable Endpoint row (it is read-only metadata) and is ready without a
+// probe.
+func TestModelsDevSourceHasNoEditableEndpoint(t *testing.T) {
+	m := NewAdvancedConfigModel(&provider.Provider{Type: "openai"})
+	m.applyModelsDevProvider(testModelsDevProvider())
+
+	if m.source != sourceModelsDev {
+		t.Fatalf("applyModelsDevProvider did not switch source: %v", m.source)
+	}
+	if m.mainRowIndex(rowEndpoint) != -1 {
+		t.Fatalf("models.dev source: rowEndpoint index = %d, want -1 (read-only)", m.mainRowIndex(rowEndpoint))
+	}
+	if m.mainRowIndex(rowProvider) < 0 {
+		t.Fatalf("models.dev source: rowProvider absent")
+	}
+	if !m.connectionReady() {
+		t.Fatalf("models.dev source should be connection-ready without a probe")
+	}
+}
+
+// TestModelsDevSourceNotReadyUntilProviderSelected verifies a freshly switched
+// models.dev source (no provider picked, no key) is NOT connection-ready and
+// cannot be saved — the "✓ Connected" status and the Model Mapping/Runtime
+// sections must wait until a provider is picked (which loads the pool).
+func TestModelsDevSourceNotReadyUntilProviderSelected(t *testing.T) {
+	m := NewAdvancedConfigModel(&provider.Provider{Type: "openai"})
+	m.switchSource(sourceModelsDev)
+
+	if m.connectionReady() {
+		t.Fatalf("models.dev source with no provider picked should not be connection-ready")
+	}
+	if m.canSave() {
+		t.Fatalf("models.dev source with no provider picked should not be savable")
+	}
+
+	m.applyModelsDevProvider(testModelsDevProvider())
+	if !m.connectionReady() {
+		t.Fatalf("models.dev source should be ready after picking a provider")
+	}
+}
+
+// TestProtocolMovedOutOfRuntime verifies the fine-grained Protocol row now lives
+// in the Connection section (before Auto Configure) and no longer renders in the
+// Runtime section.
+func TestProtocolMovedOutOfRuntime(t *testing.T) {
+	m := NewAdvancedConfigModel(&provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"})
+	if m.mainRowIndex(rowProtocol) >= m.mainRowIndex(rowTest) {
+		t.Fatalf("Protocol (%d) should precede Auto Configure (%d)", m.mainRowIndex(rowProtocol), m.mainRowIndex(rowTest))
+	}
+	view := m.View().Content
+	idx := strings.Index(view, "Runtime")
+	if idx < 0 {
+		t.Fatalf("Runtime heading missing from view")
+	}
+	if strings.Contains(view[idx:], "Protocol") {
+		t.Fatalf("Runtime section still renders a Protocol row:\n%s", view[idx:])
+	}
+}
+
+// TestProviderRowOpensPicker verifies activating the Provider row (models.dev
+// source) opens the full-screen catalog picker and starts the fetch.
+func TestProviderRowOpensPicker(t *testing.T) {
+	m := NewAdvancedConfigModel(&provider.Provider{Type: "openai"})
+	m.applyModelsDevProvider(testModelsDevProvider())
+	m.cursor = m.mainRowIndex(rowProvider)
+
+	m.activateRow(rowProvider)
+	if !m.modelsDevPicker {
+		t.Fatalf("Provider row did not open the models.dev picker")
+	}
+	if !m.modelsDevLoading {
+		t.Fatalf("picker did not start the catalog fetch")
+	}
+}
+
+// TestSwitchSourceNoopWhileDetecting verifies switching source is refused while
+// a connection probe is in flight, so a stale detection result cannot land on
+// the wrong side.
+func TestSwitchSourceNoopWhileDetecting(t *testing.T) {
+	m := NewAdvancedConfigModel(&provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"})
+	m.live().detecting = true
+	m.switchSource(sourceModelsDev)
+	if m.source != sourceCustom {
+		t.Fatalf("switchSource changed source during detection: %v", m.source)
+	}
+}
+
+// TestEditExistingModelsDevProviderOpensModelsDevSource verifies that editing a
+// provider already persisted as models.dev opens on the models.dev source rather
+// than Custom. Opening as Custom used to let Init's auto-probe overwrite Type
+// ("modelsdev") with a single detected protocol and drop the per-model routing
+// table.
+func TestEditExistingModelsDevProviderOpensModelsDevSource(t *testing.T) {
+	p := provider.Provider{
+		Name:     "test-gw",
+		Type:     "modelsdev",
+		Endpoint: "https://gw.example/v1",
+		APIKey:   "sk-existing",
+		Model:    "model-a,model-b",
+		ModelProtocols: map[string]string{
+			"model-a": "anthropic",
+			"model-b": "openai_responses",
+		},
+	}
+	m := NewAdvancedConfigModel(&p)
+
+	if m.source != sourceModelsDev {
+		t.Fatalf("editing a modelsdev provider opened source %v, want models.dev", m.source)
+	}
+	if m.p == nil || m.p.Type != "modelsdev" {
+		t.Fatalf("Type = %q, want preserved as modelsdev", m.p.Type)
+	}
+	if len(m.p.ModelProtocols) != 2 {
+		t.Fatalf("ModelProtocols lost: got %v, want 2 entries", m.p.ModelProtocols)
+	}
+	if m.live().autoDetectOnOpen {
+		t.Fatalf("models.dev provider must not auto-probe on open (would overwrite Type)")
+	}
+	if !m.live().modelPoolFromDiscovery {
+		t.Fatalf("models.dev provider pool should count as discovered")
+	}
+	if len(m.live().modelPool) != 2 {
+		t.Fatalf("modelPool = %v, want 2 entries", m.live().modelPool)
+	}
+
+	// The Custom side must be a clean empty draft (same name only), so switching
+	// source still offers a blank form.
+	if m.customDraft.p == m.p {
+		t.Fatalf("custom draft aliases the models.dev provider")
+	}
+	if m.customDraft.p.Type != "" {
+		t.Fatalf("custom draft Type = %q, want empty", m.customDraft.p.Type)
+	}
+	if m.customDraft.p.Name != "test-gw" {
+		t.Fatalf("custom draft Name = %q, want test-gw", m.customDraft.p.Name)
+	}
+}
+
+// TestEditKeyClearsVerificationAndSyncsProbeKey verifies that editing the API
+// key after a successful verification invalidates the cached "connected" status
+// and re-syncs the probe key to the newly typed value, so any later verification
+// request is keyed off the current input rather than a stale one.
+func TestEditKeyClearsVerificationAndSyncsProbeKey(t *testing.T) {
+	p := provider.Provider{
+		Name:     "test-gw",
+		Type:     "modelsdev",
+		Endpoint: "https://gw.example/v1",
+		APIKey:   "old-key",
+		Model:    "model-a",
+		ModelProtocols: map[string]string{
+			"model-a": "anthropic",
+		},
+	}
+	m := NewAdvancedConfigModel(&p)
+
+	// A prior verification succeeded.
+	m.live().keyVerified = true
+	m.live().probeAPIKey = "old-key"
+	m.live().detectionError = nil
+
+	// Edit the key.
+	m.cursor = m.mainRowIndex(rowAPIKey)
+	next, _ := m.Update(typeKey('X'))
+	m = next.(*AdvancedConfigModel)
+
+	if m.keyInput.Value() == "old-key" {
+		t.Fatalf("key edit did not change the key value")
+	}
+	if m.live().keyVerified {
+		t.Fatalf("editing the key must clear keyVerified")
+	}
+	if m.live().probeAPIKey != m.keyInput.Value() {
+		t.Fatalf("probeAPIKey = %q, want %q (the newly typed key)", m.live().probeAPIKey, m.keyInput.Value())
+	}
+
+	// A late result for the old key must be ignored: the key it verified no
+	// longer matches the current input.
+	next, _ = m.Update(keyVerifyDoneMsg{endpoint: "https://gw.example/v1", apiKey: "old-key", err: nil})
+	m = next.(*AdvancedConfigModel)
+	if m.live().keyVerified {
+		t.Fatalf("stale verification result resurrected keyVerified=true for an unverified key")
 	}
 }

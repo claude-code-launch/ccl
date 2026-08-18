@@ -26,7 +26,6 @@ func TestOAuthRuntimeTypeDefaults(t *testing.T) {
 		{oauthproxy.ProviderKimi, "openai"},
 		{oauthproxy.ProviderKiro, "anthropic"},
 		{oauthproxy.ProviderQoder, "anthropic"},
-		{oauthproxy.ProviderClaude, "anthropic"},
 		{oauthproxy.ProviderCopilot, "openai_responses"},
 		{oauthproxy.ProviderWorkBuddy, "openai"},
 	}
@@ -505,58 +504,6 @@ func TestRunAuthKimiWithoutAliasDerivesName(t *testing.T) {
 	}
 }
 
-func TestRunAuthClaudeUsesAnthropicBackend(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	originalLogin := oauthLogin
-	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{Provider: target, Backend: "claude", Path: "claude-alice@example.com.json"}, nil
-	}
-	t.Cleanup(func() { oauthLogin = originalLogin })
-
-	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"claude", "anthropic-acct"}, authOptions{}); err != nil {
-		t.Fatalf("runAuth() error: %v", err)
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	p, ok := cfg.Providers["anthropic-acct"]
-	if !ok {
-		t.Fatalf("no claude provider anthropic-acct: %+v", cfg.Providers)
-	}
-	if p.Type != "anthropic" || p.Endpoint != "oauth://claude" || p.OAuthProvider != "claude" {
-		t.Fatalf("Claude provider = %+v", p)
-	}
-	if p.OAuthAccountCredential != "claude-alice@example.com.json" {
-		t.Fatalf("credential = %q", p.OAuthAccountCredential)
-	}
-}
-
-func TestRunAuthClaudeWithoutAliasDerivesName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	originalLogin := oauthLogin
-	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{Provider: target, Backend: "claude", Path: "claude-alice@example.com.json"}, nil
-	}
-	t.Cleanup(func() { oauthLogin = originalLogin })
-
-	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"claude"}, authOptions{}); err != nil {
-		t.Fatalf("runAuth() error: %v", err)
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	derived := "claude-alice@example.com"
-	p, ok := cfg.Providers[derived]
-	if !ok {
-		t.Fatalf("no derived claude provider %q: %+v", derived, cfg.Providers)
-	}
-	if p.OAuthProvider != "claude" || p.Type != "anthropic" {
-		t.Fatalf("Claude provider = %+v", p)
-	}
-}
-
 func TestRunAuthPreservesFastModeOnReauth(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
@@ -604,39 +551,6 @@ func TestProviderFastSummary(t *testing.T) {
 	}
 	if got := providerFastSummary(provider.Provider{FastMode: false, OAuthProvider: "gpt"}); got != "off" {
 		t.Fatalf("gpt off = %q, want off", got)
-	}
-}
-
-func TestPrepareProviderRuntimeStartsClaudeOAuth(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	authDir := filepath.Join(home, ".ccl", "auth")
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		t.Fatalf("mkdir auth: %v", err)
-	}
-	// Minimal Claude OAuth credential so the embedded runtime can start.
-	cred := []byte(`{"type":"claude","access_token":"test-token","refresh_token":"test-refresh","email":"alice@example.com"}`)
-	if err := os.WriteFile(filepath.Join(authDir, "claude-alice@example.com.json"), cred, 0o600); err != nil {
-		t.Fatalf("write credential: %v", err)
-	}
-
-	runtimeProvider, _, cleanup, err := prepareProviderRuntime(provider.Provider{
-		Name:                   "anthropic-acct",
-		Type:                   "anthropic",
-		OAuthProvider:          "claude",
-		OAuthAccountCredential: "claude-alice@example.com.json",
-		Endpoint:               "oauth://claude",
-	})
-	if err != nil {
-		t.Fatalf("prepareProviderRuntime() error: %v", err)
-	}
-	t.Cleanup(cleanup)
-
-	if !strings.HasPrefix(runtimeProvider.Endpoint, "http://127.0.0.1:") {
-		t.Fatalf("runtime endpoint = %q", runtimeProvider.Endpoint)
-	}
-	if runtimeProvider.APIKey == "" {
-		t.Fatal("runtime API key empty")
 	}
 }
 
@@ -729,7 +643,7 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 
 	m := NewAdvancedConfigModel(&p)
 	m.configureOAuthRuntime(runtimeProvider.Endpoint, runtimeProvider.APIKey)
-	m.detecting = true
+	m.live().detecting = true
 	msg, ok := modelFetchCmd(runtimeProvider.Endpoint, runtimeProvider.APIKey)().(modelFetchDoneMsg)
 	if !ok {
 		t.Fatal("modelFetchCmd() returned an unexpected message type")
@@ -737,8 +651,8 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 	next, _ := m.Update(msg)
 	m = next.(*AdvancedConfigModel)
 
-	if m.detectionError != nil || !m.autoConfigured || !m.modelPoolFromDiscovery || p.Model == "" {
-		t.Fatalf("OAuth set discovery failed: auto=%t detected=%t models=%q err=%v", m.autoConfigured, m.modelPoolFromDiscovery, p.Model, m.detectionError)
+	if m.live().detectionError != nil || !m.live().autoConfigured || !m.live().modelPoolFromDiscovery || p.Model == "" {
+		t.Fatalf("OAuth set discovery failed: auto=%t detected=%t models=%q err=%v", m.live().autoConfigured, m.live().modelPoolFromDiscovery, p.Model, m.live().detectionError)
 	}
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("OAuth runtime values leaked into stored provider: %+v", p)

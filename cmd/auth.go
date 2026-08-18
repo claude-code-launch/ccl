@@ -26,7 +26,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|claude|workbuddy> [alias]",
+		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy> [alias]",
 		Aliases: []string{"auth"},
 		Short:   "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
@@ -35,7 +35,7 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|claude|workbuddy
+  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|workbuddy
 
 Notes:
   - Alias "auth" still works: ccl auth gpt
@@ -51,7 +51,7 @@ Notes:
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Claude/Kiro Portal)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	return cmd
 }
@@ -180,7 +180,6 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderQoder,
 		oauthproxy.ProviderKimi,
 		oauthproxy.ProviderKiro,
-		oauthproxy.ProviderClaude,
 		oauthproxy.ProviderWorkBuddy:
 		return true
 	default:

@@ -275,7 +275,7 @@ func runMapTUI(args []string) error {
 	updatedModel := finalModel.(*AdvancedConfigModel)
 	p = *updatedModel.p
 
-	applyCompactConfig(&p, updatedModel.oneMSlots, updatedModel.compactPreset)
+	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)
 
 	cfg.Providers[providerName] = p
 	if err := config.Save(cfg); err != nil {

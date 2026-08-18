@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const kiroTokenRefreshSkew = 5 * time.Minute
@@ -402,15 +401,15 @@ func (p *kiroCredentialPool) refreshCredential(ctx context.Context, credential *
 	return writeCredentialAtomic(credential.path, append(normalized, '\n'))
 }
 
-func (p *kiroCredentialPool) listAuths() []*coreauth.Auth {
+func (p *kiroCredentialPool) listAuths() []*AuthInfo {
 	credentials, err := p.load()
 	if err != nil {
 		return nil
 	}
-	auths := make([]*coreauth.Auth, 0, len(credentials))
+	auths := make([]*AuthInfo, 0, len(credentials))
 	for _, credential := range credentials {
-		status := coreauth.StatusActive
-		auths = append(auths, &coreauth.Auth{
+		status := StatusActive
+		auths = append(auths, &AuthInfo{
 			ID:       credential.fileName,
 			Provider: ProviderKiro,
 			FileName: credential.path,

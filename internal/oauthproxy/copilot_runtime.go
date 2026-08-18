@@ -16,9 +16,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -138,18 +135,18 @@ func (p *copilotCredentialPool) ordered() ([]*copilotCredential, error) {
 	return ordered, nil
 }
 
-func (p *copilotCredentialPool) listAuths() []*coreauth.Auth {
+func (p *copilotCredentialPool) listAuths() []*AuthInfo {
 	credentials, err := p.load()
 	if err != nil {
 		return nil
 	}
-	auths := make([]*coreauth.Auth, 0, len(credentials))
+	auths := make([]*AuthInfo, 0, len(credentials))
 	for _, credential := range credentials {
-		status := coreauth.StatusActive
+		status := StatusActive
 		if credential.disabled {
-			status = coreauth.StatusDisabled
+			status = StatusDisabled
 		}
-		auths = append(auths, &coreauth.Auth{
+		auths = append(auths, &AuthInfo{
 			ID:       credential.fileName,
 			Provider: ProviderCopilot,
 			FileName: credential.path,
@@ -676,9 +673,9 @@ func copilotModelProtocol(model copilotModel) string {
 }
 
 type copilotRouteSet struct {
-	chat      []runtimeOpenAIModel
-	responses []runtimeResponsesModel
-	anthropic []runtimeClaudeModel
+	chat      []runtimeModelRoute
+	responses []runtimeModelRoute
+	anthropic []runtimeModelRoute
 	models    []string
 }
 
@@ -717,11 +714,11 @@ func buildCopilotRoutes(modelSpec string, catalog []copilotModel) (copilotRouteS
 		seenRoutes[key] = true
 		switch protocol {
 		case "anthropic":
-			result.anthropic = append(result.anthropic, runtimeClaudeModel{Name: model.ID, Alias: route.Alias, ForceMapping: true})
+			result.anthropic = append(result.anthropic, runtimeModelRoute{Name: model.ID, Alias: route.Alias})
 		case "responses":
-			result.responses = append(result.responses, runtimeResponsesModel{Name: model.ID, Alias: route.Alias})
+			result.responses = append(result.responses, runtimeModelRoute{Name: model.ID, Alias: route.Alias})
 		case "chat":
-			result.chat = append(result.chat, runtimeOpenAIModel{Name: model.ID, Alias: route.Alias, ForceMapping: true})
+			result.chat = append(result.chat, runtimeModelRoute{Name: model.ID, Alias: route.Alias})
 		}
 	}
 	if len(missing) > 0 {
@@ -732,26 +729,6 @@ func buildCopilotRoutes(modelSpec string, catalog []copilotModel) (copilotRouteS
 		return copilotRouteSet{}, fmt.Errorf("GitHub Copilot returned no usable model routes")
 	}
 	return result, nil
-}
-
-type runtimeClaudeKey struct {
-	APIKey  string               `yaml:"api-key"`
-	BaseURL string               `yaml:"base-url"`
-	Models  []runtimeClaudeModel `yaml:"models"`
-	Headers map[string]string    `yaml:"headers,omitempty"`
-}
-
-type runtimeClaudeModel struct {
-	Name         string `yaml:"name"`
-	Alias        string `yaml:"alias"`
-	ForceMapping bool   `yaml:"force-mapping,omitempty"`
-}
-
-type runtimeCopilotConfigFile struct {
-	runtimeConfigBase      `yaml:",inline"`
-	OpenAICompatibility    []runtimeOpenAICompatibility `yaml:"openai-compatibility,omitempty"`
-	ClaudeAPIKey           []runtimeClaudeKey           `yaml:"claude-api-key,omitempty"`
-	DisableClaudeCloakMode bool                         `yaml:"disable-claude-cloak-mode"`
 }
 
 func startCopilotOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
@@ -791,41 +768,8 @@ func startCopilotOAuth(parent context.Context, modelSpec, credentialFile string)
 		return nil, err
 	}
 
-	var compatibilityRuntime *Runtime
-	if len(routes.chat) > 0 || len(routes.anthropic) > 0 {
-		runtimeDir, port, apiKey, prepareErr := prepareAPIKeyRuntime()
-		if prepareErr != nil {
-			return nil, prepareErr
-		}
-		configFile := runtimeCopilotConfigFile{
-			runtimeConfigBase:      newRuntimeConfigBase(port, runtimeDir, apiKey),
-			DisableClaudeCloakMode: true,
-		}
-		if len(routes.chat) > 0 {
-			configFile.OpenAICompatibility = []runtimeOpenAICompatibility{{
-				Name: "github-copilot", BaseURL: gateway.endpoint,
-				APIKeyEntries: []runtimeOpenAICompatibilityKey{{APIKey: "copilot"}},
-				Models:        routes.chat,
-			}}
-		}
-		if len(routes.anthropic) > 0 {
-			configFile.ClaudeAPIKey = []runtimeClaudeKey{{APIKey: "copilot", BaseURL: gateway.endpoint, Models: routes.anthropic}}
-		}
-		rawConfig, marshalErr := yaml.Marshal(configFile)
-		if marshalErr != nil {
-			_ = os.RemoveAll(runtimeDir)
-			return nil, fmt.Errorf("encode GitHub Copilot compatibility runtime config: %w", marshalErr)
-		}
-		compatibilityRuntime, err = startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
-		if err != nil {
-			return nil, err
-		}
-	}
-	proxyRuntime, err := startCopilotProtocolRouter(parent, gateway, compatibilityRuntime, routes, pool)
+	proxyRuntime, err := startCopilotProtocolRouter(parent, gateway, routes, pool)
 	if err != nil {
-		if compatibilityRuntime != nil {
-			compatibilityRuntime.Stop()
-		}
 		return nil, err
 	}
 	stopGateway = false
@@ -837,18 +781,21 @@ func startCopilotOAuth(parent context.Context, modelSpec, credentialFile string)
 	return proxyRuntime, nil
 }
 
-// copilotProtocolRouter keeps Copilot's mixed catalog while moving only the
-// models advertised as Responses onto CCL's Codex Responses implementation.
-// Chat and native Anthropic models continue through the CPA compatibility child.
+// copilotProtocolRouter serves Copilot's mixed catalog entirely on CCL-owned
+// data planes: Responses models on the Codex adapter, Chat models on the Chat
+// Completions adapter, and native Anthropic models on the Messages passthrough.
 type copilotProtocolRouter struct {
-	apiKey        string
-	models        []string
-	responses     map[string]bool
-	codex         *codexResponsesService
-	compatibility *Runtime
+	apiKey       string
+	models       []string
+	responses    map[string]bool
+	chat         map[string]bool
+	anthropic    map[string]bool
+	codex        *codexResponsesService
+	chatSvc      *chatCompletionsService
+	anthropicSvc *anthropicPassthroughService
 }
 
-func startCopilotProtocolRouter(parent context.Context, gateway *copilotGateway, compatibility *Runtime, routes copilotRouteSet, pool *copilotCredentialPool) (*Runtime, error) {
+func startCopilotProtocolRouter(parent context.Context, gateway *copilotGateway, routes copilotRouteSet, pool *copilotCredentialPool) (*Runtime, error) {
 	apiKey, err := sessionAPIKey()
 	if err != nil {
 		return nil, err
@@ -867,13 +814,43 @@ func startCopilotProtocolRouter(parent context.Context, gateway *copilotGateway,
 		responseRoutes = append(responseRoutes, runtimeModelRoute{Name: route.Name, Alias: alias})
 		responseModels[strings.ToLower(alias)] = true
 	}
+	chatRoutes := make([]runtimeModelRoute, 0, len(routes.chat))
+	chatModels := make(map[string]bool, len(routes.chat))
+	for _, route := range routes.chat {
+		alias := route.Alias
+		if strings.TrimSpace(alias) == "" {
+			alias = route.Name
+		}
+		chatRoutes = append(chatRoutes, runtimeModelRoute{Name: route.Name, Alias: alias})
+		chatModels[strings.ToLower(alias)] = true
+	}
+	anthropicRoutes := make([]runtimeModelRoute, 0, len(routes.anthropic))
+	anthropicModels := make(map[string]bool, len(routes.anthropic))
+	for _, route := range routes.anthropic {
+		alias := route.Alias
+		if strings.TrimSpace(alias) == "" {
+			alias = route.Name
+		}
+		anthropicRoutes = append(anthropicRoutes, runtimeModelRoute{Name: route.Name, Alias: alias})
+		anthropicModels[strings.ToLower(alias)] = true
+	}
 	usage := NewUsageTracker()
 	router := &copilotProtocolRouter{
 		apiKey: apiKey, models: append([]string(nil), routes.models...), responses: responseModels,
-		compatibility: compatibility,
+		chat: chatModels, anthropic: anthropicModels,
 	}
 	if len(responseRoutes) > 0 {
 		router.codex = newCodexResponsesService(apiKey, gateway.endpoint, responseRoutes, &codexStaticAuthorizer{token: "copilot"}, usage)
+	}
+	if len(chatRoutes) > 0 {
+		router.chatSvc = newChatCompletionsServiceWithAuthorizer(apiKey, gateway.endpoint, chatRoutes, &chatStaticAuthorizer{token: "copilot"}, usage)
+	}
+	if len(anthropicRoutes) > 0 {
+		anthropicNames := make([]string, 0, len(anthropicRoutes))
+		for _, route := range anthropicRoutes {
+			anthropicNames = append(anthropicNames, route.Alias)
+		}
+		router.anthropicSvc = newAnthropicPassthroughService(apiKey, gateway.endpoint, anthropicNames, &chatStaticAuthorizer{token: "copilot"}, usage)
 	}
 	runCtx, cancel := context.WithCancel(parent)
 	server := &http.Server{
@@ -886,9 +863,6 @@ func startCopilotProtocolRouter(parent context.Context, gateway *copilotGateway,
 		endpoint: "http://" + listener.Addr().String() + "/v1", apiKey: apiKey,
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, usage: usage, listAuths: pool.listAuths,
-	}
-	if compatibility != nil {
-		proxyRuntime.children = []*Runtime{compatibility}
 	}
 	go func() {
 		err := server.Serve(listener)
@@ -950,11 +924,34 @@ func (r *copilotProtocolRouter) handleModels(writer http.ResponseWriter, request
 }
 
 func (r *copilotProtocolRouter) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	if r.codex != nil {
+	if !r.authorized(request) {
+		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, copilotMaxBodyBytes+1))
+	if err != nil {
+		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if int64(len(body)) > copilotMaxBodyBytes {
+		writeAnthropicError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "request body is too large")
+		return
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	lower := strings.ToLower(copilotRequestModel(body))
+	if r.codex != nil && r.responses[lower] {
 		r.codex.handleCountTokens(writer, request)
 		return
 	}
-	r.proxyCompatibility(writer, request)
+	if r.chatSvc != nil && r.chat[lower] {
+		r.chatSvc.handleCountTokens(writer, request)
+		return
+	}
+	if r.anthropicSvc != nil && r.anthropic[lower] {
+		r.anthropicSvc.handleCountTokens(writer, request)
+		return
+	}
+	writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "model is not routed to a supported Copilot protocol")
 }
 
 func (r *copilotProtocolRouter) handleMessages(writer http.ResponseWriter, request *http.Request) {
@@ -973,38 +970,21 @@ func (r *copilotProtocolRouter) handleMessages(writer http.ResponseWriter, reque
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	model := copilotRequestModel(body)
-	if r.codex != nil && r.responses[strings.ToLower(model)] {
+	lower := strings.ToLower(model)
+	if r.codex != nil && r.responses[lower] {
 		LogDebugEvent("protocol_route", "component", "copilot", "model", model, "protocol", "codex_responses", "owner", "ccl")
 		r.codex.handleMessages(writer, request)
 		return
 	}
-	r.proxyCompatibility(writer, request)
-}
-
-func (r *copilotProtocolRouter) proxyCompatibility(writer http.ResponseWriter, request *http.Request) {
-	if r.compatibility == nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "model is not routed to a supported Copilot protocol")
+	if r.chatSvc != nil && r.chat[lower] {
+		LogDebugEvent("protocol_route", "component", "copilot", "model", model, "protocol", "openai_chat", "owner", "ccl")
+		r.chatSvc.handleMessages(writer, request)
 		return
 	}
-	target := strings.TrimSuffix(r.compatibility.Endpoint(), "/v1") + request.URL.Path
-	if request.URL.RawQuery != "" {
-		target += "?" + request.URL.RawQuery
-	}
-	upstream, err := http.NewRequestWithContext(request.Context(), request.Method, target, request.Body)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+	if r.anthropicSvc != nil && r.anthropic[lower] {
+		LogDebugEvent("protocol_route", "component", "copilot", "model", model, "protocol", "anthropic_messages", "owner", "ccl")
+		r.anthropicSvc.handleMessages(writer, request)
 		return
 	}
-	copyCopilotHeaders(upstream.Header, request.Header)
-	upstream.Header.Set("Authorization", "Bearer "+r.compatibility.APIKey())
-	upstream.Header.Del("X-Api-Key")
-	response, err := http.DefaultClient.Do(upstream)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
-		return
-	}
-	defer response.Body.Close()
-	copyCopilotHeaders(writer.Header(), response.Header)
-	writer.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(writer, response.Body)
+	writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "model is not routed to a supported Copilot protocol")
 }

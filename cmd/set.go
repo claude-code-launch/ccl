@@ -50,57 +50,56 @@ func RunProviderSet(args []string) error {
 	}
 
 	var targetName string
+	var p provider.Provider
 	if len(args) > 0 {
 		targetName = strings.TrimSpace(args[0])
 	} else {
-		// 没有传 provider name：显示已有 provider 列表，提供新建入口。选中后进
-		// 单页配置——URL / Key 直接在配置页顶部的 Connection 区填写，无需单独
-		// 的凭据步骤。
+		// 没有传 provider name：显示已有 provider 列表与新建入口。选中后进
+		// 单页配置——URL / Key 直接在配置页顶部的 Connection 区填写，无需单
+		// 独的凭据步骤。models.dev provider 在配置页的 Provider 行内选取。
 		var names []string
 		for name := range cfg.Providers {
 			names = append(names, name)
 		}
 		sort.Strings(names)
 
-		if len(names) > 0 {
-			var providerItems []string
-			providerItems = append(providerItems, locale.T("+ 新建 Provider", "+ Create new provider"))
+		newLabel := locale.T("+ 新建 Provider", "+ Create new provider")
+		var providerItems []string
+		providerItems = append(providerItems, newLabel)
+		for _, name := range names {
+			label := name
+			if name == cfg.ActiveProvider {
+				label = fmt.Sprintf("%s %s", name, locale.T("(当前使用)", "(active)"))
+			}
+			providerItems = append(providerItems, label)
+		}
+
+		chosen, err := runSelect(locale.T("选择 Provider 或新建:", "Select a provider or create new:"), providerItems)
+		if err != nil {
+			return err
+		}
+		if chosen == "" {
+			return nil
+		}
+
+		switch chosen {
+		case newLabel:
+			targetName = ""
+		default:
+			// Match label back to original name
 			for _, name := range names {
 				label := name
 				if name == cfg.ActiveProvider {
 					label = fmt.Sprintf("%s %s", name, locale.T("(当前使用)", "(active)"))
 				}
-				providerItems = append(providerItems, label)
-			}
-
-			chosen, err := runSelect(locale.T("选择 Provider 或新建:", "Select a provider or create new:"), providerItems)
-			if err != nil {
-				return err
-			}
-			if chosen == "" {
-				return nil
-			}
-
-			// First item is "Create new"
-			if chosen == providerItems[0] {
-				targetName = ""
-			} else {
-				// Match label back to original name
-				for _, name := range names {
-					label := name
-					if name == cfg.ActiveProvider {
-						label = fmt.Sprintf("%s %s", name, locale.T("(当前使用)", "(active)"))
-					}
-					if chosen == label {
-						targetName = name
-						break
-					}
+				if chosen == label {
+					targetName = name
+					break
 				}
 			}
 		}
 	}
 
-	var p provider.Provider
 	isUpdate := false
 	if targetName != "" {
 		if existing, exists := cfg.Providers[targetName]; exists {
@@ -133,6 +132,11 @@ func RunProviderSet(args []string) error {
 	}
 
 	updatedModel := finalModel.(*AdvancedConfigModel)
+	// models.dev providers never run the probe (their endpoint/protocol come from
+	// metadata), so the API key the user typed lives only in the text input. Sync
+	// it into the draft before validating/persisting. Harmless for normal
+	// providers (the detection step already copied these values in).
+	updatedModel.syncConnectionInputs()
 	p = *updatedModel.p
 	setDebugf(
 		"advanced config finished name=%q endpoint_empty=%t api_key_len=%d type=%q model_count=%d effort=%q slots=%s one_m=%s detecting=%t detection_error=%v model_pool_count=%d connection_dirty=%t auto_configured=%t",
@@ -143,12 +147,12 @@ func RunProviderSet(args []string) error {
 		countCSV(p.Model),
 		p.EffortLevel,
 		slotDebugSummary(p),
-		reviewOneMSummary(updatedModel.oneMSlots),
-		updatedModel.detecting,
-		updatedModel.detectionError,
-		len(updatedModel.modelPool),
-		updatedModel.connectionDirty,
-		updatedModel.autoConfigured,
+		reviewOneMSummary(updatedModel.live().oneMSlots),
+		updatedModel.live().detecting,
+		updatedModel.live().detectionError,
+		len(updatedModel.live().modelPool),
+		updatedModel.live().connectionDirty,
+		updatedModel.live().autoConfigured,
 	)
 	if !updatedModel.saveConfirmed {
 		setDebugf("abort: save was not confirmed")
@@ -158,7 +162,7 @@ func RunProviderSet(args []string) error {
 
 	// 连接被修改但未重新检测，或从未成功探测过 → 不允许保存半成品。
 	if !updatedModel.canSave() {
-		setDebugf("abort: cannot save endpoint_dirty=%t detected=%t", updatedModel.connectionDirty, updatedModel.modelPoolFromDiscovery)
+		setDebugf("abort: cannot save endpoint_dirty=%t detected=%t", updatedModel.live().connectionDirty, updatedModel.live().modelPoolFromDiscovery)
 		fmt.Fprintln(os.Stderr, locale.T(
 			"ℹ️ 连接已修改或尚未成功检测，未保存。请重新运行 Auto Configure。",
 			"ℹ️ Connection changed or not detected; nothing was saved. Re-run Auto Configure.",
@@ -167,12 +171,12 @@ func RunProviderSet(args []string) error {
 	}
 
 	// 协议探测/模型获取失败 → 直接退出，不保存
-	if updatedModel.detectionError != nil {
-		setDebugf("abort: detection error err=%v", updatedModel.detectionError)
+	if updatedModel.live().detectionError != nil {
+		setDebugf("abort: detection error err=%v", updatedModel.live().detectionError)
 		fmt.Fprintf(os.Stderr, "❌ %s\n   %v\n",
 			locale.T("协议探测与模型获取均失败，已退出配置", "protocol detection and model fetching both failed; aborted"),
-			updatedModel.detectionError)
-		return updatedModel.detectionError
+			updatedModel.live().detectionError)
+		return updatedModel.live().detectionError
 	}
 
 	// 未完成探测就退出（如在凭据页按 Esc）→ 不保存半成品配置
@@ -192,7 +196,7 @@ func RunProviderSet(args []string) error {
 		return nil
 	}
 
-	applyCompactConfig(&p, updatedModel.oneMSlots, updatedModel.compactPreset)
+	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)
 	// Effort is managed by Claude Code. Do not persist CLAUDE_CODE_EFFORT_LEVEL
 	// from ccl set; clear any legacy effortLevel so it cannot override /effort.
 	p.EffortLevel = ""

@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"gopkg.in/yaml.v3"
 )
 
 const workbuddyMaxBodyBytes = int64(128 << 20)
@@ -167,18 +165,18 @@ func (s *workbuddyCredentialStore) authorize(ctx context.Context, forceRefresh b
 	return credential, nil
 }
 
-func (s *workbuddyCredentialStore) listAuths() []*coreauth.Auth {
+func (s *workbuddyCredentialStore) listAuths() []*AuthInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	credential, err := s.load()
 	if err != nil {
 		return nil
 	}
-	status := coreauth.StatusActive
+	status := StatusActive
 	if credential.disabled {
-		status = coreauth.StatusDisabled
+		status = StatusDisabled
 	}
-	return []*coreauth.Auth{{
+	return []*AuthInfo{{
 		ID:       credential.fileName,
 		Provider: ProviderWorkBuddy,
 		FileName: credential.path,
@@ -483,9 +481,9 @@ func (g *workbuddyGateway) discoverModels(ctx context.Context) ([]workbuddyModel
 	return models, nil
 }
 
-func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtimeOpenAIModel, []string, map[string]string, error) {
+func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtimeModelRoute, []string, map[string]string, error) {
 	lookup := make(map[string]workbuddyModel, len(catalog))
-	routes := make([]runtimeOpenAIModel, 0, len(catalog)+len(runtimeModelRoutes(modelSpec)))
+	routes := make([]runtimeModelRoute, 0, len(catalog)+len(runtimeModelRoutes(modelSpec)))
 	models := make([]string, 0, len(catalog))
 	names := make(map[string]string)
 	seenRoutes := make(map[string]bool)
@@ -495,7 +493,7 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 			return
 		}
 		seenRoutes[key] = true
-		routes = append(routes, runtimeOpenAIModel{Name: name, Alias: alias, ForceMapping: true})
+		routes = append(routes, runtimeModelRoute{Name: name, Alias: alias})
 	}
 	for _, model := range catalog {
 		lookup[strings.ToLower(model.ID)] = model
@@ -545,26 +543,11 @@ func startWorkBuddyOAuth(parent context.Context, modelSpec, credentialFile strin
 	if err != nil {
 		return nil, err
 	}
-	runtimeDir, port, apiKey, err := prepareAPIKeyRuntime()
-	if err != nil {
-		return nil, err
-	}
-	configFile := runtimeOpenAIConfigFile{
-		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
-		OpenAICompatibility: []runtimeOpenAICompatibility{{
-			Name:           ProviderWorkBuddy,
-			BaseURL:        gateway.endpoint,
-			APIKeyEntries:  []runtimeOpenAICompatibilityKey{{APIKey: ProviderWorkBuddy}},
-			Models:         routes,
-			DisableCooling: true,
-		}},
-	}
-	rawConfig, err := yaml.Marshal(configFile)
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return nil, fmt.Errorf("encode WorkBuddy compatibility runtime config: %w", err)
-	}
-	proxyRuntime, err := startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
+	// The WorkBuddy gateway already handles authentication, catalog discovery, and
+	// the /v1→/v2 path rewrite. The Messages↔Chat Completions translation below is
+	// CCL's own data plane now; the gateway ignores the Bearer token, so a static
+	// placeholder key is passed and never read.
+	proxyRuntime, err := startOpenAIChatRuntimeRoutes(parent, gateway.endpoint, routes, &chatStaticAuthorizer{token: ProviderWorkBuddy})
 	if err != nil {
 		return nil, err
 	}
@@ -573,7 +556,7 @@ func startWorkBuddyOAuth(parent context.Context, modelSpec, credentialFile strin
 	proxyRuntime.listAuths = store.listAuths
 	proxyRuntime.models = append([]string(nil), models...)
 	proxyRuntime.modelNames = names
-	LogInfof("runtime start oauth provider=workbuddy backend=workbuddy protocol=openai_chat local_endpoint=%q credential_file=%s models=%d auth_owner=ccl catalog_owner=ccl data_plane=cpa",
+	LogInfof("runtime start oauth provider=workbuddy backend=workbuddy protocol=openai_chat local_endpoint=%q credential_file=%s models=%d auth_owner=ccl catalog_owner=ccl data_plane=ccl",
 		SafeLogEndpoint(proxyRuntime.endpoint), filepath.Base(credentialFile), len(models))
 	return proxyRuntime, nil
 }

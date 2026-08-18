@@ -15,8 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type qoderCredential struct {
@@ -246,18 +244,18 @@ func (pool *qoderCredentialPool) refresh(ctx context.Context, credential *qoderC
 	return credential, nil
 }
 
-func (pool *qoderCredentialPool) listAuths() []*coreauth.Auth {
+func (pool *qoderCredentialPool) listAuths() []*AuthInfo {
 	credentials, err := pool.load()
 	if err != nil {
 		return nil
 	}
-	auths := make([]*coreauth.Auth, 0, len(credentials))
+	auths := make([]*AuthInfo, 0, len(credentials))
 	for _, credential := range credentials {
-		status := coreauth.StatusActive
+		status := StatusActive
 		if credential.disabled {
-			status = coreauth.StatusDisabled
+			status = StatusDisabled
 		}
-		auths = append(auths, &coreauth.Auth{
+		auths = append(auths, &AuthInfo{
 			ID:       credential.fileName,
 			Provider: ProviderQoder,
 			FileName: credential.path,

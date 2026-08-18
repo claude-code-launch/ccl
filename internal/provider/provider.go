@@ -101,6 +101,12 @@ type Provider struct {
 	// the cost of higher usage; only meaningful for the GPT/Codex Responses
 	// OAuth backend. Empty/zero leaves Claude Code's own setting.
 	FastMode bool `yaml:"fastMode,omitempty" mapstructure:"fastMode,omitempty"`
+	// ModelProtocols maps a lowercase model ID to its upstream protocol
+	// ("anthropic", "openai", or "openai_responses"). It is only used by the
+	// mixed-protocol gateway (Type == "modelsdev"), whose single endpoint serves
+	// models over different wire protocols. Empty means provider-level single
+	// protocol, selected by Type as before.
+	ModelProtocols map[string]string `yaml:"modelProtocols,omitempty" mapstructure:"modelProtocols,omitempty"`
 }
 
 type Config struct {
@@ -129,7 +135,7 @@ func OAuthRuntimeType(oauthProvider string) (string, bool) {
 		return "openai_responses", true
 	case "gemini", "grok", "kimi", "workbuddy":
 		return "openai", true
-	case "kiro", "qoder", "claude":
+	case "kiro", "qoder":
 		return "anthropic", true
 	default:
 		return "", false
@@ -168,8 +174,6 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "kimi"
 	case "kiro":
 		return "kiro"
-	case "claude":
-		return "claude"
 	case "workbuddy":
 		return "workbuddy"
 	default:
@@ -195,6 +199,29 @@ func IsOpenAICompatibleType(providerType string) bool {
 
 func IsAnthropicType(providerType string) bool {
 	return strings.EqualFold(strings.TrimSpace(providerType), "anthropic")
+}
+
+// IsModelsDevType reports whether the provider is a mixed-protocol models.dev
+// gateway, whose per-model protocols live in ModelProtocols rather than a
+// single provider-level Type.
+func IsModelsDevType(providerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(providerType), "modelsdev")
+}
+
+// ProtocolForAISdkNPM maps a models.dev AI SDK package to ccl's provider Type
+// protocol. ok is false for an unknown package, in which case the model should
+// be skipped by the caller.
+func ProtocolForAISdkNPM(npm string) (string, bool) {
+	switch strings.TrimSpace(npm) {
+	case "@ai-sdk/anthropic":
+		return "anthropic", true
+	case "@ai-sdk/openai":
+		return "openai_responses", true
+	case "@ai-sdk/openai-compatible":
+		return "openai", true
+	default:
+		return "", false
+	}
 }
 
 // RuntimeModelSpec returns every model ID that Claude Code may send for this
@@ -251,6 +278,8 @@ func ProtocolLabel(providerType string) string {
 	switch {
 	case trimmed == "":
 		return ""
+	case IsModelsDevType(trimmed):
+		return "models.dev (auto)"
 	case IsOpenAIResponsesType(trimmed):
 		return "openai(responses)"
 	case IsAnthropicType(trimmed):

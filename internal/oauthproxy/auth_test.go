@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
-	log "github.com/sirupsen/logrus"
 )
 
 func TestBackendProviderAliases(t *testing.T) {
@@ -31,7 +30,6 @@ func TestBackendProviderAliases(t *testing.T) {
 		"xai":       "xai",
 		"kimi":      "kimi",
 		"kiro":      "kiro",
-		"claude":    "claude",
 		"workbuddy": "workbuddy",
 	}
 	for input, want := range tests {
@@ -46,7 +44,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderClaude, ProviderWorkBuddy} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}
@@ -160,55 +158,6 @@ func TestEnsureAuthDirSecuresExistingDirectory(t *testing.T) {
 	}
 }
 
-func TestProviderTokenStoreFiltersOtherBackends(t *testing.T) {
-	authDir := t.TempDir()
-	credentials := map[string][]byte{
-		"codex.json":       []byte(`{"type":"codex","access_token":"codex-token","email":"codex@example.com"}`),
-		"antigravity.json": []byte(`{"type":"antigravity","access_token":"gemini-token","project_id":"test-project","email":"gemini@example.com"}`),
-	}
-	for name, data := range credentials {
-		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	store := newProviderTokenStore(authDir, ProviderCodex, "codex.json")
-	auths, err := store.List(context.Background())
-	if err != nil {
-		t.Fatalf("List() error: %v", err)
-	}
-	if len(auths) != 1 || auths[0].Provider != ProviderCodex {
-		t.Fatalf("filtered auths = %+v, want one Codex auth", auths)
-	}
-}
-
-func TestProviderTokenStoreFiltersByCredentialFile(t *testing.T) {
-	authDir := t.TempDir()
-	credentials := map[string][]byte{
-		"codex-alice@example.com.json": []byte(`{"type":"codex","access_token":"alice","email":"alice@example.com"}`),
-		"codex-bob@example.com.json":   []byte(`{"type":"codex","access_token":"bob","email":"bob@example.com"}`),
-		"xai-ada@example.com.json":     []byte(`{"type":"xai","access_token":"ada","email":"ada@example.com"}`),
-	}
-	for name, data := range credentials {
-		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	// Bound to one credential file: only that account loads.
-	store := newProviderTokenStore(authDir, ProviderCodex, "codex-bob@example.com.json")
-	auths, err := store.List(context.Background())
-	if err != nil {
-		t.Fatalf("filtered List() error: %v", err)
-	}
-	if len(auths) != 1 {
-		t.Fatalf("credential-bound auths = %d, want 1", len(auths))
-	}
-	if got := filepath.Base(auths[0].FileName); got != "codex-bob@example.com.json" {
-		t.Fatalf("selected file = %q, want codex-bob@example.com.json", got)
-	}
-}
-
 func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -231,7 +180,7 @@ func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
 	if proxyRuntime.APIKey() == "" {
 		t.Fatal("Start() returned an empty session API key")
 	}
-	if proxyRuntime.coreManager != nil || proxyRuntime.httpServer == nil {
+	if proxyRuntime.httpServer == nil {
 		t.Fatal("GPT subscription must use the CCL-owned HTTP runtime, not CPA")
 	}
 
@@ -262,46 +211,6 @@ func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
 	proxyRuntime.Stop()
 	if _, err := http.Get(endpoint + "/models"); err == nil {
 		t.Fatal("Codex runtime still accepts connections after Stop()")
-	}
-}
-
-func TestDirectCodexRuntimeDoesNotChangeSDKLogger(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	authDir := filepath.Join(home, ".ccl", "auth")
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		t.Fatalf("create auth dir: %v", err)
-	}
-	credential := []byte(`{"type":"codex","access_token":"test-token","refresh_token":"test-refresh","email":"test@example.com"}`)
-	if err := os.WriteFile(filepath.Join(authDir, "codex-log-test.json"), credential, 0o600); err != nil {
-		t.Fatalf("write credential: %v", err)
-	}
-
-	originalOut := log.StandardLogger().Out
-	originalLevel := log.GetLevel()
-	var output bytes.Buffer
-	log.SetOutput(&output)
-	log.SetLevel(log.WarnLevel)
-	t.Cleanup(func() {
-		log.SetOutput(originalOut)
-		log.SetLevel(originalLevel)
-	})
-
-	proxyRuntime, err := StartOAuth(context.Background(), ProviderCodex, "", "codex-log-test.json")
-	if err != nil {
-		t.Fatalf("Start() error: %v", err)
-	}
-	log.Warn("hidden while embedded runtime is active")
-	if !strings.Contains(output.String(), "hidden while embedded runtime is active") {
-		proxyRuntime.Stop()
-		t.Fatalf("direct runtime unexpectedly changed the process logger: %q", output.String())
-	}
-
-	output.Reset()
-	proxyRuntime.Stop()
-	log.Warn("still hidden after embedded runtime stops")
-	if !strings.Contains(output.String(), "still hidden after embedded runtime stops") {
-		t.Fatalf("direct runtime did not preserve the process logger after stop: %q", output.String())
 	}
 }
 
@@ -383,7 +292,7 @@ func TestStartOpenAIResponsesAPIUsesCCLOwnedCodexIdentity(t *testing.T) {
 		t.Fatalf("upstream model = %v, want gpt-5.4-mini", got.body["model"])
 	}
 
-	if proxyRuntime.coreManager != nil || proxyRuntime.httpServer == nil {
+	if proxyRuntime.httpServer == nil {
 		t.Fatal("Responses API key runtime unexpectedly depends on CPA")
 	}
 }
@@ -562,7 +471,7 @@ func TestStopClosesDirectCodexRuntime(t *testing.T) {
 		proxyRuntime.Stop()
 		t.Fatalf("runtime auth count = %d, want 1", len(auths))
 	}
-	if proxyRuntime.coreManager != nil || proxyRuntime.httpServer == nil {
+	if proxyRuntime.httpServer == nil {
 		proxyRuntime.Stop()
 		t.Fatal("Codex subscription unexpectedly started a CPA runtime")
 	}
@@ -638,42 +547,6 @@ func TestStartRequiresMatchingCredential(t *testing.T) {
 	}
 }
 
-func TestSilenceStdoutNestedReferenceCount(t *testing.T) {
-	original := os.Stdout
-	t.Cleanup(func() {
-		os.Stdout = original
-		stdoutState.Lock()
-		if stdoutState.sink != nil {
-			_ = stdoutState.sink.Close()
-		}
-		stdoutState.users = 0
-		stdoutState.original = nil
-		stdoutState.sink = nil
-		stdoutState.Unlock()
-	})
-
-	restoreOuter := silenceStdout()
-	if os.Stdout == original {
-		t.Fatal("outer silenceStdout should redirect os.Stdout")
-	}
-	redirected := os.Stdout
-
-	restoreInner := silenceStdout()
-	if os.Stdout != redirected {
-		t.Fatal("nested silenceStdout should reuse the same sink")
-	}
-
-	restoreInner()
-	if os.Stdout != redirected {
-		t.Fatal("inner restore must keep stdout silenced while outer is active")
-	}
-
-	restoreOuter()
-	if os.Stdout != original {
-		t.Fatal("outer restore should put back the original stdout")
-	}
-}
-
 func TestStartOpenAIResponsesAPIUsesCCLDataPlane(t *testing.T) {
 	type capture struct {
 		path   string
@@ -718,7 +591,7 @@ func TestStartOpenAIResponsesAPIUsesCCLDataPlane(t *testing.T) {
 	if got.body["model"] != "gpt-test" {
 		t.Fatalf("upstream model = %v, want gpt-test", got.body["model"])
 	}
-	if proxyRuntime.coreManager != nil || proxyRuntime.service != nil || proxyRuntime.httpServer == nil {
+	if proxyRuntime.httpServer == nil {
 		t.Fatal("Responses request was not served by CCL's direct data plane")
 	}
 }

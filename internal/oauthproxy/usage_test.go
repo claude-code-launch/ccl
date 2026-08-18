@@ -1,11 +1,8 @@
 package oauthproxy
 
 import (
-	"context"
 	"strings"
 	"testing"
-
-	cpausage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestUsageTrackerAddAccumulatesPerModel(t *testing.T) {
@@ -140,56 +137,5 @@ func TestFormatTokenCompact(t *testing.T) {
 		if got := formatTokenCompact(tc.tokens); got != tc.want {
 			t.Errorf("formatTokenCompact(%d) = %q, want %q", tc.tokens, got, tc.want)
 		}
-	}
-}
-
-func TestCpaUsagePluginSkipsFailedRecords(t *testing.T) {
-	tracker := NewUsageTracker()
-	plugin := cpaUsagePlugin{tracker: tracker}
-	plugin.HandleUsage(context.Background(), cpausage.Record{
-		Failed: true,
-		Alias:  "gpt-5.6-sol",
-		Detail: cpausage.Detail{InputTokens: 100, OutputTokens: 50},
-	})
-	if _, ok := tracker.Snapshot(); ok {
-		t.Fatalf("expected a failed record to be skipped entirely")
-	}
-}
-
-func TestCpaUsagePluginUsesAliasWithModelFallback(t *testing.T) {
-	tracker := NewUsageTracker()
-	plugin := cpaUsagePlugin{tracker: tracker}
-	plugin.HandleUsage(context.Background(), cpausage.Record{
-		Alias: "my-alias",
-		Model: "upstream-model-id",
-		Detail: cpausage.Detail{
-			InputTokens:         10,
-			OutputTokens:        20,
-			CacheReadTokens:     3,
-			CacheCreationTokens: 4,
-		},
-	})
-	plugin.HandleUsage(context.Background(), cpausage.Record{
-		Model:  "upstream-model-id-2",
-		Detail: cpausage.Detail{InputTokens: 1, OutputTokens: 1},
-	})
-
-	totals, ok := tracker.Snapshot()
-	if !ok || len(totals) != 2 {
-		t.Fatalf("expected 2 recorded models, got %+v (ok=%t)", totals, ok)
-	}
-	byModel := make(map[string]UsageModelTotals, len(totals))
-	for _, entry := range totals {
-		byModel[entry.Model] = entry
-	}
-	aliased, ok := byModel["my-alias"]
-	if !ok {
-		t.Fatalf("expected an entry keyed by Alias, got %+v", totals)
-	}
-	if aliased.InputTokens != 10 || aliased.OutputTokens != 20 || aliased.CacheReadTokens != 3 || aliased.CacheWriteTokens != 4 {
-		t.Fatalf("unexpected aliased totals: %+v", aliased)
-	}
-	if _, ok := byModel["upstream-model-id-2"]; !ok {
-		t.Fatalf("expected the second record to fall back to Model when Alias is empty, got %+v", totals)
 	}
 }

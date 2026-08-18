@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const (
@@ -43,7 +42,7 @@ type codexResponsesAuthorization struct {
 
 type codexResponsesAuthorizer interface {
 	authorize(context.Context, bool) (codexResponsesAuthorization, error)
-	listAuths() []*coreauth.Auth
+	listAuths() []*AuthInfo
 	isOAuth() bool
 }
 
@@ -52,8 +51,8 @@ type codexStaticAuthorizer struct{ token string }
 func (a *codexStaticAuthorizer) authorize(context.Context, bool) (codexResponsesAuthorization, error) {
 	return codexResponsesAuthorization{token: a.token, credential: "api-key"}, nil
 }
-func (*codexStaticAuthorizer) listAuths() []*coreauth.Auth { return nil }
-func (*codexStaticAuthorizer) isOAuth() bool               { return false }
+func (*codexStaticAuthorizer) listAuths() []*AuthInfo { return nil }
+func (*codexStaticAuthorizer) isOAuth() bool          { return false }
 
 type codexOAuthAuthorizer struct {
 	path   string
@@ -81,6 +80,11 @@ type codexResponsesService struct {
 	usage          *UsageTracker
 	installationID string
 	windowID       string
+	// xai switches the Responses data plane from Codex identity to xAI/Grok
+	// identity: xAI Grok headers replace the Codex turn headers, and the
+	// Codex-specific client_metadata block is omitted. Both backends share the
+	// same OpenAI Responses wire protocol and CCL converter/stream pipeline.
+	xai bool
 }
 
 type codexResponsesUpstreamError struct {
@@ -151,16 +155,23 @@ func startCodexOAuth(parent context.Context, modelSpec, credentialFile string) (
 }
 
 func startCodexResponsesRuntime(parent context.Context, endpoint, modelSpec string, authorizer codexResponsesAuthorizer) (*Runtime, error) {
+	return startCodexResponsesRuntimeWithService(parent, endpoint, modelSpec, authorizer, newCodexResponsesService)
+}
+
+// startCodexResponsesRuntimeWithService starts a Responses data plane using the
+// supplied service factory. The Codex and xAI/Grok backends share the loopback
+// server lifecycle but build a different service identity (see newResponsesService).
+func startCodexResponsesRuntimeWithService(parent context.Context, endpoint, modelSpec string, authorizer codexResponsesAuthorizer, makeService func(apiKey, endpoint string, routes []runtimeModelRoute, authorizer codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
 	endpoint = normalizeOpenAIBaseURL(endpoint)
 	if endpoint == "" || authorizer == nil {
-		return nil, fmt.Errorf("Codex Responses runtime requires endpoint and authorization")
+		return nil, fmt.Errorf("Responses runtime requires endpoint and authorization")
 	}
 	routes := runtimeModelRoutes(modelSpec)
 	if len(routes) == 0 {
-		return nil, fmt.Errorf("Codex Responses runtime requires at least one model")
+		return nil, fmt.Errorf("Responses runtime requires at least one model")
 	}
 	apiKey, err := sessionAPIKey()
 	if err != nil {
@@ -168,10 +179,10 @@ func startCodexResponsesRuntime(parent context.Context, endpoint, modelSpec stri
 	}
 	listener, err := net.Listen("tcp", runtimeLoopbackHost+":0")
 	if err != nil {
-		return nil, fmt.Errorf("listen for Codex Responses runtime: %w", err)
+		return nil, fmt.Errorf("listen for Responses runtime: %w", err)
 	}
 	usage := NewUsageTracker()
-	service := newCodexResponsesService(apiKey, endpoint, routes, authorizer, usage)
+	service := makeService(apiKey, endpoint, routes, authorizer, usage)
 	runCtx, cancel := context.WithCancel(parent)
 	server := &http.Server{
 		Handler: service.handler(), ReadHeaderTimeout: 15 * time.Second,
@@ -205,6 +216,17 @@ func startCodexResponsesRuntime(parent context.Context, endpoint, modelSpec stri
 }
 
 func newCodexResponsesService(apiKey, endpoint string, routes []runtimeModelRoute, authorizer codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService {
+	return newResponsesService(apiKey, endpoint, routes, authorizer, usage, false)
+}
+
+// newXaiResponsesService builds the same Responses data plane with xAI/Grok
+// identity. Grok uses the OpenAI Responses wire protocol with Grok-specific
+// headers and no Codex client metadata.
+func newXaiResponsesService(apiKey, endpoint string, routes []runtimeModelRoute, authorizer codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService {
+	return newResponsesService(apiKey, endpoint, routes, authorizer, usage, true)
+}
+
+func newResponsesService(apiKey, endpoint string, routes []runtimeModelRoute, authorizer codexResponsesAuthorizer, usage *UsageTracker, xai bool) *codexResponsesService {
 	models := make([]string, 0, len(routes))
 	modelRoute := make(map[string]string, len(routes))
 	seenModels := make(map[string]bool, len(routes))
@@ -218,6 +240,7 @@ func newCodexResponsesService(apiKey, endpoint string, routes []runtimeModelRout
 	return &codexResponsesService{
 		apiKey: apiKey, endpoint: endpoint, models: models, modelRoute: modelRoute,
 		authorizer: authorizer, usage: usage, installationID: uuidString(), windowID: uuidString(),
+		xai: xai,
 		client: &http.Client{Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
 			ResponseHeaderTimeout: 90 * time.Second,
@@ -608,9 +631,11 @@ func (s *codexResponsesService) recordUsage(converted *codexResponsesConvertedRe
 
 func (s *codexResponsesService) call(ctx context.Context, body []byte, sessionID string, dumpPayload bool) (*http.Response, error) {
 	var err error
-	body, err = s.addClientMetadata(body, sessionID)
-	if err != nil {
-		return nil, err
+	if !s.xai {
+		body, err = s.addClientMetadata(body, sessionID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	auth, err := s.authorizer.authorize(ctx, false)
 	if err != nil {
@@ -655,7 +680,11 @@ func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessi
 	if err != nil {
 		return nil, err
 	}
-	codexidentity.ApplyTurnHeaders(request.Header, sessionID, sessionID, s.windowID)
+	if s.xai {
+		applyXaiGrokHeaders(request.Header, sessionID)
+	} else {
+		codexidentity.ApplyTurnHeaders(request.Header, sessionID, sessionID, s.windowID)
+	}
 	request.Header.Set("Authorization", "Bearer "+auth.token)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
@@ -931,16 +960,16 @@ func (a *codexOAuthAuthorizer) refresh(ctx context.Context, credential *codexOAu
 	return credential, nil
 }
 
-func (a *codexOAuthAuthorizer) listAuths() []*coreauth.Auth {
+func (a *codexOAuthAuthorizer) listAuths() []*AuthInfo {
 	credential, err := a.load()
 	if err != nil {
 		return nil
 	}
-	status := coreauth.StatusActive
+	status := StatusActive
 	if credential.disabled {
-		status = coreauth.StatusDisabled
+		status = StatusDisabled
 	}
-	return []*coreauth.Auth{{
+	return []*AuthInfo{{
 		ID: filepath.Base(a.path), Provider: ProviderCodex, FileName: a.path, Label: credential.email,
 		Status: status, Disabled: credential.disabled, Metadata: credential.metadata,
 	}}

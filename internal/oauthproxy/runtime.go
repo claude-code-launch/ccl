@@ -4,28 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	cliproxy "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cpausage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	log "github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -35,25 +21,19 @@ const (
 )
 
 type Runtime struct {
-	endpoint    string
-	apiKey      string
-	service     *cliproxy.Service
-	coreManager *coreauth.Manager
-	httpServer  *http.Server
-	listAuths   func() []*coreauth.Auth
-	children    []*Runtime
-	cleanup     []func()
-	cancel      context.CancelFunc
-	done        chan struct{}
-	runErr      chan error
-	started     chan struct{}
-	configPath  string
-	runtimeDir  string
-	restoreLogs func()
-	models      []string
-	modelNames  map[string]string
-	ownsLog     bool
-	stopOnce    sync.Once
+	endpoint   string
+	apiKey     string
+	httpServer *http.Server
+	listAuths  func() []*AuthInfo
+	cleanup    []func()
+	cancel     context.CancelFunc
+	done       chan struct{}
+	runErr     chan error
+	started    chan struct{}
+	models     []string
+	modelNames map[string]string
+	ownsLog    bool
+	stopOnce   sync.Once
 	// usage accumulates per-model token totals for this runtime. It is never nil:
 	// StartProvider always installs one, even when the backend cannot report
 	// usage, so callers do not need a nil check.
@@ -108,6 +88,10 @@ type StartOptions struct {
 	// OAuthAccountCredential optionally restricts the runtime to a single
 	// credential file (basename under the OAuth auth dir) for this backend.
 	OAuthAccountCredential string
+	// ModelProtocols maps a lowercase model ID to its upstream protocol for the
+	// mixed-protocol models.dev gateway. When non-empty it takes precedence over
+	// the single Protocol value and starts the mixed-protocol router.
+	ModelProtocols map[string]string
 }
 
 type runtimeModelRoute struct {
@@ -115,238 +99,9 @@ type runtimeModelRoute struct {
 	Alias string
 }
 
-// stdoutState reference-counts temporary redirection of os.Stdout to
-// os.DevNull while embedded CLIProxyAPI services become ready. Nested
-// startRuntime calls must share one sink instead of stacking file
-// descriptors or restoring a mid-stack original too early.
-var stdoutState struct {
-	sync.Mutex
-	users    int
-	original *os.File
-	sink     *os.File
-}
-
-var sdkLogState struct {
-	sync.Mutex
-	users         int
-	previousLevel log.Level
-}
-
-// runtimeConfigBase holds the CLIProxyAPI settings every embedded runtime shares.
-// The upstream-specific config files inline it so the common block is declared
-// (and filled) exactly once.
-type runtimeConfigBase struct {
-	Host                   string   `yaml:"host"`
-	Port                   int      `yaml:"port"`
-	AuthDir                string   `yaml:"auth-dir"`
-	APIKeys                []string `yaml:"api-keys"`
-	LogToFile              bool     `yaml:"logging-to-file"`
-	DisableImageGeneration string   `yaml:"disable-image-generation,omitempty"`
-}
-
-func newRuntimeConfigBase(port int, authDir, apiKey string) runtimeConfigBase {
-	return runtimeConfigBase{
-		Host:                   runtimeLoopbackHost,
-		Port:                   port,
-		AuthDir:                authDir,
-		APIKeys:                []string{apiKey},
-		LogToFile:              false,
-		DisableImageGeneration: "passthrough",
-	}
-}
-
-type runtimeConfigFile struct {
-	runtimeConfigBase `yaml:",inline"`
-	OAuthModelAlias   map[string][]runtimeOAuthModelAlias `yaml:"oauth-model-alias,omitempty"`
-}
-
-type runtimeOpenAIConfigFile struct {
-	runtimeConfigBase   `yaml:",inline"`
-	OpenAICompatibility []runtimeOpenAICompatibility `yaml:"openai-compatibility"`
-}
-
-type runtimeOAuthModelAlias struct {
-	Name         string `yaml:"name"`
-	Alias        string `yaml:"alias"`
-	Fork         bool   `yaml:"fork,omitempty"`
-	ForceMapping bool   `yaml:"force-mapping,omitempty"`
-}
-
-type runtimeOpenAICompatibility struct {
-	Name           string                          `yaml:"name"`
-	BaseURL        string                          `yaml:"base-url"`
-	APIKeyEntries  []runtimeOpenAICompatibilityKey `yaml:"api-key-entries"`
-	Models         []runtimeOpenAIModel            `yaml:"models"`
-	DisableCooling bool                            `yaml:"disable-cooling,omitempty"`
-}
-
-type runtimeOpenAICompatibilityKey struct {
-	APIKey string `yaml:"api-key"`
-}
-
-type runtimeOpenAIModel struct {
-	Name         string `yaml:"name"`
-	Alias        string `yaml:"alias"`
-	ForceMapping bool   `yaml:"force-mapping,omitempty"`
-}
-
-type runtimeResponsesModel struct {
-	Name  string `yaml:"name"`
-	Alias string `yaml:"alias,omitempty"`
-}
-
-type providerTokenStore struct {
-	backend        string
-	credentialFile string
-	store          coreauth.Store
-}
-
-func newProviderTokenStore(authDir, backend, credentialFile string) *providerTokenStore {
-	store := sdkauth.NewFileTokenStore()
-	store.SetBaseDir(authDir)
-	credentialFile = strings.TrimSpace(credentialFile)
-	if credentialFile != "" {
-		credentialFile = strings.ToLower(filepath.Base(credentialFile))
-	}
-	return &providerTokenStore{
-		backend:        backend,
-		credentialFile: credentialFile,
-		store:          store,
-	}
-}
-
-func (s *providerTokenStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
-	auths, err := s.store.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]*coreauth.Auth, 0, len(auths))
-	for _, auth := range auths {
-		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), s.backend) {
-			continue
-		}
-		if s.credentialFile != "" && !strings.EqualFold(filepath.Base(auth.FileName), s.credentialFile) {
-			continue
-		}
-		hydrateAuthHealthFromMetadata(auth)
-		filtered = append(filtered, auth)
-	}
-	return filtered, nil
-}
-
-func (s *providerTokenStore) Save(ctx context.Context, auth *coreauth.Auth) (string, error) {
-	if auth != nil && !strings.EqualFold(strings.TrimSpace(auth.Provider), s.backend) {
-		return "", fmt.Errorf("refuse to persist %q credentials in %q OAuth runtime", auth.Provider, s.backend)
-	}
-	// CPA's MarkResult keeps quota/unavailable on Auth fields; FileTokenStore only
-	// serializes Metadata (+ token storage). Mirror runtime health into Metadata so
-	// exhausted accounts survive restarts and doctor/offline scans can see them.
-	enrichAuthMetadataForPersist(auth)
-	return s.store.Save(ctx, auth)
-}
-
-// enrichAuthMetadataForPersist copies CPA runtime health into auth.Metadata so
-// token-file saves retain quota/unavailable markers across process restarts.
-func enrichAuthMetadataForPersist(auth *coreauth.Auth) {
-	if auth == nil {
-		return
-	}
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-	auth.Metadata["disabled"] = auth.Disabled
-	auth.Metadata["unavailable"] = auth.Unavailable
-	if status := strings.TrimSpace(string(auth.Status)); status != "" {
-		auth.Metadata["status"] = status
-	}
-	if msg := strings.TrimSpace(auth.StatusMessage); msg != "" {
-		auth.Metadata["status_message"] = msg
-	} else if !auth.Unavailable && !auth.Quota.Exceeded {
-		delete(auth.Metadata, "status_message")
-	}
-	if auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel != 0 {
-		quota := map[string]any{
-			"exceeded": auth.Quota.Exceeded,
-		}
-		if reason := strings.TrimSpace(auth.Quota.Reason); reason != "" {
-			quota["reason"] = reason
-		}
-		if !auth.Quota.NextRecoverAt.IsZero() {
-			quota["next_recover_at"] = auth.Quota.NextRecoverAt.UTC().Format(time.RFC3339)
-		}
-		if auth.Quota.BackoffLevel != 0 {
-			quota["backoff_level"] = auth.Quota.BackoffLevel
-		}
-		auth.Metadata["quota"] = quota
-	} else if !auth.Unavailable {
-		// Clear stale quota markers when the account recovered.
-		delete(auth.Metadata, "quota")
-	}
-	if !auth.NextRetryAfter.IsZero() {
-		auth.Metadata["next_retry_after"] = auth.NextRetryAfter.UTC().Format(time.RFC3339)
-	} else {
-		delete(auth.Metadata, "next_retry_after")
-	}
-}
-
-// hydrateAuthHealthFromMetadata restores runtime health fields that CPA stores
-// only on Auth (not rehydrated by FileTokenStore on load).
-func hydrateAuthHealthFromMetadata(auth *coreauth.Auth) {
-	if auth == nil || auth.Metadata == nil {
-		return
-	}
-	if unavailable, ok := auth.Metadata["unavailable"].(bool); ok {
-		auth.Unavailable = unavailable
-	}
-	if status, ok := auth.Metadata["status"].(string); ok && strings.TrimSpace(status) != "" {
-		auth.Status = coreauth.Status(strings.TrimSpace(status))
-	}
-	if msg, ok := auth.Metadata["status_message"].(string); ok {
-		auth.StatusMessage = strings.TrimSpace(msg)
-	}
-	if raw, ok := auth.Metadata["quota"].(map[string]any); ok {
-		if exceeded, ok := raw["exceeded"].(bool); ok {
-			auth.Quota.Exceeded = exceeded
-		}
-		if reason, ok := raw["reason"].(string); ok {
-			auth.Quota.Reason = strings.TrimSpace(reason)
-		}
-		if recoverAt, ok := raw["next_recover_at"].(string); ok {
-			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(recoverAt)); err == nil {
-				auth.Quota.NextRecoverAt = t
-			}
-		}
-		switch v := raw["backoff_level"].(type) {
-		case float64:
-			auth.Quota.BackoffLevel = int(v)
-		case int:
-			auth.Quota.BackoffLevel = v
-		}
-	}
-	if retryAfter, ok := auth.Metadata["next_retry_after"].(string); ok {
-		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(retryAfter)); err == nil {
-			auth.NextRetryAfter = t
-		}
-	}
-	// Metadata-only quota markers should also surface as unavailable for scheduling.
-	if auth.Quota.Exceeded && !auth.Unavailable {
-		auth.Unavailable = true
-		if auth.Status == "" || auth.Status == coreauth.StatusActive {
-			auth.Status = coreauth.StatusError
-		}
-		if auth.StatusMessage == "" {
-			auth.StatusMessage = "quota exhausted"
-		}
-	}
-}
-
-func (s *providerTokenStore) Delete(ctx context.Context, id string) error {
-	return s.store.Delete(ctx, id)
-}
-
-// StartProvider starts a loopback Anthropic Messages adapter. Responses
-// gateways use CCL's Codex Responses implementation; CPA remains responsible
-// only for protocol families that have not moved to a CCL-owned data plane.
+// StartProvider starts a loopback Anthropic Messages adapter. Every protocol
+// family is served by a CCL-owned data plane (Codex Responses, OpenAI Chat, or
+// the native Anthropic passthrough).
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	_, ownsLog, logErr := EnsureSessionLog("runtime")
 	if logErr != nil {
@@ -373,6 +128,9 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 	if strings.TrimSpace(options.OAuthProvider) != "" {
 		return StartOAuth(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredential)
 	}
+	if len(options.ModelProtocols) > 0 {
+		return StartMixedProtocolAPIKeyRuntime(parent, options.Endpoint, options.APIKey, options.ModelSpec, options.ModelProtocols)
+	}
 	switch options.Protocol {
 	case ProtocolOpenAIChat:
 		return StartOpenAIChatAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
@@ -390,10 +148,6 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	}
 	if parent == nil {
 		parent = context.Background()
-	}
-	authDir, err := ensureAuthDir()
-	if err != nil {
-		return nil, err
 	}
 	backend, err := BackendProvider(providerName)
 	if err != nil {
@@ -414,94 +168,33 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if backend == ProviderWorkBuddy {
 		return startWorkBuddyOAuth(parent, modelSpec, credentialFile)
 	}
-	found, err := hasCredential(authDir, backend, credentialFile)
-	if err != nil {
-		return nil, err
+	if backend == backendXAI {
+		return startXaiOAuth(parent, modelSpec, credentialFile)
 	}
-	if !found {
-		return nil, fmt.Errorf("no %s credentials found; run `ccl oauth %s` first", backend, providerName)
+	if backend == ProviderKimi {
+		return startKimiOAuth(parent, modelSpec, credentialFile)
 	}
-
-	port, err := availablePort()
-	if err != nil {
-		return nil, err
+	if backend == backendAntigravity {
+		return startAntigravityOAuth(parent, modelSpec, credentialFile)
 	}
-	apiKey, err := sessionAPIKey()
-	if err != nil {
-		return nil, err
-	}
-	aliases := oauthModelAliases(modelSpec)
-	rawConfig, err := yaml.Marshal(runtimeConfigFile{
-		runtimeConfigBase: newRuntimeConfigBase(port, authDir, apiKey),
-		OAuthModelAlias: map[string][]runtimeOAuthModelAlias{
-			backend: aliases,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("encode embedded OAuth proxy config: %w", err)
-	}
-	cfg, err := sdkconfig.ParseConfigBytes(rawConfig)
-	if err != nil {
-		return nil, fmt.Errorf("parse embedded OAuth proxy config: %w", err)
-	}
-	configPath, err := writeRuntimeConfigData(rawConfig)
-	if err != nil {
-		return nil, err
-	}
-	store := newProviderTokenStore(authDir, backend, credentialFile)
-	runtime, err := startRuntime(parent, cfg, configPath, apiKey, store, "")
-	if err != nil {
-		return nil, err
-	}
-	LogInfof("runtime start oauth provider=%s backend=%s protocol=openai port=%d credential_file=%s model_count=%d",
-		providerName, backend, port, filepath.Base(credentialFile), len(aliases))
-	return runtime, nil
+	return nil, fmt.Errorf("unsupported subscription provider %q", providerName)
 }
 
-// StartOpenAIChatAPI starts CLIProxyAPI with an OpenAI-compatible Chat
-// Completions upstream. CLIProxyAPI owns both request and response translation.
+// StartOpenAIChatAPI starts CCL's self-owned Chat Completions adapter against
+// an OpenAI-compatible API-key gateway. Request conversion, SSE conversion,
+// error mapping, and usage accounting are all owned by CCL and cannot change
+// with a CLIProxyAPI upgrade.
 func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
-	endpoint = normalizeOpenAIBaseURL(endpoint)
-	if endpoint == "" || strings.TrimSpace(upstreamAPIKey) == "" {
-		return nil, fmt.Errorf("OpenAI Chat runtime requires endpoint and API key")
-	}
 	routes := runtimeModelRoutes(modelSpec)
 	if len(routes) == 0 {
 		return nil, fmt.Errorf("OpenAI Chat runtime requires at least one model")
 	}
-
-	runtimeDir, port, apiKey, err := prepareAPIKeyRuntime()
+	proxyRuntime, err := startOpenAIChatRuntime(parent, endpoint, upstreamAPIKey, modelSpec)
 	if err != nil {
 		return nil, err
 	}
-	models := make([]runtimeOpenAIModel, 0, len(routes))
-	for _, route := range routes {
-		models = append(models, runtimeOpenAIModel{
-			Name:         route.Name,
-			Alias:        route.Alias,
-			ForceMapping: true,
-		})
-	}
-	rawConfig, err := yaml.Marshal(runtimeOpenAIConfigFile{
-		runtimeConfigBase: newRuntimeConfigBase(port, runtimeDir, apiKey),
-		OpenAICompatibility: []runtimeOpenAICompatibility{{
-			Name:    "ccl-openai-chat",
-			BaseURL: endpoint,
-			APIKeyEntries: []runtimeOpenAICompatibilityKey{{
-				APIKey: upstreamAPIKey,
-			}},
-			Models: models,
-		}},
-	})
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return nil, fmt.Errorf("encode OpenAI Chat runtime config: %w", err)
-	}
-	proxyRuntime, err := startAPIKeyRuntime(parent, rawConfig, apiKey, runtimeDir)
-	if err != nil {
-		return nil, err
-	}
-	LogInfof("runtime start openai_chat endpoint=%q port=%d model_count=%d", SafeLogEndpoint(endpoint), port, len(models))
+	LogInfof("runtime start openai_chat endpoint=%q local_endpoint=%q model_count=%d",
+		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(routes))
 	return proxyRuntime, nil
 }
 
@@ -528,44 +221,6 @@ func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, m
 	LogInfof("runtime start codex_responses auth=api_key endpoint=%q local_endpoint=%q model_count=%d",
 		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(routes))
 	return proxyRuntime, nil
-}
-
-func prepareAPIKeyRuntime() (runtimeDir string, port int, apiKey string, err error) {
-	runtimeDir, err = os.MkdirTemp("", "ccl-cliproxy-runtime-*")
-	if err != nil {
-		return "", 0, "", fmt.Errorf("create CLIProxyAPI runtime directory: %w", err)
-	}
-	if err = os.Chmod(runtimeDir, 0o700); err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return "", 0, "", err
-	}
-	port, err = availablePort()
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return "", 0, "", err
-	}
-	apiKey, err = sessionAPIKey()
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return "", 0, "", err
-	}
-	return runtimeDir, port, apiKey, nil
-}
-
-func startAPIKeyRuntime(parent context.Context, rawConfig []byte, apiKey, runtimeDir string) (*Runtime, error) {
-	cfg, err := sdkconfig.ParseConfigBytes(rawConfig)
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return nil, fmt.Errorf("parse embedded CLIProxyAPI config: %w", err)
-	}
-	configPath, err := writeRuntimeConfigData(rawConfig)
-	if err != nil {
-		_ = os.RemoveAll(runtimeDir)
-		return nil, err
-	}
-	store := sdkauth.NewFileTokenStore()
-	store.SetBaseDir(runtimeDir)
-	return startRuntime(parent, cfg, configPath, apiKey, store, runtimeDir)
 }
 
 func runtimeModelRoutes(modelSpec string) []runtimeModelRoute {
@@ -615,22 +270,6 @@ func runtimeModelAliases(modelSpec string) []string {
 	return aliases
 }
 
-func oauthModelAliases(modelSpec string) []runtimeOAuthModelAlias {
-	aliases := make([]runtimeOAuthModelAlias, 0)
-	for _, route := range runtimeModelRoutes(modelSpec) {
-		if strings.EqualFold(route.Name, route.Alias) {
-			continue
-		}
-		aliases = append(aliases, runtimeOAuthModelAlias{
-			Name:         route.Name,
-			Alias:        route.Alias,
-			Fork:         true,
-			ForceMapping: true,
-		})
-	}
-	return aliases
-}
-
 func stripContextModelSuffix(model string) string {
 	model = strings.TrimSpace(model)
 	for strings.HasSuffix(strings.ToLower(model), "[1m]") {
@@ -639,190 +278,16 @@ func stripContextModelSuffix(model string) string {
 	return model
 }
 
-func startRuntime(parent context.Context, cfg *sdkconfig.Config, configPath, apiKey string, store coreauth.Store, runtimeDir string) (*Runtime, error) {
-	// CPA owns retry, cooldown, Retry-After, and credential availability for all
-	// CPA-backed protocols. Provider-specific runtimes (Kiro/Qoder/Copilot) keep
-	// their targeted recovery behavior outside this manager.
-	coreManager := coreauth.NewManager(store, nil, nil)
-	restoreLogs := silenceSDKLogs()
-	started := make(chan struct{})
-	service, err := cliproxy.NewBuilder().
-		WithConfig(cfg).
-		WithConfigPath(configPath).
-		WithAuthManager(sdkauth.NewManager(store)).
-		WithCoreAuthManager(coreManager).
-		WithWatcherFactory(func(string, string, func(*sdkconfig.Config)) (*cliproxy.WatcherWrapper, error) {
-			return &cliproxy.WatcherWrapper{}, nil
-		}).
-		WithHooks(cliproxy.Hooks{OnAfterStart: func(*cliproxy.Service) { close(started) }}).
-		Build()
-	if err != nil {
-		restoreLogs()
-		_ = os.Remove(configPath)
-		_ = os.RemoveAll(runtimeDir)
-		return nil, fmt.Errorf("build embedded CLIProxyAPI: %w", err)
-	}
-
-	runCtx, cancel := context.WithCancel(parent)
-	usageTracker := NewUsageTracker()
-	// CLIProxyAPI's usage manager is process-global and has no unregister call,
-	// so the plugin is named uniquely per runtime (apiKey is a fresh random
-	// session token, see sessionAPIKey) rather than reusing a fixed name: a
-	// second name collision would silently replace the first runtime's plugin
-	// and its usage would stop being recorded.
-	cpausage.DefaultManager().RegisterNamed("ccl-usage-"+apiKey, cpaUsagePlugin{tracker: usageTracker})
-	runtime := &Runtime{
-		endpoint:    "http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/v1",
-		apiKey:      apiKey,
-		service:     service,
-		coreManager: coreManager,
-		cancel:      cancel,
-		done:        make(chan struct{}),
-		runErr:      make(chan error, 1),
-		started:     started,
-		configPath:  configPath,
-		runtimeDir:  runtimeDir,
-		restoreLogs: restoreLogs,
-		usage:       usageTracker,
-	}
-	restoreStdout := silenceStdout()
-	go func() {
-		runtime.runErr <- service.Run(runCtx)
-		close(runtime.done)
-	}()
-
-	err = runtime.waitReady(runCtx)
-	restoreStdout()
-	if err != nil {
-		runtime.Stop()
-		return nil, err
-	}
-	return runtime, nil
-}
-
-func silenceSDKLogs() func() {
-	sdkLogState.Lock()
-	if sdkLogState.users == 0 {
-		sdkLogState.previousLevel = log.GetLevel()
-		if LogEnabled() {
-			// File logging keeps the noisy CLIProxyAPI logrus stream but funnels it
-			// through debugFilterWriter: only diagnostic-looking lines survive,
-			// and any line carrying a credential marker is dropped entirely.
-			log.SetOutput(newDebugFilterWriter())
-			log.SetLevel(log.InfoLevel)
-		} else {
-			log.SetOutput(io.Discard)
-			log.SetLevel(log.PanicLevel)
-		}
-	}
-	sdkLogState.users++
-	sdkLogState.Unlock()
-
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			sdkLogState.Lock()
-			defer sdkLogState.Unlock()
-			sdkLogState.users--
-			if sdkLogState.users == 0 {
-				// CLIProxyAPI refresh workers can finish after Service.Shutdown and
-				// emit late warnings. ccl does not otherwise use logrus, so keep its
-				// output isolated for the remainder of this process.
-				log.SetOutput(io.Discard)
-				log.SetLevel(sdkLogState.previousLevel)
-			}
-		})
-	}
-}
-
-func silenceStdout() func() {
-	stdoutState.Lock()
-	if stdoutState.users == 0 {
-		sink, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-		if err != nil {
-			stdoutState.Unlock()
-			return func() {}
-		}
-		stdoutState.original = os.Stdout
-		stdoutState.sink = sink
-		os.Stdout = sink
-	}
-	stdoutState.users++
-	stdoutState.Unlock()
-
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			stdoutState.Lock()
-			defer stdoutState.Unlock()
-			if stdoutState.users == 0 {
-				return
-			}
-			stdoutState.users--
-			if stdoutState.users > 0 {
-				return
-			}
-			os.Stdout = stdoutState.original
-			if stdoutState.sink != nil {
-				_ = stdoutState.sink.Close()
-			}
-			stdoutState.original = nil
-			stdoutState.sink = nil
-		})
-	}
-}
-
-func hasCredential(authDir, backend, credentialFile string) (bool, error) {
-	credentialFile = strings.TrimSpace(credentialFile)
-	if credentialFile == "" {
-		return false, nil
-	}
-	entries, err := os.ReadDir(authDir)
-	if err != nil {
-		return false, fmt.Errorf("read auth directory: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		if !strings.EqualFold(entry.Name(), filepath.Base(credentialFile)) {
-			continue
-		}
-		// An unreadable file is reported (it usually means a permission problem the
-		// user must fix), while a file that is simply not valid credential JSON is
-		// skipped like any other unrelated file in the directory.
-		data, err := os.ReadFile(filepath.Join(authDir, entry.Name()))
-		if err != nil {
-			return false, fmt.Errorf("read credential %s: %w", entry.Name(), err)
-		}
-		var metadata struct {
-			Type     string `json:"type"`
-			Disabled bool   `json:"disabled"`
-		}
-		if err := json.Unmarshal(data, &metadata); err != nil {
-			LogWarnf("skip malformed credential file %s: %v", entry.Name(), err)
-			continue
-		}
-		if !metadata.Disabled && strings.EqualFold(strings.TrimSpace(metadata.Type), backend) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func (r *Runtime) Endpoint() string { return r.endpoint }
 
 // ListAuths returns the credentials currently loaded in this runtime, already
 // filtered to the OAuth backend and selected account.
-func (r *Runtime) ListAuths() []*coreauth.Auth {
+func (r *Runtime) ListAuths() []*AuthInfo {
 	if r == nil {
 		return nil
 	}
 	if r.listAuths != nil {
 		return r.listAuths()
-	}
-	if r.coreManager != nil {
-		return r.coreManager.List()
 	}
 	return nil
 }
@@ -836,12 +301,8 @@ func (r *Runtime) ClaudeBaseURL() string {
 
 func (r *Runtime) APIKey() string { return r.apiKey }
 
-// Stop tears down the embedded CLIProxyAPI service.
-//
-// Teardown order is part of the CLIProxyAPI compatibility boundary (see
-// package doc): cancel the run context, wait for Service.Run to exit on its
-// own, and only force Service.Shutdown if that wait times out. Concurrent
-// Shutdown during Run's deferred cleanup races inside the SDK.
+// Stop cancels the run context, waits for Serve to exit on its own, and only
+// force-calls http.Server.Shutdown if that wait times out.
 func (r *Runtime) Stop() {
 	if r == nil {
 		return
@@ -860,40 +321,16 @@ func (r *Runtime) Stop() {
 			}
 		}()
 		// Force Shutdown only when Run did not exit cleanly in time.
-		if !stopped && (r.service != nil || r.httpServer != nil) {
+		if !stopped && r.httpServer != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), runtimeStopTimeout)
-			if r.service != nil {
-				_ = r.service.Shutdown(ctx)
-			} else if r.httpServer != nil {
-				_ = r.httpServer.Shutdown(ctx)
-			}
+			_ = r.httpServer.Shutdown(ctx)
 			cancel()
 			waitClosed(r.done, runtimeStopTimeout)
-		}
-		if r.coreManager != nil {
-			registry := cliproxy.GlobalModelRegistry()
-			for _, auth := range r.coreManager.List() {
-				if auth != nil && auth.ID != "" {
-					registry.UnregisterClient(auth.ID)
-				}
-			}
-		}
-		for _, child := range r.children {
-			if child != nil {
-				child.Stop()
-			}
 		}
 		for _, cleanup := range r.cleanup {
 			if cleanup != nil {
 				cleanup()
 			}
-		}
-		_ = os.Remove(r.configPath)
-		if r.runtimeDir != "" {
-			_ = os.RemoveAll(r.runtimeDir)
-		}
-		if r.restoreLogs != nil {
-			r.restoreLogs()
 		}
 	})
 }
@@ -912,59 +349,6 @@ func waitClosed(done <-chan struct{}, timeout time.Duration) bool {
 	}
 }
 
-func (r *Runtime) waitReady(ctx context.Context) error {
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	healthURL := r.endpoint[:len(r.endpoint)-len("/v1")] + "/healthz"
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-r.done:
-			err := <-r.runErr
-			if err == nil || errors.Is(err, context.Canceled) {
-				return fmt.Errorf("embedded CLIProxyAPI stopped before becoming ready")
-			}
-			return fmt.Errorf("start embedded CLIProxyAPI: %w", err)
-		case <-deadline.C:
-			return fmt.Errorf("embedded CLIProxyAPI did not become ready within 10 seconds")
-		case <-r.started:
-			r.started = nil
-		case <-ticker.C:
-			if r.started != nil {
-				continue
-			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
-			if err != nil {
-				return err
-			}
-			resp, err := client.Do(req)
-			if err == nil {
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					return nil
-				}
-			}
-		}
-	}
-}
-
-func availablePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("reserve local proxy port: %w", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		return 0, fmt.Errorf("release local proxy port: %w", err)
-	}
-	return port, nil
-}
-
 func sessionAPIKey() (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
@@ -973,31 +357,8 @@ func sessionAPIKey() (string, error) {
 	return "ccl-" + hex.EncodeToString(raw), nil
 }
 
-func writeRuntimeConfigData(data []byte) (string, error) {
-	file, err := os.CreateTemp("", "ccl-cliproxy-*.yaml")
-	if err != nil {
-		return "", fmt.Errorf("create embedded proxy config: %w", err)
-	}
-	path := file.Name()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return "", err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return "", err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", err
-	}
-	return path, nil
-}
-
 // normalizeOpenAIBaseURL strips trailing generation paths (/responses,
-// /chat/completions, /models) so CLIProxyAPI config receives an API root.
+// /chat/completions, /models) so the runtime receives an API root.
 func normalizeOpenAIBaseURL(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
 	parsed, err := url.Parse(endpoint)

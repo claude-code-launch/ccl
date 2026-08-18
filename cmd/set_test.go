@@ -274,8 +274,8 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 
 	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	m = next.(*AdvancedConfigModel)
-	if !m.detecting || cmd == nil {
-		t.Fatalf("OAuth model discovery did not start: detecting=%t cmd=%v", m.detecting, cmd)
+	if !m.live().detecting || cmd == nil {
+		t.Fatalf("OAuth model discovery did not start: detecting=%t cmd=%v", m.live().detecting, cmd)
 	}
 
 	next, _ = m.Update(modelFetchDoneMsg{
@@ -286,11 +286,11 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 		discoveredModelsRaw: "gpt-5.6-sol,gpt-5.6-codex",
 	})
 	m = next.(*AdvancedConfigModel)
-	if m.detectionError != nil {
-		t.Fatalf("OAuth discovery result was not accepted: %v", m.detectionError)
+	if m.live().detectionError != nil {
+		t.Fatalf("OAuth discovery result was not accepted: %v", m.live().detectionError)
 	}
-	if !m.autoConfigured || !m.modelPoolFromDiscovery {
-		t.Fatalf("OAuth discovery should auto-configure and stay on the page: auto=%t detected=%t", m.autoConfigured, m.modelPoolFromDiscovery)
+	if !m.live().autoConfigured || !m.live().modelPoolFromDiscovery {
+		t.Fatalf("OAuth discovery should auto-configure and stay on the page: auto=%t detected=%t", m.live().autoConfigured, m.live().modelPoolFromDiscovery)
 	}
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("temporary OAuth runtime values leaked into provider: %+v", p)
@@ -331,7 +331,7 @@ func TestApplyModelDetectionResultFailsWhenDetectionFailsWithoutExistingType(t *
 
 	cmd := m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
 
-	if m.detectionError == nil {
+	if m.live().detectionError == nil {
 		t.Fatalf("expected detection error to be set")
 	}
 	if p.Type != "" {
@@ -357,14 +357,14 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 
 	cmd := m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
 
-	if m.detectionError == nil {
+	if m.live().detectionError == nil {
 		t.Fatalf("expected detection error instead of falling back to existing local models")
 	}
 	if p.Type != "openai" {
 		t.Fatalf("expected provider type to be preserved, got %q", p.Type)
 	}
-	if len(m.modelPool) != 0 {
-		t.Fatalf("expected model pool not to use existing local models, got %v", m.modelPool)
+	if len(m.live().modelPool) != 0 {
+		t.Fatalf("expected model pool not to use existing local models, got %v", m.live().modelPool)
 	}
 	if cmd != nil {
 		t.Fatalf("expected detection failure to stay on page instead of quitting")
@@ -391,13 +391,13 @@ func TestConnectionEditRevertClearsDirty(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 
 	// Simulate a successful detection committing the baseline.
-	m.probeEndpoint = "https://api.example.com/v1"
-	m.probeAPIKey = "test-key"
-	m.modelPool = []string{"gpt-test"}
-	m.modelPoolFromDiscovery = true
+	m.live().probeEndpoint = "https://api.example.com/v1"
+	m.live().probeAPIKey = "test-key"
+	m.live().modelPool = []string{"gpt-test"}
+	m.live().modelPoolFromDiscovery = true
 	m.applyModelDetectionResult("openai", "gpt-test", "", "https://api.example.com/v1", nil)
-	if m.detectionError != nil {
-		t.Fatalf("unexpected detection error: %v", m.detectionError)
+	if m.live().detectionError != nil {
+		t.Fatalf("unexpected detection error: %v", m.live().detectionError)
 	}
 	if !m.canSave() {
 		t.Fatalf("freshly detected connection should be saveable")
@@ -406,14 +406,14 @@ func TestConnectionEditRevertClearsDirty(t *testing.T) {
 	// Edit the endpoint → dirty, save blocked.
 	m.urlInput.SetValue("https://api.example.com/v1/changed")
 	m.refreshConnectionDirty()
-	if !m.connectionDirty || m.canSave() {
-		t.Fatalf("edited endpoint should be dirty and un-saveable: dirty=%t canSave=%t", m.connectionDirty, m.canSave())
+	if !m.live().connectionDirty || m.canSave() {
+		t.Fatalf("edited endpoint should be dirty and un-saveable: dirty=%t canSave=%t", m.live().connectionDirty, m.canSave())
 	}
 
 	// Revert → dirty clears, save allowed again.
 	m.urlInput.SetValue("https://api.example.com/v1")
 	m.refreshConnectionDirty()
-	if m.connectionDirty {
+	if m.live().connectionDirty {
 		t.Fatalf("reverted endpoint should not be dirty")
 	}
 	if !m.canSave() {
@@ -433,7 +433,7 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "model-opus", "model-sonnet", "model-haiku")
-	m.oneMSlots["sonnet"] = true
+	m.live().oneMSlots["sonnet"] = true
 
 	view := m.View().Content
 	// The [1M] badge next to the slot is the whole story now: sizing is per slot
@@ -457,8 +457,8 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
-	m.oneMSlots["opus"], m.oneMSlots["sonnet"] = true, true
-	m.oneMSlots["haiku"], m.oneMSlots["custom"] = true, true
+	m.live().oneMSlots["opus"], m.live().oneMSlots["sonnet"] = true, true
+	m.live().oneMSlots["haiku"], m.live().oneMSlots["custom"] = true, true
 	view := m.View().Content
 	// Only Default and Balanced exist, so old/custom presets are absent.
 	for _, removed := range []string{"300K", "Switch-safe", "Maximum", "Custom (preserve)"} {
@@ -498,19 +498,19 @@ func TestCompactPresetCyclesDefaultAndBalanced(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "model")
 	// Unsupported old/custom settings open on Default and are cleared on save.
-	if m.compactPreset != compactPresetDefault || !hasUnsupportedContextConfig(*m.p) {
-		t.Fatalf("compact preset = %v, want Default with unsupported env", m.compactPreset)
+	if m.live().compactPreset != compactPresetDefault || !hasUnsupportedContextConfig(*m.p) {
+		t.Fatalf("compact preset = %v, want Default with unsupported env", m.live().compactPreset)
 	}
 	m.cursor = m.mainRowIndex(rowContext)
-	m.oneMSlots["opus"] = true
+	m.live().oneMSlots["opus"] = true
 
 	// Right selects Balanced without changing per-slot [1m].
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
 	m = next.(*AdvancedConfigModel)
-	if m.compactPreset != compactPresetBalanced {
-		t.Fatalf("compact preset = %v, want Balanced", m.compactPreset)
+	if m.live().compactPreset != compactPresetBalanced {
+		t.Fatalf("compact preset = %v, want Balanced", m.live().compactPreset)
 	}
-	if !m.oneMSlots["opus"] {
+	if !m.live().oneMSlots["opus"] {
 		t.Fatal("cycling compact must not clear [1m] slots")
 	}
 	if got := m.compactSummary(); got != "Balanced 500K / 400K" {
@@ -520,10 +520,10 @@ func TestCompactPresetCyclesDefaultAndBalanced(t *testing.T) {
 	// Right wraps back to Default.
 	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
 	m = next.(*AdvancedConfigModel)
-	if m.compactPreset != compactPresetDefault {
-		t.Fatalf("compact preset = %v, want Default", m.compactPreset)
+	if m.live().compactPreset != compactPresetDefault {
+		t.Fatalf("compact preset = %v, want Default", m.live().compactPreset)
 	}
-	if !m.oneMSlots["opus"] {
+	if !m.live().oneMSlots["opus"] {
 		t.Fatal("selecting Default must not clear [1m] slots")
 	}
 	view := m.View().Content
@@ -584,14 +584,14 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	// runtime subagent default.
 	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	m = next.(*AdvancedConfigModel)
-	if !m.oneMSlots["subagent"] {
+	if !m.live().oneMSlots["subagent"] {
 		t.Fatal("Subagent 1M option was not enabled")
 	}
 	if p.SubagentModel != "subagent-model" {
 		t.Fatalf("automatic subagent model was not materialized: %q", p.SubagentModel)
 	}
 
-	applyCompactConfig(&p, m.oneMSlots, compactPresetDefault)
+	applyCompactConfig(&p, m.live().oneMSlots, compactPresetDefault)
 	if p.SubagentModel != "subagent-model[1m]" {
 		t.Fatalf("subagent model = %q, want 1M suffix", p.SubagentModel)
 	}
@@ -762,7 +762,7 @@ func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
 	if m.modelTesting {
 		t.Fatal("expected availability test to finish")
 	}
-	if got, want := strings.Join(m.modelPool, ","), "model-available,model-unavailable"; got != want {
+	if got, want := strings.Join(m.live().modelPool, ","), "model-available,model-unavailable"; got != want {
 		t.Fatalf("model pool = %q, want %q", got, want)
 	}
 	if got, want := p.Model, "model-available,model-unavailable"; got != want {
@@ -913,14 +913,14 @@ func TestApplyModelDetectionResultUsesDiscoveredModelsOnly(t *testing.T) {
 
 	_ = m.applyModelDetectionResult("openai", "new-a,new-b", "", "", nil)
 
-	if m.detectionError != nil {
-		t.Fatalf("unexpected detection error: %v", m.detectionError)
+	if m.live().detectionError != nil {
+		t.Fatalf("unexpected detection error: %v", m.live().detectionError)
 	}
 	if p.Model != "new-a,new-b" {
 		t.Fatalf("expected local model pool to be refreshed from API models, got %q", p.Model)
 	}
-	if strings.Join(m.modelPool, ",") != "new-a,new-b" {
-		t.Fatalf("expected selectable model pool to use API models only, got %v", m.modelPool)
+	if strings.Join(m.live().modelPool, ",") != "new-a,new-b" {
+		t.Fatalf("expected selectable model pool to use API models only, got %v", m.live().modelPool)
 	}
 	if m.staleSlotCount() != 2 {
 		t.Fatalf("expected two stale slot mappings, got %d", m.staleSlotCount())

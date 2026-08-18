@@ -1,13 +1,10 @@
 package oauthproxy
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
-
-	cpausage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 // UsageTotals accumulates token counts for one model across a session.
@@ -90,36 +87,6 @@ func (u *UsageTracker) Snapshot() ([]UsageModelTotals, bool) {
 type UsageModelTotals struct {
 	Model string
 	UsageTotals
-}
-
-// cpaUsagePlugin adapts a UsageTracker to CLIProxyAPI's usage.Plugin interface.
-//
-// CLIProxyAPI's executors publish one usage.Record per upstream request/stream
-// regardless of protocol (openai_chat, openai_responses, codex, or any OAuth
-// backend it drives), through the same global manager Runtime.RegisterUsagePlugin
-// hooks into. This is the only place that sees every one of those backends; the
-// alternative would be intercepting each protocol's response body ourselves.
-type cpaUsagePlugin struct {
-	tracker *UsageTracker
-}
-
-// HandleUsage implements usage.Plugin. Failed requests are not counted: a 401 or
-// a rate limit carries no real token cost and would otherwise inflate totals
-// with zero-token entries.
-func (p cpaUsagePlugin) HandleUsage(_ context.Context, record cpausage.Record) {
-	if record.Failed {
-		return
-	}
-	model := strings.TrimSpace(record.Alias)
-	if model == "" {
-		model = record.Model
-	}
-	p.tracker.Add(model,
-		record.Detail.InputTokens,
-		record.Detail.OutputTokens,
-		record.Detail.CacheReadTokens,
-		record.Detail.CacheCreationTokens,
-	)
 }
 
 // FormatUsageSummary renders one line per model plus a total line, in the style
