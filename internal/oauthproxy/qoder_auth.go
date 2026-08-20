@@ -30,7 +30,7 @@ var (
 	qoderCenterBaseURL  = "https://center.qoder.sh"
 	qoderAPIBaseURL     = "https://api3.qoder.sh"
 	qoderPollInterval   = 2 * time.Second
-	qoderBrowserOpener  = openKiroBrowser
+	qoderBrowserOpener  = openBrowser
 )
 
 type qoderDeviceToken struct {

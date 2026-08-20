@@ -28,7 +28,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy> [alias]",
+		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|commandcode> [alias]",
 		Aliases: []string{"auth"},
 		Short:   "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
@@ -45,15 +45,19 @@ Notes:
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
   - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
+  - Command Code opens the official "Get API key" browser page; authorize there,
+    copy the key, and paste it back into the terminal (2-minute window). The
+    non-browser alternative is importing the official CLI's stored key:
+    ccl import commandcode
   - Flags: --no-browser, --callback-port, --kiro-auth
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuth(cmd.Context(), cmd.OutOrStdout(), args, opts)
+			return runAuth(cmd.Context(), cmd.OutOrStdout(), cmd.InOrStdin(), args, opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/Command Code)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	return cmd
 }
@@ -69,7 +73,7 @@ func supportsFastMode(providerName string) bool {
 	}
 }
 
-func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions) error {
+func runAuth(ctx context.Context, out io.Writer, in io.Reader, args []string, opts authOptions) error {
 	target, err := oauthproxy.ValidateLoginProvider(args[0])
 	if err != nil {
 		return err
@@ -81,11 +85,8 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	var alias string
 	if len(args) > 1 {
 		alias = strings.TrimSpace(args[1])
-		if isReservedProviderName(alias) {
-			return fmt.Errorf("alias %q collides with a reserved provider name; choose a different alias", alias)
-		}
-		if alias == "" {
-			return fmt.Errorf("alias cannot be empty")
+		if err := validateProviderAlias(alias); err != nil {
+			return err
 		}
 	}
 
@@ -94,15 +95,47 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 		NoBrowser:    opts.noBrowser,
 		CallbackPort: opts.callbackPort,
 		KiroAuthMode: opts.kiroAuthMode,
+		Stdin:        in,
 	})
 	if err != nil {
 		return fmt.Errorf("authenticate %s: %w", target, err)
 	}
 
-	// Every login produces an independent provider entry. With an explicit
-	// alias it becomes the provider key; without one we derive one from the
-	// credential file so multiple accounts on the same backend never overwrite
-	// each other.
+	providerName, p, err := activateProvider(target, alias, result)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "Authenticated %s as provider %q and switched active provider.\n", target, providerName)
+	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
+	if target == oauthproxy.ProviderCopilot {
+		fmt.Fprintln(out, "Protocol: automatic (Responses / Chat Completions / Anthropic Messages per model)")
+	} else {
+		fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
+	}
+	if supportsFastMode(target) {
+		fmt.Fprintf(out, "Fast: %s (toggle with /fast or ccl set Review & Apply)\n", providerFastSummary(p))
+	}
+	return nil
+}
+
+// validateProviderAlias checks an explicit provider alias before any login or
+// import work runs, so a bad alias never wastes an upstream round-trip.
+func validateProviderAlias(alias string) error {
+	if isReservedProviderName(alias) {
+		return fmt.Errorf("alias %q collides with a reserved provider name; choose a different alias", alias)
+	}
+	if alias == "" {
+		return fmt.Errorf("alias cannot be empty")
+	}
+	return nil
+}
+
+// activateProvider persists a freshly created credential as an active
+// provider. Every login produces an independent provider entry: an explicit
+// alias becomes the provider key, otherwise one is derived from the credential
+// file so multiple accounts on the same backend never overwrite each other.
+func activateProvider(target, alias string, result oauthproxy.LoginResult) (string, provider.Provider, error) {
 	providerName := alias
 	if providerName == "" {
 		providerName = derivedProviderName(target, result.Path)
@@ -111,7 +144,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("load ccl config: %w", err)
+		return "", provider.Provider{}, fmt.Errorf("load ccl config: %w", err)
 	}
 	p, targetExists := cfg.Providers[providerName]
 	// GPT migrates the legacy "codex" OAuth provider alias when no explicit
@@ -128,20 +161,9 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	cfg.Providers[providerName] = p
 	cfg.ActiveProvider = providerName
 	if err := config.Save(cfg); err != nil {
-		return fmt.Errorf("save OAuth provider: %w", err)
+		return "", provider.Provider{}, fmt.Errorf("save OAuth provider: %w", err)
 	}
-
-	fmt.Fprintf(out, "Authenticated %s as provider %q and switched active provider.\n", target, providerName)
-	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
-	if target == oauthproxy.ProviderCopilot {
-		fmt.Fprintln(out, "Protocol: automatic (Responses / Chat Completions / Anthropic Messages per model)")
-	} else {
-		fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
-	}
-	if supportsFastMode(target) {
-		fmt.Fprintf(out, "Fast: %s (toggle with /fast or ccl set Review & Apply)\n", providerFastSummary(p))
-	}
-	return nil
+	return providerName, p, nil
 }
 
 // configureOAuthProvider normalizes the provider created or refreshed by login
@@ -182,7 +204,8 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderQoder,
 		oauthproxy.ProviderKimi,
 		oauthproxy.ProviderKiro,
-		oauthproxy.ProviderWorkBuddy:
+		oauthproxy.ProviderWorkBuddy,
+		oauthproxy.ProviderCommandCode:
 		return true
 	default:
 		return false

@@ -83,7 +83,7 @@ func loginGemini(ctx context.Context, authDir string, opts LoginOptions) (LoginR
 	}.Encode()
 	fmt.Printf("Open %s to authorize Gemini\n", authURL)
 	if !opts.NoBrowser {
-		_ = openKiroBrowser(authURL)
+		_ = openBrowser(authURL)
 	}
 	fmt.Println("Waiting for Gemini authentication callback...")
 

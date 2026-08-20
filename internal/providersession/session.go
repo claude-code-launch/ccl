@@ -34,13 +34,16 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 	session := &Session{
 		Provider: resolved,
 		BaseURL:  resolved.Endpoint,
-		UseProxy: provider.IsOpenAICompatibleType(resolved.Type) || provider.IsModelsDevType(resolved.Type) || strings.TrimSpace(resolved.OAuthProvider) != "",
+		UseProxy: provider.IsOpenAICompatibleType(resolved.Type) || provider.IsModelsDevType(resolved.Type) ||
+			provider.IsCommandCodeType(resolved.Type) || strings.TrimSpace(resolved.OAuthProvider) != "",
 	}
 	if !session.UseProxy {
 		return session, nil
 	}
 
-	if resolved.OAuthProvider == "" && strings.TrimSpace(resolved.Model) == "" {
+	// Command Code has no OpenAI /v1/models upstream; its catalog is owned by the
+	// runtime and fills the session model pool when it starts.
+	if resolved.OAuthProvider == "" && strings.TrimSpace(resolved.Model) == "" && !provider.IsCommandCodeType(resolved.Type) {
 		models, err := protocol.GetOpenAIModels(resolved.Endpoint, resolved.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("discover OpenAI models before starting CLIProxyAPI: %w", err)
@@ -73,6 +76,9 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 }
 
 func upstreamProtocol(p provider.Provider) oauthproxy.UpstreamProtocol {
+	if provider.IsCommandCodeType(p.Type) {
+		return oauthproxy.ProtocolCommandCode
+	}
 	if provider.IsOpenAIResponsesType(p.Type) {
 		return oauthproxy.ProtocolOpenAIResponses
 	}

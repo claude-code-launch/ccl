@@ -78,7 +78,7 @@ func loginCodex(ctx context.Context, authDir string, opts LoginOptions) (LoginRe
 	}.Encode()
 	fmt.Printf("Open %s to authorize Codex\n", authURL)
 	if !opts.NoBrowser {
-		_ = openKiroBrowser(authURL)
+		_ = openBrowser(authURL)
 	}
 	fmt.Println("Waiting for Codex authentication callback...")
 

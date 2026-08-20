@@ -77,6 +77,7 @@ type UpstreamProtocol string
 const (
 	ProtocolOpenAIChat      UpstreamProtocol = "openai_chat"
 	ProtocolOpenAIResponses UpstreamProtocol = "openai_responses"
+	ProtocolCommandCode     UpstreamProtocol = "commandcode"
 )
 
 type StartOptions struct {
@@ -136,6 +137,8 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		return StartOpenAIChatAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	case ProtocolOpenAIResponses:
 		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
+	case ProtocolCommandCode:
+		return StartCommandCodeAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -173,6 +176,9 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	}
 	if backend == ProviderKimi {
 		return startKimiOAuth(parent, modelSpec, credentialFile)
+	}
+	if backend == ProviderCommandCode {
+		return startCommandCodeOAuth(parent, modelSpec, credentialFile)
 	}
 	if backend == backendAntigravity {
 		return startAntigravityOAuth(parent, modelSpec, credentialFile)
@@ -220,6 +226,25 @@ func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, m
 	}
 	LogInfof("runtime start codex_responses auth=api_key endpoint=%q local_endpoint=%q model_count=%d",
 		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(routes))
+	return proxyRuntime, nil
+}
+
+// StartCommandCodeAPI starts CCL's self-owned Command Code data plane against a
+// Command Code API key. Conversion, NDJSON/SSE handling, identity headers, the
+// fingerprint/lifecycle handshake, error mapping, and usage accounting are all
+// owned by CCL and cannot change with a CLIProxyAPI upgrade. modelSpec is
+// accepted for StartOptions symmetry only: the runtime serves the authoritative
+// 26-model catalog and never rewrites requested model IDs.
+func StartCommandCodeAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	proxyRuntime, err := startCommandCodeRuntime(parent, endpoint, upstreamAPIKey)
+	if err != nil {
+		return nil, err
+	}
+	LogInfof("runtime start commandcode endpoint=%q local_endpoint=%q model_count=%d",
+		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(proxyRuntime.Models()))
 	return proxyRuntime, nil
 }
 

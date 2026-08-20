@@ -340,22 +340,23 @@ func unsupportedProtocolResult(failures []modelProbeFailure) protocolDetectionRe
 	if reason != "" {
 		setDebugf("detect failed summary=%q", reason)
 		return protocolDetectionResult{err: fmt.Errorf("%s: %s", locale.T(
-			"暂不支持这个协议：Anthropic 与 OpenAI 模型列表均获取失败",
-			"unsupported protocol: both Anthropic and OpenAI model-list probes failed",
+			"暂不支持这个协议：Anthropic、OpenAI 模型列表与 Command Code 握手探测均失败",
+			"unsupported protocol: Anthropic, OpenAI, and Command Code probes all failed",
 		), reason)}
 	}
 	return protocolDetectionResult{err: fmt.Errorf("%s", locale.T(
-		"暂不支持这个协议：Anthropic 与 OpenAI 模型列表均获取失败",
-		"unsupported protocol: both Anthropic and OpenAI model-list probes failed",
+		"暂不支持这个协议：Anthropic、OpenAI 模型列表与 Command Code 握手探测均失败",
+		"unsupported protocol: Anthropic, OpenAI, and Command Code probes all failed",
 	))}
 }
 
 type modelListShape string
 
 const (
-	modelListShapeUnknown   modelListShape = ""
-	modelListShapeOpenAI    modelListShape = "openai"
-	modelListShapeAnthropic modelListShape = "anthropic"
+	modelListShapeUnknown     modelListShape = ""
+	modelListShapeOpenAI      modelListShape = "openai"
+	modelListShapeAnthropic   modelListShape = "anthropic"
+	modelListShapeCommandCode modelListShape = "commandcode"
 )
 
 type modelListDetection struct {
@@ -374,8 +375,9 @@ const (
 type modelProbeExpectation string
 
 const (
-	modelProbeExpectOpenAI    modelProbeExpectation = "openai-compatible"
-	modelProbeExpectAnthropic modelProbeExpectation = "anthropic-native"
+	modelProbeExpectOpenAI      modelProbeExpectation = "openai-compatible"
+	modelProbeExpectAnthropic   modelProbeExpectation = "anthropic-native"
+	modelProbeExpectCommandCode modelProbeExpectation = "commandcode"
 )
 
 type modelProbeCandidate struct {
@@ -401,13 +403,23 @@ func buildModelProbeCandidates(endpoint string) []modelProbeCandidate {
 		}
 	}
 	modelsURL := protocol.NormalizeOpenAIModelsURL(baseURL)
+	// Command Code has no /v1/models route; it is recognized by its handshake
+	// endpoint once both OpenAI-shaped candidates fail. It is only offered on
+	// the generic base-URL shape — a path hint of /claude or /anthropic is a
+	// deliberate Anthropic gateway choice.
 	return []modelProbeCandidate{
 		{name: "openai-path-bearer", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthBearer, expect: modelProbeExpectOpenAI},
 		{name: "openai-path-x-api-key", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthXAPIKey, expect: modelProbeExpectAnthropic},
+		{name: "commandcode-path-bearer", modelsURL: baseURL, baseURL: baseURL, auth: modelProbeAuthBearer, expect: modelProbeExpectCommandCode},
 	}
 }
 
 func classifyModelProbeResult(candidate modelProbeCandidate, result modelListDetection) (protocolDetectionResult, bool) {
+	if result.shape == modelListShapeCommandCode && candidate.expect == modelProbeExpectCommandCode {
+		setDebugf("detect selected commandcode model_count=%d shape=%q probe=%s base_url=%q", countCSV(result.models), result.shape, candidate.name, candidate.baseURL)
+		return protocolDetectionResult{protocol: "commandcode", models: result.models, modelInfos: result.modelInfos, baseURL: candidate.baseURL}, true
+	}
+
 	if result.shape == modelListShapeAnthropic {
 		auth := anthropicAuthXAPIKey
 		if candidate.auth == modelProbeAuthBearer {
@@ -436,6 +448,9 @@ func fetchCandidateModelsForDetection(candidate modelProbeCandidate, apiKey stri
 	if strings.TrimSpace(apiKey) == "" {
 		return modelListDetection{}, errors.New(locale.T("api key 不能为空", "api key is empty"))
 	}
+	if candidate.expect == modelProbeExpectCommandCode {
+		return fetchCommandCodeModelsForDetection(candidate, apiKey)
+	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, candidate.modelsURL, nil)
 	if err != nil {
 		return modelListDetection{}, err
@@ -449,6 +464,34 @@ func fetchCandidateModelsForDetection(candidate modelProbeCandidate, apiKey stri
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return fetchModelListForDetection(req, 8*time.Second)
+}
+
+// fetchCommandCodeModelsForDetection recognizes the Command Code gateway by its
+// identity route: the lightweight GET /alpha/whoami answers first, and only a
+// transport failure falls back to the reference-shaped POST
+// /alpha/fingerprint/record handshake. OpenAI and Anthropic model-list probes
+// 404 against the fallback route, so a 2xx response confirms the gateway and
+// unlocks the runtime's authoritative catalog; 401/403 surface as an
+// invalid-key failure like the OpenAI probe's 401.
+func fetchCommandCodeModelsForDetection(candidate modelProbeCandidate, apiKey string) (modelListDetection, error) {
+	status, preview, err := oauthproxy.CommandCodeProbeInit(context.Background(), candidate.baseURL, apiKey, 8*time.Second)
+	if err != nil {
+		return modelListDetection{}, err
+	}
+	if status >= 200 && status < 300 {
+		infos := oauthproxy.CommandCodeModelCatalog()
+		ids := make([]string, 0, len(infos))
+		for _, info := range infos {
+			ids = append(ids, info.ID)
+		}
+		setDebugf("detect commandcode handshake ok status=%d model_count=%d", status, len(ids))
+		return modelListDetection{models: strings.Join(ids, ","), modelInfos: infos, shape: modelListShapeCommandCode}, nil
+	}
+	return modelListDetection{}, modelProbeHTTPError{
+		statusCode: status,
+		status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		preview:    preview,
+	}
 }
 
 func endpointHasVersionSuffix(endpoint string) bool {

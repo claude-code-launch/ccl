@@ -14,7 +14,7 @@ func providerAuthLabel(p provider.Provider) string {
 	if p.OAuthProvider != "" {
 		return "oauth/" + p.OAuthProvider
 	}
-	if provider.IsOpenAICompatibleType(p.Type) {
+	if provider.IsOpenAICompatibleType(p.Type) || provider.IsCommandCodeType(p.Type) {
 		return "bearer"
 	}
 	if provider.IsAnthropicType(p.Type) {
@@ -93,7 +93,7 @@ func providerOneMSummary(p provider.Provider) string {
 }
 
 func setProviderAuthHeaders(req *http.Request, p provider.Provider) {
-	if provider.IsOpenAICompatibleType(p.Type) {
+	if provider.IsOpenAICompatibleType(p.Type) || provider.IsCommandCodeType(p.Type) {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
 		return
 	}

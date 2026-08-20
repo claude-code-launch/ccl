@@ -35,9 +35,9 @@ func hasUnsupportedContextConfig(p provider.Provider) bool {
 func compactPresetLabel(preset compactPreset) string {
 	switch preset {
 	case compactPresetBalanced:
-		return "Balanced 500K / 400K"
+		return "Balanced 500K / 1M & 80%"
 	default:
-		return "Default (Claude Code 200K / 1M)"
+		return "Default  200K / 1M & 80%"
 	}
 }
 

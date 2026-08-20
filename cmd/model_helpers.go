@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -20,6 +21,11 @@ func fetchModelsForProvider(p provider.Provider) []string {
 }
 
 func fetchModelInfosForProvider(p provider.Provider) []protocol.ModelInfo {
+	if provider.IsCommandCodeType(p.Type) {
+		// The Command Code gateway has no upstream model list; the runtime's
+		// static catalog is the authoritative one for the whole CLI as well.
+		return oauthproxy.CommandCodeModelCatalog()
+	}
 	var infos []protocol.ModelInfo
 	var err error
 	if provider.IsOpenAICompatibleType(p.Type) {

@@ -26,7 +26,7 @@ const (
 
 var (
 	workbuddyBaseURL       = workbuddyDefaultBaseURL
-	workbuddyBrowserOpener = openKiroBrowser
+	workbuddyBrowserOpener = openBrowser
 	workbuddyPollInterval  = time.Second
 	workbuddyLoginTimeout  = 5 * time.Minute
 	workbuddyHTTPTimeout   = 30 * time.Second

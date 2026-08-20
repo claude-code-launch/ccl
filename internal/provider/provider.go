@@ -137,6 +137,8 @@ func OAuthRuntimeType(oauthProvider string) (string, bool) {
 		return "openai", true
 	case "kiro", "qoder":
 		return "anthropic", true
+	case "commandcode":
+		return "commandcode", true
 	default:
 		return "", false
 	}
@@ -176,6 +178,8 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "kiro"
 	case "workbuddy":
 		return "workbuddy"
+	case "commandcode":
+		return "commandcode"
 	default:
 		return ""
 	}
@@ -206,6 +210,12 @@ func IsAnthropicType(providerType string) bool {
 // single provider-level Type.
 func IsModelsDevType(providerType string) bool {
 	return strings.EqualFold(strings.TrimSpace(providerType), "modelsdev")
+}
+
+// IsCommandCodeType reports whether the provider is the Command Code API-key
+// gateway, served by ccl's own /alpha/generate data plane.
+func IsCommandCodeType(providerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(providerType), "commandcode")
 }
 
 // ProtocolForAISdkNPM maps a models.dev AI SDK package to ccl's provider Type
@@ -280,6 +290,8 @@ func ProtocolLabel(providerType string) string {
 		return ""
 	case IsModelsDevType(trimmed):
 		return "models.dev (auto)"
+	case IsCommandCodeType(trimmed):
+		return "commandcode"
 	case IsOpenAIResponsesType(trimmed):
 		return "openai(responses)"
 	case IsAnthropicType(trimmed):

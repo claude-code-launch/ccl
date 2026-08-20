@@ -26,7 +26,7 @@ var (
 	copilotGitHubBaseURL    = "https://github.com"
 	copilotGitHubAPIBaseURL = "https://api.github.com"
 	copilotOAuthPollFloor   = time.Second
-	copilotBrowserOpener    = openKiroBrowser
+	copilotBrowserOpener    = openBrowser
 )
 
 type copilotDeviceAuthorization struct {

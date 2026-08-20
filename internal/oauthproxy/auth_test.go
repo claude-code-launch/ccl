@@ -44,7 +44,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderCommandCode} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}
@@ -56,6 +56,34 @@ func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
 		if _, err := ValidateLoginProvider(name); err == nil {
 			t.Fatalf("ValidateLoginProvider(%q) should fail", name)
 		}
+	}
+}
+
+func TestImportCredentialOnlyAcceptsCommandCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".ccl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	official := filepath.Join(home, ".commandcode", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(official), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(official, []byte(`{"apiKey":"user_import_key"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COMMANDCODE_API_URL", "http://127.0.0.1:1")
+
+	// OAuth backends never ride the import path.
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, "unknown", ""} {
+		if _, err := ImportCredential(context.Background(), name); err == nil {
+			t.Fatalf("ImportCredential(%q) should fail", name)
+		}
+	}
+	// The unreachable upstream means a valid import dies at validation, not at
+	// the import-dispatch layer, which proves commandcode is accepted.
+	if _, err := ImportCredential(context.Background(), ProviderCommandCode); err == nil {
+		t.Fatal("ImportCredential(commandcode) against an unreachable upstream should still fail validation")
 	}
 }
 

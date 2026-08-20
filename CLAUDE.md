@@ -32,7 +32,7 @@ HOME="$CCL_TEST_HOME" /tmp/ccl-verify models --all
 ### 命令分派与配置
 
 - `cmd/root.go` 的 `cmd.Execute` 先判断首个参数是否为 ccl 自己注册的命令。未知首个参数会被当作 Claude Code 参数透传；字面量首参 `claude` 会被去掉后再透传。因此测试命令分派时不要随意运行会启动真实 Claude Code 会话的参数。
-- `cmd/` 负责命令语义、provider 管理、OAuth/cloud 命令和 Bubble Tea TUI；协议转换与凭据刷新应放在 `internal` 包，不要堆入 Cobra handler。TUI 用的是私有域 `charm.land/bubbletea/v2`（连同 `charm.land/bubbles/v2`、`charm.land/lipgloss/v2`），不是公开的 `github.com/charmbracelet/bubbletea`；`cmd/advanced_config.go` 是单页配置面板，`cmd/select.go` 的 `runSelect` 是通用过滤式选择器。
+- `cmd/` 负责命令语义、provider 管理、OAuth/cloud 命令和 Bubble Tea TUI；协议转换与凭据刷新应放在 `internal` 包，不要堆入 Cobra handler。TUI 使用私有域 `charm.land/bubbletea/v2`（连同 `charm.land/bubbles/v2`、`charm.land/lipgloss/v2`），不是公开的 `github.com/charmbracelet/bubbletea`；`cmd/advanced_config.go` 是单页配置面板，`cmd/select.go` 的 `runSelect` 是通用过滤式选择器。
 - `internal/config` 读写 `~/.ccl/config.yaml`，兼容迁移旧 `~/.cc/config.yaml`，读取时迁移旧字段，并以原子写入和 `0600` 权限保存。
 - `internal/provider.Provider` 是持久化配置模型：包含 protocol/type、endpoint、模型池、Opus/Sonnet/Haiku/Custom/Subagent 槽位、OAuth provider/credential 绑定和 provider 级环境变量。`internal/providersession.Session` 使用它的副本；会话临时 endpoint、随机 key 和模型目录不能写回配置。
 - `cmd/root.go` 中已有 active provider 时配置优先于环境变量；只有没有 active provider 时才回退到 `ANTHROPIC_*` / `OPENAI_*` 环境变量。
@@ -64,7 +64,8 @@ Claude Code 始终以 Anthropic Messages 请求进入。`internal/providersessio
 - `qoder`：CCL 直接处理浏览器 OAuth、refresh、COSY/WAF 编码、模型发现和 Qoder SSE → Anthropic Messages；不调用或探测 `qodercli`。
 - `kiro`：CCL 直接处理 Portal PKCE/Builder ID、credential refresh、模型目录、Messages → Amazon Q、限流轮换/重试和 AWS EventStream → Messages。
 - `workbuddy`：CCL 直接处理网页登录轮询、credential refresh、`/v3/config` 模型目录与身份/会话头注入；Messages ↔ Chat Completions 复用 `chatCompletionsService`；401/403 后刷新一次。
-- 订阅 `claude`（Anthropic OAuth）已移除：`ccl oauth` 只接受 gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy（`ValidateLoginProvider`）。
+- `commandcode`：CCL 自带 `/alpha/generate` NDJSON 数据面（`commandcode_*.go`）：Messages → NDJSON 转换、设备指纹/生命周期握手（首个请求前并行 POST `/alpha/fingerprint/record` 与 `/alpha/lifecycle-events`，生命周期事件上报 `cli_session_exists` + 设备身份）、错误映射（402→429、403→401、429 带 `Retry-After: 30`）和静态模型目录。凭据路径：API-key provider（bearer）、`ccl oauth commandcode`（模拟官方 CLI login：打开 studio "Get API key" 页，key 经 loopback `/callback` 或手动粘贴回收，`/alpha/whoami` 验证后存 `~/.ccl/auth/commandcode.json`），或 `ccl import commandcode` 导入官方 CLI 的长期 key（读 `~/.commandcode/auth.json` → 同样 `/alpha/whoami` 验证）。endpoint 解析 `COMMANDCODE_API_URL` 环境覆盖（provider 配置 > env > 默认）。详情见 `internal/oauthproxy/doc.go`，绝不把 Command Code 流量路由到第三方代理。
+- 订阅 `claude`（Anthropic OAuth）已移除：`ccl oauth` 只接受 gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|commandcode（`ValidateLoginProvider`）；Command Code 的浏览器登录即官方 CLI login 的模拟（回调 + 粘贴双路径），非浏览器替代是 `ccl import commandcode`（`ImportCredential`）。
 
 `internal/oauthproxy/doc.go` 是数据面归属的权威清单（Codex Responses、Copilot、Qoder、Kiro、WorkBuddy、native passthrough、会话凭据约束），把它当作回归 checklist，不要把任何 provider 路由回 CLIProxyAPI。所有 runtime 只绑定 `127.0.0.1` 并使用每会话随机 key；`Runtime.Stop` 先取消并等待 serve 退出，超时后才强制 Shutdown。错误恢复跟随数据面 owner：Codex/Grok/Kimi 401 后刷新一次，WorkBuddy 401/403 后刷新一次，Gemini 网络错误/429/5xx 回退控制面 base，Kiro 先轮换凭据再按 1/2/4 秒重试突发 429；其余 403/429/5xx 保留原状态与 `Retry-After`，不做全局重试。
 
@@ -85,7 +86,7 @@ Claude Code 始终以 Anthropic Messages 请求进入。`internal/providersessio
 - 未知首参会被透传给 Claude Code 并启动一次真实会话。`ccl list` 不是有效命令（正确是 `ccl ls`），`ccl "provider --help"` 这类误引用也不会报错而是进会话。
 - 裸 `ccl lang`、`ccl set`、`ccl use`、`ccl map`（无参数/flag）是交互式 TUI/提示，别在非交互环境跑；`ccl lang` 尤其会改写 `~/.ccl/config.yaml`。
 - `~/.ccl/config.yaml` 与 `~/.ccl/auth/*.json` 含明文 API key/refresh token，验证输出前要 whitelist/redact，不要整段 echo。
-- 隔离验证用临时 `HOME`（见上方命令），TUI 表面用 `tmux` 驱动——仓库自带 `.claude/skills/verify`，描述了完整流程（隔离 HOME + 假凭据 + tmux send-keys/capture-pane 取证，绝不指向真实 `~/.ccl`）。
+- 隔离验证用临时 `HOME`（见上方命令），TUI 界面用 `tmux` 驱动——仓库自带 `.claude/skills/verify`，描述了完整流程（隔离 HOME + 假凭据 + tmux send-keys/capture-pane 取证，绝不指向真实 `~/.ccl`）。
 
 改动协议 adapter 边界（converter、SSE、错误映射、credential 刷新、runtime 生命周期）后至少运行：
 

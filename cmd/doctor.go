@@ -536,6 +536,8 @@ func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, a
 		wire = "openai_responses"
 	case provider.IsModelsDevType(providerType):
 		wire = probeProtocolForModel(protocols, model)
+	case provider.IsCommandCodeType(providerType):
+		wire = "commandcode"
 	}
 	return testSingleModelForProtocolContext(ctx, model, endpoint, apiKey, wire, anthropicAuth, timeout)
 }
@@ -564,6 +566,10 @@ func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, api
 		return testSingleAnthropicModelWithAuthContext(ctx, model, endpoint, apiKey, anthropicAuth, timeout)
 	case "openai_responses":
 		return testSingleOpenAIResponsesModelContext(ctx, model, endpoint, apiKey, timeout)
+	case "commandcode":
+		// Command Code exposes no upstream model probe; the runtime's static
+		// catalog is the authority, so availability is catalog membership.
+		return oauthproxy.CommandCodeSupportsModel(model)
 	default:
 		return testSingleOpenAIModelContext(ctx, model, endpoint, apiKey, timeout)
 	}

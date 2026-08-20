@@ -60,7 +60,7 @@ func loginKimi(ctx context.Context, authDir string, opts LoginOptions) (LoginRes
 	}
 	fmt.Printf("Open %s and enter code %s\n", device.VerificationURI, device.UserCode)
 	if !opts.NoBrowser {
-		_ = openKiroBrowser(verificationURL)
+		_ = openBrowser(verificationURL)
 	}
 	fmt.Println("Waiting for authorization...")
 	token, err := pollKimiToken(ctx, client, deviceID, device)

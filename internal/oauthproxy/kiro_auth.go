@@ -46,7 +46,7 @@ var (
 		return "https://prod." + region + ".auth.desktop.kiro.dev"
 	}
 	kiroPortalSignInEndpoint = "https://app.kiro.dev/signin"
-	kiroBrowserOpener        = openKiroBrowser
+	kiroBrowserOpener        = openBrowser
 )
 
 var kiroCallbackPorts = []int{3128, 4649, 6588, 8008, 9091, 49153, 50153, 51153, 52153, 53153}
@@ -565,7 +565,7 @@ func kiroPostJSONRaw(ctx context.Context, client *http.Client, endpoint string, 
 	return resp.StatusCode, responseBody, nil
 }
 
-func openKiroBrowser(target string) error {
+func openBrowser(target string) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":

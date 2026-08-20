@@ -70,7 +70,7 @@ func loginXai(ctx context.Context, authDir string, opts LoginOptions) (LoginResu
 	}
 	fmt.Printf("Open %s and enter code %s\n", device.VerificationURI, device.UserCode)
 	if !opts.NoBrowser {
-		_ = openKiroBrowser(verificationURL)
+		_ = openBrowser(verificationURL)
 	}
 	fmt.Println("Waiting for authorization...")
 	token, err := pollXaiToken(ctx, client, discovery.TokenEndpoint, device)

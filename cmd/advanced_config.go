@@ -1496,6 +1496,8 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 		switch {
 		case provider.IsAnthropicType(m.p.Type):
 			return "Anthropic"
+		case provider.IsCommandCodeType(m.p.Type):
+			return "Command Code"
 		case provider.IsOpenAICompatibleType(m.p.Type):
 			return "OpenAI"
 		}
@@ -1506,24 +1508,30 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 	return "OpenAI"
 }
 
-// canToggleOpenAIProtocol is true when the provider is a manual OpenAI-compatible
-// API-key endpoint. OAuth backends ignore options.Protocol in StartProvider and
-// always use their fixed Chat/Responses path, so the page must not offer
-// a toggle that only changes a label.
+// canToggleOpenAIProtocol is true when the provider is a manual API-key endpoint
+// in the toggleable protocol cycle (openai → openai_responses → commandcode).
+// OAuth backends ignore options.Protocol in StartProvider and always use their
+// fixed Chat/Responses path, so the page must not offer a toggle that only
+// changes a label.
 func (m *AdvancedConfigModel) canToggleOpenAIProtocol() bool {
-	if m.p == nil || !provider.IsOpenAICompatibleType(m.p.Type) {
+	if m.p == nil || (!provider.IsOpenAICompatibleType(m.p.Type) && !provider.IsCommandCodeType(m.p.Type)) {
 		return false
 	}
 	return strings.TrimSpace(m.p.OAuthProvider) == ""
 }
 
+// toggleOpenAIProtocol cycles the manual gateway type through
+// openai(chat) → openai(responses) → commandcode → openai(chat).
 func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
 	if !m.canToggleOpenAIProtocol() {
 		return
 	}
-	if provider.IsOpenAIResponsesType(m.p.Type) {
+	switch {
+	case provider.IsCommandCodeType(m.p.Type):
 		m.p.Type = "openai"
-	} else {
+	case provider.IsOpenAIResponsesType(m.p.Type):
+		m.p.Type = "commandcode"
+	default:
 		m.p.Type = "openai_responses"
 	}
 	setDebugf("protocol toggled type=%q label=%q", m.p.Type, provider.ProtocolLabel(m.p.Type))

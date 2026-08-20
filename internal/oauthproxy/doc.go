@@ -5,8 +5,9 @@
 // OpenAI Chat (manual API-key providers, Grok, Kimi, WorkBuddy, and Copilot Chat
 // models), the native-Anthropic Messages passthrough (models.dev
 // @ai-sdk/anthropic models and Copilot native-Messages models), and Gemini
-// (Antigravity conversion). Copilot's mixed catalog, Kiro, and Qoder run
-// entirely on CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
+// (Antigravity conversion). Copilot's mixed catalog, Kiro, Qoder, and
+// Command Code (a direct /alpha/generate NDJSON data plane) run entirely on
+// CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
 // this package altogether. CLIProxyAPI is no longer a dependency.
 //
 // Error recovery follows the data-plane owner. CCL-owned data planes refresh
@@ -58,7 +59,20 @@
 //     (static key). It resolves the upstream credential and refreshes once
 //     after a 401.
 //
-//  7. Session credentials
+//  7. Command Code direct runtime (commandcode_*.go)
+//     CCL owns the /alpha/generate NDJSON conversion, client identity, device
+//     registration handshake, error mapping, usage accounting, and the static
+//     model catalog. Command Code answers are surfaced as Anthropic Messages
+//     text blocks so the protocol gap is invisible to Claude Code. Credentials
+//     arrive on two paths: `ccl oauth commandcode` mirrors the official CLI
+//     login (open the studio "Get API key" page, accept the key back through
+//     the loopback callback or as a manual paste, validate via /alpha/whoami),
+//     and `ccl import commandcode` reads the official CLI's long-lived key from
+//     ~/.commandcode/auth.json and validates it the same way. Both store the
+//     result under ~/.ccl/auth/commandcode.json.
+//     Do not route Command Code traffic through a third-party proxy.
+//
+//  8. Session credentials
 //     All runtimes bind 127.0.0.1 only and use a random per-session API key
 //     that is never written back to ~/.ccl/config.yaml. OAuth credentials live
 //     under ~/.ccl/auth and are filtered per backend so multi-login providers do
