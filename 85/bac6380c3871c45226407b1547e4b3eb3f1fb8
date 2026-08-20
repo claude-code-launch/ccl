@@ -1,0 +1,193 @@
+cmd/auth_test.go
+  s_0b9722801eabd2::t_e12e2e64a4a182 48,77,116,150,167,207,231,258,301,328,356,380,405,429,442,469,491,530,670,697
+cmd/provider_config_helpers.go
+  s_bf87a4df69c3dd::t_d9b8f905fd7548 38,40
+internal/oauthproxy/runtime.go
+  s_0b9722801eabd2::t_a13490db117308 80
+  s_0b9722801eabd2::t_79f21f323dd585 140-141
+  s_0b9722801eabd2::t_d9e4efbee5a94c 232-250
+  s_0b9722801eabd2::t_289beead881ed0 180-182
+internal/oauthproxy/commandcode_stream.go
+  s_0b9722801eabd2::t_ecf8110b2ecf52 147
+  s_0b9722801eabd2::t_d25b021ab3e6ac 1-34,41-146
+  s_0b9722801eabd2::t_399b6a3e80fdb3 35-40
+internal/provider/provider.go
+  s_0b9722801eabd2::t_96f596e11666c0 215-220
+  s_0b9722801eabd2::t_b926872f49247a 293-294
+  s_0b9722801eabd2::t_7071c4ada73bc0 140-141
+  s_0b9722801eabd2::t_8d542b4be2ed55 181-182
+cmd/advanced_config.go
+  s_0b9722801eabd2::t_903968b54ede8b 1499-1500,1511-1515,1517,1523-1524,1529-1530,1532-1534
+internal/oauthproxy/auth_test.go
+  s_0b9722801eabd2::t_f5e74035b98a34 62-87
+  s_0b9722801eabd2::t_501ff1da9a7c24 47
+  s_0b9722801eabd2::t_96d3d83bf659e6 88-89
+internal/oauthproxy/copilot_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 29
+internal/oauthproxy/commandcode_runtime_test.go
+  s_0b9722801eabd2::t_af13d5eb7d0b10 365-368,381-382,395,403,408-410
+  s_0b9722801eabd2::t_7831d113852c70 545,551,554
+  s_0b9722801eabd2::t_a820a80216cdb6 641
+  s_0b9722801eabd2::t_33ed137becd348 514
+  s_0b9722801eabd2::t_ee36c55390ae5b 578-585,592-599,606-607,621-631,633-636
+  s_0b9722801eabd2::t_c619e4f5a32640 1-364,369-380,383-394,396-402,404-407,411-513,515-544,546-550,552-553,555-577,586-591,600-605,608-620,632,637-640
+internal/oauthproxy/commandcode_runtime.go
+  s_0b9722801eabd2::t_4e2a8c5093d159 30
+  s_0b9722801eabd2::t_74e105db021343 16
+  s_0b9722801eabd2::t_ff1b954a906f24 1-15,17-22,24-29,31-48,62-135,137-465,534-643,667-879
+  s_0b9722801eabd2::t_53651bba709bf9 49-61
+  s_0b9722801eabd2::t_c72236bce66ca0 136
+  s_0b9722801eabd2::t_e527969f81e667 466-473,478-482,491,499,507-529
+  s_0b9722801eabd2::t_60c1745045aeaa 474-477,483-490,492-498,500-506,530-533
+  s_0b9722801eabd2::t_d3b5026c1232d4 644-666
+  s_0b9722801eabd2::t_ecf8110b2ecf52 880
+  s_0b9722801eabd2::t_96b7abd15bc93e 23
+cmd/model_helpers.go
+  s_0b9722801eabd2::t_9fb61586c7f981 24-28
+  s_0b9722801eabd2::t_d1c5c7904e34a7 5
+cmd/provider_display.go
+  s_0b9722801eabd2::t_8fd2b24974b1b0 17
+  s_0b9722801eabd2::t_7aee50fc266717 96
+internal/providersession/session.go
+  s_0b9722801eabd2::t_cf83c97f29c7b1 44-46
+  s_0b9722801eabd2::t_ea42e8548e59cd 79-81
+  s_0b9722801eabd2::t_0e0350498b964a 37-38
+internal/oauthproxy/commandcode_credentials.go
+  s_0b9722801eabd2::t_fba78746930ea4 147
+  s_0b9722801eabd2::t_4e26a16b9a2b5b 40-43
+  s_0b9722801eabd2::t_4a3603856b129b 87-94,106-118,121,124,129,133-142,149,151-159
+  s_0b9722801eabd2::t_1b19764ac195f4 212
+  s_0b9722801eabd2::t_640f354aa74afe 1-17,20-39,44-86,95-105,119-120,122-123,125-128,130-132,143-146,148,150,160-204
+  s_0b9722801eabd2::t_6f52ff97f8c0f1 233
+  s_0b9722801eabd2::t_d5ed4a358c9da2 205-211,213-232
+  s_0b9722801eabd2::t_cd54c4782a4e90 18-19
+cmd/auth.go
+  s_0b9722801eabd2::t_728634d529ced0 31,48-50,56,60
+  s_0b9722801eabd2::t_f9a85d3872197e 138
+  s_0b9722801eabd2::t_29d0318c58edd5 76,98
+  s_0b9722801eabd2::t_b9f47cdb5a2cab 207-208
+  s_0b9722801eabd2::t_481e7d41e1c2ff 107,115,118-120,122-137,147,164,166
+  s_0b9722801eabd2::t_58215d4e1daed6 104
+  s_0b9722801eabd2::t_f9adc628d5f7b9 88-89,106
+  s_0b9722801eabd2::t_ff4748abe116d2 51
+  s_0b9722801eabd2::t_42b181b70c0fd3 105
+  s_0b9722801eabd2::t_ee02694548236e 108-110,112-114
+  s_0b9722801eabd2::t_bfc6c842a231a0 116-117
+  s_0b9722801eabd2::t_08d4cb0c866f47 121
+  s_0b9722801eabd2::t_dc23977a06334a 111
+internal/oauthproxy/commandcode_credentials_test.go
+  s_0b9722801eabd2::t_11e20e90dcefe0 132,138
+  s_0b9722801eabd2::t_c1a54fc74d2838 148
+  s_0b9722801eabd2::t_61ebdf28704a4e 74
+  s_0b9722801eabd2::t_d4b64d6b8c73fd 188
+  s_0b9722801eabd2::t_ba033f4107bf64 14-18,29
+  s_0b9722801eabd2::t_7561448eb9876d 1-13,19-28,30-73,75-131,133-137,139-147,149-155,157-187,189-199
+  s_0b9722801eabd2::t_e8c02da117ab80 200
+  s_0b9722801eabd2::t_55ecdbebab93db 156
+internal/oauthproxy/commandcode_converter.go
+  s_0b9722801eabd2::t_d71782061a2caf 1-71,73-140,144-150,152-268,273-293
+  s_0b9722801eabd2::t_eb78a87f9fa2a3 72
+  s_0b9722801eabd2::t_fc6b213b6b5a25 141-143
+  s_0b9722801eabd2::t_6dd7c3bc743bc9 151
+  s_0b9722801eabd2::t_ecf8110b2ecf52 269-272
+cmd/doctor.go
+  s_0b9722801eabd2::t_4f5eb05c442330 539-540
+  s_0b9722801eabd2::t_c42bf350e9190a 569-572
+cmd/import.go
+  s_0b9722801eabd2::t_36ce65c4c21850 67
+  s_0b9722801eabd2::t_d1f2fb6d243aab 80
+  s_0b9722801eabd2::t_177627280349ac 1-20,24-36,39-66,68-79
+  s_0b9722801eabd2::t_a337d2abf3fed2 21-23,37-38
+internal/oauthproxy/workbuddy_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 29
+internal/oauthproxy/credentials.go
+  s_0b9722801eabd2::t_3fe88a206a9c09 147-148
+CLAUDE.md
+  s_0b9722801eabd2::t_e8056443e79b77 67-68
+  s_bf87a4df69c3dd::t_864d0f4773bdda 89
+  s_bf87a4df69c3dd::t_3f25cbf7451c7a 35
+internal/oauthproxy/kimi_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 63
+internal/oauthproxy/xai_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 73
+cmd/set.go
+  s_0b9722801eabd2::t_5f891b2bc0eb72 356-359
+  s_0b9722801eabd2::t_4759554a959c1a 406-409,413
+  s_0b9722801eabd2::t_ed00b4ec785dcd 470-475
+  s_0b9722801eabd2::t_411735e2facbac 418-422
+  s_0b9722801eabd2::t_a6935df3a3e9d2 451-453
+  s_0b9722801eabd2::t_d228840f01de76 469,476-496
+  s_0b9722801eabd2::t_b71a88ea7c00c4 378-380
+  s_0b9722801eabd2::t_6bd03cd4420f7e 343-344,348-349
+internal/oauthproxy/kiro_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 49,568
+cmd/import_test.go
+  s_0b9722801eabd2::t_d1f2fb6d243aab 114
+  s_0b9722801eabd2::t_33a09d878b87c4 1-87,89-91,93,101-104,107,113
+  s_0b9722801eabd2::t_3367e6c5e3f5db 88,92,94-100,105-106,108-112
+internal/oauthproxy/auth.go
+  s_0b9722801eabd2::t_5dec02aef100ff 100-106,108-111,114
+  s_0b9722801eabd2::t_92813a5269231d 107,112
+  s_0b9722801eabd2::t_1b593b78a6379a 127,133
+  s_0b9722801eabd2::t_f830acb0cafb61 33-35
+  s_0b9722801eabd2::t_fd9de761c51d97 24
+  s_0b9722801eabd2::t_ecb9f350afe22b 93-94
+  s_0b9722801eabd2::t_8ee03e4675deae 6
+  s_0b9722801eabd2::t_5b7fd905dd0b33 121-123
+  s_0b9722801eabd2::t_d37245035bdd6b 155-156
+  s_0b9722801eabd2::t_4e7c56e8bf0ff0 113
+  s_0b9722801eabd2::t_fcf7af484e5ae5 115-117
+internal/oauthproxy/qoder_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 33
+internal/oauthproxy/gemini_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 86
+internal/oauthproxy/commandcode_oauth.go
+  s_0b9722801eabd2::t_9220cf803ae401 241-245
+  s_0b9722801eabd2::t_70cf0c1102c945 1-240,246-353
+internal/oauthproxy/commandcode_oauth_test.go
+  s_0b9722801eabd2::t_debb341c1ed6e3 49-51,331
+  s_0b9722801eabd2::t_435ec7b49b90f7 1-9,11-48,52-240,242-330
+  s_0b9722801eabd2::t_c20abe4d7f69c8 10
+  s_0b9722801eabd2::t_4c9c02a7c358a5 241
+internal/oauthproxy/codex_auth.go
+  s_0b9722801eabd2::t_de4e2600f43b86 81
+cmd/set_test.go
+  s_0b9722801eabd2::t_a3462a38a6081a 1648-1656,1662-1664
+  s_bf87a4df69c3dd::t_ff7cfd1343cf4f 474,490,582
+  s_bf87a4df69c3dd::t_cf9e4608dbc1c8 518
+  s_0b9722801eabd2::t_c6ce3cdd9d54f7 1001,1005-1007,1013-1020,1028-1032
+  s_0b9722801eabd2::t_e42ace47ce3341 1685
+  s_0b9722801eabd2::t_32b20584af098b 17-18
+  s_0b9722801eabd2::t_8e79b46046754e 1645-1647,1657-1661,1665-1684,1686-1689,1691-1703
+  s_0b9722801eabd2::t_656ab2632bf82a 1690
+  s_0b9722801eabd2::t_cbbc3fd78669fb 1033
+internal/oauthproxy/doc.go
+  s_0b9722801eabd2::t_6f9b80f8b18143 73
+  s_0b9722801eabd2::t_66a3081ae92281 66-72
+  s_0b9722801eabd2::t_daa6fa79ddf6a6 8-10
+  s_0b9722801eabd2::t_4dcd1c3a740f96 62-65,74-75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "85bac6380c3871c45226407b1547e4b3eb3f1fb8",
+  "prompts": {},
+  "sessions": {
+    "s_0b9722801eabd2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ae34ad1c-8677-44fe-9659-fe7fd7e3b514",
+        "model": "deepseek-v4-pro"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    },
+    "s_bf87a4df69c3dd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b11cb8e1-ee11-44dd-b935-e9c5f841baf6",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "yuhaibo <haiboyuwen@gmail.com>"
+    }
+  }
+}
