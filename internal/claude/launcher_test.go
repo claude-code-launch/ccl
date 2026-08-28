@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -41,7 +42,43 @@ type settingsJSON struct {
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"`
+	OutputStyle            string            `json:"outputStyle,omitempty"`
+	Language               string            `json:"language,omitempty"`
 	FastMode               bool              `json:"fastMode"`
+}
+
+func TestPreviewSettingsOutputStyleAndLanguage(t *testing.T) {
+	base := provider.Provider{
+		Name:     "defaults-test",
+		Type:     "anthropic",
+		Endpoint: "https://api.anthropic.com",
+		APIKey:   "sk-test",
+		Model:    "dummy",
+	}
+
+	original := locale.Current()
+	defer locale.SetLanguage(original)
+
+	locale.SetLanguage("en")
+	en := previewSettingsJSON(t, base)
+	if en.OutputStyle != claude.DefaultOutputStyle {
+		t.Errorf("OutputStyle = %q, want %q", en.OutputStyle, claude.DefaultOutputStyle)
+	}
+	if en.Language != "English" {
+		t.Errorf("Language = %q, want English", en.Language)
+	}
+
+	locale.SetLanguage("zh")
+	zh := previewSettingsJSON(t, base)
+	if zh.Language != "中文" {
+		t.Errorf("Language = %q, want 中文", zh.Language)
+	}
+
+	locale.SetLanguage("zh-TW")
+	tw := previewSettingsJSON(t, base)
+	if tw.Language != "繁體中文" {
+		t.Errorf("Language = %q, want 繁體中文", tw.Language)
+	}
 }
 
 func TestPreviewSettingsFeatures(t *testing.T) {

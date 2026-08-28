@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -30,6 +31,11 @@ type settingsJSON struct {
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
+	// OutputStyle pins Claude Code's output style for every ccl-launched session.
+	OutputStyle string `json:"outputStyle,omitempty"`
+	// Language tells Claude Code which language to reply in (a natural-language
+	// name, e.g. "中文" or "English") and is derived from the user's ccl lang.
+	Language string `json:"language,omitempty"`
 	// FastMode is always serialized (no omitempty) so turning it off in ccl set
 	// (or Claude Code /fast) can clear a previously enabled pin.
 	FastMode bool `json:"fastMode"`
@@ -41,6 +47,9 @@ const (
 	ToolSearchEnv             = "ENABLE_TOOL_SEARCH"
 	DefaultToolUseConcurrency = "3"
 	DefaultToolSearch         = "false"
+	// DefaultOutputStyle sets Claude Code's output style for every ccl-launched
+	// session. "Concise" favors terse, direct responses over extra explanation.
+	DefaultOutputStyle = "Concise"
 )
 
 // RuntimeSettings are ccl's Claude Code process defaults. Provider Env values
@@ -454,7 +463,24 @@ func (c *providerContext) settings() settingsJSON {
 		HasCompletedOnboarding: true,
 		Model:                  catalogModelRequestName(c.provider.CustomModelID, c.modelNames),
 		ModelOverrides:         catalogModelOverrides(c.provider.ModelOverrides, c.modelNames),
+		OutputStyle:            DefaultOutputStyle,
+		Language:               responseLanguage(),
 		FastMode:               c.provider.FastMode,
+	}
+}
+
+// responseLanguage maps the user's configured ccl language to the natural-language
+// name Claude Code's `language` setting expects. ccl canonicalizes locales to
+// zh-CN/zh-TW/en-US, distinguishing Traditional vs Simplified Chinese and falling
+// back to English for everything else.
+func responseLanguage() string {
+	switch locale.Current() {
+	case "zh-TW":
+		return "繁體中文"
+	case "zh-CN":
+		return "中文"
+	default:
+		return "English"
 	}
 }
 
