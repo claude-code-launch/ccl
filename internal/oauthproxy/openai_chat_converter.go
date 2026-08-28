@@ -9,7 +9,6 @@ import (
 
 // chatCompletionsConvertedRequest is the CCL-owned wire representation of one
 // Anthropic Messages request destined for an OpenAI Chat Completions upstream.
-// No CPA translator or executor participates in it.
 type chatCompletionsConvertedRequest struct {
 	anthropicAdapterRequest
 	body  []byte
@@ -28,9 +27,8 @@ type chatAnthropicRequest struct {
 }
 
 // convertAnthropicToChatCompletions translates an Anthropic Messages request into
-// an OpenAI Chat Completions request. The translation follows the same rules as
-// CLIProxyAPI's Claude->OpenAI Chat translator so behavior stays identical after
-// the migration.
+// an OpenAI Chat Completions request. The translation preserves the established
+// Claude-to-Chat compatibility behavior.
 func convertAnthropicToChatCompletions(raw []byte) (*chatCompletionsConvertedRequest, error) {
 	var request chatAnthropicRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
@@ -310,7 +308,7 @@ func chatImageURL(block map[string]any) string {
 
 // chatToolResultContent stringifies a tool_result content field. Text is
 // concatenated; images and other unsupported blocks are marked as omitted, the
-// same collapse CLIProxyAPI applies for image-less upstreams.
+// same collapse used for image-less upstreams.
 func chatToolResultContent(value any) string {
 	switch typed := value.(type) {
 	case string:

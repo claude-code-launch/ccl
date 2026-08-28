@@ -205,7 +205,7 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 // StartOpenAIChatAPI starts CCL's self-owned Chat Completions adapter against
 // an OpenAI-compatible API-key gateway. Request conversion, SSE conversion,
 // error mapping, and usage accounting are all owned by CCL and cannot change
-// with a CLIProxyAPI upgrade.
+// with an external runtime implementation upgrade.
 func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
 	routes := runtimeModelRoutes(modelSpec)
 	if len(routes) == 0 {
@@ -222,7 +222,8 @@ func StartOpenAIChatAPI(parent context.Context, endpoint, upstreamAPIKey, modelS
 
 // StartOpenAIResponsesAPI starts CCL's Codex Responses adapter against an API
 // key gateway. Request conversion, Codex identity, SSE conversion, errors, and
-// usage accounting are all owned by CCL and cannot change with a CPA upgrade.
+// usage accounting are all owned by CCL and independent of external runtime
+// upgrades.
 func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -248,7 +249,7 @@ func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, m
 // StartCommandCodeAPI starts CCL's self-owned Command Code data plane against a
 // Command Code API key. Conversion, NDJSON/SSE handling, identity headers, the
 // fingerprint/lifecycle handshake, error mapping, and usage accounting are all
-// owned by CCL and cannot change with a CLIProxyAPI upgrade. modelSpec is
+// owned by CCL and independent of external runtime upgrades. modelSpec is
 // accepted for StartOptions symmetry only: the runtime serves the authoritative
 // 26-model catalog and never rewrites requested model IDs.
 func StartCommandCodeAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {

@@ -1,7 +1,7 @@
 // Package codexidentity defines the Codex wire identity owned by CCL.
 //
-// Keep these values independent from CLIProxyAPI: a CPA dependency update must
-// never silently change how CCL identifies its Codex Responses requests.
+// Keep these values owned by CCL: an external implementation update must never
+// silently change how CCL identifies its Codex Responses requests.
 package codexidentity
 
 import (
@@ -27,7 +27,7 @@ var (
 )
 
 // UserAgent mirrors the public Codex CLI wire format without depending on an
-// installed Codex binary or CPA's release-specific constants.
+// installed Codex binary or release-specific constants from another implementation.
 func UserAgent() string {
 	userAgentOnce.Do(func() {
 		platform, version := platformIdentity()

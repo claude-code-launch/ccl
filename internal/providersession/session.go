@@ -46,7 +46,7 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 	if resolved.OAuthProvider == "" && strings.TrimSpace(resolved.Model) == "" && !provider.IsCommandCodeType(resolved.Type) {
 		models, err := protocol.GetOpenAIModels(resolved.Endpoint, resolved.APIKey)
 		if err != nil {
-			return nil, fmt.Errorf("discover OpenAI models before starting CLIProxyAPI: %w", err)
+			return nil, fmt.Errorf("discover OpenAI models before starting the provider runtime: %w", err)
 		}
 		resolved.Model = models
 	}

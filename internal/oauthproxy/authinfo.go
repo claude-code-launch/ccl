@@ -34,11 +34,10 @@ type QuotaState struct {
 	BackoffLevel int
 }
 
-// AuthInfo is ccl's self-owned view of a loaded OAuth credential, replacing the
-// CLIProxyAPI coreauth.Auth type in Runtime.ListAuths. Only the fields the
-// doctor diagnostics and the per-backend listAuths implementations need are
-// carried; fields are named to match the previous coreauth.Auth surface so the
-// doctor consumers and tests need no semantic changes.
+// AuthInfo is ccl's self-owned view of a loaded OAuth credential used by
+// Runtime.ListAuths. It carries only the fields needed by doctor diagnostics
+// and the per-backend listAuths implementations, while retaining the existing
+// field surface so consumers and tests need no semantic changes.
 type AuthInfo struct {
 	ID             string
 	Provider       string

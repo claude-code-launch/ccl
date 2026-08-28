@@ -33,7 +33,7 @@ type codexLoginCallback struct {
 // loginCodex runs the OpenAI Codex OAuth PKCE authorization-code flow with a
 // local loopback callback and persists a credential the codexOAuthAuthorizer
 // reads (type/id_token/access_token/refresh_token/account_id/email/expired).
-// It replaces CLIProxyAPI's codex authenticator.
+// CCL owns this authenticator and its persisted credential format.
 func loginCodex(ctx context.Context, authDir string, opts LoginOptions) (LoginResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -237,7 +237,7 @@ func codexLoginJWTIdentity(token string) (accountID, email, planType string) {
 	return strings.TrimSpace(claims.Auth.AccountID), strings.TrimSpace(claims.Email), strings.TrimSpace(claims.Auth.PlanType)
 }
 
-// codexCredentialFileName mirrors CPA's Codex CredentialFileName: it includes a
+// codexCredentialFileName derives a stable Codex credential filename: it includes a
 // short account hash and plan type when available to keep same-email accounts
 // distinct, falling back to the email-only format.
 func codexCredentialFileName(email, planType, accountID string) string {

@@ -24,16 +24,15 @@ import (
 )
 
 const (
-	// backendAntigravity is the CLIProxyAPI authenticator provider key for the
-	// Google Gemini subscription (Antigravity control plane).
+	// backendAntigravity is the internal backend key for the Google Gemini
+	// subscription (Antigravity control plane).
 	backendAntigravity = "antigravity"
 
 	antigravityStreamPath   = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath = "/v1internal:generateContent"
 
-	// antigravityOAuthClientID/Secret are the Google OAuth client identifiers CPA's
-	// antigravity authenticator uses, so the refresh flow can mint tokens for the
-	// same backend.
+	// antigravityOAuthClientID/Secret are the Google OAuth client identifiers used
+	// by CCL for the Antigravity control-plane refresh flow.
 	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityOAuthClientSecret = "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"
 
@@ -43,9 +42,8 @@ const (
 	antigravityMaxErrorBytes    = int64(1 << 20)
 	antigravityMaxResponseBytes = int64(64 << 20)
 
-	// antigravityRequestUserAgent mirrors CPA's resolveUserAgent for a request
-	// with no configured override: the Antigravity Hub family UA at the fallback
-	// version (the version updater is not run by CCL).
+	// antigravityRequestUserAgent is the Antigravity Hub family UA sent when no
+	// configured override is present (the version updater is not run by CCL).
 	antigravityRequestUserAgent = "antigravity/hub/2.2.1 darwin/arm64"
 )
 
@@ -66,8 +64,7 @@ var (
 
 // antigravityHTTPTransport returns the shared HTTP/1.1-only transport used for
 // Antigravity requests. Antigravity rejects HTTP/2, so ALPN is pinned to
-// http/1.1 and ForceAttemptHTTP2 is disabled, mirroring CPA's
-// cloneTransportWithHTTP11.
+// http/1.1 and ForceAttemptHTTP2 is disabled to satisfy the upstream contract.
 func antigravityHTTPTransport() *http.Transport {
 	antigravityTransportOnce.Do(func() {
 		antigravityTransport = &http.Transport{
@@ -81,8 +78,7 @@ func antigravityHTTPTransport() *http.Transport {
 	return antigravityTransport
 }
 
-// resolveAntigravityHost derives the Host header value from a base URL,
-// mirroring CPA's resolveHost.
+// resolveAntigravityHost derives the Host header value from a base URL.
 func resolveAntigravityHost(base string) string {
 	parsed, err := url.Parse(base)
 	if err == nil && parsed.Host != "" {
@@ -92,9 +88,8 @@ func resolveAntigravityHost(base string) string {
 }
 
 // antigravityOAuthAuthorizer resolves and refreshes a Gemini/Antigravity OAuth
-// credential written by CPA's antigravity authenticator during `ccl oauth gemini`.
-// It reads the fields CPA's executor reads and refreshes against Google's OAuth
-// endpoint with the Antigravity client credentials (form-encoded, unlike the
+// credential persisted by CCL during `ccl oauth gemini`. It reads the required
+// fields and refreshes against Google's OAuth endpoint with the Antigravity client credentials (form-encoded, unlike the
 // Claude subscription's JSON body).
 type antigravityOAuthAuthorizer struct {
 	path   string
@@ -412,8 +407,8 @@ func (s *geminiService) forward(ctx context.Context, stream bool, envelope []byt
 }
 
 // forwardOnce issues the request against the daily base URL and falls back to
-// the prod base URL on network errors, 429s and 5xx responses, mirroring CPA's
-// antigravityBaseURLFallbackOrder + retry loop.
+// the prod base URL on network errors, 429s and 5xx responses, following the
+// provider's fallback order.
 func (s *geminiService) forwardOnce(ctx context.Context, stream bool, envelope []byte) (*http.Response, error) {
 	token, err := s.authorizer.authorize(ctx, false)
 	if err != nil {
@@ -496,7 +491,7 @@ func (s *geminiService) recordGeminiUsage(converted *geminiConvertedRequest, ass
 }
 
 // geminiStableSessionID derives a stable session id from the first user text
-// part, mirroring CPA's generateStableSessionID: a signed-non-negative int64 of
+// part, using a stable signed-non-negative int64 of
 // the first 8 bytes of the text's SHA-256, prefixed with "-". When there is no
 // user text it falls back to a random positive int64.
 func geminiStableSessionID(geminiBody []byte) string {

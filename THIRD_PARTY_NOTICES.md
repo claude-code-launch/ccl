@@ -1,10 +1,12 @@
 # Third-Party Notices
 
-## CLIProxyAPI
+## Historical protocol adapter attribution
 
-This project embeds the Go SDK from
+The following MIT notice is retained for historical/reference-derived material
+used by the protocol adapters. CCL does not embed or depend on the referenced
+SDK as a current runtime dependency.
+
 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI),
-version 7.2.73.
 
 MIT License
 

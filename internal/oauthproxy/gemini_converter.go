@@ -11,13 +11,13 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// geminiFunctionNameSanitizer mirrors CPA's functionNameSanitizer: Gemini
+// geminiFunctionNameSanitizer applies the Gemini function-name rules: Gemini
 // function names may only contain [a-zA-Z0-9_.:-] and must start with a letter or
 // underscore, capped at 64 bytes. Claude tool names are arbitrary, so they are
 // rewritten here and restored from toolNameMap on the response path.
 var geminiFunctionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
 
-// geminiToolIDSanitizer mirrors CPA's claudeToolUseIDSanitizer for the
+// geminiToolIDSanitizer produces a safe identifier for the
 // synthesized Claude-facing tool_use.id on the response path.
 var geminiToolIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
@@ -31,7 +31,7 @@ type geminiConvertedRequest struct {
 }
 
 // sanitizeFunctionName rewrites an arbitrary Claude tool name into a Gemini-safe
-// function name, mirroring CPA's util.SanitizeFunctionName.
+// function name.
 func sanitizeFunctionName(name string) string {
 	if name == "" {
 		return ""
@@ -55,8 +55,7 @@ func sanitizeFunctionName(name string) string {
 }
 
 // toolNameFromClaudeToolUseID recovers the tool name encoded in a Claude tool_use
-// id ("get_weather-call123" -> "get_weather"), mirroring CPA's
-// toolNameFromClaudeToolUseID.
+// id ("get_weather-call123" -> "get_weather"), preserving the encoded
 func toolNameFromClaudeToolUseID(id string) string {
 	parts := strings.Split(id, "-")
 	if len(parts) <= 1 {
@@ -65,7 +64,7 @@ func toolNameFromClaudeToolUseID(id string) string {
 	return strings.Join(parts[:len(parts)-1], "-")
 }
 
-// sanitizeClaudeToolID mirrors CPA's util.SanitizeClaudeToolID.
+// sanitizeClaudeToolID produces a Gemini-safe Claude tool identifier.
 func sanitizeClaudeToolID(id string) string {
 	s := geminiToolIDSanitizer.ReplaceAllString(id, "_")
 	if s == "" {
@@ -402,7 +401,7 @@ type geminiToolResultImage struct {
 
 // geminiToolResultContent normalizes a Claude tool_result content field into a
 // Gemini functionResponse result (string or raw JSON) plus any separated image
-// blocks, mirroring CPA's ConvertClaudeToolResultContent.
+// blocks.
 func geminiToolResultContent(content gjson.Result) (result string, resultIsRaw bool, images []geminiToolResultImage) {
 	switch {
 	case content.Type == gjson.String:

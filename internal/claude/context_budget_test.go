@@ -31,7 +31,7 @@ func codexCatalogServer(t *testing.T, body string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if _, ok := request.URL.Query()["client_version"]; !ok {
-			// Mirror CLIProxyAPI: without client_version the list is trimmed and
+			// Mirror the upstream catalog behavior: without client_version the list is trimmed and
 			// carries no window at all.
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = writer.Write([]byte(`{"object":"list","data":[{"id":"gpt-5.6-sol","object":"model"}]}`))

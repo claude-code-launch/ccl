@@ -50,7 +50,7 @@ type xaiDeviceToken struct {
 
 // loginXai runs the xAI/Grok OAuth device-code flow (RFC 8628) and persists a
 // credential the xaiOAuthAuthorizer reads (access_token/refresh_token/
-// token_endpoint). It replaces CLIProxyAPI's xai authenticator.
+// token_endpoint). CCL owns this authenticator and its persisted credential format.
 func loginXai(ctx context.Context, authDir string, opts LoginOptions) (LoginResult, error) {
 	if ctx == nil {
 		ctx = context.Background()

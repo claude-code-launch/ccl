@@ -35,8 +35,8 @@ func (*chatStaticAuthorizer) isOAuth() bool                                     
 
 // chatCompletionsService is the CCL-owned data plane for an OpenAI Chat
 // Completions upstream. Request conversion, SSE conversion, error mapping, and
-// usage accounting all live here, so a CLIProxyAPI upgrade can no longer change
-// how openai(chat) behaves.
+// usage accounting all live here, independent of external runtime upgrades;
+// these details define how openai(chat) behaves.
 type chatCompletionsService struct {
 	apiKey     string
 	endpoint   string

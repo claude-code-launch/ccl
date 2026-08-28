@@ -24,8 +24,8 @@ const (
 )
 
 // applyXaiGrokHeaders attaches the identity headers the Grok CLI chat-proxy
-// expects. These mirror CPA's applyXAIChatHeaders for the OAuth (non-using_api)
-// path: xAI has no Codex-style client_metadata block, so identity travels in
+// expects. These follow the Grok CLI chat-proxy's OAuth (non-using_api)
+// contract: xAI has no Codex-style client_metadata block, so identity travels in
 // headers instead.
 func applyXaiGrokHeaders(header http.Header, sessionID string) {
 	header.Set("X-XAI-Token-Auth", "xai-grok-cli")
@@ -39,9 +39,8 @@ func applyXaiGrokHeaders(header http.Header, sessionID string) {
 }
 
 // xaiOAuthAuthorizer resolves and refreshes an xAI/Grok OAuth credential. The
-// credential is written by CPA's xai authenticator during `ccl oauth grok`, and
-// this authorizer only reads the same fields CPA's executor reads (access_token,
-// refresh_token, token_endpoint).
+// credential is written by CCL during `ccl oauth grok`, and this authorizer
+// reads the persisted access_token, refresh_token, and token_endpoint fields.
 type xaiOAuthAuthorizer struct {
 	path   string
 	client *http.Client

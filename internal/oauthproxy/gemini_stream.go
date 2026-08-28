@@ -16,7 +16,7 @@ import (
 const geminiStreamScannerBuffer = 16 << 20
 
 // geminiJSONPayload extracts the JSON payload from one Gemini SSE line,
-// mirroring CPA's helps.JSONPayload: trim, skip empty lines, `[DONE]` and
+// following the Antigravity stream format: trim, skip empty lines, `[DONE]` and
 // `event:` lines, strip a `data:` prefix, and require a leading `{`.
 func geminiJSONPayload(line string) string {
 	trimmed := strings.TrimSpace(line)

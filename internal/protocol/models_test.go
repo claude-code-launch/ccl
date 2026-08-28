@@ -278,7 +278,7 @@ func TestGetCodexClientModelInfosRequiresClientVersion(t *testing.T) {
 	var sawClientVersion bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := r.URL.Query()["client_version"]; !ok {
-			// CLIProxyAPI trims the plain list to identity fields only.
+			// The plain catalog trims entries to identity fields only.
 			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-sol","object":"model"}]}`))
 			return
 		}

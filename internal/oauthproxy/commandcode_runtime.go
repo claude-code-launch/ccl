@@ -97,8 +97,8 @@ var commandcodeModelCatalog = []struct {
 // commandcodeService is the CCL-owned data plane for a Command Code upstream:
 // a loopback Anthropic Messages entrypoint that speaks the /alpha/generate
 // NDJSON protocol. Identity headers, the fingerprint/lifecycle handshake,
-// error mapping, and usage accounting all live here, so no CLIProxyAPI upgrade
-// can change how commandcode behaves.
+// error mapping, and usage accounting all live here, independent of external
+// runtime implementations.
 type commandcodeService struct {
 	apiKey      string // loopback key
 	endpoint    string // Command Code API base

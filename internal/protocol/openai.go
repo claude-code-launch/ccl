@@ -28,7 +28,7 @@ type ModelInfo struct {
 
 // ModelResponse is the OpenAI-compatible /models list payload.
 // Context windows appear either nested under token_limits (some gateways) or
-// as a top-level context_window (CLIProxyAPI / OpenAI-style catalogs).
+// as a top-level context_window (Codex / OpenAI-style catalogs).
 type ModelResponse struct {
 	Data []struct {
 		Created  int    `json:"created"`
@@ -159,8 +159,8 @@ type codexClientModelsResponse struct {
 	} `json:"models"`
 }
 
-// GetCodexClientModelInfos reads the Codex-flavoured model catalog that
-// CLIProxyAPI serves from /v1/models?client_version=…
+// GetCodexClientModelInfos reads the Codex-flavoured model catalog exposed by
+// the upstream /v1/models?client_version=… endpoint.
 //
 // This matters for subscription (OAuth) providers: the plain OpenAI list is
 // trimmed to id/object/created/owned_by, so it never reveals a context window,

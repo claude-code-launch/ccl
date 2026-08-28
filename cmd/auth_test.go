@@ -585,7 +585,7 @@ func TestPrepareProviderRuntimeRoutesManualResponsesThroughSharedAdapter(t *test
 	}
 }
 
-func TestPrepareProviderRuntimeRoutesManualChatThroughCLIProxyAPI(t *testing.T) {
+func TestPrepareProviderRuntimeRoutesManualChatThroughCCLAdapter(t *testing.T) {
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(upstream.Close)
 	original := provider.Provider{
@@ -606,7 +606,7 @@ func TestPrepareProviderRuntimeRoutesManualChatThroughCLIProxyAPI(t *testing.T) 
 		t.Fatalf("runtime endpoint = %q", runtimeProvider.Endpoint)
 	}
 	if runtimeProvider.Endpoint == original.Endpoint {
-		t.Fatal("manual Chat provider bypassed embedded CLIProxyAPI")
+		t.Fatal("manual Chat provider bypassed the CCL-owned adapter")
 	}
 	if runtimeProvider.APIKey == "" || runtimeProvider.APIKey == original.APIKey {
 		t.Fatalf("runtime API key was not isolated: %q", runtimeProvider.APIKey)

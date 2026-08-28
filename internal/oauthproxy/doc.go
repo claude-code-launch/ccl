@@ -8,7 +8,7 @@
 // (Antigravity conversion). Copilot's mixed catalog, Kiro, Qoder, and
 // Command Code (a direct /alpha/generate NDJSON data plane) run entirely on
 // CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
-// this package altogether. CLIProxyAPI is no longer a dependency.
+// this package altogether.
 //
 // Error recovery follows the data-plane owner. CCL-owned data planes refresh
 // OAuth once after a 401 and otherwise preserve upstream status/Retry-After:
@@ -22,16 +22,15 @@
 // # Direct data planes
 //
 // Each backend's data plane is CCL-owned end-to-end. Treat these as a
-// regression checklist rather than routing any of them back through CLIProxyAPI:
+// regression checklist for keeping provider traffic on the corresponding CCL
+// runtime:
 //
 //  1. Codex Responses ownership (codex_responses_*.go)
 //     CCL owns Messages-to-Responses translation, Codex identity headers, GPT
-//     token refresh, upstream errors, Responses SSE decoding, and usage. CPA's
-//     codex executor must never be inserted into these paths.
+//     token refresh, upstream errors, Responses SSE decoding, and usage.
 //
 //  2. GitHub Copilot direct gateway (copilot_runtime.go)
-//     Copilot does not use CLIProxyAPI OAuth credentials. ccl authenticates
-//     with GitHub, discovers the account's authoritative model catalog, and
+//     Copilot authenticates with GitHub, discovers the account's authoritative model catalog, and
 //     routes each model according to its advertised Chat, Responses, or
 //     Messages endpoint — all three served by CCL data planes. Do not bypass
 //     the Copilot gateway's own client identity or credential rotation.
@@ -45,7 +44,7 @@
 //  4. Kiro direct runtime (kiro_*.go)
 //     Kiro Portal PKCE / Builder ID auth, credential refresh, model discovery,
 //     Messages-to-Amazon-Q conversion, retry, and AWS EventStream decoding all
-//     run in ccl. Do not route Kiro traffic through CPA.
+//     run in ccl. Keep Kiro's direct request path and upstream identity intact.
 //
 //  5. WorkBuddy runtime (workbuddy_*.go)
 //     CCL owns the official external-link login polling, credential refresh,

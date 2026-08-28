@@ -550,7 +550,7 @@ func Run(p provider.Provider, args []string) error {
 
 	// Approximate session metadata for the session log. These are ccl-side counts,
 	// not the real upstream request size, and never include credentials or
-	// request bodies. Useful to correlate with upstream errors logged by CPA.
+	// request bodies. Useful to correlate with errors logged by the provider runtime.
 	if oauthproxy.LogEnabled() {
 		spec := provider.RuntimeModelSpec(p)
 		modelCount := 0

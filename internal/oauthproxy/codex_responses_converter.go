@@ -11,7 +11,7 @@ import (
 const codexResponsesNameLimit = 64
 
 // codexResponsesConvertedRequest is the CCL-owned wire representation of one
-// Anthropic Messages request. No CPA translator or executor participates in it.
+// Anthropic Messages request. CCL performs the translation directly.
 type codexResponsesConvertedRequest struct {
 	anthropicAdapterRequest
 	body              []byte

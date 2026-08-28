@@ -90,6 +90,7 @@ jobs:
             dist/ccl-linux-arm64
             dist/ccl-win32-x64.exe
             dist/ccl-win32-arm64.exe
+            THIRD_PARTY_NOTICES.md
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

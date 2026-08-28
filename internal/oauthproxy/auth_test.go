@@ -209,7 +209,7 @@ func TestStartEmbeddedProxyWithStoredCredential(t *testing.T) {
 		t.Fatal("Start() returned an empty session API key")
 	}
 	if proxyRuntime.httpServer == nil {
-		t.Fatal("GPT subscription must use the CCL-owned HTTP runtime, not CPA")
+		t.Fatal("GPT subscription must use the CCL-owned HTTP runtime")
 	}
 
 	unauthorizedResp, err := http.Get(proxyRuntime.Endpoint() + "/models")
@@ -321,7 +321,7 @@ func TestStartOpenAIResponsesAPIUsesCCLOwnedCodexIdentity(t *testing.T) {
 	}
 
 	if proxyRuntime.httpServer == nil {
-		t.Fatal("Responses API key runtime unexpectedly depends on CPA")
+		t.Fatal("Responses API key runtime is not CCL-owned")
 	}
 }
 
@@ -356,7 +356,7 @@ func TestStartOpenAIChatAPIServesClaudeMessages(t *testing.T) {
 
 	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test[1m]")
 	if !strings.Contains(responseBody, "chat ok") || !strings.Contains(responseBody, `"type":"message_stop"`) {
-		t.Fatalf("CLIProxyAPI did not return Claude SSE: %s", responseBody)
+		t.Fatalf("CCL Chat adapter did not return Claude SSE: %s", responseBody)
 	}
 	got := <-captured
 	if got.path != "/v1/chat/completions" {
@@ -401,15 +401,15 @@ func TestStartOpenAIResponsesAPIServesClaudeMessages(t *testing.T) {
 	defer proxyRuntime.Stop()
 	models := runtimeModelIDs(t, ctx, proxyRuntime)
 	if !models["gpt-test"] || !models["gpt-test[1m]"] {
-		t.Fatalf("CLIProxyAPI models = %v, want base model and 1M alias", models)
+		t.Fatalf("CCL runtime models = %v, want base model and 1M alias", models)
 	}
 
 	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test[1m]")
 	if !strings.Contains(responseBody, "responses ok") || !strings.Contains(responseBody, `"type":"message_stop"`) {
-		t.Fatalf("CLIProxyAPI did not return Claude SSE: %s", responseBody)
+		t.Fatalf("CCL Chat adapter did not return Claude SSE: %s", responseBody)
 	}
 	if count := strings.Count(responseBody, "responses ok"); count != 1 {
-		t.Fatalf("CLIProxyAPI returned Responses text %d times, want once: %s", count, responseBody)
+		t.Fatalf("CCL Responses adapter returned text %d times, want once: %s", count, responseBody)
 	}
 	got := <-captured
 	if got.path != "/v1/responses" {
@@ -501,7 +501,7 @@ func TestStopClosesDirectCodexRuntime(t *testing.T) {
 	}
 	if proxyRuntime.httpServer == nil {
 		proxyRuntime.Stop()
-		t.Fatal("Codex subscription unexpectedly started a CPA runtime")
+		t.Fatal("Codex subscription did not use the CCL runtime")
 	}
 
 	endpoint := proxyRuntime.Endpoint()

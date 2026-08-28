@@ -131,7 +131,7 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 					t.Errorf("Claude Code base URL must not include /v1: %s", baseURL)
 				}
 				if token := s.Env["ANTHROPIC_AUTH_TOKEN"]; !strings.HasPrefix(token, "ccl-") || token == "sk-test" {
-					t.Errorf("auth token should be an isolated CLIProxyAPI session key: %s", token)
+					t.Errorf("auth token should be an isolated CCL runtime session key: %s", token)
 				}
 				if key := s.Env["ANTHROPIC_API_KEY"]; key != "" {
 					t.Errorf("ANTHROPIC_API_KEY should not be set for proxy auth: %s", key)

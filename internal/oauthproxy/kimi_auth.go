@@ -43,7 +43,7 @@ type kimiDeviceToken struct {
 
 // loginKimi runs the Kimi (Moonshot AI) OAuth device-code flow and persists a
 // credential the kimiOAuthAuthorizer reads (access_token/refresh_token/device_id).
-// It replaces CLIProxyAPI's kimi authenticator.
+// CCL owns this authenticator and its persisted credential format.
 func loginKimi(ctx context.Context, authDir string, opts LoginOptions) (LoginResult, error) {
 	if ctx == nil {
 		ctx = context.Background()

@@ -53,7 +53,7 @@ HOME="$CCL_TEST_HOME" /tmp/ccl-verify models --all
 Claude Code 始终以 Anthropic Messages 请求进入。`internal/providersession` 根据 `Provider.Type` 与 `OAuthProvider` 决定直连或 loopback proxy，最终所有需要代理的运行时都只暴露本机 Anthropic Messages 入口。
 
 - 普通 Anthropic API-key provider：Claude Code 直连上游，绕过 `oauthproxy`。
-- 手动 OpenAI Chat provider：CCL 自研 `chatCompletionsService`（`openai_chat_runtime.go`）完成 Messages ↔ Chat Completions 转换、SSE、错误映射与 usage；CPA 升级不再能改变 `openai(chat)` 的行为。
+- 手动 OpenAI Chat provider：CCL 自研 `chatCompletionsService`（`openai_chat_runtime.go`）完成 Messages ↔ Chat Completions 转换、SSE、错误映射与 usage；该行为不受外部 runtime/SDK 升级影响。
 - 手动 OpenAI Responses provider：由 CCL 自研 Codex Responses runtime 完成 Messages ↔ Responses、Codex headers/metadata、OAuth/API-key 鉴权、SSE 和错误/usage 处理。
 - `models.dev` 混合协议网关（`Type: "modelsdev"` + `Provider.ModelProtocols`）：单 endpoint 下不同模型用不同 wire 协议。协议来自 models.dev 目录里每模型的 `provider.npm`（缺省回退 provider 级 `npm`），映射在 `provider.ProtocolForAISdkNPM`：`@ai-sdk/anthropic`→Messages、`@ai-sdk/openai`→Responses、`@ai-sdk/openai-compatible`→Chat。`internal/modelsdev` 只做 `https://models.dev/api.json` 的拉取与 wire 解码（不依赖 `internal/provider`）；`cmd/modelsdev.go` 在 `ccl set` 里提供 models.dev provider 浏览导入并生成该类型草稿。运行时走 `internal/oauthproxy/mixed_runtime.go` 的 `StartMixedProtocolAPIKeyRuntime`，loopback 暴露 Anthropic Messages，按请求里的 model 分流到三个 CCL 子 service：chat → `chatCompletionsService`、responses → Codex Responses service、native anthropic → `anthropicPassthroughService`；鉴权是静态 API key。
 - `gpt` / Codex OAuth：登录（`codex_auth.go`）与运行时均由 CCL 实现；Codex Responses runtime 读取所选 credential、401 后刷新一次并重试。
@@ -67,7 +67,7 @@ Claude Code 始终以 Anthropic Messages 请求进入。`internal/providersessio
 - `commandcode`：CCL 自带 `/alpha/generate` NDJSON 数据面（`commandcode_*.go`）：Messages → NDJSON 转换、设备指纹/生命周期握手（首个请求前并行 POST `/alpha/fingerprint/record` 与 `/alpha/lifecycle-events`，生命周期事件上报 `cli_session_exists` + 设备身份）、错误映射（402→429、403→401、429 带 `Retry-After: 30`）和静态模型目录。凭据路径：API-key provider（bearer）、`ccl oauth commandcode`（模拟官方 CLI login：打开 studio "Get API key" 页，key 经 loopback `/callback` 或手动粘贴回收，`/alpha/whoami` 验证后存 `~/.ccl/auth/commandcode.json`），或 `ccl import commandcode` 导入官方 CLI 的长期 key（读 `~/.commandcode/auth.json` → 同样 `/alpha/whoami` 验证）。endpoint 解析 `COMMANDCODE_API_URL` 环境覆盖（provider 配置 > env > 默认）。详情见 `internal/oauthproxy/doc.go`，绝不把 Command Code 流量路由到第三方代理。
 - 订阅 `claude`（Anthropic OAuth）已移除：`ccl oauth` 只接受 gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|commandcode（`ValidateLoginProvider`）；Command Code 的浏览器登录即官方 CLI login 的模拟（回调 + 粘贴双路径），非浏览器替代是 `ccl import commandcode`（`ImportCredential`）。
 
-`internal/oauthproxy/doc.go` 是数据面归属的权威清单（Codex Responses、Copilot、Qoder、Kiro、WorkBuddy、native passthrough、会话凭据约束），把它当作回归 checklist，不要把任何 provider 路由回 CLIProxyAPI。所有 runtime 只绑定 `127.0.0.1` 并使用每会话随机 key；`Runtime.Stop` 先取消并等待 serve 退出，超时后才强制 Shutdown。错误恢复跟随数据面 owner：Codex/Grok/Kimi 401 后刷新一次，WorkBuddy 401/403 后刷新一次，Gemini 网络错误/429/5xx 回退控制面 base，Kiro 先轮换凭据再按 1/2/4 秒重试突发 429；其余 403/429/5xx 保留原状态与 `Retry-After`，不做全局重试。
+`internal/oauthproxy/doc.go` 是数据面归属的权威清单（Codex Responses、Copilot、Qoder、Kiro、WorkBuddy、native passthrough、会话凭据约束），把它当作回归 checklist，保持所有 provider 由 CCL 自有 runtime 处理。所有 runtime 只绑定 `127.0.0.1` 并使用每会话随机 key；`Runtime.Stop` 先取消并等待 serve 退出，超时后才强制 Shutdown。错误恢复跟随数据面 owner：Codex/Grok/Kimi 401 后刷新一次，WorkBuddy 401/403 后刷新一次，Gemini 网络错误/429/5xx 回退控制面 base，Kiro 先轮换凭据再按 1/2/4 秒重试突发 429；其余 403/429/5xx 保留原状态与 `Retry-After`，不做全局重试。
 
 ### OAuth、模型和 cloud sync
 

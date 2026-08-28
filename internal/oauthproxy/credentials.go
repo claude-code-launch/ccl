@@ -13,8 +13,8 @@ import (
 )
 
 // CredentialInfo is the non-secret state doctor reads from ~/.ccl/auth.
-// Disabled / Unavailable / QuotaExceeded reflect CPA-persisted account health
-// when present in the credential JSON (runtime may also keep these in memory only).
+// Disabled / Unavailable / QuotaExceeded reflect persisted account health when
+// present in credential JSON (runtime may also keep these in memory only).
 type CredentialInfo struct {
 	FileName      string
 	Backend       string
@@ -76,7 +76,7 @@ func parseCredential(raw []byte) (CredentialInfo, error) {
 	status, _ := metadata["status"].(string)
 	quotaExceeded := credentialQuotaExceeded(metadata)
 	if !unavailable {
-		// Some CPA builds only surface unavailability via status/quota.
+		// Some credential formats only surface unavailability via status/quota.
 		if strings.EqualFold(strings.TrimSpace(status), "error") ||
 			strings.EqualFold(strings.TrimSpace(status), "disabled") {
 			unavailable = true

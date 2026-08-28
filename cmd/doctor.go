@@ -1011,7 +1011,7 @@ func countOfflineAuthMetadata(files []string) authMetadataCounts {
 }
 
 // accumulateAuthMetadata counts persisted health keys. When metadata is nil/partial,
-// runtime field fallbacks still contribute so doctor reflects in-memory CPA state.
+// runtime field fallbacks still contribute so doctor reflects in-memory runtime state.
 func accumulateAuthMetadata(counts *authMetadataCounts, metadata map[string]any, unavailable bool, status, statusMessage string, quotaExceeded, hasNextRetry bool) {
 	if metadataHasKey(metadata, "unavailable") || unavailable {
 		// Count only true unavailable, or key present with true; bare false should not inflate.

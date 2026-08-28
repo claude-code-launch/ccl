@@ -121,8 +121,8 @@ type Provider struct {
 	Endpoint string `yaml:"endpoint" mapstructure:"endpoint"`
 	APIKey   string `yaml:"apikey" mapstructure:"apikey"`
 	// Model is ccl's local model pool used for TUI mapping, slot defaults, and
-	// availability checks. For OpenAI-family providers it is also registered as
-	// CLIProxyAPI model routes/aliases; direct Anthropic providers must expose
+	// availability checks. For OpenAI-family providers it also supplies the
+	// local runtime routes and aliases; direct Anthropic providers must expose
 	// their own /v1/models to Claude Code.
 	Model string            `yaml:"model" mapstructure:"model"`
 	Env   map[string]string `yaml:"env,omitempty" mapstructure:"env,omitempty"`
@@ -130,8 +130,8 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
-	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, and claude. The
-	// legacy chatgpt and codex values remain readable.
+	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, and
+	// commandcode. The legacy chatgpt and codex values remain readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
 	// (basename of the JSON under ~/.ccl/auth). Subscription runtimes require

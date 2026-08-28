@@ -28,17 +28,17 @@ const (
 var (
 	// kimiAPIBaseURL is the Kimi Code data plane base; callOnce appends
 	// /chat/completions, yielding https://api.kimi.com/coding/v1/chat/completions
-	// to match CPA's KimiAPIBaseURL + "/v1/chat/completions". A var (not const)
-	// so tests can point it at a stub.
+	// /chat/completions, yielding https://api.kimi.com/coding/v1/chat/completions
+	// for the Kimi Code API. A var (not const) so tests can point it at a stub.
 	kimiAPIBaseURL = "https://api.kimi.com/coding/v1"
 	// kimiTokenURL is the OAuth refresh endpoint. A var so tests can stub it.
 	kimiTokenURL = "https://auth.kimi.com/api/oauth/token"
 )
 
 // kimiOAuthAuthorizer resolves and refreshes a Kimi OAuth credential written by
-// CPA's kimi authenticator during `ccl oauth kimi`. It reads the same fields
-// CPA's executor reads (access_token/refresh_token/device_id) and refreshes
-// against Kimi's token endpoint.
+// kimiOAuthAuthorizer resolves and refreshes a Kimi OAuth credential written by
+// CCL during `ccl oauth kimi`. It reads the persisted access_token,
+// refresh_token, and device_id fields and refreshes against Kimi's token endpoint.
 type kimiOAuthAuthorizer struct {
 	path   string
 	client *http.Client
@@ -202,10 +202,9 @@ func (a *kimiOAuthAuthorizer) decorateHeader(header http.Header) {
 	}
 }
 
-// kimiCommonHeaders builds the Kimi device-identity headers CPA attaches to
-// every request. deviceModel is passed in because the OAuth server
-// (auth.kimi.com) and the API data plane (api.kimi.com/coding) report different
-// device-model formats in CPA.
+// kimiCommonHeaders builds the device-identity headers required by the Kimi API
+// on every request. The OAuth server and API data plane report different
+// device-model formats, so the caller selects the appropriate one.
 func kimiCommonHeaders(deviceID, deviceModel string) http.Header {
 	header := make(http.Header)
 	header.Set("X-Msh-Platform", kimiPlatformHeader)
@@ -236,14 +235,14 @@ func kimiHostname() string {
 	return hostname
 }
 
-// kimiExecutorDeviceModel mirrors CPA executor's getKimiDeviceModel, the raw
-// "<GOOS> <GOARCH>" format the data plane sends to api.kimi.com/coding.
+// kimiExecutorDeviceModel returns the raw "<GOOS> <GOARCH>" format required by
+// the Kimi Code data plane.
 func kimiExecutorDeviceModel() string {
 	return runtime.GOOS + " " + runtime.GOARCH
 }
 
-// kimiAuthDeviceModel mirrors CPA auth's getDeviceModel, the friendly
-// "macOS/Windows/Linux <arch>" format the OAuth server expects.
+// kimiAuthDeviceModel returns the friendly "macOS/Windows/Linux <arch>" format
+// required by the Kimi OAuth server.
 func kimiAuthDeviceModel() string {
 	switch runtime.GOOS {
 	case "darwin":
@@ -258,7 +257,7 @@ func kimiAuthDeviceModel() string {
 }
 
 // kimiDeviceID returns a stable device ID matching kimi-cli's storage location,
-// falling back to the same sentinel CPA uses when none is found.
+// falling back to the protocol's compatibility sentinel when none is found.
 func kimiDeviceID() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -311,7 +310,7 @@ func normalizeKimiUpstreamModel(model string) string {
 }
 
 // splitModelThinkingSuffix splits a trailing "(value)" suffix off a model ID,
-// mirroring CPA's thinking.ParseSuffix. It only splits when the model ends with
+// mirroring the Kimi model suffix convention. It only splits when the model ends with
 // a closing parenthesis so IDs like "gemini-2.5-pro" pass through unchanged.
 func splitModelThinkingSuffix(model string) (modelName, suffix string, hasSuffix bool) {
 	lastOpen := strings.LastIndex(model, "(")
@@ -329,7 +328,7 @@ func stripKimiPrefix(model string) string {
 	return model
 }
 
-// normalizeKimiBody mirrors CPA's normalizeKimiToolMessageLinks: it links tool
+// normalizeKimiBody applies Kimi's tool-message linking rules: it links tool
 // results to the preceding tool call when tool_call_id is missing, patches
 // call_id onto tool_call_id, back-fills assistant reasoning_content before a
 // tool call, and drops assistant messages with empty content. This is applied to
@@ -457,8 +456,7 @@ func normalizeKimiBody(body []byte) ([]byte, error) {
 	return out, nil
 }
 
-// joinRawJSONStrings joins raw JSON values into a JSON array. It mirrors CPA's
-// helps.JoinRawJSONStrings helper without taking a dependency on the SDK.
+// joinRawJSONStrings joins raw JSON values into a JSON array.
 func joinRawJSONStrings(items []string) string {
 	return "[" + strings.Join(items, ",") + "]"
 }

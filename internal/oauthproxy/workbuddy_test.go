@@ -110,7 +110,7 @@ func TestLoginWorkBuddyPollsAndPersistsBoundCredential(t *testing.T) {
 	}
 }
 
-func TestWorkBuddyRuntimeUsesCPAChatAndRefreshesOnce(t *testing.T) {
+func TestWorkBuddyRuntimeUsesCCLChatAdapterAndRefreshesOnce(t *testing.T) {
 	var chatAttempts atomic.Int32
 	var refreshes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

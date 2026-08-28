@@ -22,7 +22,7 @@ const (
 	ProviderKiro          = "kiro"
 	ProviderWorkBuddy     = "workbuddy"
 	ProviderCommandCode   = "commandcode"
-	// backendXAI is the CLIProxyAPI authenticator provider key for xAI/Grok.
+	// backendXAI is the internal backend key for xAI/Grok credentials.
 	backendXAI = "xai"
 )
 
