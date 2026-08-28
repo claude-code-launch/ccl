@@ -15,17 +15,19 @@ import (
 // per slot by the [1m] marker on a model id. It scales its own compaction buffer
 // and trigger point to whichever one a slot uses.
 //
-// ccl offers exactly two provider-wide modes:
+// ccl offers exactly three provider-wide modes:
 //
 //   - Default declares nothing and preserves Claude Code's native 200K/1M
 //     behavior selected per slot by the [1m] marker.
-//   - Balanced declares a 500K context/window and an 80% compact threshold,
+//   - Balanced 500K declares a 500K context/window and an 80% compact threshold,
 //     which triggers compaction at approximately 400K.
+//   - Balanced 800K declares an 800K context/window and an 80% compact threshold,
+//     which triggers compaction at approximately 640K.
 //
 // Other historical or hand-written combinations are removed at launch so the
-// effective behavior always matches one of those two choices. The per-slot [1m]
-// marker remains independently configurable; Balanced intentionally applies a
-// single 500K cap to every slot.
+// effective behavior always matches one of those choices. The per-slot [1m]
+// marker remains independently configurable; either Balanced tier intentionally
+// applies one provider-wide cap to every slot.
 const (
 	// claudeDefaultContextWindow is the window Claude Code assumes for a model it
 	// does not recognize, which is every model behind a gateway.
@@ -121,8 +123,8 @@ func AdvertisedContextWindows(endpoint, apiKey string) (map[string]int, string) 
 	return nil, ""
 }
 
-// applyContextPolicy keeps only the exact Balanced triplet. Any other context
-// override is retired to Default and removed from the launched session.
+// applyContextPolicy keeps either exact supported Balanced triplet. Any other
+// context override is retired to Default and removed from the launched session.
 func applyContextPolicy(env map[string]string) bool {
 	if env == nil || provider.IsBalancedContextPreset(env) {
 		return false

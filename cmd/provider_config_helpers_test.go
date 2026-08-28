@@ -95,7 +95,31 @@ func TestApplyCompactConfigBalancedWritesExactTriplet(t *testing.T) {
 	}
 }
 
-func TestCompactPresetOffersOnlyDefaultAndBalanced(t *testing.T) {
+func TestApplyCompactConfigBalanced800KWritesExactTriplet(t *testing.T) {
+	p := provider.Provider{Env: map[string]string{
+		maxContextTokensEnv:  "500000",
+		autoCompactWindowEnv: "500000",
+		autoCompactPctEnv:    "80",
+		"KEEP_ME":            "1",
+	}}
+	applyCompactConfig(&p, nil, compactPresetBalanced800K)
+
+	want := map[string]string{
+		maxContextTokensEnv:  "800000",
+		autoCompactWindowEnv: "800000",
+		autoCompactPctEnv:    "80",
+	}
+	for key, value := range want {
+		if p.Env[key] != value {
+			t.Errorf("Balanced 800K %s=%q, want %q", key, p.Env[key], value)
+		}
+	}
+	if p.Env["KEEP_ME"] != "1" || provider.ContextPresetFromEnv(p.Env) != provider.ContextPresetBalanced800K {
+		t.Fatalf("Balanced 800K env = %+v", p.Env)
+	}
+}
+
+func TestCompactPresetOffersSupportedBalancedTiers(t *testing.T) {
 	tests := []struct {
 		name         string
 		env          map[string]string
@@ -103,9 +127,12 @@ func TestCompactPresetOffersOnlyDefaultAndBalanced(t *testing.T) {
 		wantObsolete bool
 	}{
 		{name: "default", want: compactPresetDefault},
-		{name: "balanced", env: map[string]string{
+		{name: "balanced 500K", env: map[string]string{
 			maxContextTokensEnv: "500000", autoCompactWindowEnv: "500000", autoCompactPctEnv: "80",
-		}, want: compactPresetBalanced},
+		}, want: compactPresetBalanced500K},
+		{name: "balanced 800K", env: map[string]string{
+			maxContextTokensEnv: "800000", autoCompactWindowEnv: "800000", autoCompactPctEnv: "80",
+		}, want: compactPresetBalanced800K},
 		{name: "old 300K", env: map[string]string{
 			maxContextTokensEnv: "300000", autoCompactWindowEnv: "200000",
 		}, want: compactPresetDefault, wantObsolete: true},
@@ -137,9 +164,12 @@ func TestCompactStateSummaries(t *testing.T) {
 	}{
 		{name: "default", p: provider.Provider{}, want: "default (200K/1M) · off"},
 		{name: "extended slot", p: provider.Provider{OpusModel: "gpt[1m]"}, want: "default (200K/1M) · opus"},
-		{name: "balanced", p: provider.Provider{Env: map[string]string{
+		{name: "balanced 500K", p: provider.Provider{Env: map[string]string{
 			maxContextTokensEnv: "500000", autoCompactWindowEnv: "500000", autoCompactPctEnv: "80",
 		}}, want: "500K/400K · off"},
+		{name: "balanced 800K", p: provider.Provider{Env: map[string]string{
+			maxContextTokensEnv: "800000", autoCompactWindowEnv: "800000", autoCompactPctEnv: "80",
+		}}, want: "800K/640K · off"},
 		{name: "obsolete becomes default", p: provider.Provider{Env: map[string]string{
 			maxContextTokensEnv: "300000",
 		}}, want: "default (200K/1M) · off"},

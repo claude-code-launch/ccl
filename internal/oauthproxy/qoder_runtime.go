@@ -701,6 +701,7 @@ type qoderToolState struct {
 func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *anthropicResponseAssembler) (qoderStreamUsage, error) {
 	usage := qoderStreamUsage{}
 	tools := make(map[int]*qoderToolState)
+	retainedArgs := 0
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64<<10), int(qoderMaxBodyBytes))
 	for scanner.Scan() {
@@ -796,6 +797,9 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 			for _, toolCall := range delta.ToolCalls {
 				state := tools[toolCall.Index]
 				if state == nil {
+					if len(tools) >= anthropicAssemblerMaxToolCalls {
+						return usage, fmt.Errorf("Qoder tool call stream exceeds %d concurrent tool calls", anthropicAssemblerMaxToolCalls)
+					}
 					state = &qoderToolState{}
 					tools[toolCall.Index] = state
 				}
@@ -805,7 +809,13 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 				if toolCall.Function.Name != "" {
 					state.name = toolCall.Function.Name
 				}
-				state.args.WriteString(toolCall.Function.Arguments)
+				if args := toolCall.Function.Arguments; args != "" {
+					if retainedArgs+len(args) > anthropicAssemblerMaxRetainedBytes {
+						return usage, fmt.Errorf("Qoder tool call arguments exceed %d bytes", anthropicAssemblerMaxRetainedBytes)
+					}
+					retainedArgs += len(args)
+					state.args.WriteString(args)
+				}
 			}
 			switch choice.FinishReason {
 			case "length":

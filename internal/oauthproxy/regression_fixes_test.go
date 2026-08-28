@@ -26,6 +26,29 @@ func TestChatToolChoiceNoneIsPreserved(t *testing.T) {
 	}
 }
 
+func TestInternalSubscriptionGatewaysRequireRuntimeKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{name: "copilot", handler: (&copilotGateway{key: "runtime-secret"}).serveHTTP},
+		{name: "workbuddy", handler: (&workbuddyGateway{key: "runtime-secret"}).serveHTTP},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+			recorder := httptest.NewRecorder()
+			tc.handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", recorder.Code)
+			}
+			if !strings.Contains(recorder.Body.String(), "invalid gateway key") {
+				t.Fatalf("body = %q", recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestKimiDeviceTokenSlowDownGrowsInterval(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -150,5 +173,27 @@ func TestPassthroughUsageScannerOutputHighWaterMark(t *testing.T) {
 	scanner.feed([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n"))
 	if scanner.output != 7 {
 		t.Fatalf("scanner output = %d, want high-water mark 7", scanner.output)
+	}
+}
+
+func TestPassthroughUsageScannerRejectsUnboundedLine(t *testing.T) {
+	scanner := &passthroughUsageScanner{}
+	chunk := make([]byte, passthroughMaxPendingBytes+1)
+	if err := scanner.feed(chunk); err == nil {
+		t.Fatal("oversized newline-free usage stream was accepted")
+	}
+	if len(scanner.pending) != 0 {
+		t.Fatalf("pending bytes = %d after rejection", len(scanner.pending))
+	}
+}
+
+func TestStreamingReadersBoundMultilineEvents(t *testing.T) {
+	line := strings.Repeat("a", codexResponsesMaxSSEEventBytes/2)
+	input := "data: " + line + "\ndata: " + line + "\n"
+	if err := readChatCompletionsSSE(strings.NewReader(input), func([]byte) error { return nil }); err == nil {
+		t.Fatal("OpenAI multiline SSE event exceeded the limit without an error")
+	}
+	if err := readCodexSSE(strings.NewReader(input), func([]byte) error { return nil }); err == nil {
+		t.Fatal("Codex multiline SSE event exceeded the limit without an error")
 	}
 }

@@ -45,7 +45,8 @@ func commandcodeTestWhoami(validKey string) http.HandlerFunc {
 			http.Error(writer, `{"error":{"message":"invalid token"}}`, http.StatusUnauthorized)
 			return
 		}
-		writer.WriteHeader(http.StatusOK)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"user":{"id":"u-123","userName":"Ada","name":"Ada"}}`))
 	}
 }
 
@@ -84,7 +85,7 @@ func TestLoginCommandCodeImportsOfficialCredential(t *testing.T) {
 	if result.Provider != ProviderCommandCode || result.Backend != ProviderCommandCode {
 		t.Fatalf("result = %+v", result)
 	}
-	if want := filepath.Join(authDir, commandcodeCredentialFile); result.Path != want {
+	if want := filepath.Join(authDir, commandcodeCredentialFilename(map[string]any{"user_id": "u-123"})); result.Path != want {
 		t.Fatalf("credential path = %q, want %q", result.Path, want)
 	}
 	info, err := os.Stat(result.Path)
@@ -115,7 +116,7 @@ func TestLoginCommandCodeImportsOfficialCredential(t *testing.T) {
 			t.Errorf("credential[%q] = %v, want %q", key, saved[key], want)
 		}
 	}
-	apiKey, metadata, err := loadCommandCodeCredential(authDir, commandcodeCredentialFile)
+	apiKey, metadata, err := loadCommandCodeCredential(authDir, filepath.Base(result.Path))
 	if err != nil {
 		t.Fatalf("load credential: %v", err)
 	}

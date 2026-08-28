@@ -13,6 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -53,21 +56,38 @@ func commandcodeAuthState() (string, error) {
 
 // commandcodeCallbackListener binds the loopback callback server. With an
 // explicit port hint (--callback-port) only that port is tried; otherwise the
-// official 5959..5968 window is scanned.
-func commandcodeCallbackListener(portHint int) (net.Listener, int, error) {
+// official 5959..5968 window is scanned. Because the callback URL uses the
+// name localhost, a usable port must be owned on both IPv4 and IPv6 when IPv6
+// loopback is available.
+func commandcodeCallbackListener(portHint int) ([]net.Listener, int, error) {
+	bindPort := func(port int) ([]net.Listener, error) {
+		v4, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return nil, err
+		}
+		v6, err := net.Listen("tcp", fmt.Sprintf("[::1]:%d", port))
+		if err == nil {
+			return []net.Listener{v4, v6}, nil
+		}
+		if errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL) {
+			return []net.Listener{v4}, nil
+		}
+		_ = v4.Close()
+		return nil, err
+	}
 	if portHint > 0 {
-		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", portHint))
+		listeners, err := bindPort(portHint)
 		if err != nil {
 			return nil, 0, fmt.Errorf("bind callback port %d: %w", portHint, err)
 		}
-		return listener, portHint, nil
+		return listeners, portHint, nil
 	}
 	var lastErr error
-	for attempt := 0; attempt < commandcodeCallbackPortAttempts; attempt++ {
+	for attempt := range commandcodeCallbackPortAttempts {
 		port := commandcodeCallbackStartPort + attempt
-		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		listeners, err := bindPort(port)
 		if err == nil {
-			return listener, port, nil
+			return listeners, port, nil
 		}
 		lastErr = err
 	}
@@ -95,14 +115,93 @@ func commandcodeCallbackOriginAllowed(origin string) bool {
 	}
 }
 
+// commandcodeTrySendCallback delivers a callback without allowing an HTTP
+// handler to wait for the login loop. The parent owns channel lifetime; a
+// closed done channel and a full buffer both mean the callback is stale.
+func commandcodeTrySendCallback(done <-chan struct{}, results chan<- commandcodeCallback, callback commandcodeCallback) bool {
+	select {
+	case <-done:
+		return false
+	default:
+	}
+	select {
+	case results <- callback:
+		return true
+	case <-done:
+		return false
+	default:
+		return false
+	}
+}
+
+func commandcodeTrySendError(done <-chan struct{}, errors chan<- error, err error) bool {
+	select {
+	case <-done:
+		return false
+	default:
+	}
+	select {
+	case errors <- err:
+		return true
+	case <-done:
+		return false
+	default:
+		return false
+	}
+}
+
 // commandcodeCallbackHandler serves POST /callback with the exact contract of
 // the official createAuthServer: CORS echo for whitelisted origins, OPTIONS
 // preflight, a 10KB body limit, access_denied rejection, strict field checks,
 // state comparison, and a final {success:true} before the caller resumes.
+//
+// The public wrapper is retained for focused handler tests. Login uses the
+// done-aware variant so callbacks racing with timeout/shutdown get a bounded
+// response instead of blocking on a result channel.
 func commandcodeCallbackHandler(state string, results chan<- commandcodeCallback, serveErrors chan<- error) http.Handler {
+	return commandcodeCallbackHandlerWithDone(state, results, serveErrors, nil)
+}
+
+func commandcodeCallbackHandlerWithDone(state string, results chan<- commandcodeCallback, serveErrors chan<- error, done <-chan struct{}) http.Handler {
+	return commandcodeCallbackHandlerWithDoneAndMutex(state, results, serveErrors, done, nil)
+}
+
+// commandcodeCallbackHandlerWithDoneAndMutex is the login-loop variant of the
+// callback handler. deliveryMu is shared with the owner that closes done, so a
+// callback cannot enqueue work after shutdown has begun. The mutex also keeps
+// the success response ahead of the owner's server close when a callback wins.
+func commandcodeCallbackHandlerWithDoneAndMutex(state string, results chan<- commandcodeCallback, serveErrors chan<- error, done <-chan struct{}, deliveryMu *sync.Mutex) http.Handler {
+	var accepted atomic.Bool
 	writeJSON := func(writer http.ResponseWriter, status int, body string) {
 		writer.WriteHeader(status)
 		_, _ = io.WriteString(writer, body)
+	}
+	withDelivery := func(fn func() bool) bool {
+		if deliveryMu != nil {
+			deliveryMu.Lock()
+			defer deliveryMu.Unlock()
+		}
+		return fn()
+	}
+	sendErrorResponse := func(writer http.ResponseWriter, err error) bool {
+		return withDelivery(func() bool {
+			if !commandcodeTrySendError(done, serveErrors, err) {
+				writeJSON(writer, http.StatusGone, `{"success":false,"error":"Authorization session closed"}`)
+				return false
+			}
+			writeJSON(writer, http.StatusOK, `{"success":true}`)
+			return true
+		})
+	}
+	sendCallbackResponse := func(writer http.ResponseWriter, callback commandcodeCallback) bool {
+		return withDelivery(func() bool {
+			if !commandcodeTrySendCallback(done, results, callback) {
+				writeJSON(writer, http.StatusGone, `{"success":false,"error":"Authorization session closed"}`)
+				return false
+			}
+			writeJSON(writer, http.StatusOK, `{"success":true}`)
+			return true
+		})
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		origin := request.Header.Get("Origin")
@@ -113,6 +212,12 @@ func commandcodeCallbackHandler(state string, results chan<- commandcodeCallback
 		writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		writer.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		writer.Header().Set("Content-Type", "application/json")
+		select {
+		case <-done:
+			writeJSON(writer, http.StatusGone, `{"success":false,"error":"Authorization session closed"}`)
+			return
+		default:
+		}
 		switch {
 		case request.Method == http.MethodOptions:
 			writer.WriteHeader(http.StatusNoContent)
@@ -145,19 +250,30 @@ func commandcodeCallbackHandler(state string, results chan<- commandcodeCallback
 			writeJSON(writer, http.StatusBadRequest, `{"success":false,"error":"Invalid JSON"}`)
 			return
 		}
+		// Error callbacks are authenticated by the same state as successful
+		// callbacks. Checking it first prevents unauthenticated requests from
+		// consuming the one-shot login or injecting text into the terminal.
+		if body.State != state {
+			writeJSON(writer, http.StatusForbidden, `{"success":false,"error":"Invalid state token"}`)
+			return
+		}
 		if body.Error != nil {
-			writeJSON(writer, http.StatusOK, `{"success":true}`)
-			description := body.ErrorDescription
+			if !accepted.CompareAndSwap(false, true) {
+				writeJSON(writer, http.StatusConflict, `{"success":false,"error":"Authorization already completed"}`)
+				return
+			}
+			description := commandcodeSanitizeErrorText(body.ErrorDescription)
 			if *body.Error == "access_denied" {
 				if description == "" {
 					description = "Authorization was denied by the user"
 				}
-				serveErrors <- fmt.Errorf("Command Code authorization was denied: %s", description)
+			} else if description == "" {
+				description = commandcodeSanitizeErrorText(*body.Error)
+			}
+			if *body.Error == "access_denied" {
+				sendErrorResponse(writer, fmt.Errorf("Command Code authorization was denied: %s", description))
 			} else {
-				if description == "" {
-					description = *body.Error
-				}
-				serveErrors <- fmt.Errorf("Command Code authorization failed: %s", description)
+				sendErrorResponse(writer, fmt.Errorf("Command Code authorization failed: %s", description))
 			}
 			return
 		}
@@ -165,16 +281,17 @@ func commandcodeCallbackHandler(state string, results chan<- commandcodeCallback
 			writeJSON(writer, http.StatusBadRequest, `{"success":false,"error":"Missing required fields"}`)
 			return
 		}
-		if body.State != state {
-			writeJSON(writer, http.StatusForbidden, `{"success":false,"error":"Invalid state token"}`)
+		if !accepted.CompareAndSwap(false, true) {
+			writeJSON(writer, http.StatusConflict, `{"success":false,"error":"Authorization already completed"}`)
 			return
 		}
-		writeJSON(writer, http.StatusOK, `{"success":true}`)
-		results <- commandcodeCallback{
+		if !sendCallbackResponse(writer, commandcodeCallback{
 			apiKey:   body.APIKey,
 			userID:   body.UserID,
 			userName: body.UserName,
 			keyName:  body.KeyName,
+		}) {
+			return
 		}
 	})
 }
@@ -198,6 +315,22 @@ func commandcodeSanitizePastedKey(raw string) string {
 	return strings.TrimSpace(key)
 }
 
+// commandcodeSanitizeErrorText removes terminal control characters before a
+// callback error is returned to the interactive CLI. Newlines are flattened
+// so an error cannot forge additional terminal output lines.
+func commandcodeSanitizeErrorText(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n':
+			return ' '
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			return -1
+		default:
+			return r
+		}
+	}, value)
+}
+
 // commandcodeSubmitKey mirrors the official CLI's submitApiKey: sanitize the
 // pasted text, validate through /alpha/whoami, and persist with the
 // manual-entry metadata shape. retry is true when the key was invalid and the
@@ -217,27 +350,11 @@ func commandcodeSubmitKey(ctx context.Context, base, authDir, raw string) (Login
 		}
 		return LoginResult{}, false, err
 	}
-	userID, userName := "manual-entry", "API Key"
-	if user != nil {
-		if strings.TrimSpace(user.ID) != "" {
-			userID = strings.TrimSpace(user.ID)
-		}
-		switch {
-		case strings.TrimSpace(user.UserName) != "":
-			userName = strings.TrimSpace(user.UserName)
-		case strings.TrimSpace(user.Name) != "":
-			userName = strings.TrimSpace(user.Name)
-		}
-	}
-	metadata := map[string]any{
-		"type":             ProviderCommandCode,
-		"api_key":          apiKey,
-		"user_id":          userID,
-		"user_name":        userName,
+	metadata := commandcodeCredentialMetadata(apiKey, user, map[string]any{
 		"key_name":         "cli-manual-entry",
 		"authenticated_at": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		"source":           "manual_paste",
-	}
+	})
 	result, saveErr := saveCommandCodeCredential(authDir, metadata)
 	if saveErr != nil {
 		return LoginResult{}, false, saveErr
@@ -250,55 +367,113 @@ func commandcodeSubmitKey(ctx context.Context, base, authDir, raw string) (Login
 // key back either through the loopback callback or as a manual paste, and
 // races both against a 2-minute browser window. A rejected key re-prompts
 // after a short pause instead of aborting.
-func loginCommandCodeOAuth(ctx context.Context, authDir string, opts LoginOptions) (LoginResult, error) {
+func loginCommandCodeOAuth(ctx context.Context, authDir string, opts LoginOptions) (result LoginResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	loginCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	state, err := commandcodeAuthState()
 	if err != nil {
 		return LoginResult{}, err
 	}
-	listener, port, err := commandcodeCallbackListener(opts.CallbackPort)
+	listeners, port, err := commandcodeCallbackListener(opts.CallbackPort)
 	if err != nil {
 		return LoginResult{}, err
 	}
+
 	results := make(chan commandcodeCallback, 1)
 	serveErrors := make(chan error, 2)
-	server := &http.Server{
-		Handler:           commandcodeCallbackHandler(state, results, serveErrors),
-		ReadHeaderTimeout: 10 * time.Second,
+	callbackDone := make(chan struct{})
+	var deliveryMu sync.Mutex
+	var stopCallbackOnce sync.Once
+	server := &http.Server{ReadHeaderTimeout: 10 * time.Second}
+	stopCallbackServer := func() {
+		stopCallbackOnce.Do(func() {
+			// The callback handler holds deliveryMu while enqueueing a result and
+			// writing its success response. Closing the session under the same
+			// mutex prevents a queued callback from racing with shutdown and keeps
+			// the browser response ahead of server.Close.
+			deliveryMu.Lock()
+			close(callbackDone)
+			_ = server.Close()
+			deliveryMu.Unlock()
+		})
+	}
+	server.Handler = commandcodeCallbackHandlerWithDoneAndMutex(state, results, serveErrors, callbackDone, &deliveryMu)
+	serveDone := make(chan struct{})
+	var serveWG sync.WaitGroup
+	serveWG.Add(len(listeners))
+	for _, listener := range listeners {
+		go func(listener net.Listener) {
+			defer serveWG.Done()
+			if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				deliveryMu.Lock()
+				commandcodeTrySendError(callbackDone, serveErrors, serveErr)
+				deliveryMu.Unlock()
+			}
+		}(listener)
 	}
 	go func() {
-		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			serveErrors <- serveErr
-		}
-	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		serveWG.Wait()
+		close(serveDone)
 	}()
 
-	// Feed pasted lines from stdin (when there is a terminal) concurrently
-	// with the browser callback, so both entry modes stay live at once.
 	stdinLines := make(chan string, 8)
+	stdinDone := make(chan struct{})
 	if opts.Stdin != nil {
 		go func() {
-			defer close(stdinLines)
+			defer close(stdinDone)
 			scanner := bufio.NewScanner(opts.Stdin)
 			scanner.Buffer(make([]byte, 64*1024), 1<<20)
 			for scanner.Scan() {
-				stdinLines <- scanner.Text()
+				select {
+				case stdinLines <- scanner.Text():
+				case <-loginCtx.Done():
+					return
+				}
 			}
+			if scanErr := scanner.Err(); scanErr != nil {
+				deliveryMu.Lock()
+				commandcodeTrySendError(callbackDone, serveErrors, fmt.Errorf("read Command Code login input: %w", scanErr))
+				deliveryMu.Unlock()
+			}
+			close(stdinLines)
 		}()
+	} else {
+		close(stdinDone)
+		close(stdinLines)
 	}
+
+	// All exit paths use the same cleanup. The optional cancellation hook can
+	// interrupt a reader owned by the caller; Login deliberately does not close
+	// an io.Closer implicitly because cmd.InOrStdin() commonly returns os.Stdin.
+	defer func() {
+		cancel()
+		stopCallbackServer()
+		if opts.StdinCancel != nil {
+			opts.StdinCancel()
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		_ = server.Shutdown(shutdownCtx)
+		shutdownCancel()
+		select {
+		case <-serveDone:
+		case <-time.After(time.Second):
+		}
+		select {
+		case <-stdinDone:
+		case <-time.After(time.Second):
+		}
+	}()
 
 	authURL := commandcodeAuthURL(port, state)
 	fmt.Println("Authorize in browser, or paste API key here")
 	fmt.Printf("Get API key: %s\n", authURL)
 	if !opts.NoBrowser {
-		if err := openBrowser(authURL); err != nil {
-			fmt.Printf("Could not open browser. Paste your API key below: %v\n", err)
+		if browserErr := openBrowser(authURL); browserErr != nil {
+			fmt.Printf("Could not open browser. Paste your API key below: %v\n", browserErr)
 		}
 		fmt.Println("If your browser doesn't open, go to this link.")
 	}
@@ -307,27 +482,47 @@ func loginCommandCodeOAuth(ctx context.Context, authDir string, opts LoginOption
 	base := commandcodeAPIBase("")
 	timeout := time.NewTimer(commandcodeBrowserTimeout)
 	defer timeout.Stop()
+	var stdinChannel <-chan string
+	if opts.Stdin != nil {
+		stdinChannel = stdinLines
+	}
+	browserClosed := false
 	for {
 		select {
 		case callback := <-results:
-			metadata := map[string]any{
-				"type":             ProviderCommandCode,
-				"api_key":          callback.apiKey,
-				"user_id":          callback.userID,
-				"user_name":        callback.userName,
+			stopCallbackServer()
+			apiKey := commandcodeSanitizePastedKey(callback.apiKey)
+			if apiKey == "" {
+				if stdinChannel == nil {
+					return LoginResult{}, errors.New("Command Code callback returned an empty API key")
+				}
+				fmt.Println("The browser-provided key was empty. Paste a valid API key below.")
+				continue
+			}
+			user, validateErr := commandcodeValidateCredential(loginCtx, base, apiKey)
+			if validateErr != nil {
+				if errors.Is(validateErr, errCommandCodeKeyRejected) {
+					if stdinChannel == nil {
+						return LoginResult{}, validateErr
+					}
+					fmt.Println("The browser-provided key was invalid. Paste a valid API key below.")
+					continue
+				}
+				return LoginResult{}, validateErr
+			}
+			metadata := commandcodeCredentialMetadata(apiKey, user, map[string]any{
 				"key_name":         callback.keyName,
 				"authenticated_at": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 				"source":           "browser_callback",
-			}
+			})
 			return saveCommandCodeCredential(authDir, metadata)
 		case serveErr := <-serveErrors:
 			return LoginResult{}, fmt.Errorf("serve Command Code callback: %w", serveErr)
-		case keyText, ok := <-stdinLines:
+		case keyText, ok := <-stdinChannel:
 			if !ok {
-				stdinLines = nil // stdin exhausted: only the browser can finish
-				continue
+				return LoginResult{}, errors.New("Command Code login ended: stdin reached EOF before authorization completed")
 			}
-			result, retry, submitErr := commandcodeSubmitKey(ctx, base, authDir, keyText)
+			result, retry, submitErr := commandcodeSubmitKey(loginCtx, base, authDir, keyText)
 			if submitErr != nil {
 				return LoginResult{}, submitErr
 			}
@@ -338,16 +533,20 @@ func loginCommandCodeOAuth(ctx context.Context, authDir string, opts LoginOption
 			select {
 			case <-time.After(commandcodeInvalidKeyDelay):
 				fmt.Println("Paste a valid API key below.")
-			case <-ctx.Done():
-				return LoginResult{}, fmt.Errorf("Command Code login: %w", ctx.Err())
+			case <-loginCtx.Done():
+				return LoginResult{}, fmt.Errorf("Command Code login: %w", loginCtx.Err())
 			}
 		case <-timeout.C:
-			// Browser window expired: stop the callback server and degrade to
-			// manual entry, exactly like the official race timeout.
-			_ = server.Close()
-			fmt.Println("Browser auth timed out. Paste your API key below.")
-		case <-ctx.Done():
-			return LoginResult{}, fmt.Errorf("Command Code login: %w", ctx.Err())
+			if !browserClosed {
+				browserClosed = true
+				stopCallbackServer()
+				fmt.Println("Browser auth timed out. Paste your API key below.")
+				if stdinChannel == nil {
+					return LoginResult{}, errors.New("Command Code browser authorization timed out and no manual input is available")
+				}
+			}
+		case <-loginCtx.Done():
+			return LoginResult{}, fmt.Errorf("Command Code login: %w", loginCtx.Err())
 		}
 	}
 }

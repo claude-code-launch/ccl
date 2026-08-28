@@ -101,17 +101,21 @@ func TestApplyContextPolicyDropsUnsupportedOverrides(t *testing.T) {
 	}
 }
 
-func TestApplyContextPolicyKeepsBalanced(t *testing.T) {
-	env := map[string]string{
-		provider.EnvMaxContextTokens:  "500000",
-		provider.EnvAutoCompactWindow: "500000",
-		provider.EnvAutoCompactPct:    "80",
-	}
-	if applyContextPolicy(env) {
-		t.Fatal("Balanced must survive the launcher policy")
-	}
-	if !provider.IsBalancedContextPreset(env) {
-		t.Fatalf("Balanced values were modified: %#v", env)
+func TestApplyContextPolicyKeepsSupportedBalancedTiers(t *testing.T) {
+	for _, tokens := range []string{"500000", "800000"} {
+		t.Run(tokens, func(t *testing.T) {
+			env := map[string]string{
+				provider.EnvMaxContextTokens:  tokens,
+				provider.EnvAutoCompactWindow: tokens,
+				provider.EnvAutoCompactPct:    "80",
+			}
+			if applyContextPolicy(env) {
+				t.Fatal("supported Balanced tier must survive the launcher policy")
+			}
+			if !provider.IsBalancedContextPreset(env) {
+				t.Fatalf("Balanced values were modified: %#v", env)
+			}
+		})
 	}
 }
 
@@ -146,26 +150,33 @@ func TestSettingsDoNotDeclareContextByDefault(t *testing.T) {
 	}
 }
 
-func TestSettingsKeepBalancedContextTriplet(t *testing.T) {
-	ctx := &providerContext{
-		provider: provider.Provider{
-			Name:   "balanced",
-			Type:   "anthropic",
-			APIKey: "test-key",
-			Env: map[string]string{
-				provider.EnvMaxContextTokens:  "500000",
-				provider.EnvAutoCompactWindow: "500000",
-				provider.EnvAutoCompactPct:    "80",
-			},
-		},
-		baseURL: "https://example.test",
-	}
-	settings := ctx.settings()
-	if !provider.IsBalancedContextPreset(settings.Env) {
-		t.Fatalf("Balanced settings were not retained: %#v", settings.Env)
-	}
-	if ctx.droppedContextOverride {
-		t.Fatal("Balanced was incorrectly treated as an unsupported preset")
+func TestSettingsKeepSupportedBalancedContextTriplets(t *testing.T) {
+	for _, tokens := range []string{"500000", "800000"} {
+		t.Run(tokens, func(t *testing.T) {
+			ctx := &providerContext{
+				provider: provider.Provider{
+					Name:   "balanced",
+					Type:   "anthropic",
+					APIKey: "test-key",
+					Env: map[string]string{
+						provider.EnvMaxContextTokens:  tokens,
+						provider.EnvAutoCompactWindow: tokens,
+						provider.EnvAutoCompactPct:    "80",
+					},
+				},
+				baseURL: "https://example.test",
+			}
+			settings := ctx.settings()
+			if !provider.IsBalancedContextPreset(settings.Env) {
+				t.Fatalf("Balanced settings were not retained: %#v", settings.Env)
+			}
+			if settings.Env[provider.EnvMaxContextTokens] != tokens || settings.Env[provider.EnvAutoCompactWindow] != tokens {
+				t.Fatalf("Balanced %s settings changed: %#v", tokens, settings.Env)
+			}
+			if ctx.droppedContextOverride {
+				t.Fatal("Balanced was incorrectly treated as an unsupported preset")
+			}
+		})
 	}
 }
 
@@ -233,8 +244,8 @@ func TestBuildProcessEnvDropsInheritedSettingsKeys(t *testing.T) {
 
 func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 	settings := settingsJSON{Env: map[string]string{
-		provider.EnvMaxContextTokens:  "500000",
-		provider.EnvAutoCompactWindow: "500000",
+		provider.EnvMaxContextTokens:  "800000",
+		provider.EnvAutoCompactWindow: "800000",
 		provider.EnvAutoCompactPct:    "80",
 	}}
 	inherited := []string{"PATH=/usr/bin", provider.EnvAutoCompactPct + "=10", "HOME=/root"}
@@ -247,8 +258,8 @@ func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 		values[key] = value
 		seen[key]++
 	}
-	if values[provider.EnvMaxContextTokens] != "500000" ||
-		values[provider.EnvAutoCompactWindow] != "500000" {
+	if values[provider.EnvMaxContextTokens] != "800000" ||
+		values[provider.EnvAutoCompactWindow] != "800000" {
 		t.Fatalf("managed context vars were not exported: %#v", values)
 	}
 	// A ccl-managed value must replace the ambient one, not duplicate it.

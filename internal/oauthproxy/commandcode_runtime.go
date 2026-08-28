@@ -186,6 +186,13 @@ func startCommandCodeRuntimeService(parent context.Context, service *commandcode
 		endpoint: "http://" + listener.Addr().String() + "/v1", apiKey: apiKey,
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, models: append([]string(nil), service.models...),
+		upstreamCheck: func(ctx context.Context) (int, string, error) {
+			client := service.client
+			if client == nil {
+				client = &http.Client{}
+			}
+			return commandcodeProbeWhoami(ctx, client, service.endpoint, service.upstreamKey)
+		},
 		usage: service.usage,
 	}
 	go func() {
@@ -506,6 +513,25 @@ func CommandCodeProbeInit(ctx context.Context, endpoint, upstreamAPIKey string, 
 		return response.StatusCode, "", err
 	}
 	return response.StatusCode, strings.TrimSpace(string(body)), nil
+}
+
+// CommandCodeProbeWhoami checks the configured Command Code gateway directly with
+// GET /alpha/whoami. Unlike CommandCodeProbeInit, it never falls back to the
+// fingerprint handshake: callers such as doctor need to report the real upstream
+// authentication/connectivity result rather than a different endpoint's status.
+func CommandCodeProbeWhoami(ctx context.Context, endpoint, upstreamAPIKey string, timeout time.Duration) (int, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	upstreamAPIKey = strings.TrimSpace(upstreamAPIKey)
+	if upstreamAPIKey == "" {
+		return 0, "", errors.New("Command Code upstream probe requires an API key")
+	}
+	if timeout <= 0 {
+		timeout = commandcodeInitTimeout
+	}
+	client := &http.Client{Timeout: timeout}
+	return commandcodeProbeWhoami(ctx, client, commandcodeAPIBase(endpoint), upstreamAPIKey)
 }
 
 // commandcodeProbeWhoami runs the lightweight GET /alpha/whoami probe. It

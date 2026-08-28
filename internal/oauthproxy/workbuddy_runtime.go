@@ -224,6 +224,7 @@ func metadataInt64(metadata map[string]any, key string) int64 {
 
 type workbuddyGateway struct {
 	endpoint       string
+	key            string
 	store          *workbuddyCredentialStore
 	server         *http.Server
 	done           chan struct{}
@@ -235,8 +236,14 @@ func startWorkBuddyGateway(parent context.Context, store *workbuddyCredentialSto
 	if err != nil {
 		return nil, fmt.Errorf("start WorkBuddy gateway listener: %w", err)
 	}
+	gatewayKey, err := sessionAPIKey()
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("generate WorkBuddy gateway key: %w", err)
+	}
 	gateway := &workbuddyGateway{
 		endpoint:       "http://" + listener.Addr().String(),
+		key:            gatewayKey,
 		store:          store,
 		done:           make(chan struct{}),
 		conversationID: uuid.NewString(),
@@ -271,6 +278,13 @@ func (g *workbuddyGateway) Stop() {
 func (g *workbuddyGateway) serveHTTP(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	started := time.Now()
+	if strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) != g.key {
+		LogWarnEvent("request_rejected", "component", "workbuddy", "request_id", requestID,
+			"path", request.URL.Path, "method", request.Method, "status", http.StatusUnauthorized,
+			"reason", "invalid_gateway_key")
+		writeWorkBuddyGatewayError(writer, http.StatusUnauthorized, "invalid gateway key")
+		return
+	}
 	if request.Method != http.MethodPost || workbuddyUpstreamPath(request.URL.Path) == "" {
 		LogWarnEvent("request_rejected", "component", "workbuddy", "request_id", requestID,
 			"path", request.URL.Path, "method", request.Method, "status", http.StatusNotFound,
@@ -363,10 +377,13 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 	request.Header.Set("X-Conversation-Message-ID", traceID)
 	request.Header.Set("X-Request-ID", traceID)
 	request.Header.Set("X-Agent-Intent", "craft")
-	request.Header.Set("X-IDE-Type", workbuddyPlatform)
-	request.Header.Set("X-IDE-Name", workbuddyPlatform)
+	request.Header.Set("X-Agent-Purpose", "conversation")
+	request.Header.Set("X-IDE-Type", workbuddyChatChannel)
+	request.Header.Set("X-IDE-Name", workbuddyChatChannel)
 	request.Header.Set("X-IDE-Version", workbuddyClientVersion)
-	request.Header.Set("X-Private-Data", "false")
+	request.Header.Set("X-Private-Data", "true")
+	request.Header.Set("x-requested-with", "XMLHttpRequest")
+	request.Header.Set("x-codebuddy-request", "1")
 	model := copilotRequestModel(body)
 	LogDebugEvent("upstream_request", "component", "workbuddy", "request_id", requestLogID(ctx),
 		"path", path, "model", model, "credential", credential.fileName, "conversation_id", g.conversationID)
@@ -543,11 +560,9 @@ func startWorkBuddyOAuth(parent context.Context, modelSpec, credentialFile strin
 	if err != nil {
 		return nil, err
 	}
-	// The WorkBuddy gateway already handles authentication, catalog discovery, and
-	// the /v1→/v2 path rewrite. The Messages↔Chat Completions translation below is
-	// CCL's own data plane now; the gateway ignores the Bearer token, so a static
-	// placeholder key is passed and never read.
-	proxyRuntime, err := startOpenAIChatRuntimeRoutes(parent, gateway.endpoint, routes, &chatStaticAuthorizer{token: ProviderWorkBuddy})
+	// The gateway verifies a per-runtime token on the internal hop before it
+	// attaches the user's subscription credential.
+	proxyRuntime, err := startOpenAIChatRuntimeRoutes(parent, gateway.endpoint, routes, &chatStaticAuthorizer{token: gateway.key})
 	if err != nil {
 		return nil, err
 	}

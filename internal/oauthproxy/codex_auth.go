@@ -63,7 +63,7 @@ func loginCodex(ctx context.Context, authDir string, opts LoginOptions) (LoginRe
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	redirectURI := fmt.Sprintf("http://localhost:%d%s", listener.Addr().(*net.TCPAddr).Port, codexOAuthCallbackPath)
+	redirectURI := "http://" + listener.Addr().String() + codexOAuthCallbackPath
 	authURL := codexOAuthAuthorizeURL + "?" + url.Values{
 		"client_id":                  {codexResponsesOAuthClientID},
 		"response_type":              {"code"},

@@ -6,6 +6,62 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
+func TestContextPresetFromEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      map[string]string
+		want     provider.ContextPreset
+		balanced bool
+	}{
+		{name: "default", want: provider.ContextPresetDefault},
+		{name: "balanced 500K", env: map[string]string{
+			provider.EnvMaxContextTokens: "500000", provider.EnvAutoCompactWindow: "500000", provider.EnvAutoCompactPct: "80",
+		}, want: provider.ContextPresetBalanced500K, balanced: true},
+		{name: "balanced 800K with whitespace", env: map[string]string{
+			provider.EnvMaxContextTokens: " 800000 ", provider.EnvAutoCompactWindow: "800000\t", provider.EnvAutoCompactPct: " 80",
+		}, want: provider.ContextPresetBalanced800K, balanced: true},
+		{name: "partial 800K", env: map[string]string{
+			provider.EnvMaxContextTokens: "800000", provider.EnvAutoCompactWindow: "800000",
+		}, want: provider.ContextPresetDefault},
+		{name: "legacy 1M", env: map[string]string{
+			provider.EnvMaxContextTokens: "1000000", provider.EnvAutoCompactWindow: "900000", provider.EnvAutoCompactPct: "90",
+		}, want: provider.ContextPresetDefault},
+		{name: "custom percentage", env: map[string]string{
+			provider.EnvMaxContextTokens: "800000", provider.EnvAutoCompactWindow: "800000", provider.EnvAutoCompactPct: "82",
+		}, want: provider.ContextPresetDefault},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := provider.ContextPresetFromEnv(tt.env); got != tt.want {
+				t.Fatalf("ContextPresetFromEnv() = %v, want %v", got, tt.want)
+			}
+			if got := provider.IsBalancedContextPreset(tt.env); got != tt.balanced {
+				t.Fatalf("IsBalancedContextPreset() = %t, want %t", got, tt.balanced)
+			}
+		})
+	}
+}
+
+func TestContextPresetValues(t *testing.T) {
+	tests := []struct {
+		preset                                provider.ContextPreset
+		maxContext, compactWindow, compactPct string
+		ok                                    bool
+	}{
+		{preset: provider.ContextPresetDefault},
+		{preset: provider.ContextPresetBalanced500K, maxContext: "500000", compactWindow: "500000", compactPct: "80", ok: true},
+		{preset: provider.ContextPresetBalanced800K, maxContext: "800000", compactWindow: "800000", compactPct: "80", ok: true},
+	}
+	for _, tt := range tests {
+		maxContext, compactWindow, compactPct, ok := provider.ContextPresetValues(tt.preset)
+		if maxContext != tt.maxContext || compactWindow != tt.compactWindow || compactPct != tt.compactPct || ok != tt.ok {
+			t.Fatalf("ContextPresetValues(%v) = (%q, %q, %q, %t), want (%q, %q, %q, %t)",
+				tt.preset, maxContext, compactWindow, compactPct, ok,
+				tt.maxContext, tt.compactWindow, tt.compactPct, tt.ok)
+		}
+	}
+}
+
 func TestProtocolLabel(t *testing.T) {
 	testCases := []struct {
 		name         string

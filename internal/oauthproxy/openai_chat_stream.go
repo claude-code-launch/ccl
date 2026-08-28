@@ -24,6 +24,7 @@ type chatCompletionsStreamState struct {
 	assembler *anthropicResponseAssembler
 	tools     map[string]*chatToolCall
 	usage     map[string]any
+	retained  int
 }
 
 // processChatCompletionsStream converts an OpenAI Chat Completions SSE stream
@@ -81,6 +82,9 @@ func readChatCompletionsSSE(reader io.Reader, consume func([]byte) error) error 
 			if data.Len() > 0 {
 				data.WriteByte('\n')
 			}
+			if data.Len()+len(value) > codexResponsesMaxSSEEventBytes {
+				return fmt.Errorf("OpenAI Chat Completions SSE event exceeds %d bytes", codexResponsesMaxSSEEventBytes)
+			}
 			data.WriteString(strings.TrimPrefix(value, " "))
 		}
 	}
@@ -122,7 +126,9 @@ func (s *chatCompletionsStreamState) process(payload []byte) error {
 			}
 		}
 		for _, rawCall := range sliceValue(delta["tool_calls"]) {
-			s.accumulateToolCall(mapValue(rawCall))
+			if err := s.accumulateToolCall(mapValue(rawCall)); err != nil {
+				return err
+			}
 		}
 	}
 	if finish := stringValue(choice["finish_reason"]); finish != "" {
@@ -131,11 +137,14 @@ func (s *chatCompletionsStreamState) process(payload []byte) error {
 	return nil
 }
 
-func (s *chatCompletionsStreamState) accumulateToolCall(raw map[string]any) {
+func (s *chatCompletionsStreamState) accumulateToolCall(raw map[string]any) error {
 	index := intValue(raw["index"])
 	key := fmt.Sprintf("%d", index)
 	call := s.tools[key]
 	if call == nil {
+		if len(s.tools) >= anthropicAssemblerMaxToolCalls {
+			return fmt.Errorf("OpenAI Chat tool call stream exceeds %d concurrent tool calls", anthropicAssemblerMaxToolCalls)
+		}
 		call = &chatToolCall{index: index}
 		s.tools[key] = call
 	}
@@ -147,9 +156,14 @@ func (s *chatCompletionsStreamState) accumulateToolCall(raw map[string]any) {
 			call.name = name
 		}
 		if arguments := stringValue(function["arguments"]); arguments != "" {
+			if s.retained+len(arguments) > anthropicAssemblerMaxRetainedBytes {
+				return fmt.Errorf("OpenAI Chat tool call arguments exceed %d bytes", anthropicAssemblerMaxRetainedBytes)
+			}
+			s.retained += len(arguments)
 			call.arguments.WriteString(arguments)
 		}
 	}
+	return nil
 }
 
 // emitTools flushes every accumulated tool call in index order, synthesizing

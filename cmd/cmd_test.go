@@ -436,6 +436,43 @@ func TestMapAutoPreservesBalancedContextPreset(t *testing.T) {
 	}
 }
 
+func TestMapAutoPreservesBalanced800KContextPreset(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
+
+	cfg := &provider.Config{
+		ActiveProvider: "mock",
+		Providers: map[string]provider.Provider{
+			"mock": {
+				Name:      "mock",
+				Type:      "openai",
+				Endpoint:  server.URL + "/v1",
+				APIKey:    "test-key",
+				OpusModel: "old-opus",
+				Env: map[string]string{
+					maxContextTokensEnv:  provider.Balanced800KMaxContextTokens,
+					autoCompactWindowEnv: provider.Balanced800KAutoCompactWindow,
+					autoCompactPctEnv:    provider.Balanced800KAutoCompactPct,
+				},
+			},
+		},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := updated.Providers["mock"]
+	if preset := provider.ContextPresetFromEnv(got.Env); preset != provider.ContextPresetBalanced800K {
+		t.Fatalf("map auto changed Balanced 800K context preset: %+v", got.Env)
+	}
+}
+
 func TestCloudAndOAuthCommandTrees(t *testing.T) {
 	for _, args := range [][]string{
 		{"cloud", "--help"},

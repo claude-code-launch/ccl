@@ -490,19 +490,20 @@ ccl set my-provider     # 指定名称
 TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Auto Configure** 后自动识别协议、鉴权方式与模型池（只访问 `/models` 元数据端点，不消耗额度），并推荐 Opus / Sonnet / Haiku / Custom / Subagent 槽位；随后可在同一页逐项修改：
 
 - **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。**Test Model Availability** 行为可选项——会为每个模型发送一次最小请求（消耗额度），测试后槽位旁显示 `✓`/`✗` 状态。
-- **Context & Compact**：`←→` 在 Default / Balanced 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
-- **Runtime**：Protocol / Fast / Tools / Tool Search 均可 `←→` 调整。
+- **Context & Compact**：`←→` 在 Default / Balanced 500K / Balanced 800K 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
+- **Runtime**：Protocol / Fast / Tools / Tool Search 均可 `←→` 调整。Custom provider 的 Protocol 可在 Chat / Responses / Anthropic 三种协议间切换。
 - 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。新配置未填写连接时，Model Mapping / Runtime 区置灰不可编辑。
 
 Context & Compact：
 
 1. **Extended Context `[1m]`**（按槽位）：声明该模型 ID 支持扩展上下文。
-2. **Context & Compact**（Provider 全局）只有两档：
+2. **Context & Compact**（Provider 全局）有三档；界面标签里的 `/ 1M` 表示按槽位 `[1m]` 能力，与 500K / 800K 的 Provider 全局上限相互独立：
 
 | 预设 | 行为 | 环境变量 |
 |------|------|----------|
 | Default | 不注入上下文变量，使用 Claude Code 原生的 200K / `[1m]` 1M 行为 | 无 |
 | Balanced 500K / 400K | 500K 上下文，在 80%（约 400K）自动压缩 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS=500000`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW=500000`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` |
+| Balanced 800K / 640K | 800K 上下文，在 80%（约 640K）自动压缩 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS=800000`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` |
 
 旧版 300K、1M、Custom 等组合不再提供；再次保存 provider 时会归入 Default 并清除旧上下文变量。
 
@@ -613,8 +614,7 @@ providers:
 
 字段要点：
 
-- `type: openai`（显示 `openai(chat)`）：经 CLIProxyAPI 转到上游 Chat Completions。
-- `type: openai_responses`（显示 `openai(responses)`）：经 CCL 自研 Codex Responses runtime 走 Responses API。协议由 `type` 明确选择，不根据 endpoint 路径猜测；可在核对页切换 Chat / Responses。
+- `type: openai`（显示 `openai(chat)`）：经 CLIProxyAPI 转到上游 Chat Completions；`type: openai_responses`（显示 `openai(responses)`）：经 CCL 自研 Codex Responses runtime 走 Responses API；`type: anthropic`：由 Claude Code 直连 Anthropic Messages。协议由 `type` 明确选择，不根据 endpoint 路径猜测；Custom provider 可在核对页切换 Chat / Responses / Anthropic。
 - `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用本机 Messages → Amazon Q 适配器；`oauthProvider: qoder` 使用本机 Messages → Qoder 直接适配器。
 - `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
 - `oauthAccountCredential`：该订阅 provider 精确绑定的 `~/.ccl/auth/` 凭据文件名。

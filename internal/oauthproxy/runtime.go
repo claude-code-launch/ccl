@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,8 +33,12 @@ type Runtime struct {
 	started    chan struct{}
 	models     []string
 	modelNames map[string]string
-	ownsLog    bool
-	stopOnce   sync.Once
+	// upstreamCheck is set only by runtimes that can safely validate their
+	// private upstream credential without exposing it to callers (currently
+	// Command Code). The callback returns status/body preview, never the key.
+	upstreamCheck func(context.Context) (int, string, error)
+	ownsLog       bool
+	stopOnce      sync.Once
 	// usage accumulates per-model token totals for this runtime. It is never nil:
 	// StartProvider always installs one, even when the backend cannot report
 	// usage, so callers do not need a nil check.
@@ -66,10 +71,21 @@ func (r *Runtime) ModelDisplayNames() map[string]string {
 		return nil
 	}
 	names := make(map[string]string, len(r.modelNames))
-	for id, name := range r.modelNames {
-		names[id] = name
-	}
+	maps.Copy(names, r.modelNames)
 	return names
+}
+
+// CheckUpstream validates a runtime-owned upstream credential without exposing
+// that credential to the caller. It is unsupported for runtimes that do not
+// provide a safe health callback.
+func (r *Runtime) CheckUpstream(ctx context.Context) (int, string, error) {
+	if r == nil || r.upstreamCheck == nil {
+		return 0, "", fmt.Errorf("runtime does not expose an upstream health check")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return r.upstreamCheck(ctx)
 }
 
 type UpstreamProtocol string

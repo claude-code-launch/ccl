@@ -106,6 +106,13 @@ func newCodexBufferedSSEWriter() *codexBufferedSSEWriter {
 func (writer *codexBufferedSSEWriter) Header() http.Header { return writer.header }
 func (*codexBufferedSSEWriter) WriteHeader(int)            {}
 
+func (writer *codexBufferedSSEWriter) Write(p []byte) (int, error) {
+	if writer.Len()+len(p) > anthropicAssemblerMaxRetainedBytes {
+		return 0, fmt.Errorf("compaction response exceeds %d bytes", anthropicAssemblerMaxRetainedBytes)
+	}
+	return writer.Buffer.Write(p)
+}
+
 func (e *codexResponsesUpstreamError) Error() string {
 	message := strings.TrimSpace(e.body)
 	if message == "" {

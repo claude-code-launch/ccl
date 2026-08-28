@@ -54,6 +54,10 @@ func loginGemini(ctx context.Context, authDir string, opts LoginOptions) (LoginR
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("create Gemini state: %w", err)
 	}
+	verifier, challenge, err := codexPKCE()
+	if err != nil {
+		return LoginResult{}, fmt.Errorf("create Gemini PKCE challenge: %w", err)
+	}
 	callbackPort := geminiOAuthCallbackPort
 	if opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort
@@ -71,15 +75,20 @@ func loginGemini(ctx context.Context, authDir string, opts LoginOptions) (LoginR
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	redirectURI := fmt.Sprintf("http://localhost:%d%s", listener.Addr().(*net.TCPAddr).Port, geminiOAuthCallbackPath)
+	// Keep the redirect pinned to the exact loopback address this process owns.
+	// Using localhost would let the browser select an independently bound IPv6
+	// socket while this listener only owns the IPv4 leg.
+	redirectURI := "http://" + listener.Addr().String() + geminiOAuthCallbackPath
 	authURL := geminiOAuthAuthEndpoint + "?" + url.Values{
-		"access_type":   {"offline"},
-		"client_id":     {antigravityOAuthClientID},
-		"prompt":        {"consent"},
-		"redirect_uri":  {redirectURI},
-		"response_type": {"code"},
-		"scope":         {strings.Join(geminiOAuthScopes, " ")},
-		"state":         {state},
+		"access_type":           {"offline"},
+		"client_id":             {antigravityOAuthClientID},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"prompt":                {"consent"},
+		"redirect_uri":          {redirectURI},
+		"response_type":         {"code"},
+		"scope":                 {strings.Join(geminiOAuthScopes, " ")},
+		"state":                 {state},
 	}.Encode()
 	fmt.Printf("Open %s to authorize Gemini\n", authURL)
 	if !opts.NoBrowser {
@@ -106,7 +115,7 @@ func loginGemini(ctx context.Context, authDir string, opts LoginOptions) (LoginR
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	token, err := exchangeGeminiCode(ctx, client, result.code, redirectURI)
+	token, err := exchangeGeminiCode(ctx, client, result.code, redirectURI, verifier)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -170,11 +179,12 @@ func geminiCallbackHandler(resultCh chan<- geminiOAuthCallback) http.Handler {
 	return mux
 }
 
-func exchangeGeminiCode(ctx context.Context, client *http.Client, code, redirectURI string) (geminiOAuthToken, error) {
+func exchangeGeminiCode(ctx context.Context, client *http.Client, code, redirectURI, verifier string) (geminiOAuthToken, error) {
 	form := url.Values{
 		"code":          {code},
 		"client_id":     {antigravityOAuthClientID},
 		"client_secret": {antigravityOAuthClientSecret},
+		"code_verifier": {verifier},
 		"redirect_uri":  {redirectURI},
 		"grant_type":    {"authorization_code"},
 	}

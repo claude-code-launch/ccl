@@ -176,32 +176,39 @@ func runDoctor(ctx context.Context) error {
 	printDoctorContextBudget(p, configuredProvider, modelNames)
 
 	// 5. Test Endpoint reachability and API Authentication key
-	if p.Endpoint != "" {
-		endpointReachable := checkDoctorConnectivity(ctx, p)
+	endpointReachable := false
+	switch {
+	case provider.IsCommandCodeType(configuredProvider.Type) || provider.IsCommandCodeType(p.Type):
+		// Command Code's prepared endpoint is a local compatibility runtime and
+		// its /models response is static. Check that runtime separately from the
+		// real upstream /alpha/whoami health check.
+		endpointReachable = checkDoctorCommandCodeConnectivity(ctx, configuredProvider, p, runtime)
+	case p.Endpoint != "":
+		endpointReachable = checkDoctorConnectivity(ctx, p)
+	}
 
-		// 6. Validate configured models with concurrent API calls and reorder (available first)
-		if endpointReachable && p.Model != "" {
-			configuredModels := parseModelList(p.Model)
-			if len(configuredModels) > 0 {
-				doctorSection("Model verification")
-				availableSet := testModelsConcurrently(ctx, configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth, p.ModelProtocols)
-				available, unavailable := classifyModels(configuredModels, availableSet)
-				doctorKV("Summary", modelVerificationSummary(available, unavailable))
-				if len(unavailable) > 0 {
-					doctorHint("Run `ccl models` to inspect individual model results.")
-				}
+	// 6. Validate configured models with concurrent API calls and reorder (available first)
+	if endpointReachable && p.Model != "" {
+		configuredModels := parseModelList(p.Model)
+		if len(configuredModels) > 0 {
+			doctorSection("Model verification")
+			availableSet := testModelsConcurrently(ctx, configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth, p.ModelProtocols)
+			available, unavailable := classifyModels(configuredModels, availableSet)
+			doctorKV("Summary", modelVerificationSummary(available, unavailable))
+			if len(unavailable) > 0 {
+				doctorHint("Run `ccl models` to inspect individual model results.")
+			}
 
-				// Reorder and save: available first, unavailable last
-				reordered := append(available, unavailable...)
-				newModel := strings.Join(reordered, ",")
-				if newModel != p.Model {
-					configuredProvider.Model = newModel
-					cfg.Providers[cfg.ActiveProvider] = configuredProvider
-					if err := config.Save(cfg); err != nil {
-						doctorErr(fmt.Sprintf("Failed to save reordered models: %v", err))
-					} else {
-						doctorOK("Config updated: available models prioritized.")
-					}
+			// Reorder and save: available first, unavailable last
+			reordered := append(available, unavailable...)
+			newModel := strings.Join(reordered, ",")
+			if newModel != p.Model {
+				configuredProvider.Model = newModel
+				cfg.Providers[cfg.ActiveProvider] = configuredProvider
+				if err := config.Save(cfg); err != nil {
+					doctorErr(fmt.Sprintf("Failed to save reordered models: %v", err))
+				} else {
+					doctorOK("Config updated: available models prioritized.")
 				}
 			}
 		}
@@ -212,9 +219,10 @@ func runDoctor(ctx context.Context) error {
 
 // printDoctorContextBudget reports how this session will be sized.
 //
-// Default leaves Claude Code on its native 200K/1M per-slot behavior. Balanced
-// declares a 500K window and compacts at 80% (approximately 400K). This section
-// shows the effective mode and checks it against advertised backend windows.
+// Default leaves Claude Code on its native 200K/1M per-slot behavior. The two
+// Balanced tiers declare a provider-wide 500K or 800K window and compact at 80%
+// (approximately 400K or 640K). This section shows the effective mode and checks
+// it against advertised backend windows.
 //
 // runtimeProvider carries the live endpoint/key of the embedded runtime;
 // configured carries the user's ccl config.
@@ -230,7 +238,9 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 	// gateways do not serve this catalog either.
 	var windows map[string]int
 	var source string
-	if endpoint := strings.TrimSpace(runtimeProvider.Endpoint); endpoint != "" && !provider.IsAnthropicType(runtimeProvider.Type) {
+	if endpoint := strings.TrimSpace(runtimeProvider.Endpoint); endpoint != "" &&
+		!provider.IsAnthropicType(runtimeProvider.Type) &&
+		!provider.IsCommandCodeType(runtimeProvider.Type) {
 		windows, source = claude.AdvertisedContextWindows(endpoint, runtimeProvider.APIKey)
 	}
 	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
@@ -240,13 +250,24 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 		provider.IsBalancedContextPreset(configured.Env), source, len(windows), smallest, smallestModel)
 
 	oneMSlots := oneMSlotsFromProvider(configured)
-	balanced := provider.IsBalancedContextPreset(configured.Env)
+	preset := provider.ContextPresetFromEnv(configured.Env)
+	balanced := preset != provider.ContextPresetDefault
 	unsupported := overridden && !balanced
+	balancedWindow := ""
+	balancedCompactAt := ""
+	switch preset {
+	case provider.ContextPresetBalanced500K:
+		balancedWindow = "500K"
+		balancedCompactAt = "400K"
+	case provider.ContextPresetBalanced800K:
+		balancedWindow = "800K"
+		balancedCompactAt = "640K"
+	}
 	if balanced {
-		doctorKV("Sizing", "Balanced 500K / 400K")
-		doctorKV("Assumed context", "500K (500000)")
-		doctorKV("Auto-compact window", "500K (500000)")
-		doctorKV("Auto-compact pct", "80% (~400K)")
+		doctorKV("Sizing", fmt.Sprintf("Balanced %s / %s", balancedWindow, balancedCompactAt))
+		doctorKV("Assumed context", fmt.Sprintf("%s (%d)", balancedWindow, maxContext))
+		doctorKV("Auto-compact window", fmt.Sprintf("%s (%d)", balancedWindow, compactWindow))
+		doctorKV("Auto-compact pct", fmt.Sprintf("80%% (~%s)", balancedCompactAt))
 	} else if unsupported {
 		doctorKV("Sizing", "Default (unsupported context override is ignored)")
 		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
@@ -256,9 +277,10 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
 	}
 
-	// Default sizes per slot; Balanced intentionally applies one global 500K cap.
+	// Default sizes per slot; either Balanced tier intentionally applies one
+	// provider-wide cap.
 	for _, slot := range provider.SlotModels(configured) {
-		sizing := "500K Balanced"
+		sizing := balancedWindow + " Balanced"
 		if !balanced {
 			sizing = "200K default"
 		}
@@ -282,7 +304,11 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 
 	printDoctorOneMConsistency(configured, windows)
 	if claude.MappedContextClassesDiffer(configured, windows) {
-		doctorInfo("Mapped models span both context classes; Default sizes them per slot, while Balanced applies one 500K cap")
+		if balanced {
+			doctorInfo(fmt.Sprintf("Mapped models span both context classes; Default sizes them per slot, while Balanced applies one %s cap", balancedWindow))
+		} else {
+			doctorInfo("Mapped models span both context classes; Default sizes them independently per slot")
+		}
 	}
 	printDoctorIgnoredContextEnv()
 	if !overridden {
@@ -294,7 +320,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 			formatTokenCount(maxContext), providerCatalogModelLabel(smallestModel, modelNames), formatTokenCount(smallest)))
 		doctorHint("Requests can be rejected with context_length_exceeded (HTTP 400) before Claude Code auto-compacts")
 	}
-	doctorOK("Balanced mode; Claude Code compacts at 80% of the 500K window (~400K)")
+	doctorOK(fmt.Sprintf("Balanced mode; Claude Code compacts at 80%% of the %s window (~%s)", balancedWindow, balancedCompactAt))
 }
 
 // printDoctorOneMConsistency checks the [1m] markers against the advertised
@@ -377,6 +403,114 @@ func formatTokenCount(tokens int) string {
 	default:
 		return strconv.Itoa(tokens)
 	}
+}
+
+// checkDoctorCommandCodeConnectivity reports the two independent Command Code
+// health facts: the CCL-owned loopback compatibility runtime and the real
+// upstream GET /alpha/whoami result. The local /models catalog is static, so it
+// is useful for checking the runtime but cannot prove upstream authentication.
+func checkDoctorCommandCodeConnectivity(ctx context.Context, configured, runtimeProvider provider.Provider, runtime *oauthproxy.Runtime) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	doctorSection("Connectivity")
+
+	localReady := false
+	doctorInfo("Checking local Command Code compatibility runtime...")
+	if runtime == nil {
+		doctorErr("Local compatibility runtime is not available")
+	} else {
+		endpoint := strings.TrimSpace(runtimeProvider.Endpoint)
+		if endpoint == "" {
+			endpoint = strings.TrimSpace(runtime.Endpoint())
+		}
+		if endpoint == "" {
+			doctorErr("Local compatibility runtime has no endpoint")
+		} else {
+			localProvider := runtimeProvider
+			localProvider.Endpoint = endpoint
+			status, err := doctorProbeEndpoint(
+				ctx,
+				&http.Client{Timeout: doctorProbeTimeout},
+				protocol.NormalizeOpenAIModelsURL(endpoint),
+				localProvider,
+			)
+			if err != nil {
+				doctorErr(fmt.Sprintf("Local compatibility runtime is unreachable: %v", err))
+			} else {
+				switch status {
+				case http.StatusOK:
+					localReady = true
+					doctorOK(fmt.Sprintf("Local compatibility runtime available (HTTP %d)", status))
+					if models := runtime.Models(); len(models) > 0 {
+						doctorKV("Local catalog", fmt.Sprintf("%d static models", len(models)))
+					}
+				case http.StatusUnauthorized, http.StatusForbidden:
+					doctorErr(fmt.Sprintf("Local compatibility runtime rejected its session key (HTTP %d)", status))
+				default:
+					doctorWarn(fmt.Sprintf("Local compatibility runtime returned unexpected status (HTTP %d)", status))
+				}
+			}
+		}
+	}
+
+	doctorInfo("Checking upstream Command Code authentication...")
+	var (
+		status int
+		body   string
+		err    error
+	)
+	probeCtx, cancel := context.WithTimeout(ctx, doctorProbeTimeout)
+	defer cancel()
+	if strings.TrimSpace(configured.OAuthProvider) != "" {
+		if runtime == nil {
+			err = fmt.Errorf("subscription runtime is not available")
+		} else {
+			// The OAuth runtime owns the credential loaded from its bound file;
+			// never copy that private key into the resolved provider or doctor.
+			status, body, err = runtime.CheckUpstream(probeCtx)
+		}
+	} else {
+		// CommandCodeProbeWhoami resolves configured endpoint > environment
+		// override > production default and deliberately performs no fallback.
+		status, body, err = oauthproxy.CommandCodeProbeWhoami(
+			probeCtx, configured.Endpoint, configured.APIKey, doctorProbeTimeout,
+		)
+	}
+
+	if err != nil {
+		doctorErr(fmt.Sprintf("Upstream Command Code is unreachable: %v", err))
+	} else {
+		upstreamBody := doctorCommandCodeBodyPreview(body, configured.APIKey)
+		switch {
+		case status >= 200 && status < 300:
+			doctorOK(fmt.Sprintf("Upstream Command Code authenticated (GET /alpha/whoami, HTTP %d)", status))
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			doctorErr(fmt.Sprintf("Upstream Command Code authentication failed (HTTP %d). Verify the API key or subscription login.", status))
+		case upstreamBody != "":
+			doctorWarn(fmt.Sprintf("Upstream Command Code returned HTTP %d: %s", status, upstreamBody))
+		default:
+			doctorWarn(fmt.Sprintf("Upstream Command Code returned unexpected status (HTTP %d)", status))
+		}
+	}
+
+	return localReady
+}
+
+// doctorCommandCodeBodyPreview keeps an upstream diagnostic bounded and avoids
+// echoing the configured API key if a gateway includes it in an error body.
+func doctorCommandCodeBodyPreview(body string, secrets ...string) string {
+	body = strings.TrimSpace(body)
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			body = strings.ReplaceAll(body, secret, "[redacted]")
+		}
+	}
+	if len(body) > 200 {
+		body = body[:200] + "..."
+	}
+	return body
 }
 
 // checkDoctorConnectivity probes the provider endpoint and reports whether it is

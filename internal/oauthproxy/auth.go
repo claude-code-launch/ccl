@@ -33,6 +33,11 @@ type LoginOptions struct {
 	// Stdin feeds manual credential entry (Command Code API-key paste); nil
 	// disables the interactive paste path.
 	Stdin io.Reader
+	// StdinCancel optionally interrupts a blocking Stdin read when the login
+	// finishes. Login never closes Stdin implicitly because callers retain
+	// ownership of the reader (notably os.Stdin); provide this hook only when
+	// the caller can safely interrupt its reader.
+	StdinCancel func()
 }
 
 type LoginResult struct {

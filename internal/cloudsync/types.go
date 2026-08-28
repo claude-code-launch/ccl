@@ -64,13 +64,14 @@ type localCloudConfig struct {
 }
 
 type localSyncState struct {
-	LastRemoteID  string    `json:"last_remote_id,omitempty"`
-	LastLocalHash string    `json:"last_local_hash,omitempty"`
-	PendingTag    string    `json:"pending_tag,omitempty"`
-	PendingHash   string    `json:"pending_hash,omitempty"`
-	ExplicitTag   bool      `json:"explicit_tag,omitempty"`
-	LastOperation string    `json:"last_operation,omitempty"`
-	LastSyncAt    time.Time `json:"last_sync_at,omitempty"`
+	LastRemoteID        string    `json:"last_remote_id,omitempty"`
+	LastLocalHash       string    `json:"last_local_hash,omitempty"`
+	LastRemoteCreatedAt time.Time `json:"last_remote_created_at,omitempty"`
+	PendingTag          string    `json:"pending_tag,omitempty"`
+	PendingHash         string    `json:"pending_hash,omitempty"`
+	ExplicitTag         bool      `json:"explicit_tag,omitempty"`
+	LastOperation       string    `json:"last_operation,omitempty"`
+	LastSyncAt          time.Time `json:"last_sync_at,omitempty"`
 }
 
 type localDevice struct {
@@ -122,6 +123,7 @@ type localRemoteStateV2 struct {
 	LastRemoteID         string    `json:"last_remote_id,omitempty"`
 	LastLocalHash        string    `json:"last_local_hash,omitempty"`
 	LastRemoteHash       string    `json:"last_remote_hash,omitempty"`
+	LastRemoteCreatedAt  time.Time `json:"last_remote_created_at,omitempty"`
 	LastOperation        string    `json:"last_operation,omitempty"`
 	LastSyncAt           time.Time `json:"last_sync_at,omitempty"`
 	LastError            string    `json:"last_error,omitempty"`

@@ -13,29 +13,31 @@ const (
 )
 
 // compactPreset selects the provider-wide context behavior exposed by the TUI.
-type compactPreset uint8
+type compactPreset = provider.ContextPreset
 
 const (
-	compactPresetDefault compactPreset = iota
-	// Balanced declares a 500K window and an 80% compact threshold (~400K).
-	compactPresetBalanced
+	compactPresetDefault      = provider.ContextPresetDefault
+	compactPresetBalanced500K = provider.ContextPresetBalanced500K
+	compactPresetBalanced800K = provider.ContextPresetBalanced800K
+	// compactPresetBalanced keeps existing call sites and tests pinned to the
+	// original 500K Balanced tier.
+	compactPresetBalanced = compactPresetBalanced500K
 )
 
 func compactPresetFromProvider(p provider.Provider) compactPreset {
-	if provider.IsBalancedContextPreset(p.Env) {
-		return compactPresetBalanced
-	}
-	return compactPresetDefault
+	return provider.ContextPresetFromEnv(p.Env)
 }
 
 func hasUnsupportedContextConfig(p provider.Provider) bool {
-	return provider.HasManagedContextEnv(p.Env) && !provider.IsBalancedContextPreset(p.Env)
+	return provider.HasManagedContextEnv(p.Env) && provider.ContextPresetFromEnv(p.Env) == provider.ContextPresetDefault
 }
 
 func compactPresetLabel(preset compactPreset) string {
 	switch preset {
-	case compactPresetBalanced:
+	case compactPresetBalanced500K:
 		return "Balanced 500K / 1M & 80%"
+	case compactPresetBalanced800K:
+		return "Balanced 800K / 1M & 80%"
 	default:
 		return "Default  200K / 1M & 80%"
 	}
@@ -81,7 +83,7 @@ func applyOneMSuffixes(p *provider.Provider, oneMSlots map[string]bool) {
 // choice.
 //
 // Default clears every context override so Claude Code uses its native 200K/1M
-// behavior. Balanced writes the exact 500K/500K/80 triplet requested by the UI.
+// behavior. Balanced writes the exact triplet selected by the UI.
 func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset compactPreset) {
 	applyOneMSuffixes(p, oneMSlots)
 	applyCompactPreset(p, preset)
@@ -94,11 +96,11 @@ func applyCompactPreset(p *provider.Provider, preset compactPreset) {
 		delete(p.Env, autoCompactPctEnv)
 		delete(p.Env, provider.EnvContextBudgetMode)
 	}
-	if preset == compactPresetBalanced {
+	if maxContext, compactWindow, compactPct, ok := provider.ContextPresetValues(preset); ok {
 		ensureProviderEnv(p)
-		p.Env[maxContextTokensEnv] = provider.BalancedMaxContextTokens
-		p.Env[autoCompactWindowEnv] = provider.BalancedAutoCompactWindow
-		p.Env[autoCompactPctEnv] = provider.BalancedAutoCompactPct
+		p.Env[maxContextTokensEnv] = maxContext
+		p.Env[autoCompactWindowEnv] = compactWindow
+		p.Env[autoCompactPctEnv] = compactPct
 	}
 	if len(p.Env) == 0 {
 		p.Env = nil

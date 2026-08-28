@@ -134,6 +134,10 @@ type connDraft struct {
 	modelContextWindows map[string]int
 	oneMSlots           map[string]bool
 	compactPreset       compactPreset
+	// anthropicAuth remembers the direct Anthropic authentication style while the
+	// custom protocol selector is temporarily on Chat or Responses. The provider
+	// field itself stays empty for non-Anthropic protocols.
+	anthropicAuth string
 
 	probeEndpoint string
 	probeAPIKey   string
@@ -811,6 +815,7 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		modelContextWindows:  make(map[string]int),
 		modelDisplayMetadata: make(map[string]protocol.ModelInfo),
 		compactPreset:        compactPresetFromProvider(*customP),
+		anthropicAuth:        customP.AnthropicAuth,
 		probeEndpoint:        customP.Endpoint,
 		probeAPIKey:          customP.APIKey,
 		inputEndpoint:        customP.Endpoint,
@@ -1156,7 +1161,7 @@ func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
 		// Best-effort: pull context_window metadata for OpenAI-family catalogs.
 		// Failures are ignored — IDs still come from detection.
 		windows := map[string]int{}
-		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) {
+		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) && !provider.IsCommandCodeType(result.protocol) {
 			// Subscription runtimes only expose windows through the Codex catalog,
 			// which AdvertisedContextWindows tries before the plain OpenAI list.
 			advertised, source := claude.AdvertisedContextWindows(result.baseURL, apiKey)
@@ -1483,6 +1488,9 @@ func (m *AdvancedConfigModel) applyStaleSlotPolicy() {
 // 实时获取/检测协议名称
 func (m *AdvancedConfigModel) getProtocol() string {
 	if m.p.Type != "" {
+		if provider.IsCommandCodeType(m.p.Type) {
+			return "Command Code"
+		}
 		return provider.ProtocolLabelForProvider(*m.p)
 	}
 	if strings.Contains(strings.ToLower(m.urlInput.Value()), "anthropic") {
@@ -1508,33 +1516,71 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 	return "OpenAI"
 }
 
-// canToggleOpenAIProtocol is true when the provider is a manual API-key endpoint
-// in the toggleable protocol cycle (openai → openai_responses → commandcode).
-// OAuth backends ignore options.Protocol in StartProvider and always use their
-// fixed Chat/Responses path, so the page must not offer a toggle that only
-// changes a label.
-func (m *AdvancedConfigModel) canToggleOpenAIProtocol() bool {
-	if m.p == nil || (!provider.IsOpenAICompatibleType(m.p.Type) && !provider.IsCommandCodeType(m.p.Type)) {
+// canSelectCustomProtocol is true only for a manual Custom API-key provider
+// whose data plane can be selected by the user. OAuth runtimes, models.dev, and
+// Command Code have fixed or per-model routing and remain read-only.
+func (m *AdvancedConfigModel) canSelectCustomProtocol() bool {
+	if m.p == nil || m.source != sourceCustom || strings.TrimSpace(m.p.OAuthProvider) != "" {
 		return false
 	}
-	return strings.TrimSpace(m.p.OAuthProvider) == ""
+	return provider.IsOpenAICompatibleType(m.p.Type) || provider.IsAnthropicType(m.p.Type)
 }
 
-// toggleOpenAIProtocol cycles the manual gateway type through
-// openai(chat) → openai(responses) → commandcode → openai(chat).
-func (m *AdvancedConfigModel) toggleOpenAIProtocol() {
-	if !m.canToggleOpenAIProtocol() {
+func customProtocolLabel(providerType string) string {
+	switch {
+	case provider.IsOpenAIResponsesType(providerType):
+		return "Responses"
+	case provider.IsAnthropicType(providerType):
+		return "Anthropic"
+	default:
+		return "Chat"
+	}
+}
+
+// cycleCustomProtocol moves a manual gateway through Chat, Responses, and native
+// Anthropic Messages. It reinterprets the last verified raw endpoint for the
+// selected protocol without changing the text the user entered.
+func (m *AdvancedConfigModel) cycleCustomProtocol(delta int) {
+	if delta == 0 || !m.canSelectCustomProtocol() {
 		return
 	}
-	switch {
-	case provider.IsCommandCodeType(m.p.Type):
-		m.p.Type = "openai"
-	case provider.IsOpenAIResponsesType(m.p.Type):
-		m.p.Type = "commandcode"
-	default:
-		m.p.Type = "openai_responses"
+	protocols := []string{"openai", "openai_responses", "anthropic"}
+	index := 0
+	for i, protocolType := range protocols {
+		if (provider.IsOpenAIResponsesType(m.p.Type) && protocolType == "openai_responses") ||
+			(provider.IsAnthropicType(m.p.Type) && protocolType == "anthropic") ||
+			(!provider.IsOpenAIResponsesType(m.p.Type) && !provider.IsAnthropicType(m.p.Type) && protocolType == "openai") {
+			index = i
+			break
+		}
 	}
-	setDebugf("protocol toggled type=%q label=%q", m.p.Type, provider.ProtocolLabel(m.p.Type))
+	if provider.IsAnthropicType(m.p.Type) {
+		m.live().anthropicAuth = m.p.AnthropicAuth
+	}
+	index = (index + delta) % len(protocols)
+	if index < 0 {
+		index += len(protocols)
+	}
+	m.p.Type = protocols[index]
+	if provider.IsAnthropicType(m.p.Type) {
+		m.p.AnthropicAuth = m.live().anthropicAuth
+	} else {
+		m.p.AnthropicAuth = ""
+	}
+
+	rawEndpoint := strings.TrimSpace(m.live().detectedInputEndpoint)
+	if rawEndpoint == "" {
+		rawEndpoint = strings.TrimSpace(m.urlInput.Value())
+	}
+	if rawEndpoint != "" {
+		if provider.IsAnthropicType(m.p.Type) {
+			m.p.Endpoint = protocol.NormalizeAnthropicBaseURLForClaude(rawEndpoint)
+		} else {
+			m.p.Endpoint = normalizeModelBaseURL(rawEndpoint)
+		}
+		m.live().probeEndpoint = m.p.Endpoint
+	}
+	setDebugf("protocol selected type=%q label=%q anthropic_auth=%q endpoint=%q", m.p.Type, customProtocolLabel(m.p.Type), m.p.AnthropicAuth, m.p.Endpoint)
 }
 
 // Single-page cursor model.
@@ -1688,7 +1734,7 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		m.cycleCompactPreset(delta)
 	case rowProtocol:
 		if !m.usesModelsDev() {
-			m.toggleOpenAIProtocol()
+			m.cycleCustomProtocol(delta)
 		}
 	case rowFast:
 		// Toggle like Protocol; left/right/enter all flip the pin.
@@ -1731,17 +1777,29 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 	}
 }
 
-// cycleCompactPreset moves the provider-wide compact budget one step through the
-// two choices. Per-slot [1m] markers remain independent.
+// cycleCompactPreset moves the provider-wide compact budget through Default,
+// Balanced 500K, and Balanced 800K. Per-slot [1m] markers remain independent.
 func (m *AdvancedConfigModel) cycleCompactPreset(delta int) {
 	if delta == 0 {
 		return
 	}
-	if m.live().compactPreset == compactPresetBalanced {
-		m.live().compactPreset = compactPresetDefault
-	} else {
-		m.live().compactPreset = compactPresetBalanced
+	presets := []compactPreset{
+		compactPresetDefault,
+		compactPresetBalanced500K,
+		compactPresetBalanced800K,
 	}
+	index := 0
+	for i, preset := range presets {
+		if m.live().compactPreset == preset {
+			index = i
+			break
+		}
+	}
+	index = (index + delta) % len(presets)
+	if index < 0 {
+		index += len(presets)
+	}
+	m.live().compactPreset = presets[index]
 	setDebugf("cycle compact preset delta=%d preset=%v summary=%s", delta, m.live().compactPreset, m.compactSummary())
 }
 
@@ -1822,6 +1880,9 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		if anthropicAuth != "" {
 			m.p.AnthropicAuth = anthropicAuth
 		}
+		m.live().anthropicAuth = m.p.AnthropicAuth
+	} else if !m.usesOAuth() && detectedType != "" {
+		m.live().anthropicAuth = ""
 	}
 
 	m.live().modelPool = []string{}
@@ -2687,15 +2748,12 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 		body.WriteString(renderCredentialField("API Key", keyValue+copiedHint, false))
 
-		// Protocol moved up from Runtime: fine-grained (Chat/Responses) for a
-		// toggleable OpenAI manual gateway, otherwise read-only.
+		// Protocol moved up from Runtime: Chat/Responses/Anthropic is selectable
+		// for a manual Custom gateway; fixed and per-model runtimes stay read-only.
 		if m.usesModelsDev() {
 			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render("auto/mixed")))
-		} else if m.canToggleOpenAIProtocol() {
-			value := "Chat"
-			if provider.IsOpenAIResponsesType(m.p.Type) {
-				value = "Responses"
-			}
+		} else if m.canSelectCustomProtocol() {
+			value := customProtocolLabel(m.p.Type)
 			protoPrefix := "  "
 			protoVal := purpleText.Render("‹ " + value + " ›")
 			if m.cursor == m.mainRowIndex(rowProtocol) {

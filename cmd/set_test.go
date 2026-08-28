@@ -492,7 +492,7 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	}
 }
 
-func TestCompactPresetCyclesDefaultAndBalanced(t *testing.T) {
+func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 	p := provider.Provider{Env: map[string]string{
 		autoCompactWindowEnv: "750000",
 		autoCompactPctEnv:    "82",
@@ -506,28 +506,37 @@ func TestCompactPresetCyclesDefaultAndBalanced(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowContext)
 	m.live().oneMSlots["opus"] = true
 
-	// Right selects Balanced without changing per-slot [1m].
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
-	m = next.(*AdvancedConfigModel)
-	if m.live().compactPreset != compactPresetBalanced {
-		t.Fatalf("compact preset = %v, want Balanced", m.live().compactPreset)
+	forward := []struct {
+		preset compactPreset
+		label  string
+	}{
+		{compactPresetBalanced500K, "Balanced 500K / 1M & 80%"},
+		{compactPresetBalanced800K, "Balanced 800K / 1M & 80%"},
+		{compactPresetDefault, "Default  200K / 1M & 80%"},
 	}
-	if !m.live().oneMSlots["opus"] {
-		t.Fatal("cycling compact must not clear [1m] slots")
-	}
-	if got := m.compactSummary(); got != "Balanced 500K / 1M & 80%" {
-		t.Fatalf("compact summary = %q", got)
+	for _, want := range forward {
+		next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
+		m = next.(*AdvancedConfigModel)
+		if m.live().compactPreset != want.preset || m.compactSummary() != want.label {
+			t.Fatalf("right cycle = preset %v summary %q, want %v %q", m.live().compactPreset, m.compactSummary(), want.preset, want.label)
+		}
+		if !m.live().oneMSlots["opus"] {
+			t.Fatal("cycling compact must not clear [1m] slots")
+		}
 	}
 
-	// Right wraps back to Default.
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
-	m = next.(*AdvancedConfigModel)
-	if m.live().compactPreset != compactPresetDefault {
-		t.Fatalf("compact preset = %v, want Default", m.live().compactPreset)
+	// Left cycles in the reverse order: Default → 800K → 500K → Default.
+	for _, want := range []compactPreset{compactPresetBalanced800K, compactPresetBalanced500K, compactPresetDefault} {
+		next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
+		m = next.(*AdvancedConfigModel)
+		if m.live().compactPreset != want {
+			t.Fatalf("left cycle = %v, want %v", m.live().compactPreset, want)
+		}
+		if !m.live().oneMSlots["opus"] {
+			t.Fatal("reverse cycling compact must not clear [1m] slots")
+		}
 	}
-	if !m.live().oneMSlots["opus"] {
-		t.Fatal("selecting Default must not clear [1m] slots")
-	}
+
 	view := m.View().Content
 	for _, expected := range []string{"Context & Compact", "Default"} {
 		if !strings.Contains(view, expected) {
@@ -1044,8 +1053,90 @@ func TestApplyModelDetectionResultDoesNotInferProtocolFromPath(t *testing.T) {
 	if p.Type != "openai" {
 		t.Fatalf("detected protocol = %q, want openai", p.Type)
 	}
-	if !m.canToggleOpenAIProtocol() {
+	if !m.canSelectCustomProtocol() {
 		t.Fatal("manual OpenAI protocol must remain selectable on the review page")
+	}
+}
+
+func TestCustomProtocolCyclesChatResponsesAndAnthropic(t *testing.T) {
+	p := provider.Provider{
+		Type:     "openai",
+		Endpoint: "https://example.test/v1",
+		APIKey:   "test-key",
+	}
+	m := NewAdvancedConfigModel(&p)
+	enterDetectedReview(m, "model")
+	m.live().detectedInputEndpoint = p.Endpoint
+	m.cursor = m.mainRowIndex(rowProtocol)
+
+	if view := m.View().Content; !strings.Contains(view, "‹ Chat ›") {
+		t.Fatalf("custom protocol row does not show Chat: %q", view)
+	}
+
+	steps := []struct {
+		wantType     string
+		wantLabel    string
+		wantEndpoint string
+	}{
+		{wantType: "openai_responses", wantLabel: "Responses", wantEndpoint: "https://example.test/v1"},
+		{wantType: "anthropic", wantLabel: "Anthropic", wantEndpoint: "https://example.test"},
+		{wantType: "openai", wantLabel: "Chat", wantEndpoint: "https://example.test/v1"},
+	}
+	for _, want := range steps {
+		next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
+		m = next.(*AdvancedConfigModel)
+		if p.Type != want.wantType || p.Endpoint != want.wantEndpoint {
+			t.Fatalf("protocol cycle = type %q endpoint %q, want %q %q", p.Type, p.Endpoint, want.wantType, want.wantEndpoint)
+		}
+		if view := m.View().Content; !strings.Contains(view, "‹ "+want.wantLabel+" ›") {
+			t.Fatalf("custom protocol row does not show %s: %q", want.wantLabel, view)
+		}
+	}
+
+	// Reverse cycling from Chat reaches Anthropic directly.
+	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
+	m = next.(*AdvancedConfigModel)
+	if p.Type != "anthropic" || p.Endpoint != "https://example.test" {
+		t.Fatalf("reverse protocol cycle = type %q endpoint %q", p.Type, p.Endpoint)
+	}
+	if m.live().connectionDirty {
+		t.Fatal("selecting a wire protocol must not invalidate the verified endpoint/key")
+	}
+}
+
+func TestCustomProtocolPreservesDetectedAnthropicBearerAuth(t *testing.T) {
+	p := provider.Provider{
+		Type:          "anthropic",
+		Endpoint:      "https://example.test",
+		APIKey:        "test-key",
+		AnthropicAuth: anthropicAuthBearer,
+	}
+	m := NewAdvancedConfigModel(&p)
+	enterDetectedReview(m, "model")
+	m.live().detectedInputEndpoint = "https://example.test/v1"
+	m.cursor = m.mainRowIndex(rowProtocol)
+
+	m.cycleCustomProtocol(1)
+	if p.Type != "openai" || p.AnthropicAuth != "" {
+		t.Fatalf("Chat selection retained Anthropic state: type=%q auth=%q", p.Type, p.AnthropicAuth)
+	}
+	m.cycleCustomProtocol(-1)
+	if p.Type != "anthropic" || p.AnthropicAuth != anthropicAuthBearer {
+		t.Fatalf("Anthropic selection did not restore bearer auth: type=%q auth=%q", p.Type, p.AnthropicAuth)
+	}
+}
+
+func TestCustomProtocolSelectorExcludesFixedRoutingProviders(t *testing.T) {
+	tests := []provider.Provider{
+		{Type: "openai_responses", OAuthProvider: "gpt"},
+		{Type: "commandcode"},
+		{Type: "modelsdev"},
+	}
+	for _, p := range tests {
+		m := NewAdvancedConfigModel(&p)
+		if m.canSelectCustomProtocol() {
+			t.Errorf("provider type=%q oauth=%q unexpectedly has a manual protocol selector", p.Type, p.OAuthProvider)
+		}
 	}
 }
 

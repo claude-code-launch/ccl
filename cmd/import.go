@@ -37,7 +37,8 @@ Notes:
   - Prefer ccl oauth commandcode when you can authorize in a browser; import
     only reuses a key the official CLI already stored
   - ccl validates the imported key through /alpha/whoami before storing it
-  - The imported credential lives at ~/.ccl/auth/commandcode.json (0600)
+  - credentials are stored as per-account files under ~/.ccl/auth/ (0600);
+    legacy commandcode.json files remain loadable
   - The official CLI must be signed in once (it owns the browser login)
 `,
 		Args: cobra.RangeArgs(1, 2),

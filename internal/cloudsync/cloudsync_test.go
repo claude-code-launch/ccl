@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEncryptedICloudSyncLifecycle(t *testing.T) {
@@ -147,6 +148,82 @@ func TestEncryptedICloudSyncLifecycle(t *testing.T) {
 	if status.State != "remote changes available" {
 		// release-1 was pulled while latest still points to the second push.
 		t.Fatalf("status after historical pull = %+v", status)
+	}
+}
+
+func TestPullRejectsReplayedLatestIndex(t *testing.T) {
+	home := t.TempDir()
+	drive := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CCL_ICLOUD_DRIVE_DIR", drive)
+	cclDir := filepath.Join(home, ".ccl")
+	if err := os.MkdirAll(cclDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(cclDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("version: one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoginICloud("rollback-test-passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Push(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := manager.loadRemoteIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := index.Snapshots[first.ID]
+	record.CreatedAt = record.CreatedAt.Add(-2 * time.Hour)
+	index.Snapshots[first.ID] = record
+	if err := manager.saveRemoteIndex(index); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(drive, remoteDirectory, indexFileName)
+	replayedIndex, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(configPath, []byte("version: two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Push(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID == first.ID {
+		t.Fatal("second push reused the first snapshot")
+	}
+	if err := os.WriteFile(indexPath, replayedIndex, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := manager.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "remote rollback suspected" {
+		t.Fatalf("status = %q, want rollback warning", status.State)
+	}
+	if _, err := manager.Pull(defaultTag, false); err == nil || !strings.Contains(err.Error(), "cloud rollback") {
+		t.Fatalf("replayed latest pull error = %v", err)
+	}
+	if _, err := manager.Pull(defaultTag, true); err != nil {
+		t.Fatalf("forced rollback recovery: %v", err)
+	}
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "version: one\n" {
+		t.Fatalf("forced rollback restored %q", got)
 	}
 }
 

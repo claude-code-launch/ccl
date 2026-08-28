@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -131,7 +133,7 @@ func TestCommandCodeCallbackHandlerRejectsStateMismatch(t *testing.T) {
 
 func TestCommandCodeCallbackHandlerAccessDenied(t *testing.T) {
 	server, _, serveErrors := commandcodeCallbackHarness(t, "state-abc")
-	response, err := commandcodePost(server.URL, `{"error":"access_denied","error_description":""}`, "")
+	response, err := commandcodePost(server.URL, `{"error":"access_denied","error_description":"","state":"state-abc"}`, "")
 	if err != nil {
 		t.Fatalf("POST /callback: %v", err)
 	}
@@ -153,7 +155,7 @@ func TestCommandCodeCallbackHandlerAccessDenied(t *testing.T) {
 
 func TestCommandCodeCallbackHandlerRejectsMissingFields(t *testing.T) {
 	server, _, _ := commandcodeCallbackHarness(t, "state-abc")
-	response, err := commandcodePost(server.URL, `{"apiKey":"user_key"}`, "")
+	response, err := commandcodePost(server.URL, `{"apiKey":"user_key","state":"state-abc"}`, "")
 	if err != nil {
 		t.Fatalf("POST /callback: %v", err)
 	}
@@ -164,6 +166,63 @@ func TestCommandCodeCallbackHandlerRejectsMissingFields(t *testing.T) {
 	raw, _ := io.ReadAll(response.Body)
 	if string(raw) != `{"success":false,"error":"Missing required fields"}` {
 		t.Fatalf("body = %q, want missing-fields payload", raw)
+	}
+}
+
+func TestCommandCodeCallbackHandlerRejectsUnauthenticatedError(t *testing.T) {
+	server, _, serveErrors := commandcodeCallbackHarness(t, "state-abc")
+	response, err := commandcodePost(server.URL, `{"error":"access_denied","error_description":"\u001b]52;c;cG93bmVk\u0007"}`, "")
+	if err != nil {
+		t.Fatalf("POST /callback: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", response.StatusCode)
+	}
+	select {
+	case err := <-serveErrors:
+		t.Fatalf("unauthenticated error reached login loop: %v", err)
+	default:
+	}
+}
+
+func TestCommandCodeSanitizeErrorTextRemovesTerminalControls(t *testing.T) {
+	got := commandcodeSanitizeErrorText("first\n\x1b]52;c;cG93bmVk\a\u0085last")
+	if got != "first ]52;c;cG93bmVklast" {
+		t.Fatalf("sanitized text = %q", got)
+	}
+}
+
+func TestCommandCodeCallbackListenerOwnsIPv6LegWhenAvailable(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	listeners, gotPort, err := commandcodeCallbackListener(port)
+	if err != nil {
+		t.Fatalf("commandcodeCallbackListener(%d): %v", port, err)
+	}
+	for _, listener := range listeners {
+		defer listener.Close()
+	}
+	if gotPort != port {
+		t.Fatalf("port = %d, want %d", gotPort, port)
+	}
+	hosts := make(map[string]bool)
+	for _, listener := range listeners {
+		hosts[listener.Addr().(*net.TCPAddr).IP.String()] = true
+	}
+	if !hosts["127.0.0.1"] {
+		t.Fatalf("listeners = %v, missing IPv4 loopback", hosts)
+	}
+	if ipv6Probe, ipv6Err := net.Listen("tcp", "[::1]:0"); ipv6Err == nil {
+		_ = ipv6Probe.Close()
+		if !hosts["::1"] {
+			t.Fatalf("listeners = %v, missing IPv6 loopback", hosts)
+		}
 	}
 }
 
@@ -229,8 +288,8 @@ func TestLoginCommandCodeOAuthManualPastePersistsCredential(t *testing.T) {
 	for key, want := range map[string]string{
 		"type":      ProviderCommandCode,
 		"api_key":   "user_paste_key",
-		"user_id":   "manual-entry",
-		"user_name": "API Key",
+		"user_id":   "u-123",
+		"user_name": "Ada",
 		"key_name":  "cli-manual-entry",
 		"source":    "manual_paste",
 	} {
@@ -248,7 +307,8 @@ func TestLoginCommandCodeOAuthInvalidThenValidKey(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.Header.Get("Authorization") {
 		case "Bearer user_good_key":
-			writer.WriteHeader(http.StatusOK)
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"user":{"id":"u-123","userName":"Ada","name":"Ada"}}`))
 		default:
 			http.Error(writer, `{"error":{"message":"invalid token"}}`, http.StatusUnauthorized)
 		}
@@ -309,6 +369,75 @@ func TestLoginCommandCodeOAuthBrowserTimeoutFallsBackToPaste(t *testing.T) {
 func TestCommandCodeSubmitKeyEmptyPastesAreRetry(t *testing.T) {
 	if _, retry, err := commandcodeSubmitKey(context.Background(), "", "", "   "); err != nil || !retry {
 		t.Fatalf("commandcodeSubmitKey(empty) = retry %v, err %v; want retry without error", retry, err)
+	}
+}
+
+func TestLoginCommandCodeOAuthStdinEOFIsTerminal(t *testing.T) {
+	_, authDir := commandcodeTestHome(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	result, err := loginCommandCodeOAuth(ctx, authDir, LoginOptions{
+		NoBrowser: true,
+		Stdin:     strings.NewReader(""),
+	})
+	if err == nil || !strings.Contains(err.Error(), "stdin reached EOF") {
+		t.Fatalf("login result=%+v, error=%v; want terminal stdin EOF error", result, err)
+	}
+}
+
+type commandcodeBlockingReader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newCommandCodeBlockingReader() *commandcodeBlockingReader {
+	return &commandcodeBlockingReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (reader *commandcodeBlockingReader) Read([]byte) (int, error) {
+	reader.once.Do(func() { close(reader.started) })
+	<-reader.release
+	return 0, io.EOF
+}
+
+func (reader *commandcodeBlockingReader) Cancel() {
+	select {
+	case <-reader.release:
+	default:
+		close(reader.release)
+	}
+}
+
+func TestLoginCommandCodeOAuthCancellationInterruptsOwnedReader(t *testing.T) {
+	_, authDir := commandcodeTestHome(t)
+	reader := newCommandCodeBlockingReader()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-reader.started:
+			cancel()
+		case <-time.After(time.Second):
+			cancel()
+		}
+	}()
+
+	started := time.Now()
+	_, err := loginCommandCodeOAuth(ctx, authDir, LoginOptions{
+		NoBrowser:   true,
+		Stdin:       reader,
+		StdinCancel: reader.Cancel,
+	})
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("login error = %v, want context cancellation", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancellation took %s; blocking reader was not interrupted", elapsed)
 	}
 }
 

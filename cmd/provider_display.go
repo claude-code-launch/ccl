@@ -86,10 +86,14 @@ func providerCatalogModelLabel(model string, names map[string]string) string {
 
 func providerOneMSummary(p provider.Provider) string {
 	contextPart := reviewOneMSummary(oneMSlotsFromProvider(p))
-	if provider.IsBalancedContextPreset(p.Env) {
+	switch provider.ContextPresetFromEnv(p.Env) {
+	case provider.ContextPresetBalanced500K:
 		return "500K/400K · " + contextPart
+	case provider.ContextPresetBalanced800K:
+		return "800K/640K · " + contextPart
+	default:
+		return "default (200K/1M) · " + contextPart
 	}
-	return "default (200K/1M) · " + contextPart
 }
 
 func setProviderAuthHeaders(req *http.Request, p provider.Provider) {

@@ -831,7 +831,8 @@ func (m *Manager) loadState() (localSyncState, error) {
 		}
 		return localSyncState{
 			LastRemoteID: remote.LastRemoteID, LastLocalHash: remote.LastLocalHash,
-			PendingTag: profile.PendingTag, PendingHash: profile.PendingHash,
+			LastRemoteCreatedAt: remote.LastRemoteCreatedAt,
+			PendingTag:          profile.PendingTag, PendingHash: profile.PendingHash,
 			ExplicitTag:   profile.ExplicitTag,
 			LastOperation: remote.LastOperation, LastSyncAt: remote.LastSyncAt,
 		}, nil
@@ -866,6 +867,7 @@ func (m *Manager) saveState(state localSyncState) error {
 		remote.LastSeenRemoteID = state.LastRemoteID
 		remote.LastRemoteID = state.LastRemoteID
 		remote.LastLocalHash = state.LastLocalHash
+		remote.LastRemoteCreatedAt = state.LastRemoteCreatedAt
 		remote.LastOperation = state.LastOperation
 		remote.LastSyncAt = state.LastSyncAt
 		switch state.LastOperation {
@@ -1014,6 +1016,9 @@ func (m *Manager) Status() (Status, error) {
 		status.State = "not synchronized"
 	case remoteID != state.LastRemoteID && localHash != state.LastLocalHash:
 		status.State = "diverged"
+	case remoteID != state.LastRemoteID && !record.CreatedAt.IsZero() &&
+		!state.LastRemoteCreatedAt.IsZero() && record.CreatedAt.Before(state.LastRemoteCreatedAt):
+		status.State = "remote rollback suspected"
 	case remoteID != state.LastRemoteID:
 		status.State = "remote changes available"
 	default:

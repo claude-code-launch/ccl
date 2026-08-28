@@ -16,8 +16,27 @@ import (
 
 const (
 	workbuddyDefaultBaseURL = "https://www.workbuddy.ai"
-	workbuddyPlatform       = "workbuddy-ai"
-	workbuddyClientVersion  = "5.3.11"
+	// workbuddyPlatform is the OAuth `platform` query parameter passed to
+	// /v2/plugin/auth/state and embedded in the login URL. It selects the login
+	// page brand; www.workbuddy.ai accepts "workbuddy" (the desktop WorkBuddy
+	// app's platform). The Keycloak token is minted by the "console" client no
+	// matter what value is used here — that is expected and harmless: the chat
+	// gateway does not gate on the token's azp, only on the request fingerprint
+	// below (User-Agent + X-IDE-Type + X-Private-Data).
+	workbuddyPlatform = "workbuddy"
+	// workbuddyClientVersion is the desktop WorkBuddy app version. It drives the
+	// login URL `version` parameter, X-IDE-Version, and the first two
+	// User-Agent tokens. Pinned to a real desktop release.
+	workbuddyClientVersion = "5.3.13"
+	// workbuddyChatChannel is the chat wire channel advertised in
+	// X-IDE-Type/X-IDE-Name. The chat gateway rejects unrecognized channels with
+	// code 11128 ("unapproved channel"); the real desktop client reports
+	// "WorkBuddy" here (a product channel, distinct from the login platform).
+	workbuddyChatChannel = "WorkBuddy"
+	// workbuddyCLIVersion is the trailing "CLI/<ver>" token in the User-Agent,
+	// matching the desktop client's dual-token UA shape
+	// ("WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>").
+	workbuddyCLIVersion     = "2.106.4"
 	workbuddyPendingToken   = 11217
 	workbuddyPendingAccount = 12151
 	workbuddyMaxErrorBytes  = int64(1 << 20)
@@ -309,7 +328,7 @@ func workbuddyClientHeaders() http.Header {
 	headers := make(http.Header)
 	headers.Set("Accept", "application/json")
 	headers.Set("Content-Type", "application/json")
-	headers.Set("User-Agent", workbuddyPlatform+"/"+workbuddyClientVersion+" "+workbuddyPlatform+"/"+workbuddyClientVersion)
+	headers.Set("User-Agent", "WorkBuddy/"+workbuddyClientVersion+" WorkBuddy/"+workbuddyClientVersion+" CLI/"+workbuddyCLIVersion)
 	headers.Set("X-Product", "SaaS")
 	headers.Set("X-Domain", workbuddyDomain())
 	return headers

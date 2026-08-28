@@ -69,7 +69,8 @@
 //     the loopback callback or as a manual paste, validate via /alpha/whoami),
 //     and `ccl import commandcode` reads the official CLI's long-lived key from
 //     ~/.commandcode/auth.json and validates it the same way. Both store the
-//     result under ~/.ccl/auth/commandcode.json.
+//     result under a deterministic per-account file in ~/.ccl/auth (0600);
+//     the legacy commandcode.json binding remains loadable for compatibility.
 //     Do not route Command Code traffic through a third-party proxy.
 //
 //  8. Session credentials

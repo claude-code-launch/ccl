@@ -3,6 +3,7 @@ package oauthproxy
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -154,18 +155,48 @@ func chatReasoningEffort(thinking *anthropicThinking, output *anthropicOutput) s
 	}
 }
 
+// claudeCodeGitPRLine strips the git-status boilerplate line Claude Code injects
+// into its system prompt: "Main branch (you will usually use this for PRs): <branch>".
+// It duplicates the "Current branch" line and is one of the Claude Code fingerprints
+// that upstream gateways reject.
+var claudeCodeGitPRLine = regexp.MustCompile(`(?m)^[ \t]*Main branch \(you will usually use this for PRs\):.*(?:\r?\n)?`)
+
+// claudeCodeIdentityLine is the Claude Code self-identification line prepended to
+// (or split out of) its system prompt. It carries no role/behavior information and
+// is a Claude Code fingerprint rather than a user instruction.
+const claudeCodeIdentityLine = "You are Claude Code, Anthropic's official CLI for Claude."
+
+// isClaudeCodeChatFingerprint reports whether a system text block consists solely
+// of Claude Code attribution that must not be forwarded upstream. The billing header
+// and the identity line are fingerprints (not user content); forwarding them lets an
+// upstream gateway identify the request as proxied Claude Code — WorkBuddy rejects
+// such bodies with code 11128 ("unapproved channel").
+func isClaudeCodeChatFingerprint(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "x-anthropic-billing-header:") {
+		return true
+	}
+	return strings.TrimSpace(text) == claudeCodeIdentityLine
+}
+
+// sanitizeChatSystemText removes Claude Code attribution and git boilerplate from a
+// system text block so it reads as plain instructions to the upstream model.
+func sanitizeChatSystemText(text string) string {
+	text = claudeCodeGitPRLine.ReplaceAllString(text, "")
+	text = strings.ReplaceAll(text, claudeCodeIdentityLine, "")
+	return text
+}
+
 // chatSystemContent flattens an Anthropic system prompt (string or block array)
-// into OpenAI system content parts. Empty text is dropped.
+// into OpenAI system content parts. Empty text and Claude Code attribution
+// fingerprints are dropped.
 func chatSystemContent(raw json.RawMessage) []any {
 	if len(raw) == 0 {
 		return nil
 	}
 	var direct string
 	if json.Unmarshal(raw, &direct) == nil {
-		if strings.TrimSpace(direct) == "" {
-			return nil
-		}
-		return []any{map[string]any{"type": "text", "text": direct}}
+		return chatSystemParts(direct)
 	}
 	var blocks []map[string]any
 	if err := json.Unmarshal(raw, &blocks); err != nil {
@@ -176,11 +207,28 @@ func chatSystemContent(raw json.RawMessage) []any {
 		if !strings.EqualFold(metadataString(block, "type"), "text") {
 			continue
 		}
-		if text := metadataString(block, "text"); text != "" {
-			parts = append(parts, map[string]any{"type": "text", "text": text})
+		text := metadataString(block, "text")
+		if text == "" || isClaudeCodeChatFingerprint(text) {
+			continue
 		}
+		text = sanitizeChatSystemText(text)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		parts = append(parts, map[string]any{"type": "text", "text": text})
 	}
 	return parts
+}
+
+func chatSystemParts(text string) []any {
+	if strings.TrimSpace(text) == "" || isClaudeCodeChatFingerprint(text) {
+		return nil
+	}
+	text = sanitizeChatSystemText(text)
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	return []any{map[string]any{"type": "text", "text": text}}
 }
 
 // chatContentBlock is a normalized view of one Anthropic content block after

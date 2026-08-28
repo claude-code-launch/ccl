@@ -67,6 +67,45 @@ func TestConvertAnthropicToChatCompletionsToolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConvertAnthropicToChatCompletionsStripsClaudeCodeFingerprints(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-test","max_tokens":32,"stream":true,
+		"system":[
+			{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.241.c95; cc_entrypoint=cli;"},
+			{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},
+			{"type":"text","text":"You are an interactive agent.\n\nMain branch (you will usually use this for PRs): main\n\nCurrent branch: main\nGit user: alice"}
+		],
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	converted, err := convertAnthropicToChatCompletions(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(converted.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2 (system+user)", len(messages))
+	}
+	system := messages[0].(map[string]any)
+	content, ok := system["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("system content = %#v, want a single text block", system["content"])
+	}
+	text := content[0].(map[string]any)["text"].(string)
+	if strings.Contains(text, "x-anthropic-billing-header") || strings.Contains(text, "You are Claude Code") {
+		t.Fatalf("system content still carries attribution: %q", text)
+	}
+	if strings.Contains(text, "Main branch") {
+		t.Fatalf("system content still carries git PR boilerplate: %q", text)
+	}
+	if !strings.Contains(text, "You are an interactive agent.") || !strings.Contains(text, "Current branch: main") {
+		t.Fatalf("system content lost real instructions: %q", text)
+	}
+}
+
 func TestConvertAnthropicToChatCompletionsReasoningEffort(t *testing.T) {
 	cases := []struct {
 		thinking map[string]any

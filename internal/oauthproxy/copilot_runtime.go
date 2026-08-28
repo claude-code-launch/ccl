@@ -240,6 +240,7 @@ func (p *copilotCredentialPool) exchangeToken(ctx context.Context, credential *c
 
 type copilotGateway struct {
 	endpoint string
+	key      string
 	pool     *copilotCredentialPool
 	server   *http.Server
 	done     chan struct{}
@@ -250,8 +251,14 @@ func startCopilotGateway(parent context.Context, pool *copilotCredentialPool) (*
 	if err != nil {
 		return nil, fmt.Errorf("start Copilot gateway listener: %w", err)
 	}
+	gatewayKey, err := sessionAPIKey()
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("generate Copilot gateway key: %w", err)
+	}
 	gateway := &copilotGateway{
 		endpoint: "http://" + listener.Addr().String(),
+		key:      gatewayKey,
 		pool:     pool,
 		done:     make(chan struct{}),
 	}
@@ -285,6 +292,13 @@ func (g *copilotGateway) Stop() {
 func (g *copilotGateway) serveHTTP(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	started := time.Now()
+	if strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) != g.key {
+		LogWarnEvent("request_rejected", "component", "copilot", "request_id", requestID,
+			"path", request.URL.Path, "method", request.Method, "status", http.StatusUnauthorized,
+			"reason", "invalid_gateway_key")
+		writeCopilotGatewayError(writer, http.StatusUnauthorized, "invalid gateway key")
+		return
+	}
 	if request.Method != http.MethodGet && request.Method != http.MethodPost {
 		LogWarnEvent("request_rejected", "component", "copilot", "request_id", requestID,
 			"path", request.URL.Path, "method", request.Method, "status", http.StatusMethodNotAllowed,
@@ -840,17 +854,17 @@ func startCopilotProtocolRouter(parent context.Context, gateway *copilotGateway,
 		chat: chatModels, anthropic: anthropicModels,
 	}
 	if len(responseRoutes) > 0 {
-		router.codex = newCodexResponsesService(apiKey, gateway.endpoint, responseRoutes, &codexStaticAuthorizer{token: "copilot"}, usage)
+		router.codex = newCodexResponsesService(apiKey, gateway.endpoint, responseRoutes, &codexStaticAuthorizer{token: gateway.key}, usage)
 	}
 	if len(chatRoutes) > 0 {
-		router.chatSvc = newChatCompletionsServiceWithAuthorizer(apiKey, gateway.endpoint, chatRoutes, &chatStaticAuthorizer{token: "copilot"}, usage)
+		router.chatSvc = newChatCompletionsServiceWithAuthorizer(apiKey, gateway.endpoint, chatRoutes, &chatStaticAuthorizer{token: gateway.key}, usage)
 	}
 	if len(anthropicRoutes) > 0 {
 		anthropicNames := make([]string, 0, len(anthropicRoutes))
 		for _, route := range anthropicRoutes {
 			anthropicNames = append(anthropicNames, route.Alias)
 		}
-		router.anthropicSvc = newAnthropicPassthroughService(apiKey, gateway.endpoint, anthropicNames, &chatStaticAuthorizer{token: "copilot"}, usage)
+		router.anthropicSvc = newAnthropicPassthroughService(apiKey, gateway.endpoint, anthropicNames, &chatStaticAuthorizer{token: gateway.key}, usage)
 	}
 	runCtx, cancel := context.WithCancel(parent)
 	server := &http.Server{

@@ -132,7 +132,7 @@ func TestWorkBuddyRuntimeUsesCPAChatAndRefreshesOnce(t *testing.T) {
 			}})
 		case "/v2/chat/completions":
 			attempt := chatAttempts.Add(1)
-			if request.Header.Get("X-IDE-Type") != workbuddyPlatform || request.Header.Get("X-IDE-Name") != workbuddyPlatform || request.Header.Get("X-Conversation-ID") == "" || request.Header.Get("X-Request-ID") == "" {
+			if request.Header.Get("X-IDE-Type") != workbuddyChatChannel || request.Header.Get("X-IDE-Name") != workbuddyChatChannel || request.Header.Get("X-IDE-Version") != workbuddyClientVersion || request.Header.Get("X-Private-Data") != "true" || request.Header.Get("X-Agent-Purpose") != "conversation" || request.Header.Get("x-requested-with") != "XMLHttpRequest" || request.Header.Get("X-Conversation-ID") == "" || request.Header.Get("X-Request-ID") == "" {
 				t.Fatalf("chat identity headers = %+v", request.Header)
 			}
 			if attempt == 1 {
@@ -231,6 +231,7 @@ func TestWorkBuddyGatewayPreservesProviderErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			request.Header.Set("Authorization", "Bearer "+gateway.key)
 			response, err := http.DefaultClient.Do(request)
 			if err != nil {
 				t.Fatal(err)

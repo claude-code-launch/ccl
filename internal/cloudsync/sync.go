@@ -193,6 +193,9 @@ func (plan *pushPlan) commit(prepared preparedPush, clearPending bool) (PushResu
 	}
 	plan.state.LastRemoteID = plan.resultID
 	plan.state.LastLocalHash = prepared.hash
+	if record, ok := plan.index.Snapshots[plan.resultID]; ok && record.CreatedAt.After(plan.state.LastRemoteCreatedAt) {
+		plan.state.LastRemoteCreatedAt = record.CreatedAt
+	}
 	if clearPending {
 		plan.state.PendingTag = ""
 		plan.state.PendingHash = ""
@@ -409,18 +412,28 @@ func (m *Manager) Pull(tagValue string, force bool) (PullResult, error) {
 	if payload.Hash != record.Hash || payload.Hash != hashSnapshotFiles(payload.Files) {
 		return PullResult{}, fmt.Errorf("encrypted snapshot integrity metadata does not match its contents")
 	}
+	state, err := m.loadState()
+	if err != nil {
+		return PullResult{}, err
+	}
+	if tag == defaultTag && !force && !record.CreatedAt.IsZero() &&
+		!state.LastRemoteCreatedAt.IsZero() && record.CreatedAt.Before(state.LastRemoteCreatedAt) {
+		return PullResult{}, fmt.Errorf(
+			"remote snapshot %s is older than the newest snapshot this device has synchronized; this can indicate a cloud rollback - run `ccl cloud pull --force` only if that is intended",
+			shortIdentifier(id),
+		)
+	}
 
 	_, localHash, localErr := collectLocalFiles()
 	if localErr != nil && !errors.Is(localErr, ErrNoLocalData) {
 		return PullResult{}, localErr
 	}
 	if localHash == payload.Hash {
-		state, stateErr := m.loadState()
-		if stateErr != nil {
-			return PullResult{}, stateErr
-		}
 		state.LastRemoteID = id
 		state.LastLocalHash = localHash
+		if record.CreatedAt.After(state.LastRemoteCreatedAt) {
+			state.LastRemoteCreatedAt = record.CreatedAt
+		}
 		state.PendingTag = ""
 		state.PendingHash = ""
 		state.ExplicitTag = false
@@ -430,10 +443,6 @@ func (m *Manager) Pull(tagValue string, force bool) (PullResult, error) {
 			return PullResult{}, err
 		}
 		return PullResult{Tag: tag, Hash: payload.Hash, ID: id, Downloaded: false}, nil
-	}
-	state, err := m.loadState()
-	if err != nil {
-		return PullResult{}, err
 	}
 	if localHash != "" && !force {
 		if state.LastLocalHash == "" || localHash != state.LastLocalHash {
@@ -449,6 +458,9 @@ func (m *Manager) Pull(tagValue string, force bool) (PullResult, error) {
 	}
 	state.LastRemoteID = id
 	state.LastLocalHash = payload.Hash
+	if record.CreatedAt.After(state.LastRemoteCreatedAt) {
+		state.LastRemoteCreatedAt = record.CreatedAt
+	}
 	state.PendingTag = ""
 	state.PendingHash = ""
 	state.ExplicitTag = false

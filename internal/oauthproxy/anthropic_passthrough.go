@@ -254,7 +254,12 @@ func (s *anthropicPassthroughService) streamCopy(writer http.ResponseWriter, bod
 	for {
 		n, err := body.Read(buffer)
 		if n > 0 {
-			scanner.feed(buffer[:n])
+			if scanErr := scanner.feed(buffer[:n]); scanErr != nil {
+				LogWarnEvent("stream_copy_failed", "component", "anthropic_passthrough", "error", scanErr)
+				scanner.flush()
+				s.recordStreamUsage(scanner, fallbackModel)
+				return
+			}
 			if _, writeErr := writer.Write(buffer[:n]); writeErr != nil {
 				scanner.flush()
 				s.recordStreamUsage(scanner, fallbackModel)
@@ -286,7 +291,12 @@ type passthroughUsageScanner struct {
 	sawUsage                             bool
 }
 
-func (u *passthroughUsageScanner) feed(chunk []byte) {
+const passthroughMaxPendingBytes = codexResponsesMaxSSEEventBytes
+
+func (u *passthroughUsageScanner) feed(chunk []byte) error {
+	if len(u.pending)+len(chunk) > passthroughMaxPendingBytes {
+		return fmt.Errorf("usage scan line exceeds %d bytes without a newline", passthroughMaxPendingBytes)
+	}
 	u.pending = append(u.pending, chunk...)
 	for {
 		index := bytes.IndexByte(u.pending, '\n')
@@ -297,6 +307,7 @@ func (u *passthroughUsageScanner) feed(chunk []byte) {
 		u.pending = append([]byte(nil), u.pending[index+1:]...)
 		u.scanLine(line)
 	}
+	return nil
 }
 
 // flush processes a trailing line that was not newline-terminated when the

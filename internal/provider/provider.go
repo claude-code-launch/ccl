@@ -28,9 +28,27 @@ const (
 	// to the child process environment.
 	EnvAutoCompactPct = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
 
-	BalancedMaxContextTokens  = "500000"
-	BalancedAutoCompactWindow = "500000"
-	BalancedAutoCompactPct    = "80"
+	Balanced500KMaxContextTokens  = "500000"
+	Balanced500KAutoCompactWindow = "500000"
+	Balanced500KAutoCompactPct    = "80"
+	Balanced800KMaxContextTokens  = "800000"
+	Balanced800KAutoCompactWindow = "800000"
+	Balanced800KAutoCompactPct    = "80"
+
+	// BalancedMaxContextTokens and companions retain the original 500K names for
+	// callers that do not need to distinguish the two supported Balanced tiers.
+	BalancedMaxContextTokens  = Balanced500KMaxContextTokens
+	BalancedAutoCompactWindow = Balanced500KAutoCompactWindow
+	BalancedAutoCompactPct    = Balanced500KAutoCompactPct
+)
+
+// ContextPreset identifies a provider-wide context configuration managed by ccl.
+type ContextPreset uint8
+
+const (
+	ContextPresetDefault ContextPreset = iota
+	ContextPresetBalanced500K
+	ContextPresetBalanced800K
 )
 
 // ManagedContextEnvKeys are the context-sizing variables ccl forwards. They are
@@ -40,12 +58,45 @@ func ManagedContextEnvKeys() []string {
 	return []string{EnvMaxContextTokens, EnvAutoCompactWindow, EnvAutoCompactPct}
 }
 
-// IsBalancedContextPreset reports whether env contains ccl's one managed
-// override: a 500K window compacted at 80% (approximately 400K).
+// ContextPresetFromEnv recognizes the exact provider-wide context triplets that
+// ccl supports. Missing, partial, legacy, and hand-written combinations resolve
+// to Default; HasManagedContextEnv distinguishes those unsupported overrides
+// from a genuinely empty Default configuration.
+func ContextPresetFromEnv(env map[string]string) ContextPreset {
+	maxContext := strings.TrimSpace(env[EnvMaxContextTokens])
+	compactWindow := strings.TrimSpace(env[EnvAutoCompactWindow])
+	compactPct := strings.TrimSpace(env[EnvAutoCompactPct])
+	switch {
+	case maxContext == Balanced500KMaxContextTokens &&
+		compactWindow == Balanced500KAutoCompactWindow &&
+		compactPct == Balanced500KAutoCompactPct:
+		return ContextPresetBalanced500K
+	case maxContext == Balanced800KMaxContextTokens &&
+		compactWindow == Balanced800KAutoCompactWindow &&
+		compactPct == Balanced800KAutoCompactPct:
+		return ContextPresetBalanced800K
+	default:
+		return ContextPresetDefault
+	}
+}
+
+// ContextPresetValues returns the exact managed environment values for a
+// supported Balanced tier. Default has no values and returns ok=false.
+func ContextPresetValues(preset ContextPreset) (maxContext, compactWindow, compactPct string, ok bool) {
+	switch preset {
+	case ContextPresetBalanced500K:
+		return Balanced500KMaxContextTokens, Balanced500KAutoCompactWindow, Balanced500KAutoCompactPct, true
+	case ContextPresetBalanced800K:
+		return Balanced800KMaxContextTokens, Balanced800KAutoCompactWindow, Balanced800KAutoCompactPct, true
+	default:
+		return "", "", "", false
+	}
+}
+
+// IsBalancedContextPreset reports whether env contains either exact Balanced
+// tier managed by ccl.
 func IsBalancedContextPreset(env map[string]string) bool {
-	return strings.TrimSpace(env[EnvMaxContextTokens]) == BalancedMaxContextTokens &&
-		strings.TrimSpace(env[EnvAutoCompactWindow]) == BalancedAutoCompactWindow &&
-		strings.TrimSpace(env[EnvAutoCompactPct]) == BalancedAutoCompactPct
+	return ContextPresetFromEnv(env) != ContextPresetDefault
 }
 
 // HasManagedContextEnv reports whether any Claude Code context variable is set.

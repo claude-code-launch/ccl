@@ -2,9 +2,13 @@ package oauthproxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,11 +16,9 @@ import (
 	"time"
 )
 
-// commandcodeCredentialFile is the single credential file ccl writes under
-// ~/.ccl/auth. The official CLI keeps only one long-lived key in
-// ~/.commandcode/auth.json, so one imported file is always authoritative and a
-// re-login overwrites it in place. The browser OAuth flow (`ccl oauth
-// commandcode`) writes the same file.
+// commandcodeCredentialFile is the legacy credential filename ccl has always
+// accepted under ~/.ccl/auth. New logins use a deterministic per-account name,
+// but existing providers bound to this basename must keep working.
 const commandcodeCredentialFile = "commandcode.json"
 
 // commandcodeLoginTimeout bounds the /alpha/whoami validation call during an
@@ -37,10 +39,10 @@ func commandcodeOfficialAuthPath() (string, error) {
 
 // loginCommandCode imports the official CLI credential: it reads
 // ~/.commandcode/auth.json, validates the key against /alpha/whoami, and
-// persists the result to ~/.ccl/auth/commandcode.json. This is the
-// non-browser counterpart of loginCommandCodeOAuth: users who signed in once
-// with the official CLI can import its stored key instead of re-authenticating
-// in a browser.
+// persists the result to a deterministic per-account credential file. This is
+// the non-browser counterpart of loginCommandCodeOAuth: users who signed in
+// once with the official CLI can import its stored key instead of
+// re-authenticating in a browser.
 func loginCommandCode(ctx context.Context, authDir string) (LoginResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -71,32 +73,79 @@ func loginCommandCode(ctx context.Context, authDir string) (LoginResult, error) 
 	}
 
 	base := commandcodeAPIBase("")
-	if err := commandcodeValidateKey(ctx, base, apiKey); err != nil {
+	user, err := commandcodeValidateCredential(ctx, base, apiKey)
+	if err != nil {
 		return LoginResult{}, err
 	}
 
-	metadata := map[string]any{
+	metadata := commandcodeCredentialMetadata(apiKey, user, map[string]any{
 		"type":             ProviderCommandCode,
-		"api_key":          apiKey,
-		"user_id":          strings.TrimSpace(official.UserID),
-		"user_name":        strings.TrimSpace(official.UserName),
 		"key_name":         strings.TrimSpace(official.KeyName),
 		"authenticated_at": strings.TrimSpace(official.AuthenticatedAt),
 		"source":           "official_cli_import",
-	}
+	})
 	return saveCommandCodeCredential(authDir, metadata)
 }
 
-// saveCommandCodeCredential atomically persists the Command Code credential to
-// ~/.ccl/auth/commandcode.json and returns the LoginResult. Both the browser
-// OAuth login and the official-CLI import funnel through here so the stored
-// shape never diverges.
+// commandcodeCredentialMetadata creates one canonical persisted shape after the
+// key has been validated. Identity fields are deliberately sourced from the
+// gateway response, not from browser or official-CLI input.
+func commandcodeCredentialMetadata(apiKey string, user *commandcodeWhoamiUser, extra map[string]any) map[string]any {
+	metadata := make(map[string]any, len(extra)+5)
+	maps.Copy(metadata, extra)
+	metadata["type"] = ProviderCommandCode
+	metadata["api_key"] = strings.TrimSpace(apiKey)
+	if user != nil {
+		if id := strings.TrimSpace(user.ID); id != "" {
+			metadata["user_id"] = id
+		}
+		if username := strings.TrimSpace(user.UserName); username != "" {
+			metadata["user_name"] = username
+		} else if name := strings.TrimSpace(user.Name); name != "" {
+			metadata["user_name"] = name
+		}
+		if name := strings.TrimSpace(user.Name); name != "" {
+			metadata["name"] = name
+		}
+	}
+	return metadata
+}
+
+// commandcodeCredentialFilename returns a stable, bounded filename for one
+// validated account. The identity hash is derived from the authoritative
+// whoami identity, never from the raw key. A key hash is used only when the
+// server supplied no identity at all (which is not accepted by normal login,
+// but keeps this helper safe for defensive callers).
+func commandcodeCredentialFilename(metadata map[string]any) string {
+	identity := firstMetadataString(metadata, "user_id", "user_name", "name")
+	identity = strings.TrimSpace(identity)
+	if identity != "" {
+		canonical := strings.ToLower(identity)
+		fragment := sanitizeCredentialIdentity(identity)
+		if fragment == "" {
+			fragment = "account"
+		}
+		if len(fragment) > 40 {
+			fragment = fragment[:40]
+		}
+		sum := sha256.Sum256([]byte(canonical))
+		return fmt.Sprintf("commandcode-%s-%s.json", fragment, hex.EncodeToString(sum[:4]))
+	}
+
+	key := firstMetadataString(metadata, "api_key", "apiKey", "key")
+	sum := sha256.Sum256([]byte(key))
+	return "commandcode-" + hex.EncodeToString(sum[:8]) + ".json"
+}
+
+// saveCommandCodeCredential atomically persists a Command Code credential to a
+// per-account file under ~/.ccl/auth and returns the LoginResult. The legacy
+// commandcode.json name remains loadable for existing configurations.
 func saveCommandCodeCredential(authDir string, metadata map[string]any) (LoginResult, error) {
 	payload, err := json.Marshal(metadata)
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("encode Command Code credential: %w", err)
 	}
-	path := filepath.Join(authDir, commandcodeCredentialFile)
+	path := filepath.Join(authDir, commandcodeCredentialFilename(metadata))
 	if err := writeCredentialAtomic(path, append(payload, '\n')); err != nil {
 		return LoginResult{}, err
 	}
@@ -112,9 +161,70 @@ type commandcodeWhoamiUser struct {
 	Name     string `json:"name"`
 }
 
+func commandcodeWhoamiUserFromJSON(raw []byte) (*commandcodeWhoamiUser, error) {
+	var envelope struct {
+		Valid bool                   `json:"valid"`
+		User  *commandcodeWhoamiUser `json:"user"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, fmt.Errorf("decode /alpha/whoami response: %w", err)
+	}
+	user := envelope.User
+	if user == nil {
+		user = &commandcodeWhoamiUser{}
+	}
+	// Gateways in the wild have returned both a nested user object and a flat
+	// identity object. Accept the documented aliases, but never accept an
+	// identity supplied by the browser callback or official CLI metadata.
+	var flat map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &flat); err == nil {
+		if user.ID == "" {
+			user.ID = commandcodeJSONFieldString(flat, "id", "userId", "user_id")
+		}
+		if user.UserName == "" {
+			user.UserName = commandcodeJSONFieldString(flat, "userName", "username", "user_name")
+		}
+		if user.Name == "" {
+			user.Name = commandcodeJSONFieldString(flat, "name", "displayName", "display_name")
+		}
+	}
+	user.ID = strings.TrimSpace(user.ID)
+	user.UserName = strings.TrimSpace(user.UserName)
+	user.Name = strings.TrimSpace(user.Name)
+	if user.ID == "" && user.UserName == "" && user.Name == "" {
+		return nil, errors.New("/alpha/whoami returned no account identity")
+	}
+	return user, nil
+}
+
+func commandcodeJSONFieldString(fields map[string]json.RawMessage, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := fields[key]
+		if !ok {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// commandcodeValidateCredential calls /alpha/whoami and requires an
+// authoritative account identity before a credential can be persisted.
+func commandcodeValidateCredential(ctx context.Context, base, apiKey string) (*commandcodeWhoamiUser, error) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil, errors.New("Command Code credential has an empty API key")
+	}
+	return commandcodeWhoami(ctx, base, apiKey)
+}
+
 // commandcodeWhoami calls the lightweight /alpha/whoami route and returns the
 // account identity for a valid key. 401/403 mean the key is invalid; anything
-// else surfaces the raw status with a short body preview.
+// else surfaces the raw status with a short body preview. A 2xx response with
+// an empty or malformed body is not sufficient for credential creation.
 func commandcodeWhoami(ctx context.Context, base, apiKey string) (*commandcodeWhoamiUser, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/alpha/whoami", nil)
 	if err != nil {
@@ -130,16 +240,14 @@ func commandcodeWhoami(ctx context.Context, base, apiKey string) (*commandcodeWh
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		var body struct {
-			Valid bool                   `json:"valid"`
-			User  *commandcodeWhoamiUser `json:"user"`
+		raw, readErr := io.ReadAll(io.LimitReader(response.Body, chatMaxErrorBytes))
+		if readErr != nil {
+			return nil, fmt.Errorf("read /alpha/whoami response: %w", readErr)
 		}
-		// The user payload is best-effort: a 2xx response still proves the key
-		// is accepted even when the body is empty or unparseable.
-		if err := json.NewDecoder(io.LimitReader(response.Body, chatMaxErrorBytes)).Decode(&body); err != nil {
-			return nil, nil
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			return nil, errors.New("/alpha/whoami returned an empty response")
 		}
-		return body.User, nil
+		return commandcodeWhoamiUserFromJSON(raw)
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, chatMaxErrorBytes))
 	switch response.StatusCode {
@@ -150,19 +258,14 @@ func commandcodeWhoami(ctx context.Context, base, apiKey string) (*commandcodeWh
 	}
 }
 
-// commandcodeValidateKey checks a user_... key against the lightweight
-// /alpha/whoami route of the official gateway. Any 2xx response means the key
-// is accepted; 401/403 mean the key is invalid, and everything else surfaces
-// the raw status with a short body preview.
-func commandcodeValidateKey(ctx context.Context, base, apiKey string) error {
-	_, err := commandcodeWhoami(ctx, base, apiKey)
-	return err
-}
-
 // loadCommandCodeCredential reads an imported credential file under the auth
 // dir and returns the upstream API key plus the full metadata for display.
 func loadCommandCodeCredential(authDir, credentialFile string) (string, map[string]any, error) {
-	path := filepath.Join(authDir, filepath.Base(filepath.Clean(credentialFile)))
+	credentialFile = strings.TrimSpace(credentialFile)
+	if credentialFile == "" || credentialFile == "." {
+		credentialFile = commandcodeCredentialFile
+	}
+	path := filepath.Join(authDir, filepath.Base(credentialFile))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", nil, fmt.Errorf("read Command Code credential %s: %w", filepath.Base(path), err)
@@ -221,7 +324,10 @@ func startCommandCodeOAuth(parent context.Context, _ string, credentialFile stri
 	if err != nil {
 		return nil, err
 	}
-	credentialPath := filepath.Join(authDir, filepath.Base(filepath.Clean(credentialFile)))
+	credentialPath := filepath.Join(authDir, filepath.Base(strings.TrimSpace(credentialFile)))
+	if strings.TrimSpace(credentialFile) == "" || strings.TrimSpace(credentialFile) == "." {
+		credentialPath = filepath.Join(authDir, commandcodeCredentialFile)
+	}
 	proxyRuntime, err := startCommandCodeRuntime(parent, "", apiKey)
 	if err != nil {
 		return nil, err

@@ -12,6 +12,12 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	anthropicAssemblerMaxRetainedBytes = 64 << 20
+	anthropicAssemblerMaxBlocks        = 4096
+	anthropicAssemblerMaxToolCalls     = 1024
+)
+
 type kiroResponseBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
@@ -110,6 +116,7 @@ type anthropicResponseAssembler struct {
 	activeIndex      int
 	activeType       string
 	outputTokens     int
+	retainedBytes    int
 	contextTokens    int
 	cacheReadTokens  int
 	cacheWriteTokens int
@@ -240,6 +247,12 @@ func (a *anthropicResponseAssembler) processEvent(eventType string, payload []by
 			return err
 		}
 		if event.RedactedContent != "" {
+			if err := a.retain(len(event.RedactedContent)); err != nil {
+				return err
+			}
+			if len(a.blocks) >= anthropicAssemblerMaxBlocks {
+				return fmt.Errorf("Kiro response exceeds %d content blocks", anthropicAssemblerMaxBlocks)
+			}
 			if err := a.closeActive(); err != nil {
 				return err
 			}
@@ -285,11 +298,17 @@ func (a *anthropicResponseAssembler) processEvent(eventType string, payload []by
 		}
 		accumulator := a.tools[event.ToolUseID]
 		if accumulator == nil {
+			if len(a.tools) >= anthropicAssemblerMaxToolCalls {
+				return fmt.Errorf("Kiro tool use stream exceeds %d concurrent tool calls", anthropicAssemblerMaxToolCalls)
+			}
 			accumulator = &kiroToolAccumulator{name: event.Name}
 			a.tools[event.ToolUseID] = accumulator
 		}
 		if event.Name != "" {
 			accumulator.name = event.Name
+		}
+		if err := a.retain(len(event.Input)); err != nil {
+			return err
 		}
 		accumulator.input.WriteString(event.Input)
 		if event.Stop {
@@ -405,9 +424,20 @@ func partialKiroTagSuffix(content, tag string) int {
 	return 0
 }
 
+func (a *anthropicResponseAssembler) retain(size int) error {
+	if a.retainedBytes+size > anthropicAssemblerMaxRetainedBytes {
+		return fmt.Errorf("upstream response retention exceeds %d bytes", anthropicAssemblerMaxRetainedBytes)
+	}
+	a.retainedBytes += size
+	return nil
+}
+
 func (a *anthropicResponseAssembler) addText(text string) error {
 	if text == "" {
 		return nil
+	}
+	if err := a.retain(len(text)); err != nil {
+		return err
 	}
 	index, err := a.ensureBlock("text")
 	if err != nil {
@@ -426,6 +456,9 @@ func (a *anthropicResponseAssembler) addThinking(thinking string) error {
 	if thinking == "" {
 		return nil
 	}
+	if err := a.retain(len(thinking)); err != nil {
+		return err
+	}
 	index, err := a.ensureBlock("thinking")
 	if err != nil {
 		return err
@@ -442,6 +475,9 @@ func (a *anthropicResponseAssembler) addThinking(thinking string) error {
 func (a *anthropicResponseAssembler) addToolUse(id, name, partialJSON string) error {
 	if err := a.closeActive(); err != nil {
 		return err
+	}
+	if len(a.blocks) >= anthropicAssemblerMaxBlocks {
+		return fmt.Errorf("upstream response exceeds %d content blocks", anthropicAssemblerMaxBlocks)
 	}
 	if original := a.request.toolNameMap[name]; original != "" {
 		name = original
@@ -483,6 +519,9 @@ func (a *anthropicResponseAssembler) ensureBlock(blockType string) (int, error) 
 	}
 	if err := a.closeActive(); err != nil {
 		return -1, err
+	}
+	if len(a.blocks) >= anthropicAssemblerMaxBlocks {
+		return -1, fmt.Errorf("upstream response exceeds %d content blocks", anthropicAssemblerMaxBlocks)
 	}
 	var contentBlock any = kiroThinkingBlockStart{Type: blockType}
 	if blockType == "text" {
