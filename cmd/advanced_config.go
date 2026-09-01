@@ -508,13 +508,15 @@ func renderedCursorLine(body string, cursor int, rows []configRow) int {
 		return 0
 	}
 	kind := rows[cursor].kind
-	label, ok := rowClickLabels[kind]
-	if !ok || label == "" {
+	prefixes := rowClickLabelPrefixes(kind)
+	if len(prefixes) == 0 {
 		return 0
 	}
 	for i, line := range strings.Split(body, "\n") {
-		if strings.Contains(line, label) {
-			return i
+		for _, prefix := range prefixes {
+			if strings.Contains(line, prefix) {
+				return i
+			}
 		}
 	}
 	return 0
@@ -3124,17 +3126,21 @@ func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
 			lead = len(text) - len(rest)
 		}
 	}
-	// Find every label that starts the trimmed field.
+	// Find every label that starts the trimmed field. Both the English and the
+	// Chinese rendering of a label can lead the field, so both count as the row.
 	var matched configRowKind
 	var matchedIdx int
 	hasMatch := false
-	for kind, label := range rowClickLabels {
-		if strings.HasPrefix(rest, label) {
-			idx := lead
-			if !hasMatch || idx < matchedIdx {
-				matched = kind
-				matchedIdx = idx
-				hasMatch = true
+	for kind := range rowClickLabels {
+		for _, label := range rowClickLabelPrefixes(kind) {
+			if strings.HasPrefix(rest, label) {
+				idx := lead
+				if !hasMatch || idx < matchedIdx {
+					matched = kind
+					matchedIdx = idx
+					hasMatch = true
+				}
+				break
 			}
 		}
 	}
@@ -3166,45 +3172,79 @@ func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
 	// belongs to the label whose field start is at or before x (Save then Cancel).
 	best := matched
 	bestIdx := matchedIdx
-	for kind, label := range rowClickLabels {
-		if kind == matched {
-			continue
-		}
-		idx := strings.Index(rest, label)
-		if idx < 0 {
-			continue
-		}
-		absIdx := lead + idx
-		if absIdx <= x && (bestIdx > x || absIdx > bestIdx) {
-			best = kind
-			bestIdx = absIdx
+	for kind := range rowClickLabels {
+		for _, label := range rowClickLabelPrefixes(kind) {
+			if kind == matched {
+				break
+			}
+			idx := strings.Index(rest, label)
+			if idx < 0 {
+				continue
+			}
+			absIdx := lead + idx
+			if absIdx <= x && (bestIdx > x || absIdx > bestIdx) {
+				best = kind
+				bestIdx = absIdx
+			}
+			break
 		}
 	}
 	return best, true
 }
 
-// rowClickLabels maps a configuration row to the label prefix a click must
-// match on its rendered line. Only rows that make sense to click are listed.
-var rowClickLabels = map[configRowKind]string{
-	rowSource:     "Source",
-	rowEndpoint:   "Endpoint URL",
-	rowAPIKey:     "API Key",
-	rowProvider:   "Provider",
-	rowTest:       "Auto Configure",
-	rowProtocol:   "Protocol",
-	rowFast:       "Fast",
-	rowOpus:       "Opus",
-	rowSonnet:     "Sonnet",
-	rowHaiku:      "Haiku",
-	rowCustom:     "Custom",
-	rowSubagent:   "Subagent",
-	rowTestModels: "Test Model Availability",
-	rowContext:    "Context & Compact",
-	rowTools:      "Tools",
-	rowToolSearch: "Tool Search",
-	rowActive:     "Set as active provider",
-	rowSave:       "Save & Activate",
-	rowCancel:     "Cancel",
+// rowClickLabels maps a configuration row to the label prefixes a click (or
+// the cursor-line lookup) must match on its rendered line. Both the English
+// and the Chinese rendering of each label are listed: the page renders labels
+// through locale.T, so in a Chinese session only the zh form appears on
+// screen and a single-language table would silently stop matching. Only rows
+// that make sense to click are listed.
+type rowClickLabel struct {
+	en, zh string
+}
+
+var rowClickLabels = map[configRowKind]rowClickLabel{
+	rowSource:     {en: "Source"},
+	rowEndpoint:   {en: "Endpoint URL"},
+	rowAPIKey:     {en: "API Key"},
+	rowProvider:   {en: "Provider"},
+	rowTest:       {en: "Auto Configure"},
+	rowProtocol:   {en: "Protocol"},
+	rowFast:       {en: "Fast"},
+	rowOpus:       {en: "Opus"},
+	rowSonnet:     {en: "Sonnet"},
+	rowHaiku:      {en: "Haiku"},
+	rowCustom:     {en: "Custom"},
+	rowSubagent:   {en: "Subagent"},
+	rowTestModels: {en: "Test Model Availability"},
+	rowContext:    {en: "Context & Compact"},
+	rowTools:      {en: "Tools"},
+	rowToolSearch: {en: "Tool Search"},
+	rowActive:     {en: "Set as active provider", zh: "设为当前激活 Provider"},
+	// The Save button also renders as "Save Provider" when activation is not
+	// chosen; matchRowLabel matches prefixes, so the shorter shared prefix of
+	// both variants ("Save ") is what must stay clickable.
+	rowSave:   {en: "Save & Activate", zh: "保存并激活"},
+	rowCancel: {en: "Cancel", zh: "取消"},
+}
+
+// rowClickLabelPrefixes returns every rendered label variant for a row kind.
+func rowClickLabelPrefixes(kind configRowKind) []string {
+	label, ok := rowClickLabels[kind]
+	if !ok {
+		return nil
+	}
+	prefixes := make([]string, 0, 3)
+	if label.en != "" {
+		prefixes = append(prefixes, label.en)
+	}
+	if label.zh != "" {
+		prefixes = append(prefixes, label.zh)
+	}
+	// "Save Provider" is the other rendering of the Save button.
+	if kind == rowSave {
+		prefixes = append(prefixes, "Save Provider", "保存 Provider")
+	}
+	return prefixes
 }
 
 // viewModelPicker renders the filtered model selection overlay. It is shown

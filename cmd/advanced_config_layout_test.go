@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -110,24 +111,42 @@ func enterDetectedReview(m *AdvancedConfigModel, models ...string) *AdvancedConf
 
 func TestReviewFitsCommonTerminalHeights(t *testing.T) {
 	p := providerFrom("p", "https://example.com/v1", "openai")
-	m := NewAdvancedConfigModel(&p)
-	enterDetectedReview(m, "model-a", "model-b", "model-c")
-	m.width = 100
 
-	// The single page is scrollable: at every terminal height, moving the cursor
-	// to the Save row scrolls it into view, and the rendered frame never exceeds
-	// the terminal.
-	for _, h := range []int{24, 26, 27, 28, 30} {
-		m.height = h
-		m.cursor = m.mainRowIndex(rowSave)
-		m.keepCursorVisible()
-		view := m.View().Content
-		got := lipgloss.Height(view)
-		if got > h {
-			t.Fatalf("terminal height %d rendered %d lines (overflow)\n%s", h, got, view)
-		}
-		if !strings.Contains(view, "Save & Activate") {
-			t.Fatalf("Save not visible at height %d", h)
+	// The scroll anchoring matches the label the page actually renders, and that
+	// label is localized: a Chinese session shows “保存并激活” where an English
+	// one shows “Save & Activate”. The layout guarantee must hold for both, so
+	// exercise each language explicitly instead of inheriting the machine's
+	// config.yaml language.
+	savedLang := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(savedLang) })
+
+	for _, tc := range []struct {
+		lang     string
+		saveText string
+	}{
+		{lang: "en", saveText: "Save & Activate"},
+		{lang: "zh-CN", saveText: "保存并激活"},
+	} {
+		locale.SetLanguage(tc.lang)
+		m := NewAdvancedConfigModel(&p)
+		enterDetectedReview(m, "model-a", "model-b", "model-c")
+		m.width = 100
+
+		// The single page is scrollable: at every terminal height, moving the cursor
+		// to the Save row scrolls it into view, and the rendered frame never exceeds
+		// the terminal.
+		for _, h := range []int{24, 26, 27, 28, 30} {
+			m.height = h
+			m.cursor = m.mainRowIndex(rowSave)
+			m.keepCursorVisible()
+			view := m.View().Content
+			got := lipgloss.Height(view)
+			if got > h {
+				t.Fatalf("[%s] terminal height %d rendered %d lines (overflow)\n%s", tc.lang, h, got, view)
+			}
+			if !strings.Contains(view, tc.saveText) {
+				t.Fatalf("[%s] Save (%s) not visible at height %d", tc.lang, tc.saveText, h)
+			}
 		}
 	}
 }
