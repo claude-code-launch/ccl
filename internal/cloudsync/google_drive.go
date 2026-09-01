@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -527,21 +526,4 @@ func googleDriveResponseError(operation string, response *http.Response) error {
 		message = http.StatusText(response.StatusCode)
 	}
 	return fmt.Errorf("Google Drive %s failed (%s): %s", operation, response.Status, message)
-}
-
-func ensureGoogleCacheDirectory(cacheDir string) error {
-	if !filepath.IsAbs(cacheDir) {
-		return fmt.Errorf("invalid Google Drive cache directory")
-	}
-	if info, err := os.Lstat(cacheDir); err == nil {
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refuse to use non-directory Google Drive cache")
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, snapshotsDirectory), 0o700); err != nil {
-		return fmt.Errorf("create Google Drive cache: %w", err)
-	}
-	return nil
 }

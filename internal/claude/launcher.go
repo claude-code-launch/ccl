@@ -1,10 +1,12 @@
 package claude
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,9 +180,7 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 
 	// Provider-level overrides take final precedence except for embedded-proxy
 	// transport values, which must match the runtime started for this session.
-	for k, v := range p.Env {
-		env[k] = v
-	}
+	maps.Copy(env, p.Env)
 	// Advanced provider env can contain legacy technical model IDs. Normalize
 	// every request-bearing model variable after applying those overrides so a
 	// Qoder ID cannot leak back into Claude's title or /model UI.
@@ -295,13 +295,6 @@ func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) [
 	return env
 }
 
-// applyModelEnv writes model-related env vars into env.
-// A comma-separated model spec enables per-tier gateway routing;
-// a single name fills every missing tier and ANTHROPIC_MODEL with that model.
-func applyModelEnv(env map[string]string, modelSpec string) {
-	applyModelEnvWithNames(env, modelSpec, nil)
-}
-
 func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[string]string) {
 	setIfEmpty := func(key, value string) {
 		if value == "" {
@@ -405,7 +398,7 @@ type providerContext struct {
 // setupProvider starts a proxy if needed and resolves the final model list.
 // The caller must call cleanup() to release any proxy resources.
 func setupProvider(p provider.Provider) (*providerContext, error) {
-	session, err := providersession.Prepare(nil, p)
+	session, err := providersession.Prepare(context.TODO(), p)
 	if err != nil {
 		return nil, err
 	}
@@ -472,16 +465,11 @@ func (c *providerContext) settings() settingsJSON {
 // responseLanguage maps the user's configured ccl language to the natural-language
 // name Claude Code's `language` setting expects. ccl canonicalizes locales to
 // zh-CN/zh-TW/en-US, distinguishing Traditional vs Simplified Chinese and falling
-// back to English for everything else.
+// back to English for everything else. The Chinese names come from locale, the
+// package that owns language display names (the layering test's Chinese-table
+// exemption); they are protocol values for Claude Code, not UI strings.
 func responseLanguage() string {
-	switch locale.Current() {
-	case "zh-TW":
-		return "繁體中文"
-	case "zh-CN":
-		return "中文"
-	default:
-		return "English"
-	}
+	return locale.ClaudeCodeLanguageName(locale.Current())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

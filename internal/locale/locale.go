@@ -108,6 +108,21 @@ func IsChinese() bool {
 	return strings.HasPrefix(Current(), "zh")
 }
 
+// ClaudeCodeLanguageName maps a ccl locale to the natural-language name that
+// Claude Code's `language` setting expects (e.g. "中文" for zh-CN). This lives
+// in locale — the package that owns language display names — because internal/
+// packages outside locale must not hold Chinese string literals.
+func ClaudeCodeLanguageName(code string) string {
+	switch code {
+	case "zh-TW":
+		return "繁體中文"
+	case "zh-CN":
+		return "中文"
+	default:
+		return "English"
+	}
+}
+
 // T returns the Chinese or English string based on the current language.
 // Call: T("中文文本", "English text")
 func T(zh, en string) string {

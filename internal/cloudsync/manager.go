@@ -272,10 +272,6 @@ func replaceUninitializedProfile(remoteDir string) (LoginResult, error) {
 	return finishLogin(remoteDir, profile, key, false, keyModeKeychain, false)
 }
 
-func replaceUninitializedProfileLocal(remoteDir string) (LoginResult, error) {
-	return replaceUninitializedProfileLocalForProvider(remoteDir, providerICloud, remoteDir)
-}
-
 func replaceUninitializedProfileLocalForProvider(remoteDir, provider, remoteLabel string) (LoginResult, error) {
 	profile, key, err := newMasterKeyProfile()
 	if err != nil {

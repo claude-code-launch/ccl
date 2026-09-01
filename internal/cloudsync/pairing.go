@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 func pendingPairingDirectory(localDir string) string {
@@ -248,11 +247,8 @@ func ListPairingRequests(
 		if err != nil {
 			return nil, err
 		}
-		for _, request := range requests {
-			if nowUTC().After(request.ExpiresAt) {
-				_ = store.Delete(ctx, request.RequestID)
-				continue
-			}
+		active := purgeExpiredPairingRequests(ctx, store, requests)
+		for _, request := range active {
 			if request.ProfileID != manager.profileID {
 				continue
 			}
@@ -276,6 +272,26 @@ func ListPairingRequests(
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
 	return result, nil
+}
+
+// purgeExpiredPairingRequests deletes expired requests from the store and
+// returns the still-valid ones. Deletion is best-effort so a stale entry can
+// be cleared without blocking the listing; the returned slice contains only
+// requests that have not yet expired.
+func purgeExpiredPairingRequests(
+	ctx context.Context,
+	store pairingStore,
+	requests []pairingRequestEnvelope,
+) []pairingRequestEnvelope {
+	var active []pairingRequestEnvelope
+	for _, request := range requests {
+		if nowUTC().After(request.ExpiresAt) {
+			_ = store.Delete(ctx, request.RequestID)
+			continue
+		}
+		active = append(active, request)
+	}
+	return active
 }
 
 func ApprovePairing(
@@ -619,12 +635,4 @@ func PendingPairingRequests() ([]PairingRequestResult, error) {
 		return result[i].ExpiresAt.Before(result[j].ExpiresAt)
 	})
 	return result, nil
-}
-
-func pairingTimeRemaining(expiresAt time.Time) time.Duration {
-	remaining := time.Until(expiresAt)
-	if remaining < 0 {
-		return 0
-	}
-	return remaining.Round(time.Second)
 }

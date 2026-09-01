@@ -258,6 +258,16 @@ func (m *Manager) clearPendingPush() error {
 	return writeJSONAtomic(m.profileStateFile, profile, 0o600)
 }
 
+// preflightOutcome tracks one remote's push from load through commit.
+// It extends the public RemotePushOutcome with the plan built during
+// preflight so the commit phase can pick it up without a parallel slice.
+type preflightOutcome struct {
+	Alias  string
+	Result PushResult
+	Err    error
+	plan   *pushPlan
+}
+
 // PushRemotes pushes one prepared encrypted snapshot to one or more remotes.
 // All targets are preflighted before the first write unless bestEffort is set.
 func PushRemotes(to string, all, force, bestEffort bool) ([]RemotePushOutcome, error) {
@@ -265,28 +275,11 @@ func PushRemotes(to string, all, force, bestEffort bool) ([]RemotePushOutcome, e
 	if err != nil {
 		return nil, err
 	}
-	managers := make([]*Manager, 0, len(aliases))
-	loadErrors := make([]error, 0, len(aliases))
-	for _, alias := range aliases {
-		manager, err := LoadRemote(alias)
-		if err != nil {
-			if !bestEffort {
-				return nil, fmt.Errorf("%s: %w", alias, err)
-			}
-			managers = append(managers, nil)
-			loadErrors = append(loadErrors, err)
-			continue
-		}
-		managers = append(managers, manager)
-		loadErrors = append(loadErrors, nil)
+	managers, loadErrors, err := loadPushManagers(aliases, bestEffort)
+	if err != nil {
+		return nil, err
 	}
-	var preparationManager *Manager
-	for _, manager := range managers {
-		if manager != nil {
-			preparationManager = manager
-			break
-		}
-	}
+	preparationManager := firstLoadedManager(managers)
 	if preparationManager == nil {
 		return nil, fmt.Errorf("no cloud remote could be loaded")
 	}
@@ -306,39 +299,113 @@ func PushRemotes(to string, all, force, bestEffort bool) ([]RemotePushOutcome, e
 			return nil, err
 		}
 	}
+	outcomes := preflightPushPlans(aliases, managers, loadErrors, prepared, force)
+	if preflightFailed(outcomes) && !bestEffort {
+		return publicOutcomes(outcomes), firstOutcomeError(outcomes)
+	}
+	if len(aliases) > 1 && !hasOperation {
+		operation, err = createPushOperation(preparationManager, aliases, prepared)
+		if err != nil {
+			return publicOutcomes(outcomes), err
+		}
+		hasOperation = true
+	}
 	plans := make([]*pushPlan, len(aliases))
-	outcomes := make([]RemotePushOutcome, len(aliases))
-	preflightFailed := false
+	for index := range aliases {
+		plans[index] = outcomes[index].plan
+	}
+	succeeded := commitPushPlans(plans, prepared, hasOperation, operation, preparationManager, outcomes)
+	return finalizePushOutcome(outcomes, succeeded, hasOperation, preparationManager, operation)
+}
+
+// loadPushManagers loads a Manager per alias. In best-effort mode a failed
+// load is recorded as a nil manager plus its error for later reporting;
+// otherwise the first failure aborts the push with a wrapped error.
+func loadPushManagers(aliases []string, bestEffort bool) ([]*Manager, []error, error) {
+	managers := make([]*Manager, 0, len(aliases))
+	loadErrors := make([]error, 0, len(aliases))
+	for _, alias := range aliases {
+		manager, err := LoadRemote(alias)
+		if err != nil {
+			if !bestEffort {
+				return nil, nil, fmt.Errorf("%s: %w", alias, err)
+			}
+			managers = append(managers, nil)
+			loadErrors = append(loadErrors, err)
+			continue
+		}
+		managers = append(managers, manager)
+		loadErrors = append(loadErrors, nil)
+	}
+	return managers, loadErrors, nil
+}
+
+func firstLoadedManager(managers []*Manager) *Manager {
+	for _, manager := range managers {
+		if manager != nil {
+			return manager
+		}
+	}
+	return nil
+}
+
+// preflightPushPlans builds a push plan per alias without writing anything.
+// Each plan (or load/plan error) is recorded into the outcome at the same
+// index; the plan is also stashed in the outcome so the caller can hand it to
+// commitPushPlans.
+func preflightPushPlans(
+	aliases []string,
+	managers []*Manager,
+	loadErrors []error,
+	prepared preparedPush,
+	force bool,
+) []preflightOutcome {
+	outcomes := make([]preflightOutcome, len(aliases))
 	for index, alias := range aliases {
 		outcomes[index].Alias = alias
 		if managers[index] == nil {
 			outcomes[index].Err = loadErrors[index]
-			preflightFailed = true
 			continue
 		}
 		plan, planErr := managers[index].planPush(prepared, force)
 		if planErr != nil {
 			outcomes[index].Err = planErr
-			preflightFailed = true
 			continue
 		}
-		plans[index] = plan
+		outcomes[index].plan = plan
 	}
-	if preflightFailed && !bestEffort {
-		for _, outcome := range outcomes {
-			if outcome.Err != nil {
-				return outcomes, fmt.Errorf("%s: %w", outcome.Alias, outcome.Err)
-			}
+	return outcomes
+}
+
+func preflightFailed(outcomes []preflightOutcome) bool {
+	for _, outcome := range outcomes {
+		if outcome.Err != nil {
+			return true
 		}
 	}
-	if len(aliases) > 1 && !hasOperation {
-		operation, err = createPushOperation(preparationManager, aliases, prepared)
-		if err != nil {
-			return outcomes, err
+	return false
+}
+
+func firstOutcomeError(outcomes []preflightOutcome) error {
+	for _, outcome := range outcomes {
+		if outcome.Err != nil {
+			return fmt.Errorf("%s: %w", outcome.Alias, outcome.Err)
 		}
-		hasOperation = true
 	}
-	failed := preflightFailed
+	return nil
+}
+
+// commitPushPlans uploads the planned snapshot to every remote that has a
+// plan, skipping remotes already completed in a resumed operation. Returns
+// the number of successful remotes.
+func commitPushPlans(
+	plans []*pushPlan,
+	prepared preparedPush,
+	hasOperation bool,
+	operation pushOperation,
+	preparationManager *Manager,
+	outcomes []preflightOutcome,
+) int {
 	succeeded := 0
 	for index, plan := range plans {
 		if plan == nil {
@@ -356,7 +423,6 @@ func PushRemotes(to string, all, force, bestEffort bool) ([]RemotePushOutcome, e
 		outcomes[index].Result = result
 		outcomes[index].Err = commitErr
 		if commitErr != nil {
-			failed = true
 			continue
 		}
 		succeeded++
@@ -365,27 +431,56 @@ func PushRemotes(to string, all, force, bestEffort bool) ([]RemotePushOutcome, e
 				preparationManager.localDir, &operation, plan.manager.remoteID,
 			); err != nil {
 				outcomes[index].Err = err
-				failed = true
 			}
+		}
+	}
+	return succeeded
+}
+
+// finalizePushOutcome converts the internal outcomes into the public
+// RemotePushOutcome slice and decides the overall push verdict: nil when all
+// remotes succeeded (clearing pending state), PartialPushError when some
+// succeeded, or a plain error when nothing did.
+func finalizePushOutcome(
+	outcomes []preflightOutcome,
+	succeeded int,
+	hasOperation bool,
+	preparationManager *Manager,
+	operation pushOperation,
+) ([]RemotePushOutcome, error) {
+	public := publicOutcomes(outcomes)
+	failed := false
+	for _, outcome := range outcomes {
+		if outcome.Err != nil {
+			failed = true
+			break
 		}
 	}
 	if !failed {
 		if err := preparationManager.clearPendingPush(); err != nil {
-			return outcomes, err
+			return public, err
 		}
 		if hasOperation {
 			if err := removePushOperation(preparationManager.localDir, operation); err != nil {
-				return outcomes, err
+				return public, err
 			}
 		}
-		return outcomes, nil
+		return public, nil
 	}
 	if succeeded > 0 {
-		return outcomes, &PartialPushError{
+		return public, &PartialPushError{
 			Message: "one or more cloud remotes failed after another remote succeeded; retry to finish the pending push",
 		}
 	}
-	return outcomes, fmt.Errorf("one or more cloud remotes failed; successful remotes were kept and the push can be retried")
+	return public, fmt.Errorf("one or more cloud remotes failed; successful remotes were kept and the push can be retried")
+}
+
+func publicOutcomes(outcomes []preflightOutcome) []RemotePushOutcome {
+	public := make([]RemotePushOutcome, len(outcomes))
+	for index, outcome := range outcomes {
+		public[index] = RemotePushOutcome{Alias: outcome.Alias, Result: outcome.Result, Err: outcome.Err}
+	}
+	return public
 }
 
 func (m *Manager) Pull(tagValue string, force bool) (PullResult, error) {

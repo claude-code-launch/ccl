@@ -148,6 +148,78 @@ func SetRemoteMirror(alias string, enabled bool) error {
 	return writeJSONAtomic(path, remote, 0o600)
 }
 
+// loginNamedFirstRemote runs the provider's legacy first login when no v2
+// registry exists, migrates the resulting configuration, and renames the
+// default alias to the requested one. failedLogin lets each provider route
+// login failures into its own rememberFailedPairingLogin bookkeeping.
+func loginNamedFirstRemote(
+	normalized, localDir, provider string,
+	legacyLogin func() (LoginResult, error),
+	failedLogin func(err error) (LoginResult, error),
+) (LoginResult, error) {
+	result, loginErr := legacyLogin()
+	if loginErr != nil {
+		return failedLogin(loginErr)
+	}
+	registry, err := loadRegistry(localDir, true)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	defaultAlias, _, resolveErr := resolveRemote(registry, "")
+	if resolveErr != nil {
+		return LoginResult{}, resolveErr
+	}
+	if defaultAlias != normalized {
+		if err := RenameRemote(defaultAlias, normalized); err != nil {
+			return LoginResult{}, err
+		}
+	}
+	result.Alias = normalized
+	result.Provider = provider
+	return result, nil
+}
+
+// loginExistingRemote reuses the already-configured remote under alias. It
+// refuses when the remote belongs to a different provider and refreshes the
+// profile key before reporting the remote as existing.
+func loginExistingRemote(
+	localDir string,
+	registry cloudRegistry,
+	normalized, provider string,
+) (LoginResult, error) {
+	var existing localRemoteConfigV2
+	if err := readJSONFile(remoteConfigPath(localDir, registry.Aliases[normalized]), &existing); err != nil {
+		return LoginResult{}, err
+	}
+	if existing.Provider != provider {
+		return LoginResult{}, fmt.Errorf("cloud remote %q already uses provider %s", normalized, existing.Provider)
+	}
+	manager, err := LoadRemote(normalized)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if err := manager.verifyOrCreateProfileKey(manager.profileID, false); err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{
+		RemoteDir: manager.remoteDisplay(), DeviceID: manager.deviceID,
+		Alias: normalized, Provider: provider,
+		Existing: true, KeyMode: manager.keyMode,
+	}, nil
+}
+
+// verifyActiveProfileBeforeAttach requires the active profile to load before
+// a second remote is attached to it, so a broken profile is surfaced early
+// instead of after the provider's own login flow has already run.
+func verifyActiveProfileBeforeAttach(registry cloudRegistry) error {
+	if registry.PrimaryRemoteID != "" {
+		if _, err := Load(); err != nil {
+			return fmt.Errorf("verify active cloud profile before adding a remote: %w", err)
+		}
+	}
+	return nil
+}
+
 // LoginGoogleDriveNamed connects a Google account under a local alias. The
 // first login reuses the v1 implementation and immediately migrates it to v2;
 // later logins attach an independent OAuth token/cache to the active profile.
@@ -168,63 +240,31 @@ func LoginGoogleDriveNamed(
 	}
 	registry, err := loadRegistry(localDir, true)
 	if errors.Is(err, errRegistryNotConfigured) {
-		result, loginErr := LoginGoogleDrive(ctx, usePassphrase, passphrase, notice)
-		if loginErr != nil {
-			cacheDir, cacheErr := googleCacheDirectory()
-			if cacheErr != nil {
-				return LoginResult{}, loginErr
-			}
-			return LoginResult{}, rememberFailedPairingLogin(
-				normalized, providerGoogleDrive, cacheDir,
-				"Google Drive appDataFolder",
-				filepath.Join(localDir, googleAuthName), loginErr,
-			)
-		}
-		registry, loginErr = loadRegistry(localDir, true)
-		if loginErr != nil {
-			return LoginResult{}, loginErr
-		}
-		defaultAlias, _, resolveErr := resolveRemote(registry, "")
-		if resolveErr != nil {
-			return LoginResult{}, resolveErr
-		}
-		if defaultAlias != normalized {
-			if renameErr := RenameRemote(defaultAlias, normalized); renameErr != nil {
-				return LoginResult{}, renameErr
-			}
-		}
-		result.Alias = normalized
-		result.Provider = providerGoogleDrive
-		return result, nil
+		return loginNamedFirstRemote(normalized, localDir, providerGoogleDrive,
+			func() (LoginResult, error) {
+				return LoginGoogleDrive(ctx, usePassphrase, passphrase, notice)
+			},
+			func(loginErr error) (LoginResult, error) {
+				cacheDir, cacheErr := googleCacheDirectory()
+				if cacheErr != nil {
+					return LoginResult{}, loginErr
+				}
+				return LoginResult{}, rememberFailedPairingLogin(
+					normalized, providerGoogleDrive, cacheDir,
+					"Google Drive appDataFolder",
+					filepath.Join(localDir, googleAuthName), loginErr,
+				)
+			},
+		)
 	}
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if id := registry.Aliases[normalized]; id != "" {
-		var existing localRemoteConfigV2
-		if err := readJSONFile(remoteConfigPath(localDir, id), &existing); err != nil {
-			return LoginResult{}, err
-		}
-		if existing.Provider != providerGoogleDrive {
-			return LoginResult{}, fmt.Errorf("cloud remote %q already uses provider %s", normalized, existing.Provider)
-		}
-		manager, err := LoadRemote(normalized)
-		if err != nil {
-			return LoginResult{}, err
-		}
-		if err := manager.verifyOrCreateProfileKey(manager.profileID, false); err != nil {
-			return LoginResult{}, err
-		}
-		return LoginResult{
-			RemoteDir: manager.remoteDisplay(), DeviceID: manager.deviceID,
-			Alias: normalized, Provider: providerGoogleDrive,
-			Existing: true, KeyMode: manager.keyMode,
-		}, nil
+	if registry.Aliases[normalized] != "" {
+		return loginExistingRemote(localDir, registry, normalized, providerGoogleDrive)
 	}
-	if registry.PrimaryRemoteID != "" {
-		if _, err := Load(); err != nil {
-			return LoginResult{}, fmt.Errorf("verify active cloud profile before adding a remote: %w", err)
-		}
+	if err := verifyActiveProfileBeforeAttach(registry); err != nil {
+		return LoginResult{}, err
 	}
 
 	remoteID, err := randomHexIdentifier(16)
@@ -273,66 +313,32 @@ func LoginICloudNamed(alias string, usePassphrase bool, passphrase string) (Logi
 	}
 	registry, err := loadRegistry(localDir, true)
 	if errors.Is(err, errRegistryNotConfigured) {
-		var result LoginResult
-		if usePassphrase {
-			result, err = LoginICloudWithPassphrase(passphrase)
-		} else {
-			result, err = LoginICloudLocalKey()
-		}
-		if err != nil {
-			remoteDir, remoteErr := defaultICloudDirectory()
-			if remoteErr != nil {
-				return LoginResult{}, err
-			}
-			return LoginResult{}, rememberFailedPairingLogin(
-				normalized, providerICloud, remoteDir, remoteDir, "", err,
-			)
-		}
-		registry, err = loadRegistry(localDir, true)
-		if err != nil {
-			return LoginResult{}, err
-		}
-		defaultAlias, _, resolveErr := resolveRemote(registry, "")
-		if resolveErr != nil {
-			return LoginResult{}, resolveErr
-		}
-		if defaultAlias != normalized {
-			if err := RenameRemote(defaultAlias, normalized); err != nil {
-				return LoginResult{}, err
-			}
-		}
-		result.Alias = normalized
-		result.Provider = providerICloud
-		return result, nil
+		return loginNamedFirstRemote(normalized, localDir, providerICloud,
+			func() (LoginResult, error) {
+				if usePassphrase {
+					return LoginICloudWithPassphrase(passphrase)
+				}
+				return LoginICloudLocalKey()
+			},
+			func(loginErr error) (LoginResult, error) {
+				remoteDir, remoteErr := defaultICloudDirectory()
+				if remoteErr != nil {
+					return LoginResult{}, loginErr
+				}
+				return LoginResult{}, rememberFailedPairingLogin(
+					normalized, providerICloud, remoteDir, remoteDir, "", loginErr,
+				)
+			},
+		)
 	}
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if id := registry.Aliases[normalized]; id != "" {
-		var existing localRemoteConfigV2
-		if err := readJSONFile(remoteConfigPath(localDir, id), &existing); err != nil {
-			return LoginResult{}, err
-		}
-		if existing.Provider != providerICloud {
-			return LoginResult{}, fmt.Errorf("cloud remote %q already uses provider %s", normalized, existing.Provider)
-		}
-		manager, err := LoadRemote(normalized)
-		if err != nil {
-			return LoginResult{}, err
-		}
-		if err := manager.verifyOrCreateProfileKey(manager.profileID, false); err != nil {
-			return LoginResult{}, err
-		}
-		return LoginResult{
-			RemoteDir: manager.remoteDisplay(), DeviceID: manager.deviceID,
-			Alias: normalized, Provider: providerICloud,
-			Existing: true, KeyMode: manager.keyMode,
-		}, nil
+	if registry.Aliases[normalized] != "" {
+		return loginExistingRemote(localDir, registry, normalized, providerICloud)
 	}
-	if registry.PrimaryRemoteID != "" {
-		if _, err := Load(); err != nil {
-			return LoginResult{}, fmt.Errorf("verify active cloud profile before adding a remote: %w", err)
-		}
+	if err := verifyActiveProfileBeforeAttach(registry); err != nil {
+		return LoginResult{}, err
 	}
 	remoteDir, err := defaultICloudDirectory()
 	if err != nil {
@@ -506,37 +512,77 @@ func LogoutRemote(ctx context.Context, alias string, options LogoutOptions) (Log
 		if loadErr != nil {
 			return LogoutResult{}, fmt.Errorf("verify remote before deletion: %w", loadErr)
 		}
-		switch remote.Provider {
-		case providerGoogleDrive:
-			google, loadErr := loadAuthorizedGoogleDriveAt(ctx, remoteAuthPath(localDir, remoteID), resolvedAlias)
-			if loadErr != nil {
-				return LogoutResult{}, loadErr
-			}
-			if err := google.deleteAllApplicationData(ctx); err != nil {
-				return LogoutResult{}, err
-			}
-		case providerICloud:
-			if manager.remoteDir != remote.RemoteDir {
-				return LogoutResult{}, fmt.Errorf("iCloud remote path changed during deletion")
-			}
-			if err := deleteICloudRemoteData(remote.RemoteDir, remote.ProfileID); err != nil {
-				return LogoutResult{}, err
-			}
+		if err := deleteRemoteData(ctx, manager, localDir, remoteID, resolvedAlias, remote); err != nil {
+			return LogoutResult{}, err
 		}
 		result.RemoteDeleted = true
 		result.LocalOnly = false
 	}
 	if options.Revoke && remote.Provider == providerGoogleDrive {
-		if err := revokeGoogleAuthorization(ctx, remoteAuthPath(localDir, remoteID)); err != nil {
-			if !options.ForceLocal {
-				return LogoutResult{}, err
-			}
-		} else {
-			result.TokenRevoked = true
+		revoked, err := revokeRemoteToken(ctx, localDir, remoteID, options.ForceLocal)
+		if err != nil {
+			return LogoutResult{}, err
 		}
+		result.TokenRevoked = revoked
 	}
+	if err := removeRemoteFromRegistry(localDir, registry, remoteID, resolvedAlias, &result); err != nil {
+		return LogoutResult{}, err
+	}
+	if err := removeLocalRemoteDir(localDir, remoteID); err != nil {
+		return LogoutResult{}, err
+	}
+	return result, nil
+}
 
-	delete(registry.Aliases, resolvedAlias)
+// deleteRemoteData removes all cloud-side data for a remote before its local
+// configuration is dropped. The manager is required so the iCloud branch can
+// refuse to proceed when the on-disk remote directory no longer matches the
+// configured path.
+func deleteRemoteData(
+	ctx context.Context,
+	manager *Manager,
+	localDir, remoteID, alias string,
+	remote localRemoteConfigV2,
+) error {
+	switch remote.Provider {
+	case providerGoogleDrive:
+		google, loadErr := loadAuthorizedGoogleDriveAt(ctx, remoteAuthPath(localDir, remoteID), alias)
+		if loadErr != nil {
+			return loadErr
+		}
+		return google.deleteAllApplicationData(ctx)
+	case providerICloud:
+		if manager.remoteDir != remote.RemoteDir {
+			return fmt.Errorf("iCloud remote path changed during deletion")
+		}
+		return deleteICloudRemoteData(remote.RemoteDir, remote.ProfileID)
+	}
+	return nil
+}
+
+// revokeRemoteToken revokes the stored Google OAuth authorization. When
+// forceLocal is set, a revocation failure is tolerated and revoked is false;
+// otherwise the error is returned to the caller.
+func revokeRemoteToken(ctx context.Context, localDir, remoteID string, forceLocal bool) (bool, error) {
+	if err := revokeGoogleAuthorization(ctx, remoteAuthPath(localDir, remoteID)); err != nil {
+		if !forceLocal {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// removeRemoteFromRegistry drops the alias and remote ID from the registry,
+// reassigns the primary remote if needed, and persists the result. The new
+// primary alias (if any) is written back through result.NewPrimary.
+func removeRemoteFromRegistry(
+	localDir string,
+	registry cloudRegistry,
+	remoteID, alias string,
+	result *LogoutResult,
+) error {
+	delete(registry.Aliases, alias)
 	filtered := registry.RemoteOrder[:0]
 	for _, id := range registry.RemoteOrder {
 		if id != remoteID {
@@ -556,18 +602,22 @@ func LogoutRemote(ctx context.Context, alias string, options LogoutOptions) (Log
 			}
 		}
 	}
-	if err := saveRegistry(localDir, registry); err != nil {
-		return LogoutResult{}, err
-	}
+	return saveRegistry(localDir, registry)
+}
+
+// removeLocalRemoteDir deletes the on-disk remote directory after validating
+// that it lives directly under the remotes root with the remote ID as its base
+// name, refusing to touch anything that fails that shape check.
+func removeLocalRemoteDir(localDir, remoteID string) error {
 	localRemoteDir := remoteDirectoryPath(localDir, remoteID)
 	if filepath.Dir(localRemoteDir) != filepath.Join(cloudRoot(localDir), remotesDirName) ||
 		filepath.Base(localRemoteDir) != remoteID {
-		return LogoutResult{}, fmt.Errorf("refuse to remove invalid local remote path")
+		return fmt.Errorf("refuse to remove invalid local remote path")
 	}
 	if err := os.RemoveAll(localRemoteDir); err != nil {
-		return LogoutResult{}, fmt.Errorf("remove local cloud remote: %w", err)
+		return fmt.Errorf("remove local cloud remote: %w", err)
 	}
-	return result, nil
+	return nil
 }
 
 func deleteICloudRemoteData(path, profileID string) error {
