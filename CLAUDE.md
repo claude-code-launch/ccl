@@ -42,7 +42,7 @@ HOME="$CCL_TEST_HOME" /tmp/ccl-verify models --all
 `internal/claude/launcher.go` 是启动边界：
 
 1. 调用 `providersession.Prepare`，必要时发现模型并启动本机 runtime。
-2. 按 provider 槽位和模型目录生成临时 `settings.json`，把 endpoint、鉴权、模型 alias、context/compact 和 Claude Code runtime 环境变量写入其中。
+2. 按 provider 槽位和模型目录生成临时 `settings.json`，把 endpoint、鉴权、模型 alias、context/compact 和 Claude Code runtime 环境变量写入其中；同时固定写入 `outputStyle: "Concise"`（`DefaultOutputStyle`）和 `language`（由 `responseLanguage()` 从 `ccl lang` 映射：zh-CN→中文、zh-TW→繁體中文、其余→English），即每次 ccl 拉起的会话都默认简洁输出并按用户语言回复。
 3. 清理会与 settings 冲突的继承环境变量；对 embedded proxy 强制使用本次会话的 loopback URL/key。
 4. 执行外部 `claude --settings <temp-file> ...`，退出后停止 runtime 并删除临时文件。
 
@@ -94,4 +94,4 @@ Claude Code 始终以 Anthropic Messages 请求进入。`internal/providersessio
 go test ./internal/oauthproxy ./internal/claude ./cmd
 ```
 
-并回归手动验证 `ccl oauth gpt`、`ccl oauth gemini`、`ccl oauth grok`、`ccl oauth copilot`、`ccl oauth qoder`、`ccl oauth kiro`、一个 `openai_responses` API-key provider、一个 `openai(chat)` provider 的 streaming/tool calls，以及一个 `modelsdev` 混合协议 provider 的三种协议分流。
+并回归手动验证 `ccl oauth gpt`、`ccl oauth gemini`、`ccl oauth grok`、`ccl oauth copilot`、`ccl oauth qoder`、`ccl oauth kimi`、`ccl oauth kiro`、`ccl oauth workbuddy`、`ccl oauth commandcode`、一个 `openai_responses` API-key provider、一个 `openai(chat)` provider 的 streaming/tool calls，以及一个 `modelsdev` 混合协议 provider 的三种协议分流。
