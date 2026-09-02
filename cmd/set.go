@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	// 统一使用指定的私有域 v2 包
-	tea "charm.land/bubbletea/v2"
+	tui "github.com/grindlemire/go-tui"
 )
 
 // maxModelListProbeBytes caps how much of a model-list response is buffered while
@@ -124,14 +124,18 @@ func RunProviderSet(args []string) error {
 		defer cleanup()
 		m.configureOAuthRuntime(runtimeProvider.Endpoint, runtimeProvider.APIKey)
 	}
-	program := tea.NewProgram(m)
-	finalModel, err := program.Run()
+	app, err := tui.NewApp(tui.WithRootComponent(m))
 	if err != nil {
 		setDebugf("advanced config panel failed err=%v", err)
 		return fmt.Errorf("failed running advanced config panel: %w", err)
 	}
+	defer app.Close()
+	if err := app.Run(); err != nil {
+		setDebugf("advanced config panel failed err=%v", err)
+		return fmt.Errorf("failed running advanced config panel: %w", err)
+	}
 
-	updatedModel := finalModel.(*AdvancedConfigModel)
+	updatedModel := m
 	// models.dev providers never run the probe (their endpoint/protocol come from
 	// metadata), so the API key the user typed lives only in the text input. Sync
 	// it into the draft before validating/persisting. Harmless for normal

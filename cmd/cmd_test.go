@@ -173,7 +173,7 @@ func TestReviewPageShowsBearerForOpenAIChatDisplayLabel(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "model-a", "model-b")
-	view := m.View().Content
+	view := renderView(t, m)
 
 	if !contains(view, "Auth") {
 		t.Fatalf("expected review page to include Auth row")
@@ -194,7 +194,7 @@ func TestCredentialPageShowsAPIKeyPlaintext(t *testing.T) {
 		APIKey:   "super-secret-api-key-1234567890",
 	}
 	m := NewAdvancedConfigModel(&p)
-	view := m.View().Content
+	view := renderView(t, m)
 
 	for _, want := range []string{"Endpoint URL", "API Key", "Protocol: Anthropic"} {
 		if !contains(view, want) {

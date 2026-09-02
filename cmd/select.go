@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"charm.land/bubbles/v2/textinput"
-	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	tui "github.com/grindlemire/go-tui"
 
 	"github.com/claude-code-launch/ccl/internal/locale"
 )
@@ -15,183 +13,181 @@ import (
 // selection window scrolls. Longer lists show "N more above/below" hints.
 const selectViewHeight = 15
 
-// selectModel is a filterable bubbletea model for selecting from a list of
-// items. The filter input owns the keyboard so typing narrows the list (like the
-// slot picker in the single-page config), ↑↓ move the cursor, and the window
-// scrolls so the selected row stays visible.
-type selectModel struct {
-	title       string
-	items       []string
-	filtered    []string
-	cursor      int
-	windowStart int
-	input       textinput.Model
-	result      string // selected item, empty if cancelled
+// selectComponent is a filterable go-tui component for selecting from a list
+// of items. It owns a simple line editor (typed characters narrow the list,
+// like the slot picker in the single-page config), ↑↓ move the cursor, and
+// the window scrolls so the selected row stays visible.
+type selectComponent struct {
+	title    string
+	items    []string
+	filtered []string
+
+	text   *tui.State[string] // filter text being typed
+	cursor *tui.State[int]    // index into filtered
+	result string             // chosen item, empty if cancelled
+}
+
+func newSelectComponent(title string, items []string) *selectComponent {
+	s := &selectComponent{
+		title:  title,
+		items:  items,
+		text:   tui.NewState(""),
+		cursor: tui.NewState(0),
+	}
+	s.filtered = s.items
+	return s
+}
+
+// applyFilter recomputes the filtered list from the filter text and clamps
+// the cursor to the new list. Filtering always resets the window to the top.
+func (s *selectComponent) applyFilter() {
+	q := strings.ToLower(strings.TrimSpace(s.text.Get()))
+	if q == "" {
+		s.filtered = s.items
+	} else {
+		s.filtered = make([]string, 0, len(s.items))
+		for _, item := range s.items {
+			if strings.Contains(strings.ToLower(item), q) {
+				s.filtered = append(s.filtered, item)
+			}
+		}
+	}
+	s.clampCursor()
+}
+
+func (s *selectComponent) clampCursor() {
+	c := min(max(s.cursor.Get(), 0), max(len(s.filtered)-1, 0))
+	s.cursor.Set(c)
+}
+
+func (s *selectComponent) moveCursor(delta int) {
+	c := max(s.cursor.Get()+delta, 0)
+	c = min(c, max(len(s.filtered)-1, 0))
+	s.cursor.Set(c)
+}
+
+// visibleWindow returns the slice of filtered items shown at once, scrolled
+// so the cursor row stays inside the window.
+func (s *selectComponent) visibleWindow() (start, end int) {
+	cursor := max(s.cursor.Get(), 0)
+	start = max(cursor-selectViewHeight+1, 0)
+	end = min(start+selectViewHeight, len(s.filtered))
+	start = max(end-selectViewHeight, 0)
+	return start, end
+}
+
+func (s *selectComponent) typeRune(ke tui.KeyEvent) {
+	s.text.Set(s.text.Get() + string(ke.Rune))
+	s.applyFilter()
+}
+
+func (s *selectComponent) backspace() {
+	t := s.text.Get()
+	if t == "" {
+		return
+	}
+	s.text.Set(t[:len(t)-1])
+	s.applyFilter()
+}
+
+func (s *selectComponent) KeyMap() tui.KeyMap {
+	return tui.KeyMap{
+		// The filter input owns the keyboard, so single-letter keys (q, k, j)
+		// are filter text rather than navigation. Only ctrl+c and esc abort.
+		tui.OnStop(tui.KeyEscape, func(ke tui.KeyEvent) { ke.App().Stop() }),
+		tui.OnStop(tui.KeyCtrlC, func(ke tui.KeyEvent) { ke.App().Stop() }),
+		tui.OnStop(tui.KeyUp, func(ke tui.KeyEvent) { s.moveCursor(-1) }),
+		tui.OnStop(tui.KeyDown, func(ke tui.KeyEvent) { s.moveCursor(1) }),
+		tui.OnStop(tui.KeyEnter, func(ke tui.KeyEvent) {
+			c := s.cursor.Get()
+			if len(s.filtered) > 0 && c >= 0 && c < len(s.filtered) {
+				s.result = s.filtered[c]
+				ke.App().Stop()
+			}
+		}),
+		tui.OnStop(tui.AnyRune, s.typeRune),
+		tui.OnStop(tui.KeyBackspace, func(ke tui.KeyEvent) { s.backspace() }),
+	}
+}
+
+// Render builds the filter prompt and the visible slice of the filtered list.
+// It is hand-written element-tree construction (no .gsx template) so the CLI
+// stays free of a code-generation build step.
+func (s *selectComponent) Render(app *tui.App) *tui.Element {
+	root := tui.New(
+		tui.WithDirection(tui.Column),
+		tui.WithPadding(1),
+	)
+
+	root.AddChild(tui.New(
+		tui.WithText(s.title),
+		tui.WithTextStyle(tui.NewStyle().Bold()),
+	))
+
+	filterText := s.text.Get()
+	if filterText == "" {
+		filterText = locale.T("输入以过滤...", "type to filter...")
+	}
+	filterRow := tui.New(tui.WithDirection(tui.Row), tui.WithGap(1))
+	filterRow.AddChild(tui.New(
+		tui.WithText(locale.T("🔍 过滤: ", "🔍 Filter: ")),
+		tui.WithTextStyle(tui.NewStyle().Foreground(tui.Cyan)),
+	))
+	filterRow.AddChild(tui.New(tui.WithText(filterText)))
+	root.AddChild(filterRow)
+
+	if len(s.filtered) == 0 {
+		root.AddChild(tui.New(
+			tui.WithText(locale.T("(无匹配)", "(no match)")),
+			tui.WithTextStyle(tui.NewStyle().Dim()),
+		))
+	} else {
+		start, end := s.visibleWindow()
+		if start > 0 {
+			root.AddChild(tui.New(
+				tui.WithText(fmt.Sprintf("   ↑ ... %d more above ...", start)),
+				tui.WithTextStyle(tui.NewStyle().Dim()),
+			))
+		}
+		cursor := s.cursor.Get()
+		for i := start; i < end; i++ {
+			prefix := "  "
+			style := tui.NewStyle()
+			if i == cursor {
+				prefix = "▸ "
+				style = tui.NewStyle().Bold()
+			}
+			row := tui.New(tui.WithDirection(tui.Row))
+			row.AddChild(tui.New(tui.WithText(prefix), tui.WithTextStyle(style)))
+			row.AddChild(tui.New(tui.WithText(s.filtered[i]), tui.WithTextStyle(style)))
+			root.AddChild(row)
+		}
+		if end < len(s.filtered) {
+			root.AddChild(tui.New(
+				tui.WithText(fmt.Sprintf("   ↓ ... %d more below ...", len(s.filtered)-end)),
+				tui.WithTextStyle(tui.NewStyle().Dim()),
+			))
+		}
+	}
+
+	root.AddChild(tui.New(
+		tui.WithText(locale.T("输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel")),
+		tui.WithTextStyle(tui.NewStyle().Dim()),
+	))
+	return root
 }
 
 // runSelect runs a filterable select prompt and returns the chosen item (or ""
 // if aborted).
 func runSelect(title string, items []string) (string, error) {
-	input := textinput.New()
-	input.Prompt = ""
-	input.Placeholder = locale.T("输入以过滤...", "type to filter...")
-	input.SetWidth(40)
-	input.Focus()
-	m := &selectModel{title: title, items: items, filtered: items, input: input}
-	p := tea.NewProgram(m)
-	result, err := p.Run()
+	s := newSelectComponent(title, items)
+	app, err := tui.NewApp(tui.WithRootComponent(s))
 	if err != nil {
 		return "", err
 	}
-	return result.(*selectModel).result, nil
-}
-
-type textPromptModel struct {
-	title  string
-	input  textinput.Model
-	result string
-}
-
-func runTextPrompt(title, placeholder string) (string, error) {
-	input := textinput.New()
-	input.Prompt = ""
-	input.Placeholder = placeholder
-	input.SetWidth(40)
-	input.Focus()
-	m := &textPromptModel{title: title, input: input}
-	p := tea.NewProgram(m)
-	result, err := p.Run()
-	if err != nil {
+	defer app.Close()
+	if err := app.Run(); err != nil {
 		return "", err
 	}
-	return result.(*textPromptModel).result, nil
-}
-
-func (m *textPromptModel) Init() tea.Cmd {
-	return textinput.Blink
-}
-
-func (m *textPromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "ctrl+c", "esc":
-			return m, tea.Quit
-		case "enter":
-			value := strings.TrimSpace(m.input.Value())
-			if value != "" {
-				m.result = value
-				return m, tea.Quit
-			}
-		}
-	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	return m, cmd
-}
-
-func (m *textPromptModel) View() tea.View {
-	body := titleStyle.Render(m.title) + "\n\n"
-	body += selectedStyle.Render("> ") + m.input.View()
-	body += "\n\n" + grayText.Render(locale.T("输入名称 · enter 确认 · esc 取消", "enter a name · enter confirm · esc cancel"))
-	return tea.NewView(lipgloss.NewStyle().Padding(1, 2).Render(body))
-}
-
-func (m *selectModel) Init() tea.Cmd {
-	return textinput.Blink
-}
-
-// updateFilter recomputes the filtered list from the filter input and clamps the
-// cursor/window to the new list. Filtering always resets the window to the top.
-func (m *selectModel) updateFilter() {
-	q := strings.ToLower(strings.TrimSpace(m.input.Value()))
-	if q == "" {
-		m.filtered = m.items
-	} else {
-		m.filtered = make([]string, 0, len(m.items))
-		for _, item := range m.items {
-			if strings.Contains(strings.ToLower(item), q) {
-				m.filtered = append(m.filtered, item)
-			}
-		}
-	}
-	if m.cursor >= len(m.filtered) {
-		m.cursor = len(m.filtered) - 1
-	}
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
-	m.windowStart = 0
-}
-
-func (m *selectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
-		switch msg.String() {
-		// The filter input owns the keyboard, so single-letter keys (q, k, j) are
-		// filter text rather than navigation. Only ctrl+c and esc abort.
-		case "ctrl+c", "esc":
-			return m, tea.Quit
-		case "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-			if m.cursor < m.windowStart {
-				m.windowStart = m.cursor
-			}
-			return m, nil
-		case "down":
-			if m.cursor < len(m.filtered)-1 {
-				m.cursor++
-			}
-			if m.cursor >= m.windowStart+selectViewHeight {
-				m.windowStart = m.cursor - selectViewHeight + 1
-			}
-			return m, nil
-		case "enter":
-			if len(m.filtered) > 0 && m.cursor >= 0 && m.cursor < len(m.filtered) {
-				m.result = m.filtered[m.cursor]
-				return m, tea.Quit
-			}
-			return m, nil
-		}
-	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	m.updateFilter()
-	return m, cmd
-}
-
-func (m *selectModel) View() tea.View {
-	var buf strings.Builder
-	buf.WriteString(titleStyle.Render(m.title) + "\n\n")
-	buf.WriteString(filterStyle.Render(locale.T("🔍 过滤: ", "🔍 Filter: ")) + m.input.View() + "\n\n")
-
-	if len(m.filtered) == 0 {
-		buf.WriteString(grayText.Render(locale.T("(无匹配)", "(no match)")) + "\n")
-	} else {
-		start := m.windowStart
-		end := start + selectViewHeight
-		if end > len(m.filtered) {
-			end = len(m.filtered)
-		}
-		if start > 0 {
-			buf.WriteString(grayText.Render(fmt.Sprintf("   ↑ ... %d more above ...", start)) + "\n")
-		}
-		for i := start; i < end; i++ {
-			prefix := "  "
-			line := m.filtered[i]
-			if i == m.cursor {
-				prefix = "▸ "
-				line = selectedStyle.Render(line)
-			}
-			buf.WriteString(prefix + line + "\n")
-		}
-		if end < len(m.filtered) {
-			buf.WriteString(grayText.Render(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filtered)-end)) + "\n")
-		}
-	}
-
-	buf.WriteString("\n" + grayText.Render(locale.T("输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel")))
-	return tea.NewView(lipgloss.NewStyle().Padding(1, 2).Render(buf.String()))
+	return s.result, nil
 }

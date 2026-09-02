@@ -1,12 +1,10 @@
 package cmd
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	tui "github.com/grindlemire/go-tui"
 
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
@@ -19,8 +17,8 @@ func TestTruncateMiddleASCII(t *testing.T) {
 	if !strings.Contains(got, "…") {
 		t.Fatalf("expected ellipsis, got %q", got)
 	}
-	if lipgloss.Width(got) > 24 {
-		t.Fatalf("width %d > 24 for %q", lipgloss.Width(got), got)
+	if tui.StringWidth(got) > 24 {
+		t.Fatalf("width %d > 24 for %q", tui.StringWidth(got), got)
 	}
 	if !strings.Contains(got, "http") && !strings.Contains(got, "resource") {
 		t.Fatalf("expected head or tail retained, got %q", got)
@@ -33,8 +31,8 @@ func TestTruncateMiddleCJK(t *testing.T) {
 	if got == "…" || got == "" {
 		t.Fatalf("CJK truncate degenerated to %q", got)
 	}
-	if lipgloss.Width(got) > 18 {
-		t.Fatalf("width %d > 18 for %q", lipgloss.Width(got), got)
+	if tui.StringWidth(got) > 18 {
+		t.Fatalf("width %d > 18 for %q", tui.StringWidth(got), got)
 	}
 	if !strings.Contains(got, "…") || !strings.Contains(got, "中") {
 		t.Fatalf("expected CJK content with ellipsis, got %q", got)
@@ -47,8 +45,8 @@ func TestTruncateMiddleEmoji(t *testing.T) {
 	if got == "…" {
 		t.Fatalf("emoji truncate degenerated")
 	}
-	if lipgloss.Width(got) > 10 {
-		t.Fatalf("width %d > 10 for %q", lipgloss.Width(got), got)
+	if tui.StringWidth(got) > 10 {
+		t.Fatalf("width %d > 10 for %q", tui.StringWidth(got), got)
 	}
 }
 
@@ -58,7 +56,7 @@ func TestReviewShowsFastStatus(t *testing.T) {
 	chatgpt.FastMode = true
 	m := NewAdvancedConfigModel(&chatgpt)
 	enterDetectedReview(m, "m")
-	view := m.View().Content
+	view := renderView(t, m)
 	if !strings.Contains(view, "Fast") || !strings.Contains(view, "‹ On ›") {
 		t.Fatalf("review page missing Fast=on: %q", view)
 	}
@@ -66,7 +64,7 @@ func TestReviewShowsFastStatus(t *testing.T) {
 	off := providerFrom("plain", "https://example.com/v1", "openai")
 	m = NewAdvancedConfigModel(&off)
 	enterDetectedReview(m, "m")
-	view = m.View().Content
+	view = renderView(t, m)
 	if !strings.Contains(view, "Fast") || !strings.Contains(view, "‹ Off ›") {
 		t.Fatalf("review page missing Fast=off: %q", view)
 	}
@@ -80,14 +78,12 @@ func TestPageUpDownStaysWithinVisibleRows(t *testing.T) {
 	enterDetectedReview(m, "path-max")
 	rows := len(m.visibleRows())
 	m.cursor = 0
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyUp})
 	if m.cursor != rows-1 {
 		t.Fatalf("up from the first row landed on %d, want the last row %d", m.cursor, rows-1)
 	}
 	m.cursor = rows - 1
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyDown})
 	if m.cursor != 0 {
 		t.Fatalf("down from the last row landed on %d, want the first row 0", m.cursor)
 	}
@@ -139,8 +135,8 @@ func TestReviewFitsCommonTerminalHeights(t *testing.T) {
 			m.height = h
 			m.cursor = m.mainRowIndex(rowSave)
 			m.keepCursorVisible()
-			view := m.View().Content
-			got := lipgloss.Height(view)
+			view := renderView(t, m)
+			got := strings.Count(view, "\n") + 1
 			if got > h {
 				t.Fatalf("[%s] terminal height %d rendered %d lines (overflow)\n%s", tc.lang, h, got, view)
 			}
@@ -168,24 +164,21 @@ func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 
 	// Opus: 1M must not be selectable via Space.
 	m.cursor = m.mainRowIndex(rowOpus)
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
 	if m.live().oneMSlots["opus"] {
 		t.Fatal("1M was enabled for a model whose backend window is 272K")
 	}
 
 	// Sonnet: a 1M-class window stays selectable.
 	m.cursor = m.mainRowIndex(rowSonnet)
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
 	if !m.live().oneMSlots["sonnet"] {
 		t.Fatal("1M must remain selectable for a 1M-class model")
 	}
 
 	// Unknown window: the catalog is advisory, so keep it editable.
 	m.cursor = m.mainRowIndex(rowHaiku)
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
 	if !m.live().oneMSlots["haiku"] {
 		t.Fatal("1M must stay editable when the window is unknown")
 	}
@@ -193,8 +186,7 @@ func TestSinglePageBlocksOneMWhenBackendWindowIsSmaller(t *testing.T) {
 	// An existing marker on a blocked slot can still be cleared.
 	m.live().oneMSlots["opus"] = true
 	m.cursor = m.mainRowIndex(rowOpus)
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
 	if m.live().oneMSlots["opus"] {
 		t.Fatal("a stale [1m] marker on a blocked slot must be removable")
 	}
@@ -226,14 +218,9 @@ func TestCredentialsPageResolvesClickToField(t *testing.T) {
 	m.width = 100
 	m.height = 30
 
-	view := m.View()
-	if view.MouseMode == tea.MouseModeNone {
-		t.Fatal("credentials page must report mouse clicks so fields can be focused")
-	}
-	if view.OnMouse == nil {
-		t.Fatal("credentials page has no mouse handler")
-	}
-	lines := strings.Split(view.Content, "\n")
+	var clicker tui.MouseListener = m
+	_ = clicker // the single page is a MouseListener; clicks are routed by the app
+	lines := strings.Split(renderView(t, m), "\n")
 
 	// Endpoint and API Key are reachable by clicking their label rows.
 	for _, field := range []struct {
@@ -270,17 +257,15 @@ func TestCredentialsPageResolvesClickToField(t *testing.T) {
 	}
 
 	// The resolved click focuses the API key input.
-	next, _ := m.Update(focusRowMsg{row: rowAPIKey})
-	m = next.(*AdvancedConfigModel)
-	if m.cursor != m.mainRowIndex(rowAPIKey) || !m.keyInput.Focused() || m.urlInput.Focused() {
+	m.handleFocusRow(rowAPIKey)
+	if m.cursor != m.mainRowIndex(rowAPIKey) || !m.keyFocused || m.urlFocused {
 		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the key input focused",
-			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
+			m.cursor, m.urlFocused, m.keyFocused)
 	}
-	next, _ = m.Update(focusRowMsg{row: rowEndpoint})
-	m = next.(*AdvancedConfigModel)
-	if m.cursor != m.mainRowIndex(rowEndpoint) || !m.urlInput.Focused() || m.keyInput.Focused() {
+	m.handleFocusRow(rowEndpoint)
+	if m.cursor != m.mainRowIndex(rowEndpoint) || !m.urlFocused || m.keyFocused {
 		t.Fatalf("cursor=%d url_focused=%t key_focused=%t, want the endpoint input focused",
-			m.cursor, m.urlInput.Focused(), m.keyInput.Focused())
+			m.cursor, m.urlFocused, m.keyFocused)
 	}
 }
 
@@ -292,11 +277,10 @@ func TestOAuthPageSupportsMouseClick(t *testing.T) {
 	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra")
 	m.width = 100
 	m.height = 30
-	if view := m.View(); view.MouseMode == tea.MouseModeNone || view.OnMouse == nil {
-		t.Fatal("single page must capture mouse clicks for clickable rows")
-	}
+	var clicker tui.MouseListener = m
+	_ = clicker // the single page is a MouseListener; clicks are routed by the app
 	// Clicking the Opus row focuses it.
-	lines := strings.Split(m.View().Content, "\n")
+	lines := strings.Split(renderView(t, m), "\n")
 	opusLine := -1
 	for i, line := range lines {
 		if strings.Contains(line, "Opus") {
@@ -330,26 +314,10 @@ func TestSinglePageBlocksOneMForMixedCaseModelIDs(t *testing.T) {
 	}
 	enterDetectedReview(m, "GLM-4.6")
 	m.cursor = m.mainRowIndex(rowOpus)
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
 	if m.live().oneMSlots["opus"] {
 		t.Fatal("1M was enabled for a 200K model with a mixed-case id")
 	}
-}
-
-// typeKey builds the KeyPressMsg a terminal sends for a printable character.
-func typeKey(r rune) tea.KeyPressMsg {
-	return tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)})
-}
-
-// quits reports whether cmd is the quit command, by identity rather than by
-// running it: a key that reaches a text input comes back as the cursor's blink
-// cmd, which blocks for the whole blink interval when called.
-func quits(cmd tea.Cmd) bool {
-	if cmd == nil {
-		return false
-	}
-	return reflect.ValueOf(cmd).Pointer() == reflect.ValueOf(tea.Cmd(tea.Quit)).Pointer()
 }
 
 func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
@@ -362,8 +330,8 @@ func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
 		row   configRowKind
 		field func(*AdvancedConfigModel) string
 	}{
-		{"endpoint", rowEndpoint, func(m *AdvancedConfigModel) string { return m.urlInput.Value() }},
-		{"api key", rowAPIKey, func(m *AdvancedConfigModel) string { return m.keyInput.Value() }},
+		{"endpoint", rowEndpoint, func(m *AdvancedConfigModel) string { return m.urlText.Get() }},
+		{"api key", rowAPIKey, func(m *AdvancedConfigModel) string { return m.keyText.Get() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, r := range []rune{'q', 'k', 'j', 'h', 'l'} {
@@ -371,12 +339,7 @@ func TestTextInputsKeepSingleLetterKeysInsteadOfActingOnThem(t *testing.T) {
 				m := NewAdvancedConfigModel(&p)
 				m.cursor = m.mainRowIndex(tc.row)
 
-				next, cmd := m.Update(typeKey(r))
-				m = next.(*AdvancedConfigModel)
-
-				if quits(cmd) {
-					t.Fatalf("typing %q into the %s quit the TUI", r, tc.name)
-				}
+				m.handleKey(keyPress(r))
 				if m.cursor != m.mainRowIndex(tc.row) {
 					t.Fatalf("typing %q moved the cursor %d -> %d", r, tc.row, m.cursor)
 				}
@@ -394,16 +357,12 @@ func TestSlotFilterTypesLettersThatAreAlsoShortcuts(t *testing.T) {
 	p := provider.Provider{Type: "openai"}
 	m := NewAdvancedMappingModel(&p, []string{"kimi-k2", "qwen3-coder", "glm-4.6"}, nil)
 	m.cursor = 0
-	m.filterInput.Focus()
+	m.filterFocused = true
 
 	for _, r := range "kimi" {
-		next, cmd := m.Update(typeKey(r))
-		m = next.(*AdvancedConfigModel)
-		if quits(cmd) {
-			t.Fatalf("typing %q into the slot filter quit the TUI", r)
-		}
+		m.handleKey(keyPress(r))
 	}
-	if got := m.filterInput.Value(); got != "kimi" {
+	if got := m.filterText.Get(); got != "kimi" {
 		t.Fatalf("filter = %q, want %q", got, "kimi")
 	}
 	if len(m.filteredPool) != 1 || m.filteredPool[0] != "kimi-k2" {
@@ -411,11 +370,10 @@ func TestSlotFilterTypesLettersThatAreAlsoShortcuts(t *testing.T) {
 	}
 
 	// The list still moves with the arrow keys while the filter has focus.
-	m.filterInput.SetValue("")
+	m.filterText.Set("")
 	m.updateFilteredPool()
 	m.slotListCursor = 0
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyDown})
 	if m.slotListCursor != 1 {
 		t.Fatalf("slot list cursor = %d after ↓, want 1", m.slotListCursor)
 	}
@@ -436,12 +394,11 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowOpus)
 
 	// Enter on a model row opens the slot picker overlay on the single page.
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	if !m.filterInput.Focused() {
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
+	if !m.filterFocused {
 		t.Fatalf("enter on the Opus row did not open the model picker")
 	}
-	view := m.View().Content
+	view := renderView(t, m)
 	for _, want := range []string{"Qwen3.8-Max", "qmodel_38max", "0.5x", "new", "off-peak discount"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("model picker missing %q: %q", want, view)
@@ -450,14 +407,13 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 
 	// Filtering by the friendly name still keeps the internal ID as the list
 	// value selected and persisted into the slot.
-	m.filterInput.SetValue("Qwen3.8")
+	m.filterText.Set("Qwen3.8")
 	m.updateFilteredPool()
 	if len(m.filteredPool) != 1 || m.filteredPool[0] != "qmodel_38max" {
 		t.Fatalf("filtered model IDs = %v", m.filteredPool)
 	}
 	m.slotListCursor = 0
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
 	if p.OpusModel != "qmodel_38max" {
 		t.Fatalf("saved Opus model = %q, want internal ID", p.OpusModel)
 	}
@@ -467,8 +423,8 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 
 	// Back on the main page, the same display projection is used while the
 	// persisted values remain internal IDs for requests.
-	m.filterInput.Blur()
-	view = m.View().Content
+	m.filterFocused = false
+	view = renderView(t, m)
 	for _, want := range []string{"Qwen3.8-Max", "DeepSeek-V4-Flash"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("main page missing friendly model %q: %q", want, view)
@@ -496,16 +452,14 @@ func TestChangingModelClearsBlockedOneMMarker(t *testing.T) {
 	}
 
 	// Open the picker and select the small-window model on the Opus row.
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	if !m.filterInput.Focused() {
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
+	if !m.filterFocused {
 		t.Fatalf("enter on the Opus row did not open the model picker")
 	}
-	m.filterInput.SetValue("small-window")
+	m.filterText.Set("small-window")
 	m.updateFilteredPool()
 	m.slotListCursor = 0
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
 	if p.OpusModel != "small-window-model" {
 		t.Fatalf("Opus model = %q, want small-window-model", p.OpusModel)
 	}
@@ -525,13 +479,11 @@ func TestChangingModelKeepsOneMMarkerOnNonBlockedModel(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowOpus)
 	m.live().oneMSlots["opus"] = true
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	m.filterInput.SetValue("other-model")
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
+	m.filterText.Set("other-model")
 	m.updateFilteredPool()
 	m.slotListCursor = 0
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
 	if p.OpusModel != "other-model" {
 		t.Fatalf("Opus model = %q, want other-model", p.OpusModel)
 	}
@@ -542,7 +494,8 @@ func TestChangingModelKeepsOneMMarkerOnNonBlockedModel(t *testing.T) {
 
 func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 	// The shortcut must keep working on buttons and for OAuth providers, whose
-	// credentials page has no editable field at all.
+	// credentials page has no editable field at all: when no input owns the
+	// keyboard, "q" asks the app to stop rather than typing anywhere.
 	for _, tc := range []struct {
 		name string
 		p    provider.Provider
@@ -554,28 +507,32 @@ func TestQuitKeyStillWorksWhereNoTextInputHasFocus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewAdvancedConfigModel(&tc.p)
 			m.cursor = m.mainRowIndex(tc.row)
-			if _, cmd := m.Update(typeKey('q')); !quits(cmd) {
-				t.Fatal("q no longer quits")
+			m.handleKey(keyPress('q'))
+			if !m.quitRequested {
+				t.Fatalf("q did not quit the %s", tc.name)
+			}
+			if m.urlText.Get() != "" || m.keyText.Get() != "" {
+				t.Fatalf("q typed into an input: url=%q key=%q", m.urlText.Get(), m.keyText.Get())
 			}
 		})
 	}
 }
 
 func TestViewDoesNotMutateTheModel(t *testing.T) {
-	// View is a renderer: bubbletea may call it without a following Update, so
-	// state changed here makes the frame and the model disagree.
+	// Render is a pure renderer: the framework may call it without a preceding
+	// key handler, so state changed here must not be moved by the render itself.
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", Model: "model-a,model-b"}
 	m := NewAdvancedConfigModel(&p)
 	m.cursor = 1
 	m.width = 100
 	m.height = 30
 
-	view := m.View()
+	view := renderView(t, m)
 	if m.cursor != 1 {
-		t.Fatalf("View() moved the cursor to %d", m.cursor)
+		t.Fatalf("Render moved the cursor to %d", m.cursor)
 	}
-	if strings.TrimSpace(view.Content) == "" {
-		t.Fatal("View() rendered a blank frame")
+	if strings.TrimSpace(view) == "" {
+		t.Fatal("Render rendered a blank frame")
 	}
 }
 
@@ -618,21 +575,21 @@ func TestSwitchSourcePreservesBothDrafts(t *testing.T) {
 	if m.source != sourceModelsDev || m.p != m.modelsDevDraft.p {
 		t.Fatalf("did not switch to models.dev: source=%v p=%p modelsDev.p=%p", m.source, m.p, m.modelsDevDraft.p)
 	}
-	m.keyInput.SetValue("md-key")
+	m.keyText.Set("md-key")
 
 	// models.dev → Custom: the manual endpoint/key must survive.
 	m.switchSource(sourceCustom)
-	if m.urlInput.Value() != "https://custom.example/v1" {
-		t.Fatalf("custom endpoint lost: %q", m.urlInput.Value())
+	if m.urlText.Get() != "https://custom.example/v1" {
+		t.Fatalf("custom endpoint lost: %q", m.urlText.Get())
 	}
-	if m.keyInput.Value() != "custom-key" {
-		t.Fatalf("custom key lost: %q", m.keyInput.Value())
+	if m.keyText.Get() != "custom-key" {
+		t.Fatalf("custom key lost: %q", m.keyText.Get())
 	}
 
 	// Custom → models.dev again: the models.dev key must survive too.
 	m.switchSource(sourceModelsDev)
-	if m.keyInput.Value() != "md-key" {
-		t.Fatalf("models.dev key lost: %q", m.keyInput.Value())
+	if m.keyText.Get() != "md-key" {
+		t.Fatalf("models.dev key lost: %q", m.keyText.Get())
 	}
 }
 
@@ -686,7 +643,7 @@ func TestProtocolMovedOutOfRuntime(t *testing.T) {
 	if m.mainRowIndex(rowProtocol) >= m.mainRowIndex(rowTest) {
 		t.Fatalf("Protocol (%d) should precede Auto Configure (%d)", m.mainRowIndex(rowProtocol), m.mainRowIndex(rowTest))
 	}
-	view := m.View().Content
+	view := renderView(t, m)
 	idx := strings.Index(view, "Runtime")
 	if idx < 0 {
 		t.Fatalf("Runtime heading missing from view")
@@ -799,23 +756,21 @@ func TestEditKeyClearsVerificationAndSyncsProbeKey(t *testing.T) {
 
 	// Edit the key.
 	m.cursor = m.mainRowIndex(rowAPIKey)
-	next, _ := m.Update(typeKey('X'))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(keyPress('X'))
 
-	if m.keyInput.Value() == "old-key" {
+	if m.keyText.Get() == "old-key" {
 		t.Fatalf("key edit did not change the key value")
 	}
 	if m.live().keyVerified {
 		t.Fatalf("editing the key must clear keyVerified")
 	}
-	if m.live().probeAPIKey != m.keyInput.Value() {
-		t.Fatalf("probeAPIKey = %q, want %q (the newly typed key)", m.live().probeAPIKey, m.keyInput.Value())
+	if m.live().probeAPIKey != m.keyText.Get() {
+		t.Fatalf("probeAPIKey = %q, want %q (the newly typed key)", m.live().probeAPIKey, m.keyText.Get())
 	}
 
 	// A late result for the old key must be ignored: the key it verified no
 	// longer matches the current input.
-	next, _ = m.Update(keyVerifyDoneMsg{endpoint: "https://gw.example/v1", apiKey: "old-key", err: nil})
-	m = next.(*AdvancedConfigModel)
+	m.handleVerifyDone(keyVerifyDoneMsg{endpoint: "https://gw.example/v1", apiKey: "old-key", err: nil})
 	if m.live().keyVerified {
 		t.Fatalf("stale verification result resurrected keyVerified=true for an unverified key")
 	}

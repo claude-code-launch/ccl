@@ -11,7 +11,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 
-	tea "charm.land/bubbletea/v2"
+	tui "github.com/grindlemire/go-tui"
 )
 
 var mapCmd = newMapCommand("map [provider-name]")
@@ -266,13 +266,16 @@ func runMapTUI(args []string) error {
 
 	// Launch TUI at page 1
 	m := NewAdvancedMappingModel(&p, modelPool, metadata)
-	program := tea.NewProgram(m)
-	finalModel, err := program.Run()
+	app, err := tui.NewApp(tui.WithRootComponent(m))
 	if err != nil {
 		return fmt.Errorf("failed running mapping panel: %w", err)
 	}
+	defer app.Close()
+	if err := app.Run(); err != nil {
+		return fmt.Errorf("failed running mapping panel: %w", err)
+	}
 
-	updatedModel := finalModel.(*AdvancedConfigModel)
+	updatedModel := m
 	p = *updatedModel.p
 
 	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)

@@ -644,12 +644,10 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	m.configureOAuthRuntime(runtimeProvider.Endpoint, runtimeProvider.APIKey)
 	m.live().detecting = true
-	msg, ok := modelFetchCmd(runtimeProvider.Endpoint, runtimeProvider.APIKey)().(modelFetchDoneMsg)
-	if !ok {
-		t.Fatal("modelFetchCmd() returned an unexpected message type")
-	}
-	next, _ := m.Update(msg)
-	m = next.(*AdvancedConfigModel)
+	done := make(chan modelFetchDoneMsg, 1)
+	fetchModelsAsync(done, runtimeProvider.Endpoint, runtimeProvider.APIKey)
+	msg := <-done
+	m.handleFetchDone(msg)
 
 	if m.live().detectionError != nil || !m.live().autoConfigured || !m.live().modelPoolFromDiscovery || p.Model == "" {
 		t.Fatalf("OAuth set discovery failed: auto=%t detected=%t models=%q err=%v", m.live().autoConfigured, m.live().modelPoolFromDiscovery, p.Model, m.live().detectionError)

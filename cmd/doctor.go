@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"bytes"
-
-	"charm.land/lipgloss/v2"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -56,14 +54,31 @@ when the Claude session ends (default ~/.ccl/logs/ccl-debug-claude_<id>.log).
 	}
 }
 
+// ANSI 24-bit color helpers. doctor prints plain terminal output (no TUI), so
+// it escapes directly instead of pulling in a styling library.
+func ansiFg(r, g, b uint8) string {
+	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+}
+
+const ansiReset = "\x1b[0m"
+const (
+	ansiAccent    = "\x1b[38;2;101;183;255m" // #65B7FF
+	ansiSecondary = "\x1b[38;2;183;156;255m" // #B79CFF
+	ansiData      = "\x1b[38;2;65;215;200m"  // #41D7C8
+	ansiWarn      = "\x1b[38;2;240;184;77m"  // #F0B84D
+	ansiError     = "\x1b[38;2;255;138;128m" // #FF8A80
+	ansiBold      = "\x1b[1m"
+	ansiDim       = "\x1b[2m"
+)
+
 func doctorHeader(title string) {
-	fmt.Println(titleStyle.Foreground(colorAccent).Render(title))
-	fmt.Println(grayText.Render(strings.Repeat("─", 44)))
+	fmt.Println(ansiBold + ansiAccent + title + ansiReset)
+	fmt.Println(ansiDim + strings.Repeat("─", 44) + ansiReset)
 }
 
 func doctorSection(title string) {
 	fmt.Println()
-	fmt.Println(titleStyle.Foreground(colorSecondary).Render("▸ " + title))
+	fmt.Println(ansiBold + ansiSecondary + "▸ " + title + ansiReset)
 }
 
 func doctorKV(label, value string) {
@@ -72,32 +87,29 @@ func doctorKV(label, value string) {
 		label = "-"
 	}
 	fmt.Printf("  %s %s\n",
-		grayText.Render(fmt.Sprintf("%-18s", label)),
-		cyanText.Render(value),
+		ansiDim+fmt.Sprintf("%-18s", label)+ansiReset,
+		ansiData+value+ansiReset,
 	)
 }
 
 func doctorOK(msg string) {
-	fmt.Printf("  %s %s\n", availableStyle.Render("✓"), msg)
+	fmt.Printf("  %s %s\n", ansiData+ansiBold+"✓"+ansiReset, msg)
 }
 
 func doctorWarn(msg string) {
-	fmt.Printf("  %s %s\n",
-		lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("!"),
-		msg,
-	)
+	fmt.Printf("  %s %s\n", ansiWarn+ansiBold+"!"+ansiReset, msg)
 }
 
 func doctorErr(msg string) {
-	fmt.Printf("  %s %s\n", unavailableStyle.Render("✗"), msg)
+	fmt.Printf("  %s %s\n", ansiError+"✗"+ansiReset, msg)
 }
 
 func doctorInfo(msg string) {
-	fmt.Printf("  %s %s\n", grayText.Render("•"), msg)
+	fmt.Printf("  %s %s\n", ansiDim+"•"+ansiReset, msg)
 }
 
 func doctorHint(msg string) {
-	fmt.Println(grayText.Render("  ↳ " + msg))
+	fmt.Println(ansiDim + "  ↳ " + msg + ansiReset)
 }
 
 func runDoctor(ctx context.Context) error {
@@ -926,7 +938,7 @@ func inspectDoctorOAuthCredential(p provider.Provider) doctorOAuthSnapshot {
 }
 
 func printDoctorAuthMetadataCounts(counts authMetadataCounts) {
-	fmt.Println(grayText.Render("  Metadata markers (persisted in credential JSON)"))
+	fmt.Println(ansiDim + "  Metadata markers (persisted in credential JSON)" + ansiReset)
 	doctorKV("unavailable", fmt.Sprintf("%d", counts.Unavailable))
 	doctorKV("status", fmt.Sprintf("%d", counts.Status))
 	doctorKV("status_message", fmt.Sprintf("%d", counts.StatusMessage))
@@ -1173,7 +1185,7 @@ func printProviderModelMappings(p provider.Provider, modelNames map[string]strin
 		{"Subagent", subagentMappingDisplayWithNames(p, modelNames)},
 	}
 
-	fmt.Println(grayText.Render("  Slot mappings"))
+	fmt.Println(ansiDim + "  Slot mappings" + ansiReset)
 	for _, mapping := range mappings {
 		model := mapping.model
 		if model == "" {

@@ -10,8 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	tui "github.com/grindlemire/go-tui"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
@@ -239,7 +238,7 @@ func TestApplyModelDetectionResultNormalizesAnthropicEndpoint(t *testing.T) {
 	p := provider.Provider{Endpoint: "https://token.sensenova.cn/v1"}
 	m := NewAdvancedConfigModel(&p)
 
-	_ = m.applyModelDetectionResult("anthropic", "sensenova-u1-fast", anthropicAuthBearer, "", nil)
+	m.applyModelDetectionResult("anthropic", "sensenova-u1-fast", anthropicAuthBearer, "", nil)
 
 	if p.Endpoint != "https://token.sensenova.cn" {
 		t.Fatalf("expected endpoint without /v1, got %q", p.Endpoint)
@@ -262,7 +261,7 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 	m := NewAdvancedConfigModel(&p)
 	m.configureOAuthRuntime("http://127.0.0.1:54321/v1", "ccl-session-secret")
 
-	view := m.View().Content
+	view := renderView(t, m)
 	for _, want := range []string{"Provider Configuration", "oauth/gpt", "Ready (this session only)"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("OAuth credential page should contain %q, got %q", want, view)
@@ -274,20 +273,18 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 		}
 	}
 
-	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	if !m.live().detecting || cmd == nil {
-		t.Fatalf("OAuth model discovery did not start: detecting=%t cmd=%v", m.live().detecting, cmd)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
+	if !m.live().detecting {
+		t.Fatalf("OAuth model discovery did not start: detecting=%t", m.live().detecting)
 	}
 
-	next, _ = m.Update(modelFetchDoneMsg{
+	m.handleFetchDone(modelFetchDoneMsg{
 		endpoint:            "http://127.0.0.1:54321/v1",
 		apiKey:              "ccl-session-secret",
 		detectedType:        "openai",
 		detectedEndpoint:    "http://127.0.0.1:54321/v1",
 		discoveredModelsRaw: "gpt-5.6-sol,gpt-5.6-codex",
 	})
-	m = next.(*AdvancedConfigModel)
 	if m.live().detectionError != nil {
 		t.Fatalf("OAuth discovery result was not accepted: %v", m.live().detectionError)
 	}
@@ -331,16 +328,13 @@ func TestApplyModelDetectionResultFailsWhenDetectionFailsWithoutExistingType(t *
 	}
 	m := NewAdvancedConfigModel(&p)
 
-	cmd := m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
+	m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
 
 	if m.live().detectionError == nil {
 		t.Fatalf("expected detection error to be set")
 	}
 	if p.Type != "" {
 		t.Fatalf("expected provider type to remain empty, got %q", p.Type)
-	}
-	if cmd != nil {
-		t.Fatalf("expected detection failure to stay on page instead of quitting")
 	}
 	if m.cursor != m.mainRowIndex(rowTest) {
 		t.Fatalf("expected detection failure to select Auto Configure, got cursor=%d", m.cursor)
@@ -357,7 +351,7 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 	}
 	m := NewAdvancedConfigModel(&p)
 
-	cmd := m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
+	m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
 
 	if m.live().detectionError == nil {
 		t.Fatalf("expected detection error instead of falling back to existing local models")
@@ -368,15 +362,12 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 	if len(m.live().modelPool) != 0 {
 		t.Fatalf("expected model pool not to use existing local models, got %v", m.live().modelPool)
 	}
-	if cmd != nil {
-		t.Fatalf("expected detection failure to stay on page instead of quitting")
-	}
 	if m.cursor != m.mainRowIndex(rowTest) {
 		t.Fatalf("expected detection failure to select Auto Configure, got cursor=%d", m.cursor)
 	}
-	view := m.View()
-	if !strings.Contains(view.Content, "models failed") {
-		t.Fatalf("expected detection error to be visible in view, got %q", view.Content)
+	view := renderView(t, m)
+	if !strings.Contains(view, "models failed") {
+		t.Fatalf("expected detection error to be visible in view, got %q", view)
 	}
 }
 
@@ -406,14 +397,14 @@ func TestConnectionEditRevertClearsDirty(t *testing.T) {
 	}
 
 	// Edit the endpoint → dirty, save blocked.
-	m.urlInput.SetValue("https://api.example.com/v1/changed")
+	m.urlText.Set("https://api.example.com/v1/changed")
 	m.refreshConnectionDirty()
 	if !m.live().connectionDirty || m.canSave() {
 		t.Fatalf("edited endpoint should be dirty and un-saveable: dirty=%t canSave=%t", m.live().connectionDirty, m.canSave())
 	}
 
 	// Revert → dirty clears, save allowed again.
-	m.urlInput.SetValue("https://api.example.com/v1")
+	m.urlText.Set("https://api.example.com/v1")
 	m.refreshConnectionDirty()
 	if m.live().connectionDirty {
 		t.Fatalf("reverted endpoint should not be dirty")
@@ -437,7 +428,7 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 	enterDetectedReview(m, "model-opus", "model-sonnet", "model-haiku")
 	m.live().oneMSlots["sonnet"] = true
 
-	view := m.View().Content
+	view := renderView(t, m)
 	// The [1M] badge next to the slot is the whole story now: sizing is per slot
 	// and there is no session-wide compact value to review.
 	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "[1M]"} {
@@ -451,6 +442,10 @@ func TestReviewPageShowsModelMapping(t *testing.T) {
 }
 
 func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
+	original := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(original) })
+	locale.SetLanguage("en")
+
 	p := provider.Provider{
 		OpusModel:     "gpt-5.6-sol",
 		SonnetModel:   "gpt-5.6-terra",
@@ -461,7 +456,7 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 	m.live().oneMSlots["opus"], m.live().oneMSlots["sonnet"] = true, true
 	m.live().oneMSlots["haiku"], m.live().oneMSlots["custom"] = true, true
-	view := m.View().Content
+	view := renderView(t, m)
 	// Only Default and Balanced exist, so old/custom presets are absent.
 	for _, removed := range []string{"300K", "Switch-safe", "Maximum", "Custom (preserve)"} {
 		if strings.Contains(view, removed) {
@@ -487,7 +482,7 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	oauth.OAuthProvider = "gpt"
 	mo := NewAdvancedConfigModel(&oauth)
 	enterDetectedReview(mo, "gpt-5.6-sol")
-	if view := mo.View().Content; !strings.Contains(view, "Default  200K / 1M & 80%") {
+	if view := renderView(t, mo); !strings.Contains(view, "Default  200K / 1M & 80%") {
 		t.Fatalf("expected Default context choice for OAuth, got %q", view)
 	}
 }
@@ -515,8 +510,7 @@ func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 		{compactPresetDefault, "Default  200K / 1M & 80%"},
 	}
 	for _, want := range forward {
-		next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
-		m = next.(*AdvancedConfigModel)
+		m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
 		if m.live().compactPreset != want.preset || m.compactSummary() != want.label {
 			t.Fatalf("right cycle = preset %v summary %q, want %v %q", m.live().compactPreset, m.compactSummary(), want.preset, want.label)
 		}
@@ -527,8 +521,7 @@ func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 
 	// Left cycles in the reverse order: Default → 800K → 500K → Default.
 	for _, want := range []compactPreset{compactPresetBalanced800K, compactPresetBalanced500K, compactPresetDefault} {
-		next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
-		m = next.(*AdvancedConfigModel)
+		m.handleKey(tui.KeyEvent{Key: tui.KeyLeft})
 		if m.live().compactPreset != want {
 			t.Fatalf("left cycle = %v, want %v", m.live().compactPreset, want)
 		}
@@ -537,7 +530,7 @@ func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 		}
 	}
 
-	view := m.View().Content
+	view := renderView(t, m)
 	for _, expected := range []string{"Context & Compact", "Default"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("single page view missing %q: %s", expected, view)
@@ -557,14 +550,12 @@ func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
 	m := NewAdvancedMappingModel(&p, []string{"main-model", "cheap-subagent-model"}, nil)
 	m.cursor = m.mainRowIndex(rowSubagent)
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	if !m.filterInput.Focused() || m.activeSlot != 4 {
-		t.Fatalf("subagent picker was not opened: focused=%t activeSlot=%d", m.filterInput.Focused(), m.activeSlot)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
+	if !m.filterFocused || m.activeSlot != 4 {
+		t.Fatalf("subagent picker was not opened: focused=%t activeSlot=%d", m.filterFocused, m.activeSlot)
 	}
 	m.slotListCursor = 2 // clear/unset is index 0
-	next, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
 
 	if p.SubagentModel != "cheap-subagent-model" {
 		t.Fatalf("subagent mapping = %q", p.SubagentModel)
@@ -575,6 +566,10 @@ func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
 }
 
 func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
+	original := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(original) })
+	locale.SetLanguage("en")
+
 	p := provider.Provider{
 		Type:          "openai_responses",
 		Endpoint:      "https://example.test/v1",
@@ -584,7 +579,7 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	enterDetectedReview(m, "subagent-model")
 	m.cursor = m.mainRowIndex(rowSubagent)
 
-	view := m.View().Content
+	view := renderView(t, m)
 	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "(auto: subagent-model)") {
 		t.Fatalf("single page does not show Subagent: %q", view)
 	}
@@ -593,8 +588,7 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	}
 	// Space on the Subagent row toggles the per-slot 1M marker and materializes the
 	// runtime subagent default.
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
 	if !m.live().oneMSlots["subagent"] {
 		t.Fatal("Subagent 1M option was not enabled")
 	}
@@ -623,7 +617,7 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol")
 
-	view := m.View().Content
+	view := renderView(t, m)
 	for _, expected := range []string{
 		"Runtime",
 		"Subagent", "gpt-5.6-sol",
@@ -639,6 +633,10 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 }
 
 func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
+	original := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(original) })
+	locale.SetLanguage("en")
+
 	p := provider.Provider{
 		Type:          "openai_responses",
 		Endpoint:      "https://example.test/v1",
@@ -655,8 +653,8 @@ func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowSave)
 	m.keepCursorVisible()
 
-	view := m.View().Content
-	if height := lipgloss.Height(view); height > m.height {
+	view := renderView(t, m)
+	if height := strings.Count(view, "\n") + 1; height > m.height {
 		t.Fatalf("review height = %d, terminal height = %d\n%s", height, m.height, view)
 	}
 	if !strings.Contains(view, "Save & Activate") {
@@ -669,7 +667,7 @@ func TestAutoReviewPageOmitsRuntimeDefaults(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol")
 
-	view := m.View().Content
+	view := renderView(t, m)
 	// Runtime editors are always available on the single page.
 	if !strings.Contains(view, "Runtime") || !strings.Contains(view, "Tools") {
 		t.Fatalf("review should show runtime editors, got %q", view)
@@ -682,12 +680,11 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 	enterDetectedReview(m, "gpt-test")
 	m.cursor = m.mainRowIndex(rowProtocol)
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
 	if p.Type != "openai_responses" {
 		t.Fatalf("protocol toggle stored %q, want openai_responses", p.Type)
 	}
-	view := m.View().Content
+	view := renderView(t, m)
 	for _, want := range []string{"‹ Responses ›", "Tools"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("Responses review should contain %q, got %q", want, view)
@@ -707,7 +704,7 @@ func TestOpenAIReviewStaysOnSinglePage(t *testing.T) {
 	if m.cursor != m.mainRowIndex(rowOpus) {
 		t.Fatalf("cursor=%d, want rowOpus %d", m.cursor, m.mainRowIndex(rowOpus))
 	}
-	view := m.View().Content
+	view := renderView(t, m)
 	if !strings.Contains(view, "Protocol") {
 		t.Fatalf("single page missing editable Protocol row: %q", view)
 	}
@@ -726,8 +723,7 @@ func TestAdvancedConfigOnlyConfirmsSaveFromReviewAction(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Rune: 'c', Mod: tui.ModCtrl})
 	if m.saveConfirmed {
 		t.Fatal("Ctrl+C must not confirm or save a complete provider")
 	}
@@ -735,10 +731,9 @@ func TestAdvancedConfigOnlyConfirmsSaveFromReviewAction(t *testing.T) {
 	m = NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-test")
 	m.cursor = m.mainRowIndex(rowSave)
-	next, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
-	m = next.(*AdvancedConfigModel)
-	if !m.saveConfirmed || cmd == nil {
-		t.Fatalf("review save action did not confirm save: confirmed=%t cmd=%v", m.saveConfirmed, cmd)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
+	if !m.saveConfirmed || !m.quitRequested {
+		t.Fatalf("review save action did not confirm save: confirmed=%t quit=%t", m.saveConfirmed, m.quitRequested)
 	}
 }
 
@@ -765,11 +760,10 @@ func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
 	m.modelTesting = true
 	m.modelTestID = 42
 
-	next, _ := m.Update(modelAvailabilityDoneMsg{statuses: map[string]modelAvailability{
+	m.handleAvailabilityDone(modelAvailabilityDoneMsg{statuses: map[string]modelAvailability{
 		"model-unavailable": modelAvailabilityUnavailable,
 		"model-available":   modelAvailabilityAvailable,
 	}, testID: m.modelTestID})
-	m = next.(*AdvancedConfigModel)
 	if m.modelTesting {
 		t.Fatal("expected availability test to finish")
 	}
@@ -781,9 +775,9 @@ func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
 	}
 
 	m.activeSlot = 0
-	m.filterInput.Focus()
+	m.filterFocused = true
 	m.updateFilteredPool()
-	view := m.View().Content
+	view := renderView(t, m)
 	if !strings.Contains(view, "✓ available") || !strings.Contains(view, "✗ unavailable") {
 		t.Fatalf("expected availability labels in picker, got %q", view)
 	}
@@ -816,19 +810,17 @@ func TestSlotModelAvailabilityTestCanBeCanceled(t *testing.T) {
 	m.modelTestID = 7
 	m.modelTestCancel = func() {}
 
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyEscape})
 	if m.modelTesting || !m.modelTestCanceled {
 		t.Fatalf("expected canceled test state, testing=%t canceled=%t", m.modelTesting, m.modelTestCanceled)
 	}
 
-	next, _ = m.Update(modelAvailabilityDoneMsg{
+	m.handleAvailabilityDone(modelAvailabilityDoneMsg{
 		testID: m.modelTestID,
 		statuses: map[string]modelAvailability{
 			"model-a": modelAvailabilityAvailable,
 		},
 	})
-	m = next.(*AdvancedConfigModel)
 	if len(m.modelAvailability) != 0 {
 		t.Fatalf("expected canceled test result to be ignored, got %v", m.modelAvailability)
 	}
@@ -856,10 +848,8 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 	defer server.Close()
 
 	models := []string{"gpt-expensive-a", "gpt-expensive-b", lowCostProbeModel}
-	cmd := modelAvailabilityTestCmd(
-		context.Background(),
-		42,
-		models,
+	done := make(chan modelAvailabilityDoneMsg, 1)
+	testModelsAsync(done, context.Background(), 42, models,
 		server.URL+"/v1",
 		"test-key",
 		"openai_responses",
@@ -867,7 +857,7 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 		nil,
 		lowCostProbeModel,
 	)
-	msg := cmd().(modelAvailabilityDoneMsg)
+	msg := <-done
 	if requestCount.Load() != 1 {
 		t.Fatalf("OAuth availability request count = %d, want 1", requestCount.Load())
 	}
@@ -887,7 +877,7 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 	if got := m.availabilitySmokeTestModel(); got != lowCostProbeModel {
 		t.Fatalf("OAuth smoke model = %q, want %q", got, lowCostProbeModel)
 	}
-	if view := m.View().Content; !strings.Contains(view, "Model Mapping") {
+	if view := renderView(t, m); !strings.Contains(view, "Model Mapping") {
 		t.Fatalf("OAuth single page missing Model Mapping: %q", view)
 	}
 }
@@ -895,16 +885,16 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 func TestAdvancedConfigViewAdaptsToWindowSize(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
-	next, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 48})
-	m = next.(*AdvancedConfigModel)
+	m.width, m.height = 140, 48
+	m.updateInputWidths()
 
 	if got, want := m.panelWidth(), preferredPanelWidth; got != want {
 		t.Fatalf("panel width = %d, want %d", got, want)
 	}
-	if got, want := m.urlInput.Width(), preferredPanelWidth-8; got != want {
+	if got, want := m.urlInputWidth, preferredPanelWidth-8; got != want {
 		t.Fatalf("URL input width = %d, want %d", got, want)
 	}
-	if got := m.View().Content; !strings.Contains(got, "Change the TUI display language") {
+	if got := renderView(t, m); !strings.Contains(got, "Change the TUI display language") {
 		t.Fatalf("expected footer in resized view, got %q", got)
 	}
 }
@@ -923,7 +913,7 @@ func TestApplyModelDetectionResultUsesDiscoveredModelsOnly(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 
-	_ = m.applyModelDetectionResult("openai", "new-a,new-b", "", "", nil)
+	m.applyModelDetectionResult("openai", "new-a,new-b", "", "", nil)
 
 	if m.live().detectionError != nil {
 		t.Fatalf("unexpected detection error: %v", m.live().detectionError)
@@ -1048,7 +1038,7 @@ func TestApplyModelDetectionResultDoesNotInferProtocolFromPath(t *testing.T) {
 	p := provider.Provider{Endpoint: "https://example.test/codex", APIKey: "test-key"}
 	m := NewAdvancedConfigModel(&p)
 
-	_ = m.applyModelDetectionResult("openai", "gpt-5.4-mini", "", p.Endpoint, nil)
+	m.applyModelDetectionResult("openai", "gpt-5.4-mini", "", p.Endpoint, nil)
 
 	if p.Type != "openai" {
 		t.Fatalf("detected protocol = %q, want openai", p.Type)
@@ -1069,7 +1059,7 @@ func TestCustomProtocolCyclesChatResponsesAndAnthropic(t *testing.T) {
 	m.live().detectedInputEndpoint = p.Endpoint
 	m.cursor = m.mainRowIndex(rowProtocol)
 
-	if view := m.View().Content; !strings.Contains(view, "‹ Chat ›") {
+	if view := renderView(t, m); !strings.Contains(view, "‹ Chat ›") {
 		t.Fatalf("custom protocol row does not show Chat: %q", view)
 	}
 
@@ -1083,19 +1073,17 @@ func TestCustomProtocolCyclesChatResponsesAndAnthropic(t *testing.T) {
 		{wantType: "openai", wantLabel: "Chat", wantEndpoint: "https://example.test/v1"},
 	}
 	for _, want := range steps {
-		next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
-		m = next.(*AdvancedConfigModel)
+		m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
 		if p.Type != want.wantType || p.Endpoint != want.wantEndpoint {
 			t.Fatalf("protocol cycle = type %q endpoint %q, want %q %q", p.Type, p.Endpoint, want.wantType, want.wantEndpoint)
 		}
-		if view := m.View().Content; !strings.Contains(view, "‹ "+want.wantLabel+" ›") {
+		if view := renderView(t, m); !strings.Contains(view, "‹ "+want.wantLabel+" ›") {
 			t.Fatalf("custom protocol row does not show %s: %q", want.wantLabel, view)
 		}
 	}
 
 	// Reverse cycling from Chat reaches Anthropic directly.
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyLeft})
 	if p.Type != "anthropic" || p.Endpoint != "https://example.test" {
 		t.Fatalf("reverse protocol cycle = type %q endpoint %q", p.Type, p.Endpoint)
 	}
@@ -1713,15 +1701,14 @@ func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowTools)
 
 	// Cycle tool concurrency away from Default.
-	next, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight}))
-	m = next.(*AdvancedConfigModel)
+	m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
 	if got := m.reviewToolsValue(); got != "1" {
 		t.Fatalf("tool concurrency after right = %q, want 1", got)
 	}
 	if m.p.Env == nil || m.p.Env[claude.ToolUseConcurrencyEnv] != "1" {
 		t.Fatalf("provider env tool concurrency = %v, want 1", m.p.Env)
 	}
-	view := m.View().Content
+	view := renderView(t, m)
 	if !strings.Contains(view, "‹ ") || !strings.Contains(view, " ›") {
 		t.Fatalf("expected editable ‹ › markers, got %q", view)
 	}

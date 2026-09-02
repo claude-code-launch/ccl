@@ -9,13 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/textinput"
-	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
-	"charm.land/lipgloss/v2/compat"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/x/ansi"
+	tui "github.com/grindlemire/go-tui"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
@@ -24,39 +19,60 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
+// The single dark-terminal palette carried over from the previous adaptive
+// (light/dark) color set. go-tui has no background detection, so the dark
+// variants — the ones this panel was designed around — are the single source.
 var (
-	// Each semantic color has a high-contrast light and dark terminal variant.
-	colorBorder    = compat.AdaptiveColor{Light: lipgloss.Color("#8A93A0"), Dark: lipgloss.Color("#687386")}
-	colorAccent    = compat.AdaptiveColor{Light: lipgloss.Color("#0B72E7"), Dark: lipgloss.Color("#65B7FF")}
-	colorSecondary = compat.AdaptiveColor{Light: lipgloss.Color("#6E4BB6"), Dark: lipgloss.Color("#B79CFF")}
-	colorData      = compat.AdaptiveColor{Light: lipgloss.Color("#007C7C"), Dark: lipgloss.Color("#41D7C8")}
-	colorWarning   = compat.AdaptiveColor{Light: lipgloss.Color("#9A6700"), Dark: lipgloss.Color("#F0B84D")}
-	colorError     = compat.AdaptiveColor{Light: lipgloss.Color("#B42318"), Dark: lipgloss.Color("#FF8A80")}
+	colorBorder    = tui.RGBColor(0x68, 0x73, 0x86)
+	colorAccent    = tui.RGBColor(0x65, 0xB7, 0xFF)
+	colorSecondary = tui.RGBColor(0xB7, 0x9C, 0xFF)
+	colorData      = tui.RGBColor(0x41, 0xD7, 0xC8)
+	colorWarning   = tui.RGBColor(0xF0, 0xB8, 0x4D)
+	colorError     = tui.RGBColor(0xFF, 0x8A, 0x80)
 
-	windowStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorBorder).
-			Padding(1, 2).
-			Width(70)
-
-	titleStyle       = lipgloss.NewStyle().Bold(true)
-	badgeStyle       = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).MarginLeft(1)
-	protoBadgeStyle  = lipgloss.NewStyle().Foreground(colorSecondary).MarginLeft(1)
-	cyanText         = lipgloss.NewStyle().Foreground(colorData)
-	purpleText       = lipgloss.NewStyle().Foreground(colorSecondary)
-	grayText         = lipgloss.NewStyle().Faint(true)
-	errorBoxStyle    = lipgloss.NewStyle().Foreground(colorError).Border(lipgloss.NormalBorder()).BorderForeground(colorError).Padding(0, 1).Width(62)
-	dividerStyle     = lipgloss.NewStyle().Faint(true)
-	selectedStyle    = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	filterStyle      = lipgloss.NewStyle().Foreground(colorAccent)
-	availableStyle   = lipgloss.NewStyle().Foreground(colorData).Bold(true)
-	unavailableStyle = lipgloss.NewStyle().Foreground(colorError)
-	// Buttons always carry a background so they read as selectable even when the
-	// cursor is elsewhere. The unselected state is a dimmer version of the
-	// selected accent so focus is obvious at a glance.
-	buttonStyle       = lipgloss.NewStyle().Foreground(compat.AdaptiveColor{Light: lipgloss.Color("#6B7A93"), Dark: lipgloss.Color("#9AA7BE")}).Background(compat.AdaptiveColor{Light: lipgloss.Color("#C8D2E4"), Dark: lipgloss.Color("#2E3A50")}).Padding(0, 1)
-	buttonActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(colorAccent).Bold(true).Padding(0, 1)
+	// The unselected button is a dimmer version of the selected accent so
+	// focus is obvious at a glance. Both carry a background so they read as
+	// selectable even when the cursor is elsewhere.
+	buttonFg     = tui.RGBColor(0x9A, 0xA7, 0xBE)
+	buttonBg     = tui.RGBColor(0x2E, 0x3A, 0x50)
+	buttonActive = tui.RGBColor(0x00, 0x00, 0x00) // unused placeholder kept for symmetry
 )
+
+// Text styles used across the panel. A tui.Style is a value; the styled form of
+// a string is a tui.TextSpan produced by span().
+var (
+	stTitle        = tui.NewStyle().Bold()
+	stBadge        = tui.NewStyle().Foreground(colorAccent).Bold()
+	stProtoBadge   = tui.NewStyle().Foreground(colorSecondary)
+	stCyan         = tui.NewStyle().Foreground(colorData)
+	stPurple       = tui.NewStyle().Foreground(colorSecondary)
+	stGray         = tui.NewStyle().Dim()
+	stDivider      = tui.NewStyle().Dim()
+	stSelected     = tui.NewStyle().Foreground(colorAccent).Bold()
+	stFilter       = tui.NewStyle().Foreground(colorAccent)
+	stAvailable    = tui.NewStyle().Foreground(colorData).Bold()
+	stUnavailable  = tui.NewStyle().Foreground(colorError)
+	stOneM         = tui.NewStyle().Foreground(colorWarning).Bold()
+	stButton       = tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
+	stButtonActive = tui.NewStyle().Foreground(tui.White).Background(colorAccent).Bold()
+	stBright       = tui.NewStyle().Foreground(tui.RGBColor(0xFF, 0xFF, 0xFF))
+)
+
+// span wraps text with a style for tui.WithRichText rows.
+func span(text string, st tui.Style) tui.TextSpan {
+	return tui.TextSpan{Text: text, Style: st}
+}
+
+// line builds one no-wrap row element from styled spans. Rows never wrap so
+// the line number of every label stays stable for the mouse hit test.
+func line(spans ...tui.TextSpan) *tui.Element {
+	return tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Row), tui.WithWrap(false), tui.WithRichText(spans...))
+}
+
+// plainLine is line() for unstyled text.
+func plainLine(text string) *tui.Element {
+	return line(span(text, tui.NewStyle()))
+}
 
 const (
 	filterViewHeight      = 15 // max visible items in filter list
@@ -204,7 +220,7 @@ type AdvancedConfigModel struct {
 	height int
 	// scrollOffset is the number of rendered lines scrolled off the top of the
 	// single page when the content exceeds the terminal height. The cursor row is
-	// kept visible: scrolling happens in Update, never in View (which is pure).
+	// kept visible: scrolling happens in the key handlers, never in Render.
 	scrollOffset int
 	// keyCopied / urlCopied show a brief "copied" hint after the value is copied.
 	keyCopied bool
@@ -213,14 +229,29 @@ type AdvancedConfigModel struct {
 	// the second click within the window copies instead of focusing.
 	lastCopyClickAt  time.Time
 	lastCopyClickRow configRowKind
+	// lastKeyCopyAt / lastUrlCopyAt timestamp the copy so the shared 2s timer
+	// watcher (handleFetchTick) can clear the hint.
+	lastKeyCopyAt time.Time
+	lastUrlCopyAt time.Time
 
-	// Connection widgets (shared; switchSource refreshes their value).
-	urlInput textinput.Model
-	keyInput textarea.Model
+	// The four text inputs (endpoint, API key, slot filter, models.dev filter)
+	// are hand-rolled line editors: each owns a State[string] plus a focused
+	// flag. The API key editor is multi-line (Enter inserts a newline).
+	urlText    *tui.State[string]
+	keyText    *tui.State[string]
+	urlFocused bool
+	keyFocused bool
+
+	// Input box widths, derived from panelWidth in updateInputWidths (and
+	// only used by Render; the hand-rolled editors carry no width of their own).
+	urlInputWidth    int
+	keyInputWidth    int
+	filterInputWidth int
 
 	// Model mapping
 	activeSlot        int
-	filterInput       textinput.Model
+	filterText        *tui.State[string]
+	filterFocused     bool
 	filteredPool      []string
 	slotListCursor    int
 	filterWindowStart int // first visible index in filter list
@@ -234,9 +265,9 @@ type AdvancedConfigModel struct {
 	// models.dev picker overlay, opened from the Connection section. It lets the
 	// user pick a models.dev provider instead of typing an endpoint URL.
 	modelsDevPicker   bool
-	modelsDevInput    textinput.Model
-	modelsDevItems    []modelsdev.Provider
+	modelsDevText     *tui.State[string]
 	modelsDevFiltered []modelsdev.Provider
+	modelsDevItems    []modelsdev.Provider
 	modelsDevCursor   int
 	modelsDevWindow   int
 	modelsDevLoading  bool
@@ -245,6 +276,17 @@ type AdvancedConfigModel struct {
 	// Save state
 	IsActiveChosen bool
 	saveConfirmed  bool
+	// quitRequested records that a key/click asked the session to end (app.Stop
+	// when wired to a live app). Tests assert on it without an App.
+	quitRequested bool
+
+	// app is bound by the framework before the first render (AppBinder). The
+	// async channels below deliver their results onto the main loop through it.
+	app        *tui.App
+	fetchDone  chan modelFetchDoneMsg
+	verifyDone chan keyVerifyDoneMsg
+	mdDone     chan modelsDevFetchDoneMsg
+	availDone  chan modelAvailabilityDoneMsg
 }
 
 type modelFetchTickMsg struct{}
@@ -298,16 +340,17 @@ type keyVerifyDoneMsg struct {
 // verify a models.dev API key.
 const keyVerifyTimeout = 10 * time.Second
 
-// keyVerifyCmd sends one minimal, authenticated inference request for the given
-// model and protocol, and reports only whether the key was accepted at the auth
-// layer. Unlike modelFetchCmd it never mutates provider config — the
-// metadata-derived Type, endpoint, and per-model protocol table are left
-// untouched; only the key's validity (keyVerified) is recorded.
-func keyVerifyCmd(endpoint, apiKey, model, proto string) tea.Cmd {
-	return func() tea.Msg {
+// keyVerifyAsync sends one minimal, authenticated inference request for the
+// given model and protocol, and reports only whether the key was accepted at
+// the auth layer. Unlike fetchModelsAsync it never mutates provider config —
+// the metadata-derived Type, endpoint, and per-model protocol table are left
+// untouched; only the key's validity (keyVerified) is recorded. The result is
+// delivered on the verify channel consumed by Watchers().
+func keyVerifyAsync(done chan<- keyVerifyDoneMsg, endpoint, apiKey, model, proto string) {
+	go func() {
 		err := verifyProviderAPIKey(context.Background(), model, endpoint, apiKey, proto, keyVerifyTimeout)
-		return keyVerifyDoneMsg{endpoint: endpoint, apiKey: apiKey, err: err}
-	}
+		done <- keyVerifyDoneMsg{endpoint: endpoint, apiKey: apiKey, err: err}
+	}()
 }
 
 // verifyProviderAPIKey sends a minimal authenticated inference request for one
@@ -370,12 +413,121 @@ type modelsDevFetchDoneMsg struct {
 	err       error
 }
 
-// modelsDevFetchCmd fetches the models.dev catalog off the UI thread.
-func modelsDevFetchCmd() tea.Cmd {
-	return func() tea.Msg {
+// fetchModelsDevAsync fetches the models.dev catalog off the UI thread and
+// delivers the result on the models.dev channel.
+func fetchModelsDevAsync(done chan<- modelsDevFetchDoneMsg) {
+	go func() {
 		providers, err := modelsDevProviders(context.Background())
-		return modelsDevFetchDoneMsg{providers: providers, err: err}
-	}
+		done <- modelsDevFetchDoneMsg{providers: providers, err: err}
+	}()
+}
+
+// fetchModelsAsync runs protocol detection + model fetching off the UI thread
+// and delivers the result on the fetch channel.
+func fetchModelsAsync(done chan<- modelFetchDoneMsg, endpoint, apiKey string) {
+	go func() {
+		setDebugf("modelFetch start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
+		result := detectProtocolAndModelsDetailed(endpoint, apiKey)
+		setDebugf(
+			"modelFetch done endpoint=%q detected_endpoint=%q protocol=%q anthropic_auth=%q model_count=%d err=%v",
+			endpoint,
+			result.baseURL,
+			result.protocol,
+			result.anthropicAuth,
+			countCSV(result.models),
+			result.err,
+		)
+		// Best-effort: pull context_window metadata for OpenAI-family catalogs.
+		// Failures are ignored — IDs still come from detection.
+		windows := map[string]int{}
+		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) && !provider.IsCommandCodeType(result.protocol) {
+			// Subscription runtimes only expose windows through the Codex catalog,
+			// which AdvertisedContextWindows tries before the plain OpenAI list.
+			advertised, source := claude.AdvertisedContextWindows(result.baseURL, apiKey)
+			for id, window := range advertised {
+				windows[id] = window
+			}
+			setDebugf("modelFetch context windows catalog=%q count=%d", source, len(windows))
+		}
+		done <- modelFetchDoneMsg{
+			endpoint:            endpoint,
+			apiKey:              apiKey,
+			detectedType:        result.protocol,
+			detectedEndpoint:    result.baseURL,
+			anthropicAuth:       result.anthropicAuth,
+			discoveredModelsRaw: result.models,
+			contextWindows:      windows,
+			modelInfos:          result.modelInfos,
+			err:                 result.err,
+		}
+	}()
+}
+
+// testModelsAsync probes every model in the pool concurrently and delivers the
+// statuses on the availability channel. 8 workers, not 50: a concurrent burst
+// against one gateway trips per-key rate limits and marks healthy models
+// unavailable.
+func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, smokeTestModel string) {
+	models = append([]string(nil), models...)
+	go func() {
+		statuses := make(map[string]modelAvailability, len(models))
+		if len(models) == 0 {
+			done <- modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
+			return
+		}
+		if smokeTestModel != "" {
+			status := modelAvailabilityUnavailable
+			if testSingleModelWithProtocolsContext(ctx, smokeTestModel, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
+				status = modelAvailabilityAvailable
+			}
+			if ctx.Err() == nil {
+				for _, model := range models {
+					statuses[model] = status
+				}
+			}
+			done <- modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
+			return
+		}
+
+		jobs := make(chan string, len(models))
+		for _, model := range models {
+			jobs <- model
+		}
+		close(jobs)
+
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		workers := min(slotTestConcurrency, len(models))
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case model, ok := <-jobs:
+						if !ok {
+							return
+						}
+						status := modelAvailabilityUnavailable
+						if testSingleModelWithProtocolsContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
+							status = modelAvailabilityAvailable
+						}
+						if ctx.Err() != nil {
+							return
+						}
+						mu.Lock()
+						statuses[model] = status
+						mu.Unlock()
+					}
+				}
+			}()
+		}
+
+		wg.Wait()
+		done <- modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
+	}()
 }
 
 // live returns the connection draft for the currently active source. Every
@@ -732,8 +884,8 @@ func (m *AdvancedConfigModel) connectionMatchesDetected() bool {
 		baselineEndpoint = strings.TrimSpace(m.p.Endpoint)
 		baselineKey = m.p.APIKey
 	}
-	return strings.TrimSpace(m.urlInput.Value()) == strings.TrimSpace(baselineEndpoint) &&
-		m.keyInput.Value() == baselineKey
+	return strings.TrimSpace(m.urlText.Get()) == strings.TrimSpace(baselineEndpoint) &&
+		m.keyText.Get() == baselineKey
 }
 
 // syncConnectionInputs copies the current Endpoint/API Key inputs into the
@@ -745,8 +897,8 @@ func (m *AdvancedConfigModel) syncConnectionInputs() {
 	if m.usesOAuth() {
 		return
 	}
-	m.p.Endpoint = strings.TrimSpace(m.urlInput.Value())
-	m.p.APIKey = m.keyInput.Value()
+	m.p.Endpoint = strings.TrimSpace(m.urlText.Get())
+	m.p.APIKey = m.keyText.Get()
 }
 
 // connectionUnchanged reports whether the endpoint/api-key inputs still match
@@ -755,51 +907,14 @@ func (m *AdvancedConfigModel) connectionUnchanged() bool {
 	if m.p == nil {
 		return false
 	}
-	endpointMatch := strings.TrimSpace(m.urlInput.Value()) == strings.TrimSpace(m.p.Endpoint)
-	keyMatch := m.keyInput.Value() == m.p.APIKey
+	endpointMatch := strings.TrimSpace(m.urlText.Get()) == strings.TrimSpace(m.p.Endpoint)
+	keyMatch := m.keyText.Get() == m.p.APIKey
 	return endpointMatch && keyMatch
 }
 
 func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
-	ui := textinput.New()
-	ui.Prompt = ""
-	ui.Placeholder = "https://api.openai.com/v1"
-	ui.SetWidth(credentialInputWidth)
-	ui.SetValue(p.Endpoint)
-
-	// The API key is a multi-line plaintext textarea (no password masking): the
-	// user may paste or type a multi-line credential and see it as-is. Endpoint
-	// stays a single-line textinput below.
-	ki := textarea.New()
-	ki.Prompt = ""
-	ki.Placeholder = "sk-..."
-	ki.ShowLineNumbers = false
-	ki.SetWidth(credentialInputWidth)
-	ki.SetHeight(2)
-	ki.SetValue(p.APIKey)
-	// Match the Endpoint textinput's look: unfocused text is grey, focused text
-	// is bright, and the cursor is a solid reverse-video block like the
-	// textinput's. The textarea's default paints the active line black, which
-	// reads as the whole row selected; drop that background so only the cursor
-	// highlights.
-	taStyles := ki.Styles()
-	taStyles.Focused.CursorLine = lipgloss.NewStyle()
-	taStyles.Blurred.CursorLine = lipgloss.NewStyle()
-	taStyles.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("255")) // bright white when editing
-	taStyles.Blurred.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // grey when idle
-	taStyles.Cursor.Shape = tea.CursorBlock
-	ki.SetStyles(taStyles)
-
-	fi := textinput.New()
-	fi.Placeholder = ""
-
-	mdInput := textinput.New()
-	mdInput.Prompt = ""
-	mdInput.Placeholder = locale.T("输入提供商名过滤...", "type to filter providers...")
-	mdInput.SetWidth(credentialInputWidth)
-
 	// An existing models.dev provider must open on the models.dev source, not
-	// Custom: treating it as Custom would let Init's auto-probe overwrite Type
+	// Custom: treating it as Custom would let the auto-probe overwrite Type
 	// ("modelsdev") with a single detected protocol and drop the per-model
 	// routing table. When models.dev, the Custom draft starts empty (same name)
 	// so the user can still switch to a clean Custom form.
@@ -844,12 +959,16 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		modelsDevDraft:    modelsDevDraft,
 		p:                 active.p,
 		cursor:            0,
-		urlInput:          ui,
-		keyInput:          ki,
-		filterInput:       fi,
-		modelsDevInput:    mdInput,
+		urlText:           tui.NewState(p.Endpoint),
+		keyText:           tui.NewState(p.APIKey),
+		filterText:        tui.NewState(""),
+		modelsDevText:     tui.NewState(""),
 		IsActiveChosen:    true,
 		modelAvailability: make(map[string]modelAvailability),
+		fetchDone:         make(chan modelFetchDoneMsg, 8),
+		verifyDone:        make(chan keyVerifyDoneMsg, 8),
+		mdDone:            make(chan modelsDevFetchDoneMsg, 2),
+		availDone:         make(chan modelAvailabilityDoneMsg, 2),
 	}
 
 	cleanAndPopulate := func(modelStr *string, slotKey string) {
@@ -899,8 +1018,8 @@ func (m *AdvancedConfigModel) configureOAuthRuntime(endpoint, apiKey string) {
 	m.live().probeAPIKey = apiKey
 	m.live().connectionDirty = false
 	m.cursor = m.mainRowIndex(rowTest)
-	m.urlInput.Blur()
-	m.keyInput.Blur()
+	m.urlFocused = false
+	m.keyFocused = false
 }
 
 func (m *AdvancedConfigModel) usesOAuth() bool {
@@ -917,8 +1036,8 @@ func (m *AdvancedConfigModel) usesModelsDev() bool {
 // openModelsDevPicker opens the models.dev provider overlay and starts the
 // catalog fetch.
 func (m *AdvancedConfigModel) openModelsDevPicker() {
-	m.urlInput.Blur()
-	m.keyInput.Blur()
+	m.urlFocused = false
+	m.keyFocused = false
 	m.live().detecting = false
 	m.modelsDevPicker = true
 	m.modelsDevLoading = true
@@ -927,19 +1046,17 @@ func (m *AdvancedConfigModel) openModelsDevPicker() {
 	m.modelsDevFiltered = nil
 	m.modelsDevCursor = 0
 	m.modelsDevWindow = 0
-	m.modelsDevInput.SetValue("")
-	m.modelsDevInput.Focus()
+	m.modelsDevText.Set("")
 }
 
 func (m *AdvancedConfigModel) closeModelsDevPicker() {
 	m.modelsDevPicker = false
-	m.modelsDevInput.Blur()
 }
 
 // updateModelsDevFilter recomputes the filtered provider list from the filter
 // input and clamps cursor/window. Filtering matches name and id case-insensitively.
 func (m *AdvancedConfigModel) updateModelsDevFilter() {
-	q := strings.ToLower(strings.TrimSpace(m.modelsDevInput.Value()))
+	q := strings.ToLower(strings.TrimSpace(m.modelsDevText.Get()))
 	if q == "" {
 		m.modelsDevFiltered = m.modelsDevItems
 	} else {
@@ -967,8 +1084,8 @@ func (m *AdvancedConfigModel) saveInputsToDraft() {
 	if m.usesOAuth() {
 		return
 	}
-	m.live().inputEndpoint = m.urlInput.Value()
-	m.live().inputAPIKey = m.keyInput.Value()
+	m.live().inputEndpoint = m.urlText.Get()
+	m.live().inputAPIKey = m.keyText.Get()
 }
 
 // otherSource returns the source to toggle to (Custom ↔ models.dev).
@@ -1001,11 +1118,11 @@ func (m *AdvancedConfigModel) switchSource(target connectionSource) {
 	// Leaving the Custom side abandons any pending overwrite warning.
 	m.customDraft.saveGuardPending = false
 
-	m.urlInput.SetValue(m.live().inputEndpoint)
-	m.keyInput.SetValue(m.live().inputAPIKey)
-	m.urlInput.Blur()
-	m.keyInput.Blur()
-	m.filterInput.Blur()
+	m.urlText.Set(m.live().inputEndpoint)
+	m.keyText.Set(m.live().inputAPIKey)
+	m.urlFocused = false
+	m.keyFocused = false
+	m.filterFocused = false
 	m.updateFilteredPool()
 	m.cursor = m.mainRowIndex(rowSource)
 	m.keepCursorVisible()
@@ -1042,70 +1159,65 @@ func (m *AdvancedConfigModel) applyModelsDevProvider(p modelsdev.Provider) {
 		m.customDraft.saveGuardPending = false
 	}
 	m.applyRecommendation()
-	m.urlInput.SetValue(d.inputEndpoint)
-	m.keyInput.SetValue(d.inputAPIKey)
-	m.urlInput.Blur()
-	m.keyInput.Focus()
+	m.urlText.Set(d.inputEndpoint)
+	m.keyText.Set(d.inputAPIKey)
+	m.urlFocused = false
+	m.keyFocused = true
 	m.cursor = m.mainRowIndex(rowAPIKey)
 	setDebugf("models.dev applied provider=%q model_count=%d protocols=%d", draft.Name, len(d.modelPool), len(draft.ModelProtocols))
 }
 
-// updateModelsDevPicker handles a key press while the models.dev overlay is
-// open. It returns the tea.Cmd to run (usually nil). Enter applies the selected
-// provider and closes the overlay; esc/ctrl+c cancel; ↑↓ move the cursor; any
-// other key filters the list.
-func (m *AdvancedConfigModel) updateModelsDevPicker(msg tea.Msg) tea.Cmd {
-	keyMsg, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		var cmd tea.Cmd
-		m.modelsDevInput, cmd = m.modelsDevInput.Update(msg)
-		m.updateModelsDevFilter()
-		return cmd
-	}
-	key := keyMsg.String()
-	switch key {
-	case "esc", "ctrl+c":
+// handleModelsDevPickerKey handles a key press while the models.dev overlay is
+// open. Enter applies the selected provider and closes the overlay; esc/ctrl+c
+// cancel; ↑↓ move the cursor; any other printable key filters the list.
+func (m *AdvancedConfigModel) handleModelsDevPickerKey(ke tui.KeyEvent) {
+	if ke.Key == tui.KeyEscape || ke.Mod == tui.ModCtrl && ke.Rune == 'c' {
 		m.closeModelsDevPicker()
-		return nil
-	case "up":
+		return
+	}
+	switch ke.Key {
+	case tui.KeyUp:
 		if m.modelsDevCursor > 0 {
 			m.modelsDevCursor--
 		}
 		if m.modelsDevCursor < m.modelsDevWindow {
 			m.modelsDevWindow = m.modelsDevCursor
 		}
-		return nil
-	case "down":
+	case tui.KeyDown:
 		if m.modelsDevCursor < len(m.modelsDevFiltered)-1 {
 			m.modelsDevCursor++
 		}
 		if m.modelsDevCursor >= m.modelsDevWindow+selectViewHeight {
 			m.modelsDevWindow = m.modelsDevCursor - selectViewHeight + 1
 		}
-		return nil
-	case "enter":
+	case tui.KeyEnter:
 		if len(m.modelsDevFiltered) > 0 && m.modelsDevCursor >= 0 && m.modelsDevCursor < len(m.modelsDevFiltered) {
 			m.applyModelsDevProvider(m.modelsDevFiltered[m.modelsDevCursor])
 			m.closeModelsDevPicker()
 		}
-		return nil
-	default:
-		var cmd tea.Cmd
-		m.modelsDevInput, cmd = m.modelsDevInput.Update(msg)
+	case tui.KeyBackspace:
+		t := m.modelsDevText.Get()
+		if t != "" {
+			m.modelsDevText.Set(t[:len(t)-1])
+		}
 		m.updateModelsDevFilter()
-		return cmd
+	default:
+		if ke.IsRune() && ke.Rune != 0 {
+			m.modelsDevText.Set(m.modelsDevText.Get() + string(ke.Rune))
+			m.updateModelsDevFilter()
+		}
 	}
 }
 
-// textInputHasKeyboard 表示当前按键会被某个文本输入框消费。条件与本文件末尾
-// 的输入路由保持一致：主页面光标停在 Endpoint/API Key 上，或模型筛选框聚焦。
+// textInputHasKeyboard 表示当前按键会被某个文本输入框消费。条件与 KeyMap 的
+// 输入路由保持一致：主页面光标停在 Endpoint/API Key 上，或模型筛选框聚焦。
 // OAuth provider 没有可编辑的端点字段，因此不算。
 func (m *AdvancedConfigModel) textInputHasKeyboard() bool {
 	if m.usesOAuth() {
-		return m.filterInput.Focused()
+		return m.filterFocused
 	}
 	row := m.currentRow()
-	return row == rowEndpoint || row == rowAPIKey || m.filterInput.Focused()
+	return row == rowEndpoint || row == rowAPIKey || m.filterFocused
 }
 
 // vimNavAliases 是导航键的单字母别名。它们同时是合法的输入字符，因此在文本
@@ -1121,135 +1233,22 @@ func NewAdvancedMappingModel(p *provider.Provider, modelPool []string, metadata 
 	m.live().modelPoolFromDiscovery = true
 	m.live().modelDisplayMetadata = copyModelInfoIndex(metadata)
 	m.live().modelContextWindows = contextWindowsFromModelInfos(m.live().modelDisplayMetadata)
-	m.urlInput.Blur()
-	m.keyInput.Blur()
+	m.urlFocused = false
+	m.keyFocused = false
 	m.cursor = m.mainRowIndex(rowOpus)
 	return m
 }
 
-func (m *AdvancedConfigModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink, textarea.Blink}
-	// Re-verify an existing provider's connection on open. Until the check
-	// succeeds the sections below Connection stay greyed out; OAuth providers
-	// are always ready so they skip this.
+// startAutoDetect re-verifies an existing provider's connection on open. Until
+// the check succeeds the sections below Connection stay greyed out; OAuth
+// providers are always ready so they skip this. Called once from Watchers()
+// startup (go-tui has no Init() on the SetRootComponent path).
+func (m *AdvancedConfigModel) startAutoDetect() {
 	if m.live().autoDetectOnOpen && !m.usesOAuth() && !m.usesModelsDev() && strings.TrimSpace(m.live().probeEndpoint) != "" {
 		m.live().detecting = true
 		m.live().detectProgress = 5
 		m.live().detectFrame = 0
-		cmds = append(cmds, tea.Batch(modelFetchCmd(m.live().probeEndpoint, m.live().probeAPIKey), modelFetchTickCmd()))
-	}
-	return tea.Batch(cmds...)
-}
-
-func modelFetchTickCmd() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
-		return modelFetchTickMsg{}
-	})
-}
-
-func modelFetchCmd(endpoint, apiKey string) tea.Cmd {
-	return func() tea.Msg {
-		setDebugf("modelFetchCmd start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
-		result := detectProtocolAndModelsDetailed(endpoint, apiKey)
-		setDebugf(
-			"modelFetchCmd done endpoint=%q detected_endpoint=%q protocol=%q anthropic_auth=%q model_count=%d err=%v",
-			endpoint,
-			result.baseURL,
-			result.protocol,
-			result.anthropicAuth,
-			countCSV(result.models),
-			result.err,
-		)
-		// Best-effort: pull context_window metadata for OpenAI-family catalogs.
-		// Failures are ignored — IDs still come from detection.
-		windows := map[string]int{}
-		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) && !provider.IsCommandCodeType(result.protocol) {
-			// Subscription runtimes only expose windows through the Codex catalog,
-			// which AdvertisedContextWindows tries before the plain OpenAI list.
-			advertised, source := claude.AdvertisedContextWindows(result.baseURL, apiKey)
-			for id, window := range advertised {
-				windows[id] = window
-			}
-			setDebugf("modelFetchCmd context windows catalog=%q count=%d", source, len(windows))
-		}
-		return modelFetchDoneMsg{
-			endpoint:            endpoint,
-			apiKey:              apiKey,
-			detectedType:        result.protocol,
-			detectedEndpoint:    result.baseURL,
-			anthropicAuth:       result.anthropicAuth,
-			discoveredModelsRaw: result.models,
-			contextWindows:      windows,
-			modelInfos:          result.modelInfos,
-			err:                 result.err,
-		}
-	}
-}
-
-func modelAvailabilityTickCmd(testID uint64) tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
-		return modelAvailabilityTickMsg{testID: testID}
-	})
-}
-
-func modelAvailabilityTestCmd(ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, smokeTestModel string) tea.Cmd {
-	models = append([]string(nil), models...)
-	return func() tea.Msg {
-		statuses := make(map[string]modelAvailability, len(models))
-		if len(models) == 0 {
-			return modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
-		}
-		if smokeTestModel != "" {
-			status := modelAvailabilityUnavailable
-			if testSingleModelWithProtocolsContext(ctx, smokeTestModel, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
-				status = modelAvailabilityAvailable
-			}
-			if ctx.Err() == nil {
-				for _, model := range models {
-					statuses[model] = status
-				}
-			}
-			return modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
-		}
-
-		jobs := make(chan string, len(models))
-		for _, model := range models {
-			jobs <- model
-		}
-		close(jobs)
-
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		workers := min(slotTestConcurrency, len(models))
-		for range workers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case model, ok := <-jobs:
-						if !ok {
-							return
-						}
-						status := modelAvailabilityUnavailable
-						if testSingleModelWithProtocolsContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
-							status = modelAvailabilityAvailable
-						}
-						if ctx.Err() != nil {
-							return
-						}
-						mu.Lock()
-						statuses[model] = status
-						mu.Unlock()
-					}
-				}
-			}()
-		}
-
-		wg.Wait()
-		return modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
+		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey)
 	}
 }
 
@@ -1287,7 +1286,7 @@ func (m *AdvancedConfigModel) materializeSubagentModel() bool {
 }
 
 func (m *AdvancedConfigModel) updateFilteredPool() {
-	q := strings.ToLower(m.filterInput.Value())
+	q := strings.ToLower(m.filterText.Get())
 	if q == "" {
 		m.filteredPool = append([]string{locale.T("(设置为未设置/清空)", "(clear/unset)")}, m.live().modelPool...)
 	} else {
@@ -1372,15 +1371,15 @@ func (m *AdvancedConfigModel) availabilityFor(model string) modelAvailability {
 	return modelAvailabilityUnknown
 }
 
-// availabilityLabel renders the per-model availability badge for the picker.
-func (m *AdvancedConfigModel) availabilityLabel(model string) string {
+// availabilitySpan renders the per-model availability badge for the picker.
+func (m *AdvancedConfigModel) availabilitySpan(model string) tui.TextSpan {
 	switch m.availabilityFor(model) {
 	case modelAvailabilityAvailable:
-		return availableStyle.Render(locale.T("✓ 可用", "✓ available"))
+		return span(locale.T("✓ 可用", "✓ available"), stAvailable)
 	case modelAvailabilityUnavailable:
-		return unavailableStyle.Render(locale.T("✗ 不可用", "✗ unavailable"))
+		return span(locale.T("✗ 不可用", "✗ unavailable"), stUnavailable)
 	default:
-		return grayText.Render(locale.T("? 未测试", "? not tested"))
+		return span(locale.T("? 未测试", "? not tested"), stGray)
 	}
 }
 
@@ -1409,9 +1408,9 @@ func (m *AdvancedConfigModel) panelWidth() int {
 
 func (m *AdvancedConfigModel) updateInputWidths() {
 	inputWidth := max(m.panelWidth()-8, 20)
-	m.urlInput.SetWidth(inputWidth)
-	m.keyInput.SetWidth(inputWidth)
-	m.filterInput.SetWidth(inputWidth)
+	m.urlInputWidth = inputWidth
+	m.keyInputWidth = inputWidth
+	m.filterInputWidth = inputWidth
 }
 
 // doAutoConfig auto-fills the four Claude model slots, leaves subagents on
@@ -1495,7 +1494,7 @@ func (m *AdvancedConfigModel) getProtocol() string {
 		}
 		return provider.ProtocolLabelForProvider(*m.p)
 	}
-	if strings.Contains(strings.ToLower(m.urlInput.Value()), "anthropic") {
+	if strings.Contains(strings.ToLower(m.urlText.Get()), "anthropic") {
 		return "anthropic"
 	}
 	return "openai(chat)"
@@ -1512,7 +1511,7 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 			return "OpenAI"
 		}
 	}
-	if strings.Contains(strings.ToLower(m.urlInput.Value()), "anthropic") {
+	if strings.Contains(strings.ToLower(m.urlText.Get()), "anthropic") {
 		return "Anthropic"
 	}
 	return "OpenAI"
@@ -1572,7 +1571,7 @@ func (m *AdvancedConfigModel) cycleCustomProtocol(delta int) {
 
 	rawEndpoint := strings.TrimSpace(m.live().detectedInputEndpoint)
 	if rawEndpoint == "" {
-		rawEndpoint = strings.TrimSpace(m.urlInput.Value())
+		rawEndpoint = strings.TrimSpace(m.urlText.Get())
 	}
 	if rawEndpoint != "" {
 		if provider.IsAnthropicType(m.p.Type) {
@@ -1853,7 +1852,7 @@ func reviewOneMSummary(oneMSlots map[string]bool) string {
 	return strings.Join(slots, ",")
 }
 
-func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, anthropicAuth, detectedEndpoint string, derr error) tea.Cmd {
+func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, anthropicAuth, detectedEndpoint string, derr error) {
 	discoveredModels := uniqueModels(parseModelList(discoveredModelsRaw))
 	m.live().hadLocalModelPool = countCSV(m.p.Model) > 0
 	// Capture the raw detection inputs before probeEndpoint is normalized below,
@@ -1904,7 +1903,7 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		m.live().detectionError = derr
 		m.cursor = m.mainRowIndex(rowTest)
 		setDebugf("applyModelDetectionResult detection failed detection_error=%v model_count=%d", m.live().detectionError, len(m.live().modelPool))
-		return nil
+		return
 	}
 
 	// 本次 set 必须以接口返回的模型为准；不再用旧的本地模型池兜底。
@@ -1915,7 +1914,7 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		))
 		m.cursor = m.mainRowIndex(rowTest)
 		setDebugf("applyModelDetectionResult no models detection_error=%v", m.live().detectionError)
-		return nil
+		return
 	}
 
 	sort.Strings(m.live().modelPool)
@@ -1939,7 +1938,6 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		m.live().clearStaleSlots,
 		m.cursor,
 	)
-	return nil
 }
 
 // applyRecommendation fills empty slots from the auto recommendation engine and
@@ -1979,15 +1977,15 @@ func (m *AdvancedConfigModel) applyRecommendation() {
 
 // activateRow fires the action for a button row on click or Enter: Auto
 // Configure starts the connection check, Test Model Availability starts the
-// per-model probes. Returns the tea.Cmd to run, or nil for no-op.
-func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
+// per-model probes. Async work is delivered through the model's channels and
+// consumed on the main loop by the Watchers below.
+func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 	switch kind {
 	case rowProvider:
 		m.openModelsDevPicker()
-		return modelsDevFetchCmd()
+		fetchModelsDevAsync(m.mdDone)
 	case rowSource:
 		m.switchSource(m.otherSource())
-		return nil
 	case rowTest:
 		// models.dev providers are pre-configured from metadata: the endpoint,
 		// model pool, and per-model protocol table are already populated. The one
@@ -1995,9 +1993,9 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
 		// authenticated inference request instead of re-running full detection —
 		// which would overwrite Type ("modelsdev") and drop routing.
 		if m.usesModelsDev() {
-			key := strings.TrimSpace(m.keyInput.Value())
+			key := strings.TrimSpace(m.keyText.Get())
 			if key == "" {
-				return nil
+				return
 			}
 			model, proto, ok := m.firstRoutableModel()
 			if !ok {
@@ -2012,7 +2010,7 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
 				))
 				m.live().keyVerified = false
 				setDebugf("models.dev key verify aborted: no routable model endpoint=%q", m.p.Endpoint)
-				return nil
+				return
 			}
 			m.live().probeEndpoint = m.p.Endpoint
 			m.live().probeAPIKey = key
@@ -2021,36 +2019,37 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
 			m.live().detecting = true
 			m.live().detectProgress = 5
 			m.live().detectFrame = 0
-			m.keyInput.Blur()
+			m.keyFocused = false
 			setDebugf("start models.dev key verify endpoint=%q api_key_len=%d model=%q proto=%q", m.live().probeEndpoint, len(key), model, proto)
-			return tea.Batch(keyVerifyCmd(m.live().probeEndpoint, key, model, proto), modelFetchTickCmd())
+			keyVerifyAsync(m.verifyDone, m.live().probeEndpoint, key, model, proto)
+			return
 		}
 		// Start detection with the current input values (OAuth uses the session
 		// runtime endpoint/key already injected by configureOAuthRuntime).
 		if !m.usesOAuth() {
-			m.p.Endpoint = m.urlInput.Value()
-			m.p.APIKey = m.keyInput.Value()
+			m.p.Endpoint = m.urlText.Get()
+			m.p.APIKey = m.keyText.Get()
 			m.live().probeEndpoint = m.p.Endpoint
 			m.live().probeAPIKey = m.p.APIKey
 			// The inputs being detected become the new baseline only if the
 			// detection succeeds; until then keep the dirty state honest.
 			m.refreshConnectionDirty()
 		}
-		m.urlInput.Blur()
-		m.keyInput.Blur()
+		m.urlFocused = false
+		m.keyFocused = false
 		m.live().detectionError = nil
 		m.live().detecting = true
 		m.live().detectProgress = 5
 		m.live().detectFrame = 0
 		setDebugf("start detection endpoint=%q api_key_len=%d oauth=%t", m.live().probeEndpoint, len(m.live().probeAPIKey), m.usesOAuth())
-		return tea.Batch(modelFetchCmd(m.live().probeEndpoint, m.live().probeAPIKey), modelFetchTickCmd())
+		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey)
 	case rowTestModels:
 		if !m.connectionReady() {
-			return nil
+			return
 		}
 		if len(m.live().modelPool) == 0 {
 			setDebugf("model availability test skipped: empty pool")
-			return nil
+			return
 		}
 		m.modelTestID++
 		testID := m.modelTestID
@@ -2060,533 +2059,645 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) tea.Cmd {
 		m.modelTestFrame = 0
 		m.modelTestCanceled = false
 		setDebugf("model availability test started model_count=%d", len(m.live().modelPool))
-		return tea.Batch(
-			modelAvailabilityTestCmd(ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel()),
-			modelAvailabilityTickCmd(testID),
-		)
+		testModelsAsync(m.availDone, ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel())
 	}
-	return nil
 }
 
-func (m *AdvancedConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.updateInputWidths()
-		return m, nil
-
-	case copiedClearMsg:
-		m.keyCopied = false
-		return m, nil
-
-	case urlCopiedClearMsg:
-		m.urlCopied = false
-		return m, nil
-
-	case focusRowMsg:
-		// Click semantics: the first click on a row selects it (moves the cursor);
-		// a second click on the already-selected row performs its action. Endpoint
-		// and API Key focus their text inputs on first click so typing lands there.
-		if msg.row == rowCopyKey || msg.row == rowCopyURL {
-			// A single click on a value row focuses its input; a double-click
-			// (second click on the same row within the window) copies the value.
-			now := time.Now()
-			double := msg.row == m.lastCopyClickRow && now.Sub(m.lastCopyClickAt) < 500*time.Millisecond
-			m.lastCopyClickRow = msg.row
-			m.lastCopyClickAt = now
-			if !double {
-				focus := rowAPIKey
-				if msg.row == rowCopyURL {
-					focus = rowEndpoint
-				}
-				m.cursor = m.mainRowIndex(focus)
-				m.urlInput.Blur()
-				m.keyInput.Blur()
-				return m, nil
-			}
-			if msg.row == rowCopyKey {
-				m.keyCopied = true
-				if err := clipboard.WriteAll(m.keyInput.Value()); err != nil {
-					setDebugf("copy key to clipboard failed: %v", err)
-				}
-				setDebugf("key copied to clipboard")
-				return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return copiedClearMsg{} })
-			}
-			m.urlCopied = true
-			if err := clipboard.WriteAll(m.urlInput.Value()); err != nil {
-				setDebugf("copy url to clipboard failed: %v", err)
-			}
-			setDebugf("url copied to clipboard")
-			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return urlCopiedClearMsg{} })
-		}
-		idx := m.mainRowIndex(msg.row)
-		if idx < 0 {
-			return m, nil
-		}
-		alreadySelected := m.cursor == idx && !m.textInputHasKeyboard()
-		m.cursor = idx
-		m.keepCursorVisible()
-		switch msg.row {
-		case rowEndpoint:
-			m.keyInput.Blur()
-			return m, m.urlInput.Focus()
-		case rowAPIKey:
-			m.urlInput.Blur()
-			return m, m.keyInput.Focus()
-		case rowTest, rowTestModels:
-			m.urlInput.Blur()
-			m.keyInput.Blur()
-			if alreadySelected {
-				return m, m.activateRow(msg.row)
-			}
-			return m, nil
-		case rowProvider:
-			m.urlInput.Blur()
-			m.keyInput.Blur()
-			if alreadySelected {
-				return m, m.activateRow(msg.row)
-			}
-			return m, nil
-		case rowSource:
-			m.urlInput.Blur()
-			m.keyInput.Blur()
-			if alreadySelected {
-				return m, m.activateRow(msg.row)
-			}
-			return m, nil
-		case rowSave:
-			m.urlInput.Blur()
-			m.keyInput.Blur()
-			if alreadySelected {
-				if m.requestSave() {
-					return m, tea.Quit
-				}
-				return m, nil
-			}
-			return m, nil
-		case rowCancel:
-			m.urlInput.Blur()
-			m.keyInput.Blur()
-			if alreadySelected {
-				setDebugf("click cancel requested")
-				return m, tea.Quit
-			}
-			return m, nil
-		default:
-			m.urlInput.Blur()
-			m.keyInput.Blur()
-			m.filterInput.Blur()
-		}
-		return m, nil
-
-	case modelFetchTickMsg:
-		if !m.live().detecting {
-			return m, nil
-		}
-		m.live().detectFrame++
-		if m.live().detectProgress < 95 {
-			m.live().detectProgress += 3
-			if m.live().detectProgress > 95 {
-				m.live().detectProgress = 95
-			}
-		}
-		return m, modelFetchTickCmd()
-
-	case modelFetchDoneMsg:
-		if !m.live().detecting || msg.endpoint != m.live().probeEndpoint || msg.apiKey != m.live().probeAPIKey {
-			setDebugf(
-				"modelFetchDone ignored detecting=%t endpoint_match=%t api_key_match=%t msg_endpoint=%q probe_endpoint=%q",
-				m.live().detecting,
-				msg.endpoint == m.live().probeEndpoint,
-				msg.apiKey == m.live().probeAPIKey,
-				msg.endpoint,
-				m.live().probeEndpoint,
-			)
-			return m, nil
-		}
-		m.live().detectProgress = 100
-		m.live().detecting = false
-		setDebugf(
-			"modelFetchDone accepted detected_type=%q detected_endpoint=%q anthropic_auth=%q model_count=%d err=%v",
-			msg.detectedType,
-			msg.detectedEndpoint,
-			msg.anthropicAuth,
-			countCSV(msg.discoveredModelsRaw),
-			msg.err,
-		)
-		if msg.contextWindows != nil {
-			m.live().modelContextWindows = msg.contextWindows
-		}
-		m.live().modelDisplayMetadata = indexModelInfos(msg.modelInfos)
-		for id, window := range contextWindowsFromModelInfos(m.live().modelDisplayMetadata) {
-			if _, exists := m.live().modelContextWindows[id]; !exists {
-				m.live().modelContextWindows[id] = window
-			}
-		}
-		return m, m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.detectedEndpoint, msg.err)
-
-	case keyVerifyDoneMsg:
-		if !m.usesModelsDev() || !m.live().detecting || msg.endpoint != m.live().probeEndpoint || msg.apiKey != m.live().probeAPIKey {
-			setDebugf(
-				"keyVerifyDone ignored modelsdev=%t detecting=%t endpoint_match=%t api_key_match=%t",
-				m.usesModelsDev(),
-				m.live().detecting,
-				msg.endpoint == m.live().probeEndpoint,
-				msg.apiKey == m.live().probeAPIKey,
-			)
-			return m, nil
-		}
-		m.live().detectProgress = 100
-		m.live().detecting = false
-		m.live().detectionError = msg.err
-		m.live().keyVerified = msg.err == nil
-		setDebugf("keyVerifyDone verified=%t err=%v", m.live().keyVerified, msg.err)
-		return m, nil
-
-	case modelsDevFetchDoneMsg:
-		if !m.modelsDevPicker {
-			return m, nil
-		}
-		m.modelsDevLoading = false
-		m.modelsDevError = msg.err
-		if msg.err == nil {
-			m.modelsDevItems = msg.providers
-			m.updateModelsDevFilter()
-		}
-		return m, nil
-
-	case modelAvailabilityDoneMsg:
-		if !m.modelTesting || msg.testID != m.modelTestID {
-			return m, nil
-		}
-		m.modelTesting = false
-		m.modelTestCancel = nil
-		m.modelTestCanceled = false
-		m.modelAvailability = msg.statuses
-		m.live().modelPool = reorderModelsByAvailability(m.live().modelPool, m.modelAvailability)
-		m.p.Model = strings.Join(m.live().modelPool, ",")
-		m.updateFilteredPool()
-		available, unavailable := m.availabilityCounts()
-		setDebugf("model availability test finished model_count=%d available=%d unavailable=%d", len(m.live().modelPool), available, unavailable)
-		return m, nil
-
-	case modelAvailabilityTickMsg:
-		if !m.modelTesting || msg.testID != m.modelTestID {
-			return m, nil
-		}
-		m.modelTestFrame++
-		return m, modelAvailabilityTickCmd(msg.testID)
-
-	case tea.KeyMsg:
-		// 文本输入框拥有键盘时，单字母导航别名让位给输入本身：把它们清空，
-		// 下面两个 switch 都不会匹配，按键最终落到文件末尾的输入路由。
-		// ctrl+c 与方向键不受影响，esc 仍由各页自行处理。
-		key := msg.String()
-		if vimNavAliases[key] && m.textInputHasKeyboard() {
-			key = ""
-		}
-
-		// The models.dev picker owns the keyboard while it is open: esc/ctrl+c
-		// close it, enter applies the selected provider, ↑↓ move the cursor, and
-		// every other key filters the provider list.
-		if m.modelsDevPicker {
-			return m, m.updateModelsDevPicker(msg)
-		}
-
-		switch key {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		}
-
-		if m.live().detecting {
-			// Allow esc to abort a connection check so the user is never frozen
-			// out of the page; ctrl+c/q still quit above.
-			if key == "esc" {
-				m.live().detecting = false
-				m.live().detectionError = fmt.Errorf("%s", locale.T("已取消连接检查", "connection check canceled"))
-				m.cursor = m.mainRowIndex(rowTest)
-				setDebugf("connection check canceled by user")
-				return m, nil
-			}
-			return m, nil
-		}
-		if m.modelTesting {
-			if msg.String() == "esc" {
-				if m.modelTestCancel != nil {
-					m.modelTestCancel()
-				}
-				m.modelTesting = false
-				m.modelTestCancel = nil
-				m.modelTestCanceled = true
-				setDebugf("model availability test canceled test_id=%d", m.modelTestID)
-			}
-			return m, nil
-		}
-		switch key {
-		case "esc":
-			// Single page: esc quits (unless the model picker overlay is open).
-			if m.filterInput.Focused() {
-				m.filterInput.Blur()
-				setDebugf("esc closed slot picker active_slot=%d cursor=%d", m.activeSlot, m.cursor)
-				return m, nil
-			}
-			setDebugf("esc quit cursor=%d endpoint_set=%t api_key_len=%d", m.cursor, strings.TrimSpace(m.urlInput.Value()) != "", len(m.keyInput.Value()))
-			return m, tea.Quit
-
-		case "up", "k":
-			if m.filterInput.Focused() {
-				if m.slotListCursor > 0 {
-					m.slotListCursor--
-					if m.slotListCursor < m.filterWindowStart {
-						m.filterWindowStart = m.slotListCursor
-					}
-				}
-				return m, nil
-			}
-			rows := m.visibleRows()
-			if len(rows) == 0 {
-				return m, nil
-			}
-			if m.cursor > 0 {
-				m.cursor--
-			} else {
-				m.cursor = len(rows) - 1
-			}
-			m.keepCursorVisible()
-
-		case "down", "j":
-			if m.filterInput.Focused() {
-				if m.slotListCursor < len(m.filteredPool)-1 {
-					m.slotListCursor++
-					if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
-						m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
-					}
-				}
-				return m, nil
-			}
-			rows := m.visibleRows()
-			if len(rows) == 0 {
-				return m, nil
-			}
-			if m.cursor < len(rows)-1 {
-				m.cursor++
-			} else {
-				m.cursor = 0
-			}
-			m.keepCursorVisible()
-
-		case "left", "h":
-			if m.filterInput.Focused() {
-				return m, nil
-			}
-			if m.isModelRow(m.currentRow()) {
-				m.toggleOneMAtRow(m.currentRow())
-			} else {
-				switch m.currentRow() {
-				case rowSource, rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
-					m.adjustReviewField(-1)
-				}
-			}
-
-		case "right", "l":
-			if m.filterInput.Focused() {
-				return m, nil
-			}
-			if m.isModelRow(m.currentRow()) {
-				m.toggleOneMAtRow(m.currentRow())
-			} else {
-				switch m.currentRow() {
-				case rowSource, rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
-					m.adjustReviewField(1)
-				}
-			}
-
-		case "space":
-			// Toggle the 1M context marker on a model row. Turning it on is refused
-			// when the backend window rules 1M out; turning an existing marker off
-			// stays possible.
-			if m.filterInput.Focused() {
-				return m, nil
-			}
-			m.toggleOneMAtRow(m.currentRow())
-
-		case "tab":
-			if m.filterInput.Focused() {
-				if m.slotListCursor < len(m.filteredPool)-1 {
-					m.slotListCursor++
-					if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
-						m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
-					}
-				}
-				return m, nil
-			}
-			rows := m.visibleRows()
-			if len(rows) == 0 {
-				return m, nil
-			}
-			m.cursor = (m.cursor + 1) % len(rows)
-			m.keepCursorVisible()
-
-		case "shift+tab":
-			if m.filterInput.Focused() {
-				return m, nil
-			}
-			rows := m.visibleRows()
-			if len(rows) == 0 {
-				return m, nil
-			}
-			m.cursor--
-			if m.cursor < 0 {
-				m.cursor = len(rows) - 1
-			}
-
-		case "enter":
-			if m.filterInput.Focused() {
-				// Model picker selection.
-				if len(m.filteredPool) == 0 {
-					return m, nil
-				}
-				if m.slotListCursor < 0 || m.slotListCursor >= len(m.filteredPool) {
-					m.slotListCursor = 0
-				}
-				selectedModel := m.filteredPool[m.slotListCursor]
-				if selectedModel == locale.T("(设置为未设置/清空)", "(clear/unset)") || selectedModel == locale.T("(无匹配模型)", "(no match)") {
-					selectedModel = ""
-				}
-				ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID, &m.p.SubagentModel}[m.activeSlot]
-				*ptr = selectedModel
-				if m.activeSlot == 4 && m.p.Env != nil {
-					delete(m.p.Env, claude.SubagentModelEnv)
-				}
-				// A slot whose model was just changed must not keep a [1m] marker
-				// the backend rules out for the new model — toggleOneMAtRow refuses
-				// to enable one there, so leaving an enabled marker would be
-				// inconsistent and would send a non-1M model with the [1m] suffix.
-				slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.activeSlot]
-				if m.live().oneMSlots[slotKey] && m.oneMSlotBlocked(selectedModel) {
-					m.live().oneMSlots[slotKey] = false
-					setDebugf("slot model changed to a non-1M model; cleared 1M marker slot=%s model=%q", slotKey, selectedModel)
-				}
-				m.filterInput.Blur()
-				m.live().autoConfigured = false
-				setDebugf("slot selected active_slot=%d model=%q slots=%s", m.activeSlot, selectedModel, slotDebugSummary(*m.p))
-				return m, nil
-			}
-
-			// The API key textarea inserts newlines with Enter, so while it is
-			// focused the key must fall through to the input routing below rather
-			// than advance the page cursor.
-			if m.keyInput.Focused() {
-				break
-			}
-
-			switch m.currentRow() {
-			case rowSource:
-				m.switchSource(m.otherSource())
-				return m, nil
-			case rowEndpoint:
-				m.cursor = m.mainRowIndex(rowAPIKey)
-				m.urlInput.Blur()
-				m.keyInput.Focus()
-				setDebugf("enter endpoint -> api key endpoint=%q", m.urlInput.Value())
-				// Return so the Enter that moved focus here is not re-delivered to
-				// the freshly focused textarea (which would insert a newline).
-				return m, nil
-			case rowAPIKey:
-				// Custom advances to Auto Configure; models.dev has no test step, so
-				// move to the first model slot instead.
-				if m.usesModelsDev() {
-					m.cursor = m.mainRowIndex(rowOpus)
-				} else {
-					m.cursor = m.mainRowIndex(rowTest)
-				}
-				m.urlInput.Blur()
-				m.keyInput.Blur()
-				setDebugf("enter api key -> next api_key_len=%d", len(m.keyInput.Value()))
-			case rowProvider:
-				return m, m.activateRow(rowProvider)
-			case rowTest:
-				return m, m.activateRow(rowTest)
-			case rowProtocol, rowFast, rowTools, rowToolSearch:
-				m.adjustReviewField(1)
-			case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
-				if !m.connectionReady() {
-					return m, nil
-				}
-				m.activeSlot = slotForRow(m.currentRow())
-				m.filterInput.Focus()
-				m.filterInput.SetValue("")
-				m.slotListCursor = 0
-				m.updateFilteredPool()
-				setDebugf("open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
-			case rowTestModels:
-				return m, m.activateRow(rowTestModels)
-			case rowContext:
-				// Context & Compact is edited inline; nothing to open yet.
-				setDebugf("context row selected")
-			case rowActive:
-				m.IsActiveChosen = !m.IsActiveChosen
-				setDebugf("active choice toggled active_chosen=%t", m.IsActiveChosen)
-			case rowSave:
-				if m.requestSave() {
-					return m, tea.Quit
-				}
-			case rowCancel:
-				setDebugf("cancel requested")
-				return m, tea.Quit
-			}
-			m.keepCursorVisible()
-		}
+func (m *AdvancedConfigModel) markDirty() {
+	if m.app != nil {
+		m.app.MarkDirty()
 	}
+}
 
-	// 让光标位置与输入框焦点保持同步：只有获得焦点的输入框才会处理
-	// 按键和粘贴（textinput.Update 在未聚焦时会直接返回）。
-	switch {
-	case m.filterInput.Focused():
-		m.filterInput, cmd = m.filterInput.Update(msg)
-		m.updateFilteredPool()
-	case m.currentRow() == rowEndpoint && !m.usesOAuth():
-		if !m.urlInput.Focused() {
-			m.keyInput.Blur()
-			cmd = m.urlInput.Focus()
+func (m *AdvancedConfigModel) quit() {
+	m.quitRequested = true
+	if m.app != nil {
+		m.app.Stop()
+	}
+}
+
+// handleFocusRow carries out the click semantics of a configuration row: the
+// first click selects it (moves the cursor); a second click on the
+// already-selected row performs its action. Endpoint and API Key focus their
+// text inputs on first click so typing lands there.
+func (m *AdvancedConfigModel) handleFocusRow(row configRowKind) {
+	if row == rowCopyKey || row == rowCopyURL {
+		// A single click on a value row focuses its input; a double-click
+		// (second click on the same row within the window) copies the value.
+		now := time.Now()
+		double := row == m.lastCopyClickRow && now.Sub(m.lastCopyClickAt) < 500*time.Millisecond
+		m.lastCopyClickRow = row
+		m.lastCopyClickAt = now
+		if !double {
+			focus := rowAPIKey
+			if row == rowCopyURL {
+				focus = rowEndpoint
+			}
+			m.cursor = m.mainRowIndex(focus)
+			m.urlFocused = false
+			m.keyFocused = false
+			m.markDirty()
+			return
 		}
-		var updateCmd tea.Cmd
-		m.urlInput, updateCmd = m.urlInput.Update(msg)
-		cmd = tea.Batch(cmd, updateCmd)
-		m.refreshConnectionDirty()
-	case m.currentRow() == rowAPIKey && !m.usesOAuth():
-		if !m.keyInput.Focused() {
-			m.urlInput.Blur()
-			cmd = m.keyInput.Focus()
+		if row == rowCopyKey {
+			m.keyCopied = true
+			m.lastKeyCopyAt = now
+			if err := clipboard.WriteAll(m.keyText.Get()); err != nil {
+				setDebugf("copy key to clipboard failed: %v", err)
+			}
+			setDebugf("key copied to clipboard")
+			m.markDirty()
+			return
 		}
-		var updateCmd tea.Cmd
-		before := m.keyInput.Value()
-		m.keyInput, updateCmd = m.keyInput.Update(msg)
-		cmd = tea.Batch(cmd, updateCmd)
+		m.urlCopied = true
+		m.lastUrlCopyAt = now
+		if err := clipboard.WriteAll(m.urlText.Get()); err != nil {
+			setDebugf("copy url to clipboard failed: %v", err)
+		}
+		setDebugf("url copied to clipboard")
+		m.markDirty()
+		return
+	}
+	idx := m.mainRowIndex(row)
+	if idx < 0 {
+		return
+	}
+	alreadySelected := m.cursor == idx && !m.textInputHasKeyboard()
+	m.cursor = idx
+	m.keepCursorVisible()
+	m.urlFocused = false
+	m.keyFocused = false
+	switch row {
+	case rowEndpoint:
+		m.urlFocused = true
 		m.refreshConnectionDirty()
-		if m.usesModelsDev() && m.keyInput.Value() != before {
-			// 编辑 key 会让上一次的验证结果作废：keyVerified 只证明「验证时
-			// 输入的那个 key」有效，内容一变就不再生效。若此刻还有一次验证
-			// 请求在路上，必须停止等待并同步 probeAPIKey，否则迟到的
-			// keyVerifyDoneMsg 会绕过守卫，把未经验证的新 key 标成「已连接」。
-			m.live().keyVerified = false
-			m.live().detectionError = nil
-			m.live().detecting = false
-			m.live().probeAPIKey = m.keyInput.Value()
+	case rowAPIKey:
+		m.keyFocused = true
+		m.refreshConnectionDirty()
+	case rowTest, rowTestModels, rowProvider, rowSource:
+		if alreadySelected {
+			m.activateRow(row)
+		}
+	case rowSave:
+		if alreadySelected && m.requestSave() {
+			m.quit()
+		}
+	case rowCancel:
+		if alreadySelected {
+			setDebugf("click cancel requested")
+			m.quit()
 		}
 	default:
-		// 光标在按钮或只读行上时，取消两个输入框的焦点
-		m.urlInput.Blur()
-		m.keyInput.Blur()
+		m.filterFocused = false
 	}
-
-	return m, cmd
+	m.markDirty()
 }
 
-func renderModelFetchProgress(progress, frame int, oauth bool) string {
+// handleFetchDone applies a completed connection check. Late results from a
+// superseded probe are dropped: the model only accepts the result when the
+// probe endpoint/key still match the live inputs.
+func (m *AdvancedConfigModel) handleFetchDone(msg modelFetchDoneMsg) {
+	if !m.live().detecting || msg.endpoint != m.live().probeEndpoint || msg.apiKey != m.live().probeAPIKey {
+		setDebugf(
+			"modelFetchDone ignored detecting=%t endpoint_match=%t api_key_match=%t msg_endpoint=%q probe_endpoint=%q",
+			m.live().detecting,
+			msg.endpoint == m.live().probeEndpoint,
+			msg.apiKey == m.live().probeAPIKey,
+			msg.endpoint,
+			m.live().probeEndpoint,
+		)
+		return
+	}
+	m.live().detectProgress = 100
+	m.live().detecting = false
+	setDebugf(
+		"modelFetchDone accepted detected_type=%q detected_endpoint=%q anthropic_auth=%q model_count=%d err=%v",
+		msg.detectedType,
+		msg.detectedEndpoint,
+		msg.anthropicAuth,
+		countCSV(msg.discoveredModelsRaw),
+		msg.err,
+	)
+	if msg.contextWindows != nil {
+		m.live().modelContextWindows = msg.contextWindows
+	}
+	m.live().modelDisplayMetadata = indexModelInfos(msg.modelInfos)
+	for id, window := range contextWindowsFromModelInfos(m.live().modelDisplayMetadata) {
+		if _, exists := m.live().modelContextWindows[id]; !exists {
+			m.live().modelContextWindows[id] = window
+		}
+	}
+	m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.detectedEndpoint, msg.err)
+	m.markDirty()
+}
+
+// handleVerifyDone applies a models.dev key verification result, guarded the
+// same way as handleFetchDone.
+func (m *AdvancedConfigModel) handleVerifyDone(msg keyVerifyDoneMsg) {
+	if !m.usesModelsDev() || !m.live().detecting || msg.endpoint != m.live().probeEndpoint || msg.apiKey != m.live().probeAPIKey {
+		setDebugf(
+			"keyVerifyDone ignored modelsdev=%t detecting=%t endpoint_match=%t api_key_match=%t",
+			m.usesModelsDev(),
+			m.live().detecting,
+			msg.endpoint == m.live().probeEndpoint,
+			msg.apiKey == m.live().probeAPIKey,
+		)
+		return
+	}
+	m.live().detectProgress = 100
+	m.live().detecting = false
+	m.live().detectionError = msg.err
+	m.live().keyVerified = msg.err == nil
+	setDebugf("keyVerifyDone verified=%t err=%v", m.live().keyVerified, msg.err)
+	m.markDirty()
+}
+
+func (m *AdvancedConfigModel) handleModelsDevDone(msg modelsDevFetchDoneMsg) {
+	if !m.modelsDevPicker {
+		return
+	}
+	m.modelsDevLoading = false
+	m.modelsDevError = msg.err
+	if msg.err == nil {
+		m.modelsDevItems = msg.providers
+		m.updateModelsDevFilter()
+	}
+	m.markDirty()
+}
+
+// handleAvailabilityDone applies a finished model availability test. A result
+// whose testID no longer matches the current run is dropped.
+func (m *AdvancedConfigModel) handleAvailabilityDone(msg modelAvailabilityDoneMsg) {
+	if !m.modelTesting || msg.testID != m.modelTestID {
+		return
+	}
+	m.modelTesting = false
+	m.modelTestCancel = nil
+	m.modelTestCanceled = false
+	m.modelAvailability = msg.statuses
+	m.live().modelPool = reorderModelsByAvailability(m.live().modelPool, m.modelAvailability)
+	m.p.Model = strings.Join(m.live().modelPool, ",")
+	m.updateFilteredPool()
+	available, unavailable := m.availabilityCounts()
+	setDebugf("model availability test finished model_count=%d available=%d unavailable=%d", len(m.live().modelPool), available, unavailable)
+	m.markDirty()
+}
+
+// handleFetchTick advances the connection-check spinner frames while a probe
+// is in flight, and clears the copied-value hints two seconds after a copy.
+// A single timer watcher drives both cadences.
+func (m *AdvancedConfigModel) handleFetchTick() {
+	now := time.Now()
+	if m.keyCopied && now.Sub(m.lastKeyCopyAt) >= 2*time.Second {
+		m.keyCopied = false
+	}
+	if m.urlCopied && now.Sub(m.lastUrlCopyAt) >= 2*time.Second {
+		m.urlCopied = false
+	}
+	if !m.live().detecting {
+		return
+	}
+	m.live().detectFrame++
+	if m.live().detectProgress < 95 {
+		m.live().detectProgress += 3
+		if m.live().detectProgress > 95 {
+			m.live().detectProgress = 95
+		}
+	}
+	m.markDirty()
+}
+
+// handleAvailabilityTick advances the model-test spinner frames while the
+// current test run is still in flight.
+func (m *AdvancedConfigModel) handleAvailabilityTick() {
+	if !m.modelTesting {
+		return
+	}
+	m.modelTestFrame++
+	m.markDirty()
+}
+
+// handleKey routes one key press. The models.dev picker and the two modal
+// states (connection check, model test) own the keyboard while active; after
+// that the slot picker filter and the endpoint/key inputs take printable
+// keys, and the remaining keys move the page cursor.
+func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
+	if m.modelsDevPicker {
+		m.handleModelsDevPickerKey(ke)
+		m.markDirty()
+		return
+	}
+
+	if ke.Mod == tui.ModCtrl && ke.Rune == 'c' {
+		m.quit()
+		return
+	}
+
+	// q 是 quit 的单字母别名，仅当没有文本输入框持有键盘时生效（q 也是
+	// 合法的输入字符，见下方的 runeAlias 说明）。
+	if ke.IsRune() && ke.Mod == 0 && ke.Rune == 'q' && !m.textInputHasKeyboard() {
+		m.quit()
+		return
+	}
+
+	// 模态：连接检查/模型测试进行中。esc 取消操作（或退出等待），其余按键
+	// 等待结束。ctrl+c 已在上面处理。
+	if m.live().detecting {
+		if ke.Key == tui.KeyEscape {
+			m.live().detecting = false
+			m.live().detectionError = fmt.Errorf("%s", locale.T("已取消连接检查", "connection check canceled"))
+			m.cursor = m.mainRowIndex(rowTest)
+			setDebugf("connection check canceled by user")
+			m.markDirty()
+		}
+		return
+	}
+	if m.modelTesting {
+		if ke.Key == tui.KeyEscape {
+			if m.modelTestCancel != nil {
+				m.modelTestCancel()
+			}
+			m.modelTesting = false
+			m.modelTestCancel = nil
+			m.modelTestCanceled = true
+			setDebugf("model availability test canceled test_id=%d", m.modelTestID)
+			m.markDirty()
+		}
+		return
+	}
+
+	// 文本输入框拥有键盘时，单字母导航别名让位给输入本身：q/h/j/k/l 是合法
+	// 的输入字符。方向键没有这个歧义。
+	runeAlias := ke.IsRune() && ke.Mod == 0 && strings.ContainsRune("q hjkl", ke.Rune) && ke.Rune != ' '
+	inputHasKeyboard := m.textInputHasKeyboard()
+
+	// vim 单字母别名 h/j/k/l：无输入焦点时映射到方向键。
+	if m.handleNavAlias(ke, inputHasKeyboard) {
+		return
+	}
+
+	switch ke.Key {
+	case tui.KeyEscape:
+		if m.filterFocused {
+			m.filterFocused = false
+			setDebugf("esc closed slot picker active_slot=%d cursor=%d", m.activeSlot, m.cursor)
+			m.markDirty()
+			return
+		}
+		setDebugf("esc quit cursor=%d endpoint_set=%t api_key_len=%d", m.cursor, strings.TrimSpace(m.urlText.Get()) != "", len(m.keyText.Get()))
+		m.quit()
+		return
+
+	case tui.KeyUp:
+		if inputHasKeyboard && ke.IsRune() {
+			return // navigation alias yielded to text input
+		}
+		if m.filterFocused {
+			if m.slotListCursor > 0 {
+				m.slotListCursor--
+				if m.slotListCursor < m.filterWindowStart {
+					m.filterWindowStart = m.slotListCursor
+				}
+			}
+			m.markDirty()
+			return
+		}
+		rows := m.visibleRows()
+		if len(rows) == 0 {
+			return
+		}
+		if m.cursor > 0 {
+			m.cursor--
+		} else {
+			m.cursor = len(rows) - 1
+		}
+		m.keepCursorVisible()
+		m.markDirty()
+		return
+
+	case tui.KeyDown:
+		if inputHasKeyboard && ke.IsRune() {
+			return
+		}
+		if m.filterFocused {
+			if m.slotListCursor < len(m.filteredPool)-1 {
+				m.slotListCursor++
+				if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
+					m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
+				}
+			}
+			m.markDirty()
+			return
+		}
+		rows := m.visibleRows()
+		if len(rows) == 0 {
+			return
+		}
+		if m.cursor < len(rows)-1 {
+			m.cursor++
+		} else {
+			m.cursor = 0
+		}
+		m.keepCursorVisible()
+		m.markDirty()
+		return
+
+	case tui.KeyLeft:
+		if inputHasKeyboard && ke.IsRune() {
+			return
+		}
+		if m.filterFocused {
+			return
+		}
+		if m.isModelRow(m.currentRow()) {
+			m.toggleOneMAtRow(m.currentRow())
+		} else {
+			switch m.currentRow() {
+			case rowSource, rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
+				m.adjustReviewField(-1)
+			}
+		}
+		m.markDirty()
+		return
+
+	case tui.KeyRight:
+		if inputHasKeyboard && ke.IsRune() {
+			return
+		}
+		if m.filterFocused {
+			return
+		}
+		if m.isModelRow(m.currentRow()) {
+			m.toggleOneMAtRow(m.currentRow())
+		} else {
+			switch m.currentRow() {
+			case rowSource, rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
+				m.adjustReviewField(1)
+			}
+		}
+		m.markDirty()
+		return
+
+	case tui.KeyEnter:
+		// The API key textarea inserts newlines with Enter, so while it is
+		// focused the key must fall through to the text routing below rather
+		// than advance the page cursor.
+		if !m.keyFocused {
+			m.handleEnter()
+			m.markDirty()
+			return
+		}
+
+	case tui.KeyTab:
+		if inputHasKeyboard && ke.IsRune() {
+			return
+		}
+		if m.filterFocused {
+			if m.slotListCursor < len(m.filteredPool)-1 {
+				m.slotListCursor++
+				if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
+					m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
+				}
+			}
+			m.markDirty()
+			return
+		}
+		rows := m.visibleRows()
+		if len(rows) == 0 {
+			return
+		}
+		m.cursor = (m.cursor + 1) % len(rows)
+		m.keepCursorVisible()
+		m.markDirty()
+		return
+	}
+
+	// shift+tab：主页面反向移动光标（filter 打开时不响应）。
+	if ke.Key == tui.KeyTab && ke.Mod == tui.ModShift {
+		if m.filterFocused || inputHasKeyboard && ke.IsRune() {
+			return
+		}
+		rows := m.visibleRows()
+		if len(rows) == 0 {
+			return
+		}
+		m.cursor--
+		if m.cursor < 0 {
+			m.cursor = len(rows) - 1
+		}
+		m.keepCursorVisible()
+		m.markDirty()
+		return
+	}
+
+	// space：模型行上切换 1M 标记（输入框聚焦时作为空格字符输入）。
+	if ke.Key == tui.KeyRune && ke.Rune == ' ' && ke.Mod == 0 {
+		if m.filterFocused || inputHasKeyboard && runeAlias {
+			// falls through to text routing below
+		} else {
+			m.toggleOneMAtRow(m.currentRow())
+			m.markDirty()
+			return
+		}
+	}
+
+	// 文本输入路由：与旧实现的输入框焦点同步规则一致——光标在 Endpoint/
+	// API Key 行或 filter 聚焦时，可打印字符进入对应文本。
+	if ke.IsRune() && ke.Mod == 0 && ke.Rune != 0 {
+		ch := string(ke.Rune)
+		switch {
+		case m.filterFocused:
+			m.filterText.Set(m.filterText.Get() + ch)
+			m.updateFilteredPool()
+		case m.currentRow() == rowEndpoint && !m.usesOAuth():
+			m.urlFocused = true
+			m.keyFocused = false
+			m.urlText.Set(m.urlText.Get() + ch)
+			m.refreshConnectionDirty()
+		case m.currentRow() == rowAPIKey && !m.usesOAuth():
+			m.urlFocused = false
+			m.keyFocused = true
+			m.keyText.Set(m.keyText.Get() + ch)
+			m.refreshConnectionDirty()
+			if m.usesModelsDev() {
+				m.invalidateModelsDevKeyIfChanged()
+			}
+		default:
+			// 光标在按钮或只读行上时，取消两个输入框的焦点。
+			if !inputHasKeyboard {
+				m.urlFocused = false
+				m.keyFocused = false
+			}
+		}
+		m.markDirty()
+		return
+	}
+
+	if ke.Key == tui.KeyBackspace {
+		switch {
+		case m.filterFocused:
+			t := m.filterText.Get()
+			if t != "" {
+				m.filterText.Set(t[:len(t)-1])
+			}
+			m.updateFilteredPool()
+		case m.currentRow() == rowEndpoint && !m.usesOAuth():
+			t := m.urlText.Get()
+			if t != "" {
+				m.urlText.Set(t[:len(t)-1])
+			}
+			m.refreshConnectionDirty()
+		case m.currentRow() == rowAPIKey && !m.usesOAuth():
+			before := m.keyText.Get()
+			t := before
+			if t != "" {
+				m.keyText.Set(t[:len(t)-1])
+			}
+			m.refreshConnectionDirty()
+			if m.usesModelsDev() && m.keyText.Get() != before {
+				m.invalidateModelsDevKeyIfChanged()
+			}
+		}
+		m.markDirty()
+		return
+	}
+
+	// 其余按键（非打印导航在上方处理过）：确保输入框焦点不残留。
+	if !inputHasKeyboard {
+		m.urlFocused = false
+		m.keyFocused = false
+		m.markDirty()
+	}
+}
+
+// handleNavAlias maps the vim single-letter navigation aliases (h/j/k/l) onto
+// the same key events the arrow keys produce. It runs before the text-input
+// routing but only when no text input owns the keyboard, so the aliases stay
+// typeable inside the endpoint/API key/filter inputs.
+func (m *AdvancedConfigModel) handleNavAlias(ke tui.KeyEvent, inputHasKeyboard bool) bool {
+	if inputHasKeyboard || !ke.IsRune() || ke.Mod != 0 {
+		return false
+	}
+	switch ke.Rune {
+	case 'k':
+		m.handleKey(tui.KeyEvent{Key: tui.KeyUp})
+	case 'j':
+		m.handleKey(tui.KeyEvent{Key: tui.KeyDown})
+	case 'h':
+		m.handleKey(tui.KeyEvent{Key: tui.KeyLeft})
+	case 'l':
+		m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
+	default:
+		return false
+	}
+	return true
+}
+
+// handleEnter performs the Enter action of the row under the cursor. It runs
+// only when no text input owns the keyboard (the key textarea inserts
+// newlines instead).
+func (m *AdvancedConfigModel) handleEnter() {
+	if m.filterFocused {
+		// Model picker selection.
+		if len(m.filteredPool) == 0 {
+			return
+		}
+		if m.slotListCursor < 0 || m.slotListCursor >= len(m.filteredPool) {
+			m.slotListCursor = 0
+		}
+		selectedModel := m.filteredPool[m.slotListCursor]
+		if selectedModel == locale.T("(设置为未设置/清空)", "(clear/unset)") || selectedModel == locale.T("(无匹配模型)", "(no match)") {
+			selectedModel = ""
+		}
+		ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID, &m.p.SubagentModel}[m.activeSlot]
+		*ptr = selectedModel
+		if m.activeSlot == 4 && m.p.Env != nil {
+			delete(m.p.Env, claude.SubagentModelEnv)
+		}
+		// A slot whose model was just changed must not keep a [1m] marker
+		// the backend rules out for the new model — toggleOneMAtRow refuses
+		// to enable one there, so leaving an enabled marker would be
+		// inconsistent and would send a non-1M model with the [1m] suffix.
+		slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.activeSlot]
+		if m.live().oneMSlots[slotKey] && m.oneMSlotBlocked(selectedModel) {
+			m.live().oneMSlots[slotKey] = false
+			setDebugf("slot model changed to a non-1M model; cleared 1M marker slot=%s model=%q", slotKey, selectedModel)
+		}
+		m.filterFocused = false
+		m.live().autoConfigured = false
+		setDebugf("slot selected active_slot=%d model=%q slots=%s", m.activeSlot, selectedModel, slotDebugSummary(*m.p))
+		return
+	}
+
+	switch m.currentRow() {
+	case rowSource:
+		m.switchSource(m.otherSource())
+	case rowEndpoint:
+		m.cursor = m.mainRowIndex(rowAPIKey)
+		m.urlFocused = false
+		m.keyFocused = true
+		setDebugf("enter endpoint -> api key endpoint=%q", m.urlText.Get())
+	case rowAPIKey:
+		// Custom advances to Auto Configure; models.dev has no test step, so
+		// move to the first model slot instead.
+		if m.usesModelsDev() {
+			m.cursor = m.mainRowIndex(rowOpus)
+		} else {
+			m.cursor = m.mainRowIndex(rowTest)
+		}
+		m.urlFocused = false
+		m.keyFocused = false
+		setDebugf("enter api key -> next api_key_len=%d", len(m.keyText.Get()))
+	case rowProvider:
+		m.activateRow(rowProvider)
+	case rowTest:
+		m.activateRow(rowTest)
+	case rowProtocol, rowFast, rowTools, rowToolSearch:
+		m.adjustReviewField(1)
+	case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
+		if !m.connectionReady() {
+			return
+		}
+		m.activeSlot = slotForRow(m.currentRow())
+		m.filterFocused = true
+		m.filterText.Set("")
+		m.slotListCursor = 0
+		m.updateFilteredPool()
+		setDebugf("open slot picker active_slot=%d filtered_count=%d", m.activeSlot, len(m.filteredPool))
+	case rowTestModels:
+		m.activateRow(rowTestModels)
+	case rowContext:
+		// Context & Compact is edited inline; nothing to open yet.
+		setDebugf("context row selected")
+	case rowActive:
+		m.IsActiveChosen = !m.IsActiveChosen
+		setDebugf("active choice toggled active_chosen=%t", m.IsActiveChosen)
+	case rowSave:
+		if m.requestSave() {
+			m.quit()
+		}
+	case rowCancel:
+		setDebugf("cancel requested")
+		m.quit()
+	}
+	m.keepCursorVisible()
+}
+
+// invalidateModelsDevKeyIfChanged drops a stale key verification once the key
+// text changes: keyVerified only proves the key that was verified at the
+// time, and content changes void it. If a verify request is still in flight
+// the probe baseline is resynced too, so a late keyVerifyDoneMsg cannot slip
+// past the guard and mark the unverified new key as connected.
+func (m *AdvancedConfigModel) invalidateModelsDevKeyIfChanged() {
+	m.live().keyVerified = false
+	m.live().detectionError = nil
+	m.live().detecting = false
+	m.live().probeAPIKey = m.keyText.Get()
+}
+
+// renderModelFetchProgress builds the connection-check in-progress block: a
+// spinner frame, the label, and the hint line.
+func renderModelFetchProgress(progress, frame int, oauth bool, app *tui.App) []*tui.Element {
 	if progress < 0 {
 		progress = 0
 	}
@@ -2599,47 +2710,66 @@ func renderModelFetchProgress(progress, frame int, oauth bool) string {
 	if oauth {
 		label = locale.T("Connecting via OAuth...", "Connecting via OAuth...")
 	}
-	return "\n" +
-		selectedStyle.Render(fmt.Sprintf("%s %s", spin, label)) + "\n" +
-		grayText.Render(locale.T("请稍候，正在验证连接", "Please wait while the connection is verified")) + "\n"
-}
-
-// focusCredentialFieldMsg asks the model to focus one of the credential inputs.
-// focusRowMsg asks the model to move the cursor to a specific configuration row,
-// clicked in the rendered frame. The mouse handler reports intent as a message
-// instead of mutating the model from the view.
-type focusRowMsg struct{ row configRowKind }
-
-func renderCredentialField(label, value string, focused bool) string {
-	prefix := "  "
-	labelText := purpleText.Render(label)
-	if focused {
-		prefix = selectedStyle.Render("> ")
-		labelText = selectedStyle.Render(label)
+	return []*tui.Element{
+		plainLine(""),
+		line(span(fmt.Sprintf("%s %s", spin, label), stSelected)),
+		spanLine(locale.T("请稍候，正在验证连接", "Please wait while the connection is verified"), stGray),
 	}
-	return fmt.Sprintf("%s%s\n  %s\n\n", prefix, labelText, value)
 }
 
-func (m *AdvancedConfigModel) renderPageHeader(title, badge string) string {
-	line := titleStyle.Render(title) + badgeStyle.Render(badge)
-	// Show the protocol family in the header until a detection has pinned it.
+// credentialField renders one credential row: the label line and the value
+// line(s). The API key can span multiple lines (its editor accepts Enter);
+// each line is its own element so the mouse hit-test rows stay stable.
+func credentialField(label, value string, focused bool) []*tui.Element {
+	prefix := "  "
+	labelStyle := stPurple
+	if focused {
+		prefix = "> "
+		labelStyle = stSelected
+	}
+	_ = prefix
+	_ = labelStyle
+	rows := []*tui.Element{
+		line(span("  ", tui.NewStyle()), span(label, stPurple)),
+	}
+	_ = focused
+	_ = rows
+	for _, v := range strings.Split(value, "\n") {
+		rows = append(rows, line(span("  ", tui.NewStyle()), span(v, stGray)))
+	}
+	rows = append(rows, plainLine(""))
+	return rows
+}
+
+// renderPageHeader renders the page title row(s): title + badge (+ protocol
+// family until a detection pins it) and a divider rule.
+func (m *AdvancedConfigModel) renderPageHeader(title, badge string) []*tui.Element {
+	head := line(
+		span(title, stTitle),
+		span(badge, stBadge),
+	)
 	if !m.live().modelPoolFromDiscovery && !m.usesOAuth() {
-		line += protoBadgeStyle.Render("Protocol: " + m.getProtocolFamily())
+		head.AddChild(tui.New(tui.WithText("Protocol: "+m.getProtocolFamily()), tui.WithTextStyle(stProtoBadge)))
 	}
 	dividerWidth := max(m.panelWidth()-6, 16)
-	return line + "\n" + dividerStyle.Render(strings.Repeat("─", dividerWidth)) + "\n\n"
+	return []*tui.Element{
+		head,
+		spanLine(strings.Repeat("─", dividerWidth), stDivider),
+		plainLine(""),
+	}
 }
 
 // truncateMiddle keeps endpoint/model names on one line for the review page.
-// Width is measured in terminal cells via lipgloss (ANSI-aware, Unicode-aware).
+// Width is measured in terminal cells (ANSI-aware, Unicode-aware) via
+// tui.StringWidth.
 func truncateMiddle(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if max < 8 || lipgloss.Width(s) <= max {
+	if max < 8 || tui.StringWidth(s) <= max {
 		return s
 	}
 	runess := []rune(s)
 	ellipsis := "…"
-	budget := max - lipgloss.Width(ellipsis)
+	budget := max - tui.StringWidth(ellipsis)
 	if budget < 2 {
 		return ellipsis
 	}
@@ -2649,7 +2779,7 @@ func truncateMiddle(s string, max int) string {
 	var left string
 	for _, r := range runess {
 		cand := left + string(r)
-		if lipgloss.Width(cand) > leftBudget {
+		if tui.StringWidth(cand) > leftBudget {
 			break
 		}
 		left = cand
@@ -2657,7 +2787,7 @@ func truncateMiddle(s string, max int) string {
 	var right string
 	for i := len(runess) - 1; i >= 0; i-- {
 		cand := string(runess[i]) + right
-		if lipgloss.Width(cand) > rightBudget {
+		if tui.StringWidth(cand) > rightBudget {
 			break
 		}
 		right = cand
@@ -2665,10 +2795,15 @@ func truncateMiddle(s string, max int) string {
 	return left + ellipsis + right
 }
 
-func (m *AdvancedConfigModel) View() tea.View {
+// Render builds the whole page as a go-tui element tree. Three exits: the
+// slot picker overlay (filter focused), the models.dev picker overlay, and
+// the main configuration page. A nil app is tolerated so tests can render
+// offline.
+func (m *AdvancedConfigModel) Render(app *tui.App) *tui.Element {
+	_ = app
 	// Model picker overlay: when the filter input has focus, render only the
 	// filtered model list (search + availability) instead of the main page.
-	if m.filterInput.Focused() {
+	if m.filterFocused {
 		return m.viewModelPicker()
 	}
 	// models.dev picker overlay: render only the provider catalog instead of the
@@ -2676,8 +2811,13 @@ func (m *AdvancedConfigModel) View() tea.View {
 	if m.modelsDevPicker {
 		return m.viewModelsDevPicker()
 	}
+	return m.viewMainPage()
+}
 
-	var body strings.Builder
+// viewMainPage renders the single-page configuration panel: header, connection
+// block, model mapping, runtime rows, and the action bar.
+func (m *AdvancedConfigModel) viewMainPage() *tui.Element {
+	var rows []*tui.Element
 
 	// ── Title bar ──────────────────────────────────────────────────────────
 	title := locale.T("Provider 配置", "Provider Configuration")
@@ -2685,23 +2825,25 @@ func (m *AdvancedConfigModel) View() tea.View {
 	if m.usesOAuth() {
 		badge = "OAuth"
 	}
-	body.WriteString(m.renderPageHeader(title, badge))
+	rows = append(rows, m.renderPageHeader(title, badge)...)
 
 	// ── Connection ─────────────────────────────────────────────────────────
-	body.WriteString(titleStyle.Render("Connection") + "\n")
+	rows = append(rows, spanLine("Connection", stTitle))
 	if m.usesOAuth() {
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Provider", cyanText.Render(m.p.OAuthProvider)))
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Fast", cyanText.Render(providerFastSummary(*m.p))))
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
-		body.WriteString(fmt.Sprintf("  %-12s %s\n", "Local Proxy", availableStyle.Render(locale.T("已就绪（仅本次会话）", "Ready (this session only)"))))
+		rows = append(rows,
+			kvRow("Provider", span(m.p.OAuthProvider, stCyan)),
+			kvRow("Fast", span(providerFastSummary(*m.p), stCyan)),
+			kvRow("Auth", span(providerAuthLabel(*m.p), stAvailable)),
+			kvRow("Local Proxy", span(locale.T("已就绪（仅本次会话）", "Ready (this session only)"), stAvailable)),
+		)
 	} else {
 		copiedHint := ""
 		if m.keyCopied {
-			copiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
+			copiedHint = "  " + locale.T("✓ 已复制", "✓ copied")
 		}
 		urlCopiedHint := ""
 		if m.urlCopied {
-			urlCopiedHint = "  " + availableStyle.Render(locale.T("✓ 已复制", "✓ copied"))
+			urlCopiedHint = "  " + locale.T("✓ 已复制", "✓ copied")
 		}
 		// Endpoint and API Key render identically: unfocused they are grey text
 		// (so the two fields match), and only when focused do they show the live
@@ -2713,58 +2855,34 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// Source stepper: single-value ‹ › toggle between Custom and models.dev,
 		// styled like the other steppers below (purple when idle, accent when
 		// focused, cycling with ←→).
-		sourcePrefix := "  "
 		sourceVal := "models.dev"
 		if m.source == sourceCustom {
 			sourceVal = "Custom"
 		}
-		sourceValue := purpleText.Render("‹ " + sourceVal + " ›")
-		if m.cursor == m.mainRowIndex(rowSource) {
-			sourcePrefix = selectedStyle.Render("> ")
-			sourceValue = selectedStyle.Render("‹ " + sourceVal + " ›")
-		}
-		body.WriteString(fmt.Sprintf("%s%-12s %s\n", sourcePrefix, "Source", sourceValue))
+		rows = append(rows, stepperRow("Source", "‹ "+sourceVal+" ›", m.cursor == m.mainRowIndex(rowSource)))
 
 		if m.usesModelsDev() {
 			// models.dev: endpoint/protocol come from metadata (read-only). The
 			// Provider row opens the catalog picker; only the API key is editable.
-			providerPrefix := "  "
-			providerVal := purpleText.Render(truncateMiddle(m.p.Name, idleWidth))
-			if m.cursor == m.mainRowIndex(rowProvider) {
-				providerPrefix = selectedStyle.Render("> ")
-				providerVal = selectedStyle.Render(truncateMiddle(m.p.Name, idleWidth))
-			}
-			body.WriteString(fmt.Sprintf("%s%-12s %s\n", providerPrefix, "Provider", providerVal))
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Endpoint", cyanText.Render(truncateMiddle(m.p.Endpoint, idleWidth))))
+			rows = append(rows, stepperRow("Provider", truncateMiddle(m.p.Name, idleWidth), m.cursor == m.mainRowIndex(rowProvider)))
+			rows = append(rows, kvRow("Endpoint", span(truncateMiddle(m.p.Endpoint, idleWidth), stCyan)))
 		} else {
-			urlValue := grayText.Render(truncateMiddle(m.urlInput.Value(), idleWidth))
-			if m.urlInput.Focused() {
-				urlValue = m.urlInput.View()
-			}
-			body.WriteString(renderCredentialField("Endpoint URL", urlValue+urlCopiedHint, false))
+			urlValue := truncateMiddle(m.urlText.Get(), idleWidth) + urlCopiedHint
+			rows = append(rows, credentialField("Endpoint URL", urlValue, false)...)
 		}
 
-		keyValue := grayText.Render(truncateMiddle(m.keyInput.Value(), idleWidth))
-		if m.keyInput.Focused() {
-			keyValue = strings.TrimRight(m.keyInput.View(), "\n")
-		}
-		body.WriteString(renderCredentialField("API Key", keyValue+copiedHint, false))
+		keyValue := truncateMiddle(m.keyText.Get(), idleWidth) + copiedHint
+		rows = append(rows, credentialField("API Key", keyValue, false)...)
 
 		// Protocol moved up from Runtime: Chat/Responses/Anthropic is selectable
 		// for a manual Custom gateway; fixed and per-model runtimes stay read-only.
 		if m.usesModelsDev() {
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render("auto/mixed")))
+			rows = append(rows, kvRow("Protocol", span("auto/mixed", stAvailable)))
 		} else if m.canSelectCustomProtocol() {
 			value := customProtocolLabel(m.p.Type)
-			protoPrefix := "  "
-			protoVal := purpleText.Render("‹ " + value + " ›")
-			if m.cursor == m.mainRowIndex(rowProtocol) {
-				protoPrefix = selectedStyle.Render("> ")
-				protoVal = selectedStyle.Render("‹ " + value + " ›")
-			}
-			body.WriteString(fmt.Sprintf("%s%-12s %s\n", protoPrefix, "Protocol", protoVal))
+			rows = append(rows, stepperRow("Protocol", "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowProtocol)))
 		} else {
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
+			rows = append(rows, kvRow("Protocol", span(m.getProtocol(), stAvailable)))
 		}
 	}
 
@@ -2774,85 +2892,99 @@ func (m *AdvancedConfigModel) View() tea.View {
 	// against the real endpoint (Test Connection) before the page reports a live
 	// connection — a non-empty string is not proof of validity.
 	if m.live().detecting {
-		body.WriteString(renderModelFetchProgress(m.live().detectProgress, m.live().detectFrame, m.usesOAuth()))
+		rows = append(rows, renderModelFetchProgress(m.live().detectProgress, m.live().detectFrame, m.usesOAuth(), nil)...)
 	} else if m.usesModelsDev() {
 		if !m.live().modelPoolFromDiscovery {
-			body.WriteString(grayText.Render(locale.T("尚未选择 Provider", "No provider selected yet")) + "\n")
+			rows = append(rows, spanLine(locale.T("尚未选择 Provider", "No provider selected yet"), stGray))
 		} else {
 			// Symmetric with Custom's Auto Configure: the button is always present
-			// so the cursor never lands on an invisible row; the status line below it
-			// reports whether the key has actually been verified.
+			// so the cursor never lands on an invisible row; the status line below
+			// it reports whether the key has actually been verified.
 			testLabel := locale.T("验证连接", "Test Connection")
-			testStr := buttonStyle.Render(testLabel)
-			if m.cursor == m.mainRowIndex(rowTest) {
-				testStr = buttonActiveStyle.Render(testLabel)
-			}
-			body.WriteString("  " + testStr + "\n")
+			rows = append(rows, line(
+				span("  ", tui.NewStyle()),
+				span(testLabel, buttonStyle(false, m.cursor == m.mainRowIndex(rowTest))),
+			))
 
-			if strings.TrimSpace(m.keyInput.Value()) == "" {
-				body.WriteString(grayText.Render(locale.T("已选择 Provider · 请输入 API Key", "Provider selected · enter your API key")) + "\n")
+			if strings.TrimSpace(m.keyText.Get()) == "" {
+				rows = append(rows, spanLine(locale.T("已选择 Provider · 请输入 API Key", "Provider selected · enter your API key"), stGray))
 			} else if m.live().detectionError != nil {
-				errorWidth := max(m.panelWidth()-8, 20)
-				body.WriteString(errorBoxStyle.Width(errorWidth).Render(locale.T("验证失败，无法连接", "Verification failed; cannot connect")+"\n"+m.live().detectionError.Error()) + "\n\n")
+				rows = append(rows,
+					spanLine(locale.T("验证失败，无法连接", "Verification failed; cannot connect"), stUnavailable),
+					spanLine(m.live().detectionError.Error(), stUnavailable),
+					plainLine(""),
+				)
 			} else if m.live().keyVerified {
 				status := fmt.Sprintf(locale.T("✓ 已连接 · %s · %d 个模型", "✓ Connected · %s · %d models"), provider.ProtocolLabelForProvider(*m.p), len(m.live().modelPool))
-				body.WriteString(availableStyle.Render(status) + "\n")
+				rows = append(rows, spanLine(status, stAvailable))
 			} else {
-				body.WriteString(grayText.Render(locale.T("Key 尚未验证", "Key not verified yet")) + "\n")
+				rows = append(rows, spanLine(locale.T("Key 尚未验证", "Key not verified yet"), stGray))
 			}
 		}
 	} else {
 		testLabel := locale.T("Auto Configure", "Auto Configure")
-		testStr := buttonStyle.Render(testLabel)
-		if m.cursor == m.mainRowIndex(rowTest) {
-			testStr = buttonActiveStyle.Render(testLabel)
-		}
-		body.WriteString("  " + testStr + "\n")
+		rows = append(rows, line(
+			span("  ", tui.NewStyle()),
+			span(testLabel, buttonStyle(false, m.cursor == m.mainRowIndex(rowTest))),
+		))
 
 		if m.live().detectionError != nil {
-			errorWidth := max(m.panelWidth()-8, 20)
-			body.WriteString(errorBoxStyle.Width(errorWidth).Render(locale.T("检测失败，无法继续", "Detection failed; cannot continue")+"\n"+m.live().detectionError.Error()) + "\n\n")
+			rows = append(rows,
+				spanLine(locale.T("检测失败，无法继续", "Detection failed; cannot continue"), stUnavailable),
+				spanLine(m.live().detectionError.Error(), stUnavailable),
+				plainLine(""),
+			)
 		} else if m.live().modelPoolFromDiscovery {
 			status := fmt.Sprintf(locale.T("✓ 已连接 · %s · %d 个模型", "✓ Connected · %s · %d models"), provider.ProtocolLabelForProvider(*m.p), len(m.live().modelPool))
-			body.WriteString(availableStyle.Render(status) + "\n")
+			rows = append(rows, spanLine(status, stAvailable))
 			if !m.usesOAuth() {
-				body.WriteString(fmt.Sprintf("  %-12s %s\n", "Auth", availableStyle.Render(providerAuthLabel(*m.p))))
+				rows = append(rows, kvRow("Auth", span(providerAuthLabel(*m.p), stAvailable)))
 			}
 		}
 	}
 
 	// ── Model Mapping (only after detection) ──────────────────────────────
 	{
-		body.WriteString("\n" + titleStyle.Render("Model Mapping") + "\n")
+		rows = append(rows, plainLine(""), spanLine("Model Mapping", stTitle))
 		// (the block always renders; rows grey out until connectionReady)
 		ready := m.connectionReady()
 		renderMappingRow := func(kind configRowKind, label, display, modelID string, oneM bool) {
-			prefix := "  "
-			val := purpleText.Render(truncateMiddle(display, 52))
+			val := span(truncateMiddle(display, 52), stPurple)
 			if !ready {
 				// Connection not ready: grey out the row, no focus affordance.
-				val = grayText.Render(truncateMiddle(display, 52))
+				val = span(truncateMiddle(display, 52), stGray)
 			} else if m.cursor == m.mainRowIndex(kind) {
-				prefix = selectedStyle.Render("> ")
-				val = selectedStyle.Render(truncateMiddle(display, 52))
+				val = span(truncateMiddle(display, 52), stSelected)
 			}
-			badge := "    "
-			if oneM {
-				badge = lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("[1M]")
+			prefix := "  "
+			prefixStyle := tui.NewStyle()
+			if ready && m.cursor == m.mainRowIndex(kind) {
+				prefix = "> "
+				prefixStyle = stSelected
 			}
-			if !ready {
-				badge = grayText.Render("  ")
-			}
+			row := line(
+				span(prefix, prefixStyle),
+				span(fmt.Sprintf("%-10s ", label), tui.NewStyle()),
+				span(truncateMiddle(display, 52), styleOf(val)),
+			)
 			// Availability badge, shown only after the optional test ran.
+			badgeText := "    "
+			badgeStyle := tui.NewStyle()
 			if status, ok := m.modelAvailability[modelID]; ok && status != modelAvailabilityUnknown {
 				switch status {
 				case modelAvailabilityAvailable:
-					badge = availableStyle.Render("✓") + " "
+					badgeText = "✓ "
+					badgeStyle = stAvailable
 				case modelAvailabilityUnavailable:
-					badge = unavailableStyle.Render("✗") + " "
+					badgeText = "✗ "
+					badgeStyle = stUnavailable
 				}
+			} else if oneM && ready {
+				badgeText = "[1M]"
+				badgeStyle = stOneM
 			}
-			body.WriteString(fmt.Sprintf("%s%-10s %s %s\n", prefix, label, val, badge))
+			row.AddChild(tui.New(tui.WithRichText(span(" "+badgeText, badgeStyle))))
+			rows = append(rows, row)
 		}
 		renderMappingRow(rowOpus, "Opus", m.modelDisplayLabel(m.p.OpusModel), m.p.OpusModel, m.live().oneMSlots["opus"])
 		renderMappingRow(rowSonnet, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.p.SonnetModel, m.live().oneMSlots["sonnet"])
@@ -2863,80 +2995,74 @@ func (m *AdvancedConfigModel) View() tea.View {
 		// Test Model Availability — optional; each probe consumes quota, so the
 		// user opts in explicitly. Results are shown next to the model rows above.
 		testPrefix := "  "
+		testPrefixStyle := tui.NewStyle()
 		testLabel := locale.T("Test Model Availability", "Test Model Availability")
+		testStyle := stPurple
 		if !ready {
-			testLabel = grayText.Render(testLabel)
+			testStyle = stGray
 		} else if m.modelTesting {
 			spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 			spin := spinners[m.modelTestFrame%len(spinners)]
 			testLabel = fmt.Sprintf("%s %s", spin, locale.T("正在测试模型可用性...", "Testing model availability..."))
 		} else if m.cursor == m.mainRowIndex(rowTestModels) {
-			testPrefix = selectedStyle.Render("> ")
-			testLabel = selectedStyle.Render(testLabel)
-		} else {
-			testLabel = purpleText.Render(testLabel)
+			testPrefix = "> "
+			testPrefixStyle = stSelected
+			testStyle = stSelected
 		}
-		body.WriteString(testPrefix + testLabel + "\n")
+		rows = append(rows, line(
+			span(testPrefix, testPrefixStyle),
+			span(testLabel, testStyle),
+		))
 		if m.modelTesting {
-			body.WriteString(grayText.Render("    "+locale.T("测试进行中 · 按 esc 取消", "Testing in progress · press esc to cancel")) + "\n")
+			rows = append(rows, spanLine("    "+locale.T("测试进行中 · 按 esc 取消", "Testing in progress · press esc to cancel"), stGray))
 		} else if len(m.modelAvailability) > 0 {
 			available, unavailable := m.availabilityCounts()
-			body.WriteString(grayText.Render(fmt.Sprintf("    "+locale.T("%d 个可用 · %d 个不可用", "%d available · %d unavailable"), available, unavailable)) + "\n")
+			rows = append(rows, spanLine(fmt.Sprintf("    "+locale.T("%d 个可用 · %d 个不可用", "%d available · %d unavailable"), available, unavailable), stGray))
 		} else {
-			body.WriteString(grayText.Render(locale.T("    ⚠ 会为每个模型发送一次最小请求，消耗额度", "    ⚠ sends one minimal request per model; consumes quota")) + "\n")
+			rows = append(rows, spanLine(locale.T("    ⚠ 会为每个模型发送一次最小请求，消耗额度", "    ⚠ sends one minimal request per model; consumes quota"), stGray))
 		}
 
 		// Context & Compact — per-slot [1m] via Space on the rows above; the
 		// provider-wide fallback cycles with ←→ (shown as ‹ › like other editable
 		// values).
-		ctxPrefix := "  "
-		ctxVal := purpleText.Render("‹ " + m.compactSummary() + " ›")
-		if !ready {
-			ctxVal = grayText.Render("‹ " + m.compactSummary() + " ›")
-		} else if m.cursor == m.mainRowIndex(rowContext) {
-			ctxPrefix = selectedStyle.Render("> ")
-			ctxVal = selectedStyle.Render("‹ " + m.compactSummary() + " ›")
-		}
-		body.WriteString(fmt.Sprintf("%s%-18s %s\n", ctxPrefix, "Context & Compact", ctxVal))
+		rows = append(rows, stepperRow("Context & Compact", "‹ "+m.compactSummary()+" ›", m.cursor == m.mainRowIndex(rowContext)))
 
 		// ── Runtime ──────────────────────────────────────────────────────
-		body.WriteString("\n" + titleStyle.Render("Runtime") + "\n")
+		rows = append(rows, plainLine(""), spanLine("Runtime", stTitle))
 		renderEditable := func(kind configRowKind, label, value string) {
-			prefix := "  "
-			val := purpleText.Render(value)
-			if !ready {
-				val = grayText.Render(value)
-			} else if m.cursor == m.mainRowIndex(kind) {
-				prefix = selectedStyle.Render("> ")
-				val = selectedStyle.Render(value)
-			}
-			body.WriteString(fmt.Sprintf("%s%-12s %s\n", prefix, label, val))
+			rows = append(rows, stepperRow(label, value, ready && m.cursor == m.mainRowIndex(kind)))
 		}
 		if m.usesOAuth() {
 			// OAuth subscriptions keep the read-only protocol display here: their
 			// Connection block is subscription metadata with no protocol concept.
-			body.WriteString(fmt.Sprintf("  %-12s %s\n", "Protocol", availableStyle.Render(m.getProtocol())))
+			rows = append(rows, kvRow("Protocol", span(m.getProtocol(), stAvailable)))
 		}
 		renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
 		renderEditable(rowTools, "Tools", formatToolsLabel(m.reviewToolsValue()))
 		renderEditable(rowToolSearch, "Tool Search", formatSearchLabel(m.reviewSearchValue()))
 
 		// ── Active checkbox ──────────────────────────────────────────────
-		body.WriteString("\n")
-		activePrefix := "  "
 		activeBox := "[ ]"
 		if m.IsActiveChosen {
 			activeBox = "[x]"
 		}
 		activeLabel := locale.T("设为当前激活 Provider", "Set as active provider")
-		boxStyled := purpleText.Render(activeBox)
-		labelStyled := purpleText.Render(activeLabel)
-		if m.cursor == m.mainRowIndex(rowActive) {
-			activePrefix = selectedStyle.Render("> ")
-			boxStyled = selectedStyle.Render(activeBox)
-			labelStyled = selectedStyle.Render(activeLabel)
+		activeSelected := m.cursor == m.mainRowIndex(rowActive)
+		boxStyle := stPurple
+		labelStyle := stPurple
+		prefix := "  "
+		prefixStyle := tui.NewStyle()
+		if activeSelected {
+			prefix = "> "
+			prefixStyle = stSelected
+			boxStyle = stSelected
+			labelStyle = stSelected
 		}
-		body.WriteString(fmt.Sprintf("%s%s %s\n", activePrefix, boxStyled, labelStyled))
+		rows = append(rows, line(
+			span(prefix, prefixStyle),
+			span(activeBox+" ", boxStyle),
+			span(activeLabel, labelStyle),
+		))
 
 		// ── Actions ──────────────────────────────────────────────────────
 		applyLabel := locale.T("保存并激活", "Save & Activate")
@@ -2945,133 +3071,151 @@ func (m *AdvancedConfigModel) View() tea.View {
 		}
 		cancelLabel := locale.T("取消", "Cancel")
 		applyDisabled := !m.canSave()
-		applyStr := buttonStyle.Render(applyLabel)
+		applyStyle := tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
 		if applyDisabled {
 			// Not connected (or a dirty connection not yet re-tested): the button
 			// is greyed out and not focusable.
-			applyStr = grayText.Render("  " + applyLabel + "  ")
+			applyStyle = stGray
 		} else if m.cursor == m.mainRowIndex(rowSave) {
-			applyStr = buttonActiveStyle.Render(applyLabel)
+			applyStyle = stButtonActive
 		}
-		cancelStr := buttonStyle.Render(cancelLabel)
+		cancelStyle := tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
 		if m.cursor == m.mainRowIndex(rowCancel) {
-			cancelStr = buttonActiveStyle.Render(cancelLabel)
+			cancelStyle = stButtonActive
 		}
-		body.WriteString("\n  " + applyStr + "          " + cancelStr + "\n")
+		rows = append(rows, plainLine(""), line(
+			span("  ", tui.NewStyle()),
+			span(applyLabel, applyStyle),
+			span("     ", tui.NewStyle()),
+			span(cancelLabel, cancelStyle),
+		))
 
 		if m.live().connectionDirty && !m.usesOAuth() {
-			body.WriteString(grayText.Render(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving")) + "\n")
+			rows = append(rows, spanLine(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving"), stGray))
 		}
 		if m.customDraft != nil && m.customDraft.saveGuardPending {
-			body.WriteString(unavailableStyle.Render(locale.T(
+			rows = append(rows, spanLine(locale.T(
 				"保存将覆盖同名 models.dev Provider（逐模型协议表会丢失）；再次点击保存确认，或切回 models.dev",
 				"Saving replaces the same-named models.dev provider (its per-model protocol table is lost); press Save again to confirm, or switch back to models.dev",
-			)) + "\n")
+			), stUnavailable))
 		}
-		body.WriteString(grayText.Render(locale.T(
+		rows = append(rows, spanLine(locale.T(
 			"↑↓ 选择 · ←→ 调整 · enter 确认 · 模型行 enter 筛选",
 			"↑↓ select · ←→ adjust · enter confirm · enter on a model row to filter",
-		)) + "\n")
+		), stGray))
 	}
 
-	panelStyle := windowStyle.Width(m.panelWidth()).Padding(0, 2)
-	// Scroll the page body when it exceeds the terminal. The offset is derived
-	// from the cursor row so the focused row stays visible; View does not mutate
-	// model state. Fixed chrome (panel border + footer tip) leaves the rest.
-	bodyLines := strings.Split(body.String(), "\n")
-	scrollOffset := m.scrollOffset
-	if m.height > 0 && len(bodyLines) > m.height {
-		// The frame must fit: title bar, detection block, panel border, footer tip.
-		// The budget must match keepCursorVisible so a cursor it keeps visible is
-		// exactly the window sliced here.
-		maxBody := scrollBodyBudget(m.height)
-		// Anchor the scroll window to the cursor row using the persisted offset
-		// (maintained by keepCursorVisible on cursor movement). The Save/Cancel
-		// action bar is the most important thing to keep reachable, so when the
-		// persisted offset would hide it the window is anchored to the tail.
-		offset := m.scrollOffset
-		if offset < 0 {
-			offset = 0
-		}
-		// If the cursor is near the action bar (Save/Cancel), or the offset would
-		// leave it off-screen, clamp to the tail so the actions stay visible.
-		if m.cursor >= m.mainRowIndex(rowSave) {
-			offset = len(bodyLines) - maxBody
-			if offset < 0 {
-				offset = 0
-			}
-		} else if offset+maxBody > len(bodyLines) {
-			offset = len(bodyLines) - maxBody
-			if offset < 0 {
-				offset = 0
-			}
-		}
-		// Keep the cursor's own rendered line inside the window. keepCursorVisible
-		// already did this for the cursor-line model, but the structural blank
-		// lines in the body can push the rendered line a few rows later than the
-		// cursor-line estimate; clamp here so the focused row is never sliced off.
-		if m.cursor >= 0 && m.cursor < len(m.visibleRows()) {
-			cursorLine := renderedCursorLine(body.String(), m.cursor, m.visibleRows())
-			if cursorLine < offset {
-				offset = cursorLine
-			} else if cursorLine >= offset+maxBody {
-				offset = cursorLine - maxBody + 1
-			}
-			if offset < 0 {
-				offset = 0
-			}
-			if offset+maxBody > len(bodyLines) {
-				offset = len(bodyLines) - maxBody
-				if offset < 0 {
-					offset = 0
-				}
-			}
-		}
-		bodyLines = bodyLines[offset : offset+maxBody]
-		if len(bodyLines) == 0 {
-			bodyLines = []string{""}
-		}
+	// Panel: the rows above are the page body, wrapped in a rounded border with
+	// horizontal padding.
+	panel := tui.New(
+		tui.WithDisplay(tui.DisplayFlex),
+		tui.WithDirection(tui.Column),
+		tui.WithWrap(false),
+		tui.WithBorder(tui.BorderRounded),
+		tui.WithPaddingTRBL(0, 2, 0, 2),
+	)
+	for _, r := range m.scrollWindow(rows) {
+		panel.AddChild(r)
 	}
-	panel := panelStyle.Render(strings.Join(bodyLines, "\n"))
-	langTipMsg := locale.T(
+
+	content := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Column), tui.WithWrap(false), tui.WithPaddingTRBL(1, 0, 1, 0))
+	if m.scrollOffset > 0 {
+		content.AddChild(spanLine(locale.T("▲ 上滚 · ↑ 查看", "▲ scrolled up · ↑ to view"), stGray))
+	}
+	content.AddChild(panel)
+	content.AddChild(plainLine(""))
+	content.AddChild(spanLine(locale.T(
 		"💡 提示: 使用 `ccl lang` 更改终端显示语言",
 		"💡 Tip: Change the TUI display language with `ccl lang`",
-	)
-	content := panel
-	if scrollOffset > 0 {
-		content = grayText.Render(locale.T("▲ 上滚 · ↑ 查看", "▲ scrolled up · ↑ to view")) + "\n" + content
-	}
-	content += "\n\n" + grayText.Render(langTipMsg)
-
-	finalStr := content
-	if m.width > 0 && m.height > 0 {
-		finalStr = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
-	}
-	v := tea.NewView(finalStr)
-	v.AltScreen = true
-	// Mouse reporting: clicking a configuration row focuses it, and the wheel
-	// scrolls the single page when content exceeds the terminal.
-	if !m.filterInput.Focused() {
-		// AllMotion so trackpad two-finger scroll and plain wheel both report
-		// motion/wheel events even when no button is held.
-		v.MouseMode = tea.MouseModeAllMotion
-		lines := strings.Split(finalStr, "\n")
-		v.OnMouse = func(msg tea.MouseMsg) tea.Cmd {
-			// Only clicks are handled; the mouse wheel and trackpad two-finger
-			// scroll are deliberately ignored so they do not scroll the page.
-			if _, ok := msg.(tea.MouseClickMsg); !ok {
-				return nil
-			}
-			mouse := msg.Mouse()
-			row, ok := rowAtLineAt(lines, mouse.Y, mouse.X)
-			if !ok {
-				return nil
-			}
-			return func() tea.Msg { return focusRowMsg{row: row} }
-		}
-	}
-	return v
+	), stGray))
+	return content
 }
+
+// scrollWindow slices the page body rows to the visible window when the body
+// exceeds the terminal height. The offset mirrors keepCursorVisible (the model
+// field), anchored to the tail when the action bar would fall off.
+func (m *AdvancedConfigModel) scrollWindow(rows []*tui.Element) []*tui.Element {
+	if m.height <= 0 || len(rows) <= m.height {
+		return rows
+	}
+	maxBody := scrollBodyBudget(m.height)
+	offset := m.scrollOffset
+	if offset < 0 {
+		offset = 0
+	}
+	// The Save/Cancel action bar is the most important thing to keep reachable,
+	// so when the cursor is on it (or the offset would slice it off) the window
+	// anchors to the tail.
+	if m.cursor >= m.mainRowIndex(rowSave) {
+		offset = len(rows) - maxBody
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset+maxBody > len(rows) {
+		offset = len(rows) - maxBody
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	window := rows[offset : offset+maxBody]
+	if len(window) == 0 {
+		return []*tui.Element{plainLine("")}
+	}
+	return window
+}
+
+// kvRow renders a read-only key/value line ("  Key  Value") with styled value.
+func kvRow(key string, value tui.TextSpan) *tui.Element {
+	return line(
+		span(fmt.Sprintf("  %-12s ", key), tui.NewStyle()),
+		value,
+	)
+}
+
+// stepperRow renders an editable value row: a label plus a ‹ value › style value
+// that highlights when the cursor is on the row. labelPad keeps the columns of
+// differently-long labels aligned.
+func stepperRow(label, value string, selected bool) *tui.Element {
+	labelPad := 12
+	if len(label) > 10 {
+		labelPad = 18
+	}
+	valueStyle := stPurple
+	prefix := "  "
+	prefixStyle := tui.NewStyle()
+	if selected {
+		valueStyle = stSelected
+		prefix = "> "
+		prefixStyle = stSelected
+	}
+	return line(
+		span(prefix, prefixStyle),
+		span(fmt.Sprintf("%-"+fmt.Sprint(labelPad)+"s ", label), tui.NewStyle()),
+		span(value, valueStyle),
+	)
+}
+
+// spanLine renders one single-style text line (no wrap so hit-test rows stay
+// stable).
+func spanLine(text string, st tui.Style) *tui.Element {
+	return tui.New(tui.WithText(text), tui.WithTextStyle(st), tui.WithWrap(false))
+}
+
+// buttonStyle composes the button look: idle = tinted background, active =
+// accent background. The disabled variant greys the text out.
+func buttonStyle(disabled, active bool) tui.Style {
+	if disabled {
+		return stGray
+	}
+	if active {
+		return stButtonActive
+	}
+	return tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
+}
+
+// styleOf is a tiny helper keeping mapping-row construction readable.
+func styleOf(s tui.TextSpan) tui.Style { return s.Style }
 
 // rowAtLine resolves a clicked screen row to a configuration row kind by
 // matching the rendered labels. A click on the value row directly below a
@@ -3096,7 +3240,7 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 		}
 		// Strip ANSI only; keep the leading border/space columns so label
 		// offsets line up with the click's X column.
-		text := ansi.Strip(lines[row])
+		text := stripANSI(lines[row])
 		// Copy rows (key / URL value) are only hit when clicked directly on their
 		// own row; the off-by-one fallback (a value-row click resolving to its
 		// label row) must not trigger them.
@@ -3106,6 +3250,42 @@ func rowAtLineAt(lines []string, y, x int) (configRowKind, bool) {
 		}
 	}
 	return rowCancel, false
+}
+
+// stripANSI removes SGR/CSI escape sequences from a rendered line, leaving the
+// printable text. go-tui renders through its own escape builder, so the panel
+// code owns a minimal stripper instead of pulling in x/ansi.
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) {
+			// CSI sequences: ESC [ ... letter
+			if s[i+1] == '[' {
+				j := i + 2
+				for j < len(s) && !isANSIFinalByte(s[j]) {
+					j++
+				}
+				if j < len(s) {
+					j++ // include the final byte
+				}
+				i = j
+				continue
+			}
+			// Two-byte escapes (ESC c, ESC \, ...)
+			i += 2
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// isANSIFinalByte reports whether c terminates a CSI sequence (ANSI "final"
+// byte range 0x40-0x7E).
+func isANSIFinalByte(c byte) bool {
+	return c >= 0x40 && c <= 0x7e
 }
 
 // matchRowLabel matches a rendered line against the clickable labels. A label
@@ -3250,11 +3430,17 @@ func rowClickLabelPrefixes(kind configRowKind) []string {
 // viewModelPicker renders the filtered model selection overlay. It is shown
 // whenever the filter input owns the keyboard; selecting a model (enter) or
 // pressing esc returns to the main configuration page.
-func (m *AdvancedConfigModel) viewModelPicker() tea.View {
-	var body strings.Builder
+func (m *AdvancedConfigModel) viewModelPicker() *tui.Element {
 	slotName := []string{"Opus", "Sonnet", "Haiku", "Custom", "Subagent"}[m.activeSlot]
-	body.WriteString(titleStyle.Render(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName)))
-	body.WriteString("\n" + filterStyle.Render(locale.T("🔍 过滤模型: ", "🔍 Filter model: ")) + m.filterInput.View() + "\n")
+	root := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Column), tui.WithWrap(false), tui.WithPadding(1))
+	root.AddChild(tui.New(
+		tui.WithRichText(span(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName), stTitle)),
+	))
+	filterText := m.filterText.Get()
+	root.AddChild(line(
+		span(locale.T("🔍 过滤模型: ", "🔍 Filter model: "), stFilter),
+		span(filterText, tui.NewStyle()),
+	))
 
 	start := m.filterWindowStart
 	end := start + filterViewHeight
@@ -3262,54 +3448,61 @@ func (m *AdvancedConfigModel) viewModelPicker() tea.View {
 		end = len(m.filteredPool)
 	}
 	if start > 0 {
-		body.WriteString(grayText.Render(fmt.Sprintf("   ↑ ... %d more above ...", start)) + "\n")
+		root.AddChild(spanLine(fmt.Sprintf("   ↑ ... %d more above ...", start), stGray))
 	}
 	for i := start; i < end; i++ {
 		mod := m.filteredPool[i]
-		prefix := "   "
 		display := mod
 		if stringInSlice(mod, m.live().modelPool) {
 			display = m.modelDisplayLabel(mod)
 		}
-		line := grayText.Render(display)
 		status := ""
 		if stringInSlice(mod, m.live().modelPool) {
-			status = "  " + m.availabilityLabel(mod)
+			badge := m.availabilitySpan(mod)
+			status = "  " + badge.Text
 		}
+		rowStyle := stGray
+		prefix := "   "
+		prefixStyle := tui.NewStyle()
 		if i == m.slotListCursor {
-			prefix = selectedStyle.Render(" > ")
-			line = selectedStyle.Render(display)
+			rowStyle = stSelected
+			prefix = " > "
+			prefixStyle = stSelected
 		}
-		body.WriteString(prefix + line + status + "\n")
+		if status != "" {
+			root.AddChild(line(span(prefix, prefixStyle), span(display, rowStyle), span(status, stGray)))
+		} else {
+			root.AddChild(line(span(prefix, prefixStyle), span(display, rowStyle)))
+		}
 	}
 	if end < len(m.filteredPool) {
-		body.WriteString(grayText.Render(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filteredPool)-end)) + "\n")
+		root.AddChild(spanLine(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filteredPool)-end), stGray))
 	}
-	body.WriteString(selectedStyle.Render(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool))) + "\n\n" + grayText.Render(locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel")) + "\n")
-
-	panel := windowStyle.Width(m.panelWidth()).Render(body.String())
-	finalStr := panel
-	if m.width > 0 && m.height > 0 {
-		finalStr = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
-	}
-	v := tea.NewView(finalStr)
-	v.AltScreen = true
-	return v
+	root.AddChild(spanLine(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool)), stSelected))
+	root.AddChild(plainLine(""))
+	root.AddChild(spanLine(locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel"), stGray))
+	return panelWrap(root, m.panelWidth())
 }
 
 // viewModelsDevPicker renders the models.dev provider overlay opened from the
 // Connection section. It is filterable and scrolls like the slot picker.
-func (m *AdvancedConfigModel) viewModelsDevPicker() tea.View {
-	var body strings.Builder
-	body.WriteString(titleStyle.Render(locale.T("从 models.dev 选择 Provider", "Choose a provider from models.dev")) + "\n\n")
-	body.WriteString(filterStyle.Render(locale.T("🔍 过滤: ", "🔍 Filter: ")) + m.modelsDevInput.View() + "\n\n")
+func (m *AdvancedConfigModel) viewModelsDevPicker() *tui.Element {
+	root := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Column), tui.WithWrap(false), tui.WithPadding(1))
+	root.AddChild(tui.New(tui.WithText(locale.T("从 models.dev 选择 Provider", "Choose a provider from models.dev")), tui.WithTextStyle(stTitle)))
+	root.AddChild(plainLine(""))
+	root.AddChild(line(
+		span(locale.T("🔍 过滤: ", "🔍 Filter: "), stFilter),
+		span(m.modelsDevText.Get(), tui.NewStyle()),
+	))
+	root.AddChild(plainLine(""))
 
 	if m.modelsDevLoading {
-		body.WriteString(selectedStyle.Render(locale.T("正在加载 models.dev 目录...", "Loading the models.dev catalog...")) + "\n")
+		root.AddChild(spanLine(locale.T("正在加载 models.dev 目录...", "Loading the models.dev catalog..."), stSelected))
 	} else if m.modelsDevError != nil {
-		body.WriteString(errorBoxStyle.Render(locale.T("拉取失败", "Fetch failed")+"\n"+m.modelsDevError.Error()) + "\n")
+		root.AddChild(spanLine(locale.T("拉取失败", "Fetch failed"), stUnavailable))
+		root.AddChild(spanLine(m.modelsDevError.Error(), stUnavailable))
 	} else if len(m.modelsDevFiltered) == 0 {
-		body.WriteString(grayText.Render(locale.T("(无匹配)", "(no match)")) + "\n")
+		root.AddChild(spanLine(locale.T("(无匹配)", "(no match)"), stGray))
 	} else {
 		start := m.modelsDevWindow
 		end := start + selectViewHeight
@@ -3317,7 +3510,7 @@ func (m *AdvancedConfigModel) viewModelsDevPicker() tea.View {
 			end = len(m.modelsDevFiltered)
 		}
 		if start > 0 {
-			body.WriteString(grayText.Render(fmt.Sprintf("   ↑ ... %d more above ...", start)) + "\n")
+			root.AddChild(spanLine(fmt.Sprintf("   ↑ ... %d more above ...", start), stGray))
 		}
 		for i := start; i < end; i++ {
 			p := m.modelsDevFiltered[i]
@@ -3326,25 +3519,90 @@ func (m *AdvancedConfigModel) viewModelsDevPicker() tea.View {
 				display = fmt.Sprintf("%s  (%s)", p.Name, p.ID)
 			}
 			prefix := "  "
-			line := display
+			prefixStyle := tui.NewStyle()
+			rowStyle := tui.NewStyle()
 			if i == m.modelsDevCursor {
 				prefix = "▸ "
-				line = selectedStyle.Render(display)
+				prefixStyle = stSelected
+				rowStyle = stSelected
 			}
-			body.WriteString(prefix + line + "\n")
+			root.AddChild(line(span(prefix, prefixStyle), span(display, rowStyle)))
 		}
 		if end < len(m.modelsDevFiltered) {
-			body.WriteString(grayText.Render(fmt.Sprintf("   ↓ ... %d more below ...", len(m.modelsDevFiltered)-end)) + "\n")
+			root.AddChild(spanLine(fmt.Sprintf("   ↓ ... %d more below ...", len(m.modelsDevFiltered)-end), stGray))
 		}
 	}
 
-	body.WriteString("\n" + grayText.Render(locale.T("输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel")))
-	panel := windowStyle.Width(m.panelWidth()).Render(body.String())
-	finalStr := panel
-	if m.width > 0 && m.height > 0 {
-		finalStr = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
-	}
-	v := tea.NewView(finalStr)
-	v.AltScreen = true
-	return v
+	root.AddChild(plainLine(""))
+	root.AddChild(spanLine(locale.T("输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel"), stGray))
+	return panelWrap(root, m.panelWidth())
 }
+
+// panelWrap wraps an overlay body in the shared rounded panel.
+func panelWrap(body *tui.Element, width int) *tui.Element {
+	panel := tui.New(
+		tui.WithDirection(tui.Column),
+		tui.WithWrap(false),
+		tui.WithBorder(tui.BorderRounded),
+		tui.WithPaddingTRBL(0, 2, 0, 2),
+		tui.WithMaxWidth(width),
+	)
+	panel.AddChild(body)
+	return panel
+}
+
+// KeyMap routes every key through handleKey. go-tui matches one binding per
+// event, so a single AnyKey stop binding covers the whole page (the picker,
+// the modals, and the inputs are disambiguated inside handleKey).
+func (m *AdvancedConfigModel) KeyMap() tui.KeyMap {
+	return tui.KeyMap{
+		tui.OnStop(tui.AnyKey, func(ke tui.KeyEvent) {
+			m.handleKey(ke)
+			m.markDirty()
+		}),
+	}
+}
+
+// HandleMouse maps a click to the configuration row under the pointer. The
+// rendered frame is re-rendered offline (tui.Sprint at the current terminal
+// width) so the hit test works on exactly what the user sees. Only left-button
+// presses are handled; the wheel is deliberately ignored (the page anchors its
+// scroll window to the cursor instead).
+func (m *AdvancedConfigModel) HandleMouse(me tui.MouseEvent) bool {
+	if m.modelsDevPicker || m.filterFocused {
+		return false
+	}
+	if me.Button != tui.MouseLeft || me.Action != tui.MousePress {
+		return false
+	}
+	lines := strings.Split(tui.Sprint(m.Render(nil), tui.WithPrintWidth(max(m.width, 1))), "\n")
+	row, ok := rowAtLineAt(lines, me.Y, me.X)
+	if !ok {
+		return false
+	}
+	m.handleFocusRow(row)
+	return true
+}
+
+// Watchers bridges the async goroutines onto the main loop: the four result
+// channels, the two spinner/cleanup timers, and the one-shot auto-detect that
+// used to live in Init(). go-tui calls Watchers() after the first render, so
+// the channels are guaranteed to be watched before any fetch can complete.
+func (m *AdvancedConfigModel) Watchers() []tui.Watcher {
+	m.startAutoDetect()
+	return []tui.Watcher{
+		tui.Watch(m.fetchDone, m.handleFetchDone),
+		tui.Watch(m.verifyDone, m.handleVerifyDone),
+		tui.Watch(m.mdDone, m.handleModelsDevDone),
+		tui.Watch(m.availDone, m.handleAvailabilityDone),
+		tui.OnTimer(120*time.Millisecond, m.handleFetchTick),
+		tui.OnTimer(120*time.Millisecond, m.handleAvailabilityTick),
+	}
+}
+
+// BindApp stores the app reference used by markDirty/quit. The framework calls
+// it before the first render.
+func (m *AdvancedConfigModel) BindApp(app *tui.App) { m.app = app }
+
+// UnbindApp clears the app reference (symmetric cleanup for tests).
+func (m *AdvancedConfigModel) UnbindApp() { m.app = nil }
