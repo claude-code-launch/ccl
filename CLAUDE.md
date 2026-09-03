@@ -32,7 +32,7 @@ HOME="$CCL_TEST_HOME" /tmp/ccl-verify models --all
 ### 命令分派与配置
 
 - `cmd/root.go` 的 `cmd.Execute` 先判断首个参数是否为 ccl 自己注册的命令。未知首个参数会被当作 Claude Code 参数透传；字面量首参 `claude` 会被去掉后再透传。因此测试命令分派时不要随意运行会启动真实 Claude Code 会话的参数。
-- `cmd/` 负责命令语义、provider 管理、OAuth/cloud 命令和 Bubble Tea TUI；协议转换与凭据刷新应放在 `internal` 包，不要堆入 Cobra handler。TUI 使用私有域 `charm.land/bubbletea/v2`（连同 `charm.land/bubbles/v2`、`charm.land/lipgloss/v2`），不是公开的 `github.com/charmbracelet/bubbletea`；`cmd/advanced_config.go` 是单页配置面板，`cmd/select.go` 的 `runSelect` 是通用过滤式选择器。
+- `cmd/` 负责命令语义、provider 管理、OAuth/cloud 命令和 TUI 界面；协议转换与凭据刷新应放在 `internal` 包，不要堆入 Cobra handler。TUI 使用 `github.com/grindlemire/go-tui`（v0.19.0），不再依赖 Bubble Tea/lipgloss；`cmd/advanced_config.go` 是单页配置面板（组件实现 `Render/KeyMap/HandleMouse/Watchers` 接口，退出语义由 `quitRequested` 承载），`cmd/select.go` 的 `runSelect` 是通用过滤式选择器。渲染注意：flex 容器必须显式 `WithDisplay(tui.DisplayFlex)`（默认 `DisplayBlock` 会强制垂直堆叠子元素）；含前导/连续空格的行必须用 `WithRichText` span 构造（`WithText` 经 `strings.Fields` 折叠空格）。
 - `internal/config` 读写 `~/.ccl/config.yaml`，兼容迁移旧 `~/.cc/config.yaml`，读取时迁移旧字段，并以原子写入和 `0600` 权限保存。
 - `internal/provider.Provider` 是持久化配置模型：包含 protocol/type、endpoint、模型池、Opus/Sonnet/Haiku/Custom/Subagent 槽位、OAuth provider/credential 绑定和 provider 级环境变量。`internal/providersession.Session` 使用它的副本；会话临时 endpoint、随机 key 和模型目录不能写回配置。
 - `cmd/root.go` 中已有 active provider 时配置优先于环境变量；只有没有 active provider 时才回退到 `ANTHROPIC_*` / `OPENAI_*` 环境变量。
