@@ -2746,7 +2746,7 @@ func credentialField(label, value string, focused bool) []*tui.Element {
 func (m *AdvancedConfigModel) renderPageHeader(title, badge string) []*tui.Element {
 	// Leading spaces keep the lipgloss MarginLeft(1) look; go-tui styles have
 	// no margin, so the separation lives in the span text itself.
-	spans := []tui.TextSpan{span(title, stTitle), span(" " + badge, stBadge)}
+	spans := []tui.TextSpan{span(title, stTitle), span(" "+badge, stBadge)}
 	if !m.live().modelPoolFromDiscovery && !m.usesOAuth() {
 		// Must be a third span, not a later AddChild: block children appended to
 		// a flex Row mis-layout and the text overlaps (see CLAUDE.md go-tui notes).
@@ -3602,9 +3602,16 @@ func (m *AdvancedConfigModel) Watchers() []tui.Watcher {
 	}
 }
 
-// BindApp stores the app reference used by markDirty/quit. The framework calls
-// it before the first render.
-func (m *AdvancedConfigModel) BindApp(app *tui.App) { m.app = app }
+// BindApp stores the app reference used by markDirty/quit and wires the four
+// input States so their Set() calls mark the frame dirty on their own. The
+// framework calls it before the first render.
+func (m *AdvancedConfigModel) BindApp(app *tui.App) {
+	m.app = app
+	m.urlText.BindApp(app)
+	m.keyText.BindApp(app)
+	m.filterText.BindApp(app)
+	m.modelsDevText.BindApp(app)
+}
 
 // UnbindApp clears the app reference (symmetric cleanup for tests).
 func (m *AdvancedConfigModel) UnbindApp() { m.app = nil }
