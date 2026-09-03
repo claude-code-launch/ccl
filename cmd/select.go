@@ -25,6 +25,8 @@ type selectComponent struct {
 	text   *tui.State[string] // filter text being typed
 	cursor *tui.State[int]    // index into filtered
 	result string             // chosen item, empty if cancelled
+
+	app *tui.App // set by BindApp; markDirty is a no-op until then
 }
 
 func newSelectComponent(title string, items []string) *selectComponent {
@@ -96,8 +98,8 @@ func (s *selectComponent) KeyMap() tui.KeyMap {
 		// are filter text rather than navigation. Only ctrl+c and esc abort.
 		tui.OnStop(tui.KeyEscape, func(ke tui.KeyEvent) { ke.App().Stop() }),
 		tui.OnStop(tui.KeyCtrlC, func(ke tui.KeyEvent) { ke.App().Stop() }),
-		tui.OnStop(tui.KeyUp, func(ke tui.KeyEvent) { s.moveCursor(-1) }),
-		tui.OnStop(tui.KeyDown, func(ke tui.KeyEvent) { s.moveCursor(1) }),
+		tui.OnStop(tui.KeyUp, func(ke tui.KeyEvent) { s.moveCursor(-1); s.markDirty() }),
+		tui.OnStop(tui.KeyDown, func(ke tui.KeyEvent) { s.moveCursor(1); s.markDirty() }),
 		tui.OnStop(tui.KeyEnter, func(ke tui.KeyEvent) {
 			c := s.cursor.Get()
 			if len(s.filtered) > 0 && c >= 0 && c < len(s.filtered) {
@@ -105,9 +107,28 @@ func (s *selectComponent) KeyMap() tui.KeyMap {
 				ke.App().Stop()
 			}
 		}),
-		tui.OnStop(tui.AnyRune, s.typeRune),
-		tui.OnStop(tui.KeyBackspace, func(ke tui.KeyEvent) { s.backspace() }),
+		tui.OnStop(tui.AnyRune, func(ke tui.KeyEvent) { s.typeRune(ke); s.markDirty() }),
+		tui.OnStop(tui.KeyBackspace, func(ke tui.KeyEvent) { s.backspace(); s.markDirty() }),
 	}
+}
+
+// markDirty triggers a re-render after a state change. The State created by
+// tui.NewState is app-less until BindApp runs, so Set() alone does not mark
+// the frame dirty and key presses would not repaint (the terminal shows a
+// stale list with the cursor apparently frozen).
+func (s *selectComponent) markDirty() {
+	if s.app != nil {
+		s.app.MarkDirty()
+	}
+}
+
+// BindApp wires the component's States to the app (the framework calls this on
+// the root component via SetRootComponent). Bound States mark the frame dirty
+// on Set(); markDirty below covers the plain filtered slice as well.
+func (s *selectComponent) BindApp(app *tui.App) {
+	s.app = app
+	s.text.BindApp(app)
+	s.cursor.BindApp(app)
 }
 
 // Render builds the filter prompt and the visible slice of the filtered list.

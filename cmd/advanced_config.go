@@ -2744,13 +2744,15 @@ func credentialField(label, value string, focused bool) []*tui.Element {
 // renderPageHeader renders the page title row(s): title + badge (+ protocol
 // family until a detection pins it) and a divider rule.
 func (m *AdvancedConfigModel) renderPageHeader(title, badge string) []*tui.Element {
-	head := line(
-		span(title, stTitle),
-		span(badge, stBadge),
-	)
+	// Leading spaces keep the lipgloss MarginLeft(1) look; go-tui styles have
+	// no margin, so the separation lives in the span text itself.
+	spans := []tui.TextSpan{span(title, stTitle), span(" " + badge, stBadge)}
 	if !m.live().modelPoolFromDiscovery && !m.usesOAuth() {
-		head.AddChild(tui.New(tui.WithText("Protocol: "+m.getProtocolFamily()), tui.WithTextStyle(stProtoBadge)))
+		// Must be a third span, not a later AddChild: block children appended to
+		// a flex Row mis-layout and the text overlaps (see CLAUDE.md go-tui notes).
+		spans = append(spans, span(" Protocol: "+m.getProtocolFamily(), stProtoBadge))
 	}
+	head := line(spans...)
 	dividerWidth := max(m.panelWidth()-6, 16)
 	return []*tui.Element{
 		head,
