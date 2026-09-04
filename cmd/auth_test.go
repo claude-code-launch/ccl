@@ -684,24 +684,17 @@ func TestRunAuthGPTAppliesPreferredDefaults(t *testing.T) {
 	}
 }
 
-func TestRunAuthChatGPTLegacyAliasCanonicalizesToGPT(t *testing.T) {
+func TestRunAuthChatGPTLegacyAliasIsRejected(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
 	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{Provider: target, Backend: "codex", Path: "codex-legacy@example.com.json"}, nil
+		t.Fatalf("oauthLogin should not run for legacy alias, got target %q", target)
+		return oauthproxy.LoginResult{}, nil
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"chatgpt", "legacy"}, authOptions{}); err != nil {
-		t.Fatalf("runAuth(chatgpt) error: %v", err)
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	p := cfg.Providers["legacy"]
-	if p.OAuthProvider != "gpt" {
-		t.Fatalf("legacy chatgpt login should canonicalize oauthProvider to gpt, got %+v", p)
+	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"chatgpt", "legacy"}, authOptions{}); err == nil {
+		t.Fatal("runAuth(chatgpt) should fail; the legacy login alias was removed")
 	}
 }
 

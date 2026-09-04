@@ -50,10 +50,7 @@ func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}
 	}
-	if got, err := ValidateLoginProvider(ProviderChatGPTLegacy); err != nil || got != ProviderChatGPT {
-		t.Fatalf("ValidateLoginProvider(chatgpt legacy) = %q, %v; want %q", got, err, ProviderChatGPT)
-	}
-	for _, name := range []string{ProviderCodex, "antigravity", "xai", ""} {
+	for _, name := range []string{ProviderCodex, ProviderChatGPTLegacy, "antigravity", "xai", ""} {
 		if _, err := ValidateLoginProvider(name); err == nil {
 			t.Fatalf("ValidateLoginProvider(%q) should fail", name)
 		}

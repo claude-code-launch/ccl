@@ -41,7 +41,6 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
 Notes:
   - Alias "auth" still works: ccl auth gpt
-  - Legacy "chatgpt" is accepted and normalized to "gpt"
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
   - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID

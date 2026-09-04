@@ -13,7 +13,8 @@ const (
 	ProviderCodex   = "codex"
 	ProviderGemini  = "gemini"
 	ProviderChatGPT = "gpt"
-	// ProviderChatGPTLegacy is accepted by auth for older configs/docs.
+	// ProviderChatGPTLegacy is a value read from older configs and credential
+	// files; login no longer accepts it as an alias for gpt.
 	ProviderChatGPTLegacy = "chatgpt"
 	ProviderGrok          = "grok"
 	ProviderCopilot       = "copilot"
@@ -131,9 +132,6 @@ func ValidateLoginProvider(providerName string) (string, error) {
 	switch target {
 	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderCommandCode:
 		return target, nil
-	case ProviderChatGPTLegacy:
-		// Keep accepting "chatgpt" as a login alias; canonicalize to "gpt".
-		return ProviderChatGPT, nil
 	default:
 		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, or commandcode)", providerName)
 	}
