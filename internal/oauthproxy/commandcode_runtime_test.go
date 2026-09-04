@@ -448,16 +448,25 @@ func TestCommandCodeEndToEndNonStreaming(t *testing.T) {
 }
 
 func TestCommandCodeErrorMappingAndRetryAfter(t *testing.T) {
+	// Shorten the shared fast-retry backoff: the 429 subtest now exhausts the
+	// budget (3 upstream calls), while 402/403 must stay at exactly 1 call —
+	// 402 is a billing state that must not burn the retry budget even though
+	// it maps to 429 for the client.
+	previous := upstreamFastRetryBackoff
+	upstreamFastRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { upstreamFastRetryBackoff = previous })
+
 	tests := []struct {
 		name      string
 		status    int
 		want      int
 		wantType  string
 		retryFlag bool
+		wantCalls int32
 	}{
-		{name: "payment required maps to rate limit", status: http.StatusPaymentRequired, want: http.StatusTooManyRequests, wantType: "rate_limit_error"},
-		{name: "forbidden maps to unauthorized", status: http.StatusForbidden, want: http.StatusUnauthorized, wantType: "authentication_error"},
-		{name: "rate limit carries retry after", status: http.StatusTooManyRequests, want: http.StatusTooManyRequests, wantType: "rate_limit_error", retryFlag: true},
+		{name: "payment required maps to rate limit", status: http.StatusPaymentRequired, want: http.StatusTooManyRequests, wantType: "rate_limit_error", wantCalls: 1},
+		{name: "forbidden maps to unauthorized", status: http.StatusForbidden, want: http.StatusUnauthorized, wantType: "authentication_error", wantCalls: 1},
+		{name: "rate limit carries retry after", status: http.StatusTooManyRequests, want: http.StatusTooManyRequests, wantType: "rate_limit_error", retryFlag: true, wantCalls: 3},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -495,6 +504,9 @@ func TestCommandCodeErrorMappingAndRetryAfter(t *testing.T) {
 				}
 			} else if got := response.Header.Get("Retry-After"); got != "" {
 				t.Fatalf("unexpected Retry-After %q", got)
+			}
+			if got := generateCalls.Load(); got != test.wantCalls {
+				t.Fatalf("generate calls = %d, want %d", got, test.wantCalls)
 			}
 		})
 	}

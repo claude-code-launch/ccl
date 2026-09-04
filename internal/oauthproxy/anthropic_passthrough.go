@@ -170,24 +170,29 @@ func (s *anthropicPassthroughService) handleMessages(writer http.ResponseWriter,
 		"status", http.StatusOK, "stream", stream, "duration", logDuration(started))
 }
 
-// forward sends one upstream request, resolving the Bearer token. On a 401 from
-// a stale OAuth token it refreshes once and retries before surfacing the failure.
+// forward sends one upstream request, resolving the Bearer token, inside the
+// shared fast-retry loop: a 429 or 5xx outcome is retried twice more
+// (500ms/1s) before being relayed as-is for Claude Code's own backoff. On a
+// 401 from a stale OAuth token it refreshes once and retries before
+// surfacing the failure.
 func (s *anthropicPassthroughService) forward(ctx context.Context, incoming *http.Request, path string, body []byte) (*http.Response, error) {
-	response, err := s.forwardOnce(ctx, incoming, path, body)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
-		_ = response.Body.Close()
-		if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
-			return nil, fmt.Errorf("refresh OAuth token: %w", authErr)
-		}
-		response, err = s.forwardOnce(ctx, incoming, path, body)
+	return retryUpstream(ctx, "anthropic_passthrough", func() (*http.Response, error) {
+		response, err := s.forwardOnce(ctx, incoming, path, body)
 		if err != nil {
 			return nil, err
 		}
-	}
-	return response, nil
+		if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
+			_ = response.Body.Close()
+			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
+				return nil, fmt.Errorf("refresh OAuth token: %w", authErr)
+			}
+			response, err = s.forwardOnce(ctx, incoming, path, body)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return response, nil
+	})
 }
 
 func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming *http.Request, path string, body []byte) (*http.Response, error) {

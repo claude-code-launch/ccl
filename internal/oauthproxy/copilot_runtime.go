@@ -341,6 +341,11 @@ func (g *copilotGateway) serveHTTP(writer http.ResponseWriter, request *http.Req
 	copyCopilotResponse(writer, response.Body)
 }
 
+// do is the inner hop of the two-hop Copilot path: this loopback gateway
+// proxies to the real GitHub Copilot API on behalf of the outer chat/responses
+// services. The fast-retry loop in retry.go must NOT wrap this hop — the outer
+// service already owns it, and nesting the two would retry 3×3 = 9 times.
+// Credential rotation stays here; only 429/5xx fast retry is the outer hop's.
 func (g *copilotGateway) do(ctx context.Context, method, path, rawQuery string, headers http.Header, body []byte) (*http.Response, error) {
 	credentials, err := g.pool.ordered()
 	if err != nil {

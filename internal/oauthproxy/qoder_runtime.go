@@ -33,6 +33,10 @@ func (e *qoderUpstreamError) Error() string {
 	return fmt.Sprintf("Qoder upstream returned HTTP %d: %s", e.status, e.body)
 }
 
+// upstreamStatus implements the retry.go fast-retry probe against the raw
+// upstream status, before any client-facing mapping.
+func (e *qoderUpstreamError) upstreamStatus() int { return e.status }
+
 type qoderStreamUsage struct {
 	input      int64
 	output     int64
@@ -366,89 +370,96 @@ func (service *qoderService) recordUsage(model qoderModel, usage qoderStreamUsag
 	service.usage.Add(label, usage.input, usage.output, usage.cacheRead, usage.cacheWrite)
 }
 
+// callUpstream runs one credential-rotation sweep inside the shared
+// fast-retry loop: a 429 or 5xx outcome is retried twice more (500ms/1s)
+// before being returned as-is for Claude Code's own backoff. The rotation
+// sweep itself is part of ONE attempt — COSY re-signs per attempt — so the
+// worst case is 3 sweeps × N credentials.
 func (service *qoderService) callUpstream(ctx context.Context, converted *qoderConvertedRequest) (*http.Response, error) {
-	credentials, err := service.pool.ordered()
-	if err != nil {
-		return nil, err
-	}
-	if len(credentials) == 0 {
-		return nil, fmt.Errorf("no active Qoder credentials")
-	}
-	var lastResponse *http.Response
-	var lastErr error
-	for index, candidate := range credentials {
-		attempt := index + 1
-		credential, usableErr := service.pool.usable(ctx, candidate, false)
-		if usableErr != nil {
-			LogWarnEvent("credential_unavailable", "component", "qoder", "request_id", requestLogID(ctx),
-				"attempt", attempt, "credential_count", len(credentials), "credential", candidate.fileName,
-				"error", usableErr)
-			lastErr = usableErr
-			continue
+	return retryUpstream(ctx, "qoder", func() (*http.Response, error) {
+		credentials, err := service.pool.ordered()
+		if err != nil {
+			return nil, err
 		}
-		LogDebugEvent("upstream_attempt", "component", "qoder", "request_id", requestLogID(ctx),
-			"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
-			"model", converted.model.ID)
-		response, requestErr := service.doUpstreamRequest(ctx, converted, credential)
-		if requestErr != nil {
-			LogWarnEvent("upstream_attempt_failed", "component", "qoder", "request_id", requestLogID(ctx),
-				"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
-				"model", converted.model.ID, "error", requestErr)
-			lastErr = requestErr
-			continue
+		if len(credentials) == 0 {
+			return nil, fmt.Errorf("no active Qoder credentials")
 		}
-		if response.StatusCode == http.StatusUnauthorized {
-			closeQoderResponse(response)
-			LogWarnEvent("credential_refresh", "component", "qoder", "request_id", requestLogID(ctx),
-				"attempt", attempt, "credential", credential.fileName, "status", http.StatusUnauthorized,
-				"action", "force_refresh")
-			credential, usableErr = service.pool.usable(ctx, credential, true)
+		var lastResponse *http.Response
+		var lastErr error
+		for index, candidate := range credentials {
+			attempt := index + 1
+			credential, usableErr := service.pool.usable(ctx, candidate, false)
 			if usableErr != nil {
-				LogWarnEvent("credential_refresh_failed", "component", "qoder", "request_id", requestLogID(ctx),
-					"attempt", attempt, "credential", candidate.fileName, "error", usableErr)
+				LogWarnEvent("credential_unavailable", "component", "qoder", "request_id", requestLogID(ctx),
+					"attempt", attempt, "credential_count", len(credentials), "credential", candidate.fileName,
+					"error", usableErr)
 				lastErr = usableErr
 				continue
 			}
-			response, requestErr = service.doUpstreamRequest(ctx, converted, credential)
+			LogDebugEvent("upstream_attempt", "component", "qoder", "request_id", requestLogID(ctx),
+				"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+				"model", converted.model.ID)
+			response, requestErr := service.doUpstreamRequest(ctx, converted, credential)
 			if requestErr != nil {
 				LogWarnEvent("upstream_attempt_failed", "component", "qoder", "request_id", requestLogID(ctx),
 					"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
-					"model", converted.model.ID, "phase", "after_refresh", "error", requestErr)
+					"model", converted.model.ID, "error", requestErr)
 				lastErr = requestErr
 				continue
 			}
-		}
-		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			if response.StatusCode == http.StatusUnauthorized {
+				closeQoderResponse(response)
+				LogWarnEvent("credential_refresh", "component", "qoder", "request_id", requestLogID(ctx),
+					"attempt", attempt, "credential", credential.fileName, "status", http.StatusUnauthorized,
+					"action", "force_refresh")
+				credential, usableErr = service.pool.usable(ctx, credential, true)
+				if usableErr != nil {
+					LogWarnEvent("credential_refresh_failed", "component", "qoder", "request_id", requestLogID(ctx),
+						"attempt", attempt, "credential", candidate.fileName, "error", usableErr)
+					lastErr = usableErr
+					continue
+				}
+				response, requestErr = service.doUpstreamRequest(ctx, converted, credential)
+				if requestErr != nil {
+					LogWarnEvent("upstream_attempt_failed", "component", "qoder", "request_id", requestLogID(ctx),
+						"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+						"model", converted.model.ID, "phase", "after_refresh", "error", requestErr)
+					lastErr = requestErr
+					continue
+				}
+			}
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				if lastResponse != nil {
+					closeQoderResponse(lastResponse)
+				}
+				return response, nil
+			}
 			if lastResponse != nil {
 				closeQoderResponse(lastResponse)
 			}
-			return response, nil
+			lastResponse = response
+			if response.StatusCode == http.StatusBadRequest {
+				break
+			}
+			action := "return_last_response"
+			if attempt < len(credentials) {
+				action = "try_next_credential"
+			}
+			LogUpstreamEvent(response.StatusCode, "upstream_retry_decision", "component", "qoder", "request_id", requestLogID(ctx),
+				"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
+				"model", converted.model.ID, "status", response.StatusCode,
+				"retry_after", response.Header.Get("Retry-After"), "action", action)
 		}
 		if lastResponse != nil {
-			closeQoderResponse(lastResponse)
+			status := lastResponse.StatusCode
+			body := drainQoderResponse(ctx, lastResponse)
+			return nil, &qoderUpstreamError{status: status, body: body}
 		}
-		lastResponse = response
-		if response.StatusCode == http.StatusBadRequest {
-			break
+		if lastErr == nil {
+			lastErr = fmt.Errorf("all Qoder credentials failed")
 		}
-		action := "return_last_response"
-		if attempt < len(credentials) {
-			action = "try_next_credential"
-		}
-		LogUpstreamEvent(response.StatusCode, "upstream_retry_decision", "component", "qoder", "request_id", requestLogID(ctx),
-			"attempt", attempt, "credential_count", len(credentials), "credential", credential.fileName,
-			"model", converted.model.ID, "status", response.StatusCode,
-			"retry_after", response.Header.Get("Retry-After"), "action", action)
-	}
-	if lastResponse != nil {
-		status := lastResponse.StatusCode
-		body := drainQoderResponse(ctx, lastResponse)
-		return nil, &qoderUpstreamError{status: status, body: body}
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("all Qoder credentials failed")
-	}
-	return nil, lastErr
+		return nil, lastErr
+	})
 }
 
 func (service *qoderService) doUpstreamRequest(ctx context.Context, converted *qoderConvertedRequest, credential *qoderCredential) (*http.Response, error) {

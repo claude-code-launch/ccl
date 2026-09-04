@@ -385,25 +385,31 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 		"model", converted.upstreamModel, "status", http.StatusOK, "stream", false, "duration", logDuration(started))
 }
 
-// forward sends one upstream Antigravity request, resolving the Bearer token.
-// On a 401 from a stale OAuth token it refreshes once and retries before
-// surfacing the failure.
+// forward sends one upstream Antigravity request, resolving the Bearer token,
+// inside the shared fast-retry loop: a 429 or 5xx outcome is retried twice
+// more (500ms/1s) before being relayed as-is for Claude Code's own backoff.
+// The daily→prod base fallback inside forwardOnce is part of ONE attempt, so
+// the worst case is 3 attempts × 2 bases = 6 upstream calls. On a 401 from a
+// stale OAuth token it refreshes once and retries before surfacing the
+// failure.
 func (s *geminiService) forward(ctx context.Context, stream bool, envelope []byte) (*http.Response, error) {
-	response, err := s.forwardOnce(ctx, stream, envelope)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
-		_ = response.Body.Close()
-		if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
-			return nil, fmt.Errorf("refresh Gemini OAuth token: %w", authErr)
-		}
-		response, err = s.forwardOnce(ctx, stream, envelope)
+	return retryUpstream(ctx, "gemini", func() (*http.Response, error) {
+		response, err := s.forwardOnce(ctx, stream, envelope)
 		if err != nil {
 			return nil, err
 		}
-	}
-	return response, nil
+		if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
+			_ = response.Body.Close()
+			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
+				return nil, fmt.Errorf("refresh Gemini OAuth token: %w", authErr)
+			}
+			response, err = s.forwardOnce(ctx, stream, envelope)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return response, nil
+	})
 }
 
 // forwardOnce issues the request against the daily base URL and falls back to

@@ -321,6 +321,10 @@ func (g *workbuddyGateway) serveHTTP(writer http.ResponseWriter, request *http.R
 	copyCopilotResponse(writer, response.Body)
 }
 
+// do is the inner hop of the two-hop WorkBuddy path: this loopback gateway
+// proxies to the real WorkBuddy API on behalf of the outer chat/responses
+// services. The fast-retry loop in retry.go must NOT wrap this hop — the outer
+// service already owns it, and nesting the two would retry 3×3 = 9 times.
 func (g *workbuddyGateway) do(ctx context.Context, path, rawQuery string, headers http.Header, body []byte) (*http.Response, error) {
 	credential, err := g.store.authorize(ctx, false)
 	if err != nil {

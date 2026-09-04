@@ -129,6 +129,12 @@ func (e *commandcodeUpstreamError) Error() string {
 		e.status, commandcodeErrorMessage(e.body, e.status))
 }
 
+// upstreamStatus implements the retry.go fast-retry probe. It reports the
+// ORIGINAL upstream status, not the Anthropic-facing mapped one: 402 maps to
+// 429 for the client but is a billing state that will not clear inside the
+// fast-retry budget, so it must not burn retries.
+func (e *commandcodeUpstreamError) upstreamStatus() int { return e.status }
+
 // startCommandCodeRuntime starts a CCL-owned Anthropic Messages entrypoint
 // against a Command Code API key. The endpoint falls back to the official
 // gateway when the config does not pin one.
@@ -558,42 +564,46 @@ func commandcodeProbeWhoami(ctx context.Context, client *http.Client, base, upst
 }
 
 // call posts the converted request to /alpha/generate with the full identity
-// header set of the reference client. The generate endpoint always returns
+// header set of the reference client, inside the shared fast-retry loop: a
+// 429 or 5xx outcome is retried twice more (500ms/1s) before being returned
+// as-is for Claude Code's own backoff. The generate endpoint always returns
 // NDJSON.
 func (s *commandcodeService) call(ctx context.Context, converted *commandcodeConvertedRequest) (*http.Response, error) {
-	raw, err := json.Marshal(converted.body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal Command Code request: %w", err)
-	}
-	target := s.endpoint + "/alpha/generate"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+s.upstreamKey)
-	request.Header.Set("x-cli-environment", "production")
-	request.Header.Set("x-command-code-version", commandcodeVersion)
-	request.Header.Set("x-session-id", s.sessionID)
-	request.Header.Set("x-co-flag", "false")
-	request.Header.Set("x-taste-learning", "false")
-	request.Header.Set("x-project-slug", s.projectSlug)
-	request.Header.Set("traceparent", commandcodeTraceparent())
-	LogDebugEvent("upstream_request", "component", "commandcode", "request_id", requestLogID(ctx),
-		"method", http.MethodPost, "endpoint", SafeLogEndpoint(target),
-		"body_bytes", len(raw), "model", converted.upstreamModel)
-	started := time.Now()
-	response, err := s.client.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("call Command Code upstream: %w", err)
-	}
-	LogUpstreamEvent(response.StatusCode, "upstream_response", "component", "commandcode", "request_id", requestLogID(ctx),
-		"status", response.StatusCode, "retry_after", response.Header.Get("Retry-After"),
-		"content_type", response.Header.Get("Content-Type"), "duration", logDuration(started))
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, commandcodeDrainError(ctx, response)
-	}
-	return response, nil
+	return retryUpstream(ctx, "commandcode", func() (*http.Response, error) {
+		raw, err := json.Marshal(converted.body)
+		if err != nil {
+			return nil, fmt.Errorf("marshal Command Code request: %w", err)
+		}
+		target := s.endpoint + "/alpha/generate"
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+s.upstreamKey)
+		request.Header.Set("x-cli-environment", "production")
+		request.Header.Set("x-command-code-version", commandcodeVersion)
+		request.Header.Set("x-session-id", s.sessionID)
+		request.Header.Set("x-co-flag", "false")
+		request.Header.Set("x-taste-learning", "false")
+		request.Header.Set("x-project-slug", s.projectSlug)
+		request.Header.Set("traceparent", commandcodeTraceparent())
+		LogDebugEvent("upstream_request", "component", "commandcode", "request_id", requestLogID(ctx),
+			"method", http.MethodPost, "endpoint", SafeLogEndpoint(target),
+			"body_bytes", len(raw), "model", converted.upstreamModel)
+		started := time.Now()
+		response, err := s.client.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("call Command Code upstream: %w", err)
+		}
+		LogUpstreamEvent(response.StatusCode, "upstream_response", "component", "commandcode", "request_id", requestLogID(ctx),
+			"status", response.StatusCode, "retry_after", response.Header.Get("Retry-After"),
+			"content_type", response.Header.Get("Content-Type"), "duration", logDuration(started))
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return nil, commandcodeDrainError(ctx, response)
+		}
+		return response, nil
+	})
 }
 
 // commandcodeDrainError reads a bounded prefix of the upstream error body and

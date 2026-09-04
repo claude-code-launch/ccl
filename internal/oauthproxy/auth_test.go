@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -624,8 +625,17 @@ func TestStartOpenAIResponsesAPIUsesCCLDataPlane(t *testing.T) {
 	}
 }
 
-func TestAPIKeyResponsesPreservesRetryAfterWithoutGlobalCooldown(t *testing.T) {
+func TestAPIKeyResponsesFastRetriesThenPreservesRetryAfter(t *testing.T) {
+	// The shared fast-retry loop must NOT honor the 37s Retry-After hint — it
+	// retries quickly (here: sub-millisecond) and, once the budget is spent,
+	// relays the original status/body/Retry-After for Claude Code's backoff.
+	previous := upstreamFastRetryBackoff
+	upstreamFastRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { upstreamFastRetryBackoff = previous })
+
+	var attempts atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
 		w.Header().Set("Retry-After", "37")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(w, `{"error":{"message":"slow down"}}`)
@@ -649,6 +659,9 @@ func TestAPIKeyResponsesPreservesRetryAfterWithoutGlobalCooldown(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") != "37" {
 		t.Fatalf("response = HTTP %d Retry-After %q", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("upstream attempts = %d, want 3 (initial + 2 fast retries)", attempts.Load())
 	}
 }
 

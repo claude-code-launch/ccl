@@ -72,6 +72,10 @@ func (e *chatCompletionsUpstreamError) Error() string {
 	return fmt.Sprintf("OpenAI Chat Completions upstream returned HTTP %d: %s", e.status, message)
 }
 
+// upstreamStatus implements the retry.go fast-retry probe against the raw
+// upstream status, before any client-facing mapping.
+func (e *chatCompletionsUpstreamError) upstreamStatus() int { return e.status }
+
 // startOpenAIChatRuntime starts a CCL-owned Anthropic Messages entrypoint that
 // translates requests to OpenAI Chat Completions upstream. It mirrors
 // startCodexResponsesRuntime's loopback/server lifecycle with no OAuth and no
@@ -363,27 +367,33 @@ func (s *chatCompletionsService) recordUsage(converted *chatCompletionsConverted
 	s.usage.Add(converted.clientModel, int64(input), int64(output), int64(assembler.cacheReadTokens), int64(assembler.cacheWriteTokens))
 }
 
+// call runs one upstream round-trip inside the shared fast-retry loop: a 429
+// or 5xx outcome is retried twice more (500ms/1s) before being returned
+// as-is, letting Claude Code do its own full backoff over the relayed
+// status/body/Retry-After. The 401 refresh below is part of one attempt.
 func (s *chatCompletionsService) call(ctx context.Context, converted *chatCompletionsConvertedRequest) (*http.Response, error) {
-	response, err := s.callOnce(ctx, converted)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
-		// OAuth subscription: a stale token 401s once, then we force-refresh and
-		// retry the request exactly once before surfacing the failure.
-		_ = response.Body.Close()
-		if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
-			return nil, fmt.Errorf("refresh OpenAI Chat OAuth token: %w", authErr)
-		}
-		response, err = s.callOnce(ctx, converted)
+	return retryUpstream(ctx, "openai_chat", func() (*http.Response, error) {
+		response, err := s.callOnce(ctx, converted)
 		if err != nil {
 			return nil, err
 		}
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, chatDrainError(ctx, response)
-	}
-	return response, nil
+		if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
+			// OAuth subscription: a stale token 401s once, then we force-refresh and
+			// retry the request exactly once before surfacing the failure.
+			_ = response.Body.Close()
+			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
+				return nil, fmt.Errorf("refresh OpenAI Chat OAuth token: %w", authErr)
+			}
+			response, err = s.callOnce(ctx, converted)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return nil, chatDrainError(ctx, response)
+		}
+		return response, nil
+	})
 }
 
 func (s *chatCompletionsService) callOnce(ctx context.Context, converted *chatCompletionsConvertedRequest) (*http.Response, error) {

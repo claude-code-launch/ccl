@@ -248,7 +248,11 @@ func TestWorkBuddyGatewayPreservesProviderErrors(t *testing.T) {
 	}
 }
 
+// The outer chat service owns the shared fast-retry loop, so a 429/5xx is
+// retried twice more per request (3 upstream calls × 2 requests = 6). The
+// gateway inner hop must stay unwrapped or this would be 3×3 per request.
 func TestWorkBuddyRuntimePreservesProviderErrorsWithoutRetryOrCooldown(t *testing.T) {
+	swapWorkBuddyFastRetry(t)
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			testWorkBuddyRuntimeProviderError(t, status)
@@ -309,8 +313,8 @@ func testWorkBuddyRuntimeProviderError(t *testing.T, upstreamStatus int) {
 			t.Fatalf("attempt %d status=%d body=%s", attempt, response.StatusCode, body)
 		}
 	}
-	if chatAttempts.Load() != 2 {
-		t.Fatalf("chat attempts = %d, want exactly one upstream call per request", chatAttempts.Load())
+	if chatAttempts.Load() != 6 {
+		t.Fatalf("chat attempts = %d, want one upstream call per attempt (3 fast-retries × 2 requests)", chatAttempts.Load())
 	}
 }
 
@@ -342,5 +346,17 @@ func restoreWorkBuddyTestGlobals(t *testing.T, baseURL string) {
 		workbuddyPollInterval = previousPollInterval
 		workbuddyLoginTimeout = previousLoginTimeout
 		workbuddyHTTPTimeout = previousHTTPTimeout
+	})
+}
+
+// swapWorkBuddyFastRetry shortens the shared fast-retry backoff for the two-hop
+// runtime tests so retried requests do not sleep in real time. The gateway-level
+// test above must NOT call this: it pins the inner hop at exactly one call.
+func swapWorkBuddyFastRetry(t *testing.T) {
+	t.Helper()
+	previous := upstreamFastRetryBackoff
+	upstreamFastRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() {
+		upstreamFastRetryBackoff = previous
 	})
 }

@@ -10,14 +10,23 @@
 // CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
 // this package altogether.
 //
-// Error recovery follows the data-plane owner. CCL-owned data planes refresh
-// OAuth once after a 401 and otherwise preserve upstream status/Retry-After:
-// Codex Responses, Grok, and Kimi refresh once;
-// WorkBuddy refreshes once after a 401/403; Gemini also falls back from the
-// daily to the prod Antigravity base on network errors, 429s and 5xx responses.
-// Copilot, Qoder, and Kiro keep only the recovery behavior required by their
-// upstreams; notably Kiro rotates credentials and retries burst 429s after 1s,
-// 2s, and 4s.
+// Error recovery follows the data-plane owner. Every CCL-owned data plane
+// first applies the shared fast-retry loop (retry.go): an upstream 429 or 5xx
+// outcome is retried twice more after 500ms and 1s — Retry-After hints are
+// not honored inside the loop, they are relayed on final failure so Claude
+// Code runs its own full backoff over the untouched status/body/Retry-After.
+// Per-provider recovery happens INSIDE one attempt: Codex Responses, Grok, and
+// Kimi refresh once after a 401; WorkBuddy refreshes once after a 401/403;
+// Gemini also falls back from the daily to the prod Antigravity base on
+// network errors, 429s and 5xx responses (so one attempt is up to 2 upstream
+// calls); Qoder rotates credentials and re-signs COSY per attempt. Command
+// Code's 402 maps to 429 for the client but reports its original status to
+// the loop, so billing failures never burn the retry budget. Three layers are
+// deliberately outside the loop: Kiro keeps its own longer 1/2/4s budget with
+// per-round credential rotation (stacking would double the backoff), and the
+// WorkBuddy and Copilot loopback gateways are the INNER hop of a two-hop
+// path — the outer chat/responses service owns the fast retry, so wrapping
+// the gateway too would retry 3×3 = 9 times per request.
 //
 // # Direct data planes
 //

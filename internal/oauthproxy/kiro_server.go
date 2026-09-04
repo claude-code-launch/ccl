@@ -428,6 +428,11 @@ func requestLimitLabel(maxBytes int64) string {
 // is rate limited. Every credential is tried before a retry sleeps, so rotating
 // to a second account is always preferred over waiting. Once the backoff budget
 // is spent the 429 is returned to the caller.
+//
+// This is Kiro's own retry layer and is deliberately NOT wrapped in
+// retryUpstream: it already spends a longer 1/2/4s budget with per-round
+// credential rotation, which satisfies the fast-retry goal, and stacking the
+// two loops would double the backoff budget per request.
 func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConvertedRequest) (*http.Response, error) {
 	backoff := s.rateLimitBackoff
 	if backoff == nil {
@@ -456,17 +461,6 @@ func (s *kiroService) callUpstream(ctx context.Context, converted *kiroConverted
 func isKiroRateLimitError(err error) bool {
 	var upstreamErr *kiroUpstreamError
 	return errors.As(err, &upstreamErr) && upstreamErr.status == http.StatusTooManyRequests
-}
-
-func sleepContext(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 // callUpstreamOnce tries every selected credential once and returns the first

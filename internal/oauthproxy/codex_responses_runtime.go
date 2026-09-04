@@ -94,6 +94,10 @@ type codexResponsesUpstreamError struct {
 	requestID  string
 }
 
+// upstreamStatus implements the retry.go fast-retry probe against the raw
+// upstream status, before any client-facing mapping.
+func (e *codexResponsesUpstreamError) upstreamStatus() int { return e.status }
+
 type codexBufferedSSEWriter struct {
 	bytes.Buffer
 	header http.Header
@@ -636,49 +640,55 @@ func (s *codexResponsesService) recordUsage(converted *codexResponsesConvertedRe
 	s.usage.Add(converted.clientModel, int64(input), int64(output), int64(assembler.cacheReadTokens), int64(assembler.cacheWriteTokens))
 }
 
+// call runs one upstream round-trip inside the shared fast-retry loop: a 429
+// or 5xx outcome is retried twice more (500ms/1s) before being returned
+// as-is, letting Claude Code do its own full backoff over the relayed
+// status/body/Retry-After. The 401 refresh below is part of one attempt.
 func (s *codexResponsesService) call(ctx context.Context, body []byte, sessionID string, dumpPayload bool) (*http.Response, error) {
-	var err error
-	if !s.xai {
-		body, err = s.addClientMetadata(body, sessionID)
-		if err != nil {
-			return nil, err
-		}
-	}
-	auth, err := s.authorizer.authorize(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	response, err := s.callOnce(ctx, body, sessionID, auth, dumpPayload)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode == http.StatusUnauthorized && s.authorizer.isOAuth() {
-		drainAndClose(response)
-		LogWarnEvent("credential_refresh", "component", "codex_responses", "request_id", requestLogID(ctx),
-			"credential", auth.credential, "status", http.StatusUnauthorized, "action", "refresh_and_retry_once")
-		// Another concurrent request may already have refreshed this credential.
-		// Reuse its token instead of rotating the same refresh token twice.
-		current, currentErr := s.authorizer.authorize(ctx, false)
-		if currentErr == nil && current.token != "" && current.token != auth.token {
-			auth = current
-		} else {
-			auth, err = s.authorizer.authorize(ctx, true)
-		}
-		if err != nil {
-			return nil, &codexResponsesUpstreamError{
-				status: http.StatusUnauthorized,
-				body:   fmt.Sprintf("upstream rejected the access token and credential refresh failed: %v", err),
+	return retryUpstream(ctx, "codex_responses", func() (*http.Response, error) {
+		var err error
+		if !s.xai {
+			body, err = s.addClientMetadata(body, sessionID)
+			if err != nil {
+				return nil, err
 			}
 		}
-		response, err = s.callOnce(ctx, body, sessionID, auth, dumpPayload)
+		auth, err := s.authorizer.authorize(ctx, false)
 		if err != nil {
 			return nil, err
 		}
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, codexDrainError(ctx, response)
-	}
-	return response, nil
+		response, err := s.callOnce(ctx, body, sessionID, auth, dumpPayload)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode == http.StatusUnauthorized && s.authorizer.isOAuth() {
+			drainAndClose(response)
+			LogWarnEvent("credential_refresh", "component", "codex_responses", "request_id", requestLogID(ctx),
+				"credential", auth.credential, "status", http.StatusUnauthorized, "action", "refresh_and_retry_once")
+			// Another concurrent request may already have refreshed this credential.
+			// Reuse its token instead of rotating the same refresh token twice.
+			current, currentErr := s.authorizer.authorize(ctx, false)
+			if currentErr == nil && current.token != "" && current.token != auth.token {
+				auth = current
+			} else {
+				auth, err = s.authorizer.authorize(ctx, true)
+			}
+			if err != nil {
+				return nil, &codexResponsesUpstreamError{
+					status: http.StatusUnauthorized,
+					body:   fmt.Sprintf("upstream rejected the access token and credential refresh failed: %v", err),
+				}
+			}
+			response, err = s.callOnce(ctx, body, sessionID, auth, dumpPayload)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return nil, codexDrainError(ctx, response)
+		}
+		return response, nil
+	})
 }
 
 func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessionID string, auth codexResponsesAuthorization, dumpPayload bool) (*http.Response, error) {

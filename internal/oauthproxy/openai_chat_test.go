@@ -249,7 +249,13 @@ func TestOpenAIChatEndToEndNonStreaming(t *testing.T) {
 }
 
 func TestOpenAIChatErrorMapping(t *testing.T) {
+	previous := upstreamFastRetryBackoff
+	upstreamFastRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { upstreamFastRetryBackoff = previous })
+
+	var attempts atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
 		writer.Header().Set("Retry-After", "30")
 		writer.Header().Set("X-Request-Id", "req-1")
 		writer.WriteHeader(http.StatusTooManyRequests)
@@ -278,5 +284,8 @@ func TestOpenAIChatErrorMapping(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"type":"rate_limit_error"`) {
 		t.Fatalf("error body = %s", body)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("upstream attempts = %d, want 3 (initial + 2 fast retries)", attempts.Load())
 	}
 }
