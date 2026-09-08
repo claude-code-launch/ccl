@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,7 +111,7 @@ func RunProviderSet(args []string) error {
 		}
 	}
 	if targetName == "" {
-		targetName = "default"
+		targetName = randomProviderName(cfg.Providers)
 		p.Name = targetName
 	}
 
@@ -254,6 +255,30 @@ func SetCMD() *cobra.Command {
 
 func setDebugf(format string, args ...any) {
 	oauthproxy.LogDebugf(format, args...)
+}
+
+// randomProviderName generates a short, unique, human-friendly name for a new
+// provider created without an explicit name. It reads from crypto/rand and
+// retries against the existing names so a fresh provider never collides with one
+// already configured. The alphabet omits 0/O/1/l/I so the name stays legible.
+func randomProviderName(existing map[string]provider.Provider) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz23456789"
+	for range 64 {
+		var b [6]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			break
+		}
+		for i := range b {
+			b[i] = alphabet[int(b[i])%len(alphabet)]
+		}
+		name := "provider-" + string(b[:])
+		if _, exists := existing[name]; !exists {
+			return name
+		}
+	}
+	// 64 collisions is astronomically unlikely; fall back to a timestamp so the
+	// name remains unique even if the entropy source somehow keeps repeating.
+	return fmt.Sprintf("provider-%d", time.Now().UnixNano())
 }
 
 func countCSV(csv string) int {

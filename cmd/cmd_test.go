@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
@@ -175,7 +176,7 @@ func TestReviewPageShowsBearerForOpenAIChatDisplayLabel(t *testing.T) {
 	enterDetectedReview(m, "model-a", "model-b")
 	view := renderView(t, m)
 
-	if !contains(view, "Auth") {
+	if !contains(view, locale.T("鉴权", "Auth")) {
 		t.Fatalf("expected review page to include Auth row")
 	}
 	if !contains(view, "bearer") {
@@ -196,7 +197,7 @@ func TestCredentialPageShowsAPIKeyPlaintext(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	view := renderView(t, m)
 
-	for _, want := range []string{"Endpoint URL", "API Key", "Protocol: Anthropic"} {
+	for _, want := range []string{locale.T("端点 URL", "Endpoint URL"), "API Key", locale.T("协议: ", "Protocol: ") + "Anthropic"} {
 		if !contains(view, want) {
 			t.Fatalf("expected credential page to contain %q, got: %s", want, view)
 		}

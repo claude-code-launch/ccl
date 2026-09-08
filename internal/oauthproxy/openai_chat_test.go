@@ -157,7 +157,7 @@ func TestProcessChatCompletionsStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := assembler.response()
-	blocks := response["content"].([]kiroResponseBlock)
+	blocks := response["content"].([]anthropicResponseBlock)
 	var thinking, text, toolName string
 	var toolInput map[string]any
 	for _, block := range blocks {

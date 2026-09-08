@@ -49,7 +49,10 @@ func runModels(ctx context.Context, showAll bool) error {
 	source := "configured model pool"
 	if showAll || modelsStr == "" {
 		fetched := modelIDs(catalog)
-		if len(fetched) == 0 {
+		if len(fetched) == 0 && runtime != nil {
+			// Only proxy-backed providers (OpenAI-compatible, models.dev, Command
+			// Code, or OAuth) start a runtime; a direct Anthropic API-key provider
+			// runs without one, so runtime is nil and must not be dereferenced.
 			fetched = runtime.Models()
 		}
 		if len(fetched) == 0 {

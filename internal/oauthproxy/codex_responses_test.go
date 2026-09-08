@@ -444,7 +444,7 @@ func TestCodexResponsesReasoningAndUsageSSE(t *testing.T) {
 	}
 	defer runtime.Stop()
 	body := postClaudeMessage(t, context.Background(), runtime, "gpt-test")
-	for _, want := range []string{"thinking_delta", "enc_signature", "answer", `"input_tokens":9`, `"cache_read_input_tokens":3`} {
+	for _, want := range []string{"thinking_delta", codexReasoningSignaturePrefix, "answer", `"input_tokens":9`, `"cache_read_input_tokens":3`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("response missing %q: %s", want, body)
 		}

@@ -235,7 +235,7 @@ func TestProcessCommandCodeStreamEmitsAnthropicSSE(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := assembler.response()
-	blocks := response["content"].([]kiroResponseBlock)
+	blocks := response["content"].([]anthropicResponseBlock)
 	var thinking, text, toolName string
 	var toolInput map[string]any
 	for _, block := range blocks {
@@ -277,7 +277,7 @@ func TestProcessCommandCodeStreamStringToolInputPassthrough(t *testing.T) {
 	if err := processCommandCodeStream(strings.NewReader(ndjson), assembler); err != nil {
 		t.Fatal(err)
 	}
-	blocks := assembler.response()["content"].([]kiroResponseBlock)
+	blocks := assembler.response()["content"].([]anthropicResponseBlock)
 	if len(blocks) != 1 || blocks[0].Input == nil || (*blocks[0].Input)["path"] != "a.go" {
 		t.Fatalf("blocks = %v", blocks)
 	}
@@ -295,7 +295,7 @@ func TestProcessCommandCodeNonStreamAccumulatesJSON(t *testing.T) {
 	if response["model"] != "claude-sonnet-4-6" || response["stop_reason"] != "end_turn" {
 		t.Fatalf("response = %v", response)
 	}
-	blocks := response["content"].([]kiroResponseBlock)
+	blocks := response["content"].([]anthropicResponseBlock)
 	if len(blocks) != 1 || blocks[0].Text != "non-stream answer" {
 		t.Fatalf("blocks = %v", blocks)
 	}

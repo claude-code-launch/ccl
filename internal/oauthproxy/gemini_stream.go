@@ -2,6 +2,7 @@ package oauthproxy
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"strconv"
@@ -14,6 +15,9 @@ import (
 // stream. Lines are small (one incremental part or a terminal usage/finish
 // chunk), so 16 MiB is ample headroom.
 const geminiStreamScannerBuffer = 16 << 20
+
+// Signed parts must retain their original boundaries and all native fields.
+const geminiPartSignaturePrefix = "ccl-gemini-part-v1:"
 
 // geminiJSONPayload extracts the JSON payload from one Gemini SSE line,
 // following the Antigravity stream format: trim, skip empty lines, `[DONE]` and
@@ -70,7 +74,16 @@ func processGeminiNonStream(body []byte, assembler *anthropicResponseAssembler) 
 // the terminal usageMetadata/finishReason when the chunk carries them.
 func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, toolCounter *int) error {
 	root := gjson.ParseBytes(payload)
+	if !gjson.ValidBytes(payload) {
+		return fmt.Errorf("invalid Gemini response JSON")
+	}
+	if upstreamError := root.Get("error"); upstreamError.Exists() {
+		return fmt.Errorf("Gemini upstream error: %s", upstreamError.Raw)
+	}
 	responseNode := root.Get("response")
+	if upstreamError := responseNode.Get("error"); upstreamError.Exists() {
+		return fmt.Errorf("Gemini upstream error: %s", upstreamError.Raw)
+	}
 	if !responseNode.Exists() {
 		if root.Get("candidates").Exists() {
 			responseNode = root
@@ -81,6 +94,31 @@ func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, t
 
 	if parts := responseNode.Get("candidates.0.content.parts"); parts.IsArray() {
 		for _, part := range parts.Array() {
+			if part.Get("thoughtSignature").Exists() {
+				if err := assembler.closeActive(); err != nil {
+					return err
+				}
+				signature := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(part.Raw))
+				if err := assembler.retain(len(signature)); err != nil {
+					return err
+				}
+				index, err := assembler.ensureBlock("thinking")
+				if err != nil {
+					return err
+				}
+				assembler.blocks[index].Signature = signature
+				if part.Get("thought").Bool() {
+					if err := assembler.addThinking(part.Get("text").String()); err != nil {
+						return err
+					}
+				}
+				if err := assembler.closeActive(); err != nil {
+					return err
+				}
+				if part.Get("thought").Bool() {
+					continue
+				}
+			}
 			if functionCall := part.Get("functionCall"); functionCall.Exists() {
 				name := strings.TrimSpace(functionCall.Get("name").String())
 				if name == "" {
@@ -107,6 +145,11 @@ func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, t
 				}
 			} else if err := assembler.addText(text.String()); err != nil {
 				return err
+			}
+			if part.Get("thoughtSignature").Exists() {
+				if err := assembler.closeActive(); err != nil {
+					return err
+				}
 			}
 		}
 	}

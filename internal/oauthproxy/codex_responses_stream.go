@@ -24,6 +24,7 @@ type codexResponsesStreamState struct {
 	retained      int
 	textDeltaSeen bool
 	reasoningSeen bool
+	reasoningDone map[string]bool
 	terminalSeen  bool
 	metrics       codexResponsesStreamMetrics
 }
@@ -252,10 +253,35 @@ func (s *codexResponsesStreamState) processOutputItem(event map[string]any) erro
 			}
 		}
 	case "reasoning":
-		if signature := stringValue(item["encrypted_content"]); signature != "" && s.assembler.activeType == "thinking" {
-			s.assembler.blocks[s.assembler.activeIndex].Signature = signature
-			return s.assembler.closeActive()
+		key := codexFunctionKey(event, item)
+		if s.reasoningDone[key] {
+			return nil
 		}
+		if s.reasoningDone == nil {
+			s.reasoningDone = make(map[string]bool)
+		}
+		s.reasoningDone[key] = true
+		signature, err := codexReasoningSignature(item)
+		if err != nil {
+			return err
+		}
+		if err := s.assembler.retain(len(signature)); err != nil {
+			return err
+		}
+		if !s.reasoningSeen {
+			for _, raw := range sliceValue(item["summary"]) {
+				if err := s.assembler.addThinking(stringValue(mapValue(raw)["text"])); err != nil {
+					return err
+				}
+			}
+		}
+		index, err := s.assembler.ensureBlock("thinking")
+		if err != nil {
+			return err
+		}
+		s.assembler.blocks[index].Signature = signature
+		s.reasoningSeen = false
+		return s.assembler.closeActive()
 	case "function_call":
 		call, err := s.updateFunction(event, item)
 		if err != nil {

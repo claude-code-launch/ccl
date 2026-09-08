@@ -134,7 +134,7 @@ func runProviderUse(name string) error {
 	}
 
 	if _, exists := cfg.Providers[target]; !exists {
-		return fmt.Errorf("provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'", target)
+		return fmt.Errorf(locale.T("未找到 Provider %q。请先用 'ccl set' 添加，或用 'ccl ls' 检查拼写", "provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'"), target)
 	}
 
 	cfg.ActiveProvider = target
@@ -143,7 +143,7 @@ func runProviderUse(name string) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Printf("Switched to active provider: %s\n", target)
+	fmt.Printf(locale.T("已切换到激活 Provider：%s\n", "Switched to active provider: %s\n"), target)
 	return nil
 }
 

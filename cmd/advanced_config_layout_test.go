@@ -227,7 +227,7 @@ func TestCredentialsPageResolvesClickToField(t *testing.T) {
 		row   configRowKind
 		label string
 	}{
-		{rowEndpoint, "Endpoint URL"},
+		{rowEndpoint, locale.T("端点 URL", "Endpoint URL")},
 		{rowAPIKey, "API Key"},
 	} {
 		labelRow := -1
@@ -644,7 +644,7 @@ func TestProtocolMovedOutOfRuntime(t *testing.T) {
 		t.Fatalf("Protocol (%d) should precede Auto Configure (%d)", m.mainRowIndex(rowProtocol), m.mainRowIndex(rowTest))
 	}
 	view := renderView(t, m)
-	idx := strings.Index(view, "Runtime")
+	idx := strings.Index(view, locale.T("运行时", "Runtime"))
 	if idx < 0 {
 		t.Fatalf("Runtime heading missing from view")
 	}

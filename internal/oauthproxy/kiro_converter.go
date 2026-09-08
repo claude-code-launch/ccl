@@ -290,13 +290,14 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	inlineMedia = countKiroInlineMedia(conversationState)
 	return &kiroConvertedRequest{
 		anthropicAdapterRequest: anthropicAdapterRequest{
-			upstreamModel:   model,
-			clientModel:     request.Model,
-			stream:          request.Stream,
-			thinkingEnabled: thinkingEnabled,
-			maxTokens:       request.MaxTokens,
-			inputTokens:     estimateApproxTokensBytes(raw),
-			toolNameMap:     toolNameMap,
+			upstreamModel:     model,
+			clientModel:       request.Model,
+			stream:            request.Stream,
+			thinkingEnabled:   thinkingEnabled,
+			thinkingSignature: "kiro",
+			maxTokens:         request.MaxTokens,
+			inputTokens:       estimateApproxTokensBytes(raw),
+			toolNameMap:       toolNameMap,
 		},
 		body:            body,
 		model:           model,

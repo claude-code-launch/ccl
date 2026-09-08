@@ -319,7 +319,7 @@ func (s *codexResponsesService) handleCountTokens(writer http.ResponseWriter, re
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	converted, err := convertAnthropicToCodexResponses(raw)
+	converted, err := convertAnthropicToCodexResponses(raw, s.windowID)
 	if err != nil {
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -373,7 +373,7 @@ func (s *codexResponsesService) handleMessages(writer http.ResponseWriter, reque
 	LogDebugEvent("request_body_read", "component", "codex_responses", "request_id", requestID,
 		"body_bytes", len(raw), "duration", logDuration(readStarted))
 	convertStarted := time.Now()
-	converted, err := convertAnthropicToCodexResponses(raw)
+	converted, err := convertAnthropicToCodexResponses(raw, s.windowID)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "codex_responses", "request_id", requestID,
 			"status", http.StatusBadRequest, "reason", "request_conversion", "error", err)

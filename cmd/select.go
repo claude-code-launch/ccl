@@ -136,6 +136,7 @@ func (s *selectComponent) BindApp(app *tui.App) {
 // stays free of a code-generation build step.
 func (s *selectComponent) Render(app *tui.App) *tui.Element {
 	root := tui.New(
+		tui.WithDisplay(tui.DisplayFlex),
 		tui.WithDirection(tui.Column),
 		tui.WithPadding(1),
 	)
@@ -149,7 +150,7 @@ func (s *selectComponent) Render(app *tui.App) *tui.Element {
 	if filterText == "" {
 		filterText = locale.T("输入以过滤...", "type to filter...")
 	}
-	filterRow := tui.New(tui.WithDirection(tui.Row), tui.WithGap(1))
+	filterRow := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Row), tui.WithGap(1))
 	filterRow.AddChild(tui.New(
 		tui.WithText(locale.T("🔍 过滤: ", "🔍 Filter: ")),
 		tui.WithTextStyle(tui.NewStyle().Foreground(tui.Cyan)),
@@ -178,7 +179,7 @@ func (s *selectComponent) Render(app *tui.App) *tui.Element {
 				prefix = "▸ "
 				style = tui.NewStyle().Bold()
 			}
-			row := tui.New(tui.WithDirection(tui.Row))
+			row := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Row))
 			row.AddChild(tui.New(tui.WithText(prefix), tui.WithTextStyle(style)))
 			row.AddChild(tui.New(tui.WithText(s.filtered[i]), tui.WithTextStyle(style)))
 			root.AddChild(row)

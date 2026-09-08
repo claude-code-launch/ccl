@@ -97,10 +97,7 @@ func processCommandCodeEvents(scanner *bufio.Scanner, assembler *anthropicRespon
 				assembler.stopReason = stop
 			}
 		case "error":
-			// A mid-stream error event is advisory; the stream's terminal finish
-			// (or HTTP status) is what drives error handling upstream.
-			LogErrorEvent("commandcode_stream_error", "message",
-				root.Get("error.message").String()+root.Get("message").String())
+			return fmt.Errorf("CommandCode upstream error: %s", line)
 		default:
 			// start, start-step, text-start/end, reasoning-start/end,
 			// tool-input-start/delta/end, tool-error, provider-metadata.

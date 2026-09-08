@@ -2,6 +2,7 @@ package oauthproxy
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -25,7 +26,7 @@ type codexResponsesConvertedRequest struct {
 	droppedItems      int
 }
 
-func convertAnthropicToCodexResponses(raw []byte) (*codexResponsesConvertedRequest, error) {
+func convertAnthropicToCodexResponses(raw []byte, fallbackSessionID ...string) (*codexResponsesConvertedRequest, error) {
 	var request anthropicMessagesRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, fmt.Errorf("invalid Anthropic Messages request: %w", err)
@@ -87,7 +88,7 @@ func convertAnthropicToCodexResponses(raw []byte) (*codexResponsesConvertedReque
 		body["tools"] = tools
 		body["tool_choice"] = codexToolChoice(request.ToolChoice, originalToShort)
 	}
-	sessionID, promptCacheKey := codexRequestIdentity(request.Metadata)
+	sessionID, promptCacheKey := codexRequestIdentity(request.Metadata, fallbackSessionID...)
 	body["prompt_cache_key"] = promptCacheKey
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -212,7 +213,7 @@ func codexIsCompactionSystem(raw json.RawMessage) bool {
 	return false
 }
 
-func codexRequestIdentity(metadata *anthropicRequestMetadata) (sessionID, promptCacheKey string) {
+func codexRequestIdentity(metadata *anthropicRequestMetadata, fallbackSessionID ...string) (sessionID, promptCacheKey string) {
 	if metadata != nil {
 		userID := strings.TrimSpace(metadata.UserID)
 		if userID != "" {
@@ -220,6 +221,11 @@ func codexRequestIdentity(metadata *anthropicRequestMetadata) (sessionID, prompt
 			if match := kiroSessionUUIDPattern.FindStringSubmatch(userID); len(match) == 2 {
 				sessionID = match[1]
 			}
+		}
+	}
+	if sessionID == "" {
+		if len(fallbackSessionID) > 0 {
+			sessionID = fallbackSessionID[0]
 		}
 	}
 	if sessionID == "" {
@@ -313,8 +319,12 @@ func codexMessageItems(message anthropicMessage, toolNames map[string]string) ([
 				signature, _ = block["data"].(string)
 			}
 			if codexReplayableSignature(signature) {
+				item, err := codexReasoningFromSignature(signature)
+				if err != nil {
+					return nil, err
+				}
 				flush()
-				result = append(result, map[string]any{"type": "reasoning", "summary": []any{}, "content": nil, "encrypted_content": signature})
+				result = append(result, item)
 			}
 		case "tool_use":
 			flush()
@@ -558,6 +568,33 @@ func codexServiceTier(tier, speed string) string {
 	default:
 		return ""
 	}
+}
+
+// The client persists signatures verbatim. Carry the entire native reasoning
+// item here so IDs, status, summary, null/absent fields and future fields survive
+// the Messages round trip, including across proxy restarts.
+const codexReasoningSignaturePrefix = "ccl-responses-reasoning-v1:"
+
+func codexReasoningSignature(item map[string]any) (string, error) {
+	raw, err := json.Marshal(item)
+	if err != nil {
+		return "", err
+	}
+	return codexReasoningSignaturePrefix + base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func codexReasoningFromSignature(signature string) (any, error) {
+	if encoded, ok := strings.CutPrefix(signature, codexReasoningSignaturePrefix); ok {
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		var item map[string]json.RawMessage
+		if err != nil || json.Unmarshal(raw, &item) != nil || string(item["type"]) != `"reasoning"` {
+			return nil, fmt.Errorf("invalid CCL Responses reasoning signature")
+		}
+		return json.RawMessage(raw), nil
+	}
+	// Legacy sessions contain only the opaque encrypted payload. Keep their
+	// existing behavior; missing native fields cannot be reconstructed locally.
+	return map[string]any{"type": "reasoning", "summary": []any{}, "content": nil, "encrypted_content": signature}, nil
 }
 
 func codexReplayableSignature(signature string) bool {

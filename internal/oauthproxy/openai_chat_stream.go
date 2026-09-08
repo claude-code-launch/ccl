@@ -99,6 +99,9 @@ func (s *chatCompletionsStreamState) process(payload []byte) error {
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return fmt.Errorf("decode OpenAI Chat Completions chunk: %w", err)
 	}
+	if upstreamError := event["error"]; upstreamError != nil {
+		return fmt.Errorf("OpenAI Chat Completions upstream error: %v", upstreamError)
+	}
 	if !s.assembler.started {
 		if err := s.assembler.start(); err != nil {
 			return err

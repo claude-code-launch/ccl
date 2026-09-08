@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -47,7 +48,7 @@ Rename a variable:
 
 func runEnvSet(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("expected KEY and VALUE arguments, or a subcommand (ls, rm, mv). See ccl env --help")
+		return errors.New(locale.T("期望 KEY 和 VALUE 参数，或子命令（ls、rm、mv）。见 `ccl env --help`", "expected KEY and VALUE arguments, or a subcommand (ls, rm, mv). See ccl env --help"))
 	}
 
 	cfg, err := config.Load()
@@ -56,7 +57,7 @@ func runEnvSet(args []string) error {
 	}
 
 	if cfg.ActiveProvider == "" {
-		return fmt.Errorf("no active provider set. Use 'ccl set' or 'ccl use' first")
+		return errors.New(locale.T("未设置激活 Provider。请先用 'ccl set' 或 'ccl use'", "no active provider set. Use 'ccl set' or 'ccl use' first"))
 	}
 
 	p := cfg.Providers[cfg.ActiveProvider]
@@ -67,7 +68,7 @@ func runEnvSet(args []string) error {
 	key := strings.TrimSpace(args[0])
 	val := strings.TrimSpace(args[1])
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return errors.New(locale.T("键不能为空", "key cannot be empty"))
 	}
 	p.Env[key] = val
 	cfg.Providers[cfg.ActiveProvider] = p
@@ -96,17 +97,17 @@ func runEnvList() error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	if cfg.ActiveProvider == "" {
-		fmt.Println("No active provider set.")
+		fmt.Println(locale.T("未设置激活 Provider。", "No active provider set."))
 		return nil
 	}
 
 	p, exists := cfg.Providers[cfg.ActiveProvider]
 	if !exists {
-		return fmt.Errorf("active provider %q not found", cfg.ActiveProvider)
+		return fmt.Errorf(locale.T("未找到激活 Provider %q", "active provider %q not found"), cfg.ActiveProvider)
 	}
 
 	if len(p.Env) == 0 {
-		fmt.Printf("No environment variables configured for %q.\n", cfg.ActiveProvider)
+		fmt.Printf(locale.T("%q 未配置环境变量。\n", "No environment variables configured for %q.\n"), cfg.ActiveProvider)
 		return nil
 	}
 
@@ -116,7 +117,7 @@ func runEnvList() error {
 	}
 	sort.Strings(keys)
 
-	fmt.Printf("Environment variables for %q:\n", cfg.ActiveProvider)
+	fmt.Printf(locale.T("%q 的环境变量：\n", "Environment variables for %q:\n"), cfg.ActiveProvider)
 	for _, k := range keys {
 		fmt.Printf("  %s=%s\n", k, p.Env[k])
 	}
@@ -143,7 +144,7 @@ func newEnvRemoveCommand() *cobra.Command {
 func runEnvRemove(arg string, force bool) error {
 	key := strings.TrimSpace(arg)
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return errors.New(locale.T("键不能为空", "key cannot be empty"))
 	}
 
 	cfg, err := config.Load()
@@ -151,16 +152,16 @@ func runEnvRemove(arg string, force bool) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	if cfg.ActiveProvider == "" {
-		return fmt.Errorf("no active provider set")
+		return errors.New(locale.T("未设置激活 Provider", "no active provider set"))
 	}
 
 	p, exists := cfg.Providers[cfg.ActiveProvider]
 	if !exists {
-		return fmt.Errorf("active provider %q not found", cfg.ActiveProvider)
+		return fmt.Errorf(locale.T("未找到激活 Provider %q", "active provider %q not found"), cfg.ActiveProvider)
 	}
 
 	if _, exists := p.Env[key]; !exists {
-		return fmt.Errorf("key %q not found in %q", key, cfg.ActiveProvider)
+		return fmt.Errorf(locale.T("键 %q 不存在于 %q", "key %q not found in %q"), key, cfg.ActiveProvider)
 	}
 
 	prompt := fmt.Sprintf(locale.T("确定要删除 %s 吗？(y/N): ", "Delete %s? (y/N): "), key)
@@ -175,7 +176,7 @@ func runEnvRemove(arg string, force bool) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Printf("✅ Deleted %s\n", key)
+	fmt.Printf(locale.T("✅ 已删除 %s\n", "✅ Deleted %s\n"), key)
 	return nil
 }
 
@@ -198,10 +199,10 @@ func runEnvMove(oldArg, newArg string, force bool) error {
 	oldKey := strings.TrimSpace(oldArg)
 	newKey := strings.TrimSpace(newArg)
 	if oldKey == "" || newKey == "" {
-		return fmt.Errorf("keys cannot be empty")
+		return errors.New(locale.T("键不能为空", "keys cannot be empty"))
 	}
 	if oldKey == newKey {
-		fmt.Println("Old and new keys are the same, nothing to do.")
+		fmt.Println(locale.T("新旧键相同，无需操作。", "Old and new keys are the same, nothing to do."))
 		return nil
 	}
 
@@ -210,17 +211,17 @@ func runEnvMove(oldArg, newArg string, force bool) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	if cfg.ActiveProvider == "" {
-		return fmt.Errorf("no active provider set")
+		return errors.New(locale.T("未设置激活 Provider", "no active provider set"))
 	}
 
 	p, exists := cfg.Providers[cfg.ActiveProvider]
 	if !exists {
-		return fmt.Errorf("active provider %q not found", cfg.ActiveProvider)
+		return fmt.Errorf(locale.T("未找到激活 Provider %q", "active provider %q not found"), cfg.ActiveProvider)
 	}
 
 	val, exists := p.Env[oldKey]
 	if !exists {
-		return fmt.Errorf("key %q not found in %q", oldKey, cfg.ActiveProvider)
+		return fmt.Errorf(locale.T("键 %q 不存在于 %q", "key %q not found in %q"), oldKey, cfg.ActiveProvider)
 	}
 
 	if _, exists := p.Env[newKey]; exists {

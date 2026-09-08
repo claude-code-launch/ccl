@@ -1,0 +1,536 @@
+package oauthproxy
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+)
+
+const (
+	anthropicAssemblerMaxRetainedBytes = 64 << 20
+	anthropicAssemblerMaxBlocks        = 4096
+	anthropicAssemblerMaxToolCalls     = 1024
+)
+
+type anthropicResponseBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
+	Signature string          `json:"signature,omitempty"`
+	Data      string          `json:"data,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     *map[string]any `json:"input,omitempty"`
+}
+
+type anthropicToolAccumulator struct {
+	name  string
+	input strings.Builder
+}
+
+// anthropicBlockBuffer accumulates the streamed text/thinking of one content block.
+// Appending to a strings.Builder keeps assembly linear; concatenating onto the
+// block's string field would copy the whole block on every delta.
+type anthropicBlockBuffer struct {
+	text     strings.Builder
+	thinking strings.Builder
+}
+
+// Server-sent event payloads on the streaming hot path. These are typed structs
+// rather than nested maps so each delta costs one small allocation instead of
+// three maps plus reflection over them.
+type anthropicBlockDeltaEvent struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+	Delta any    `json:"delta"`
+}
+
+type anthropicBlockStartEvent struct {
+	Type         string `json:"type"`
+	Index        int    `json:"index"`
+	ContentBlock any    `json:"content_block"`
+}
+
+type anthropicBlockIndexEvent struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+}
+
+type anthropicTextDelta struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type anthropicThinkingDelta struct {
+	Type     string `json:"type"`
+	Thinking string `json:"thinking"`
+}
+
+type anthropicSignatureDelta struct {
+	Type      string `json:"type"`
+	Signature string `json:"signature"`
+}
+
+type anthropicInputJSONDelta struct {
+	Type        string `json:"type"`
+	PartialJSON string `json:"partial_json"`
+}
+
+type anthropicTextBlockStart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type anthropicThinkingBlockStart struct {
+	Type     string `json:"type"`
+	Thinking string `json:"thinking"`
+}
+
+type anthropicRedactedThinkingBlockStart struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
+}
+
+type anthropicToolUseBlockStart struct {
+	Type  string         `json:"type"`
+	ID    string         `json:"id"`
+	Name  string         `json:"name"`
+	Input map[string]any `json:"input"`
+}
+
+type anthropicResponseAssembler struct {
+	request          *anthropicAdapterRequest
+	writer           http.ResponseWriter
+	flusher          http.Flusher
+	messageID        string
+	blocks           []anthropicResponseBlock
+	buffers          []*anthropicBlockBuffer
+	eventBuffer      bytes.Buffer
+	encoder          *json.Encoder
+	activeIndex      int
+	activeType       string
+	outputTokens     int
+	retainedBytes    int
+	contextTokens    int
+	cacheReadTokens  int
+	cacheWriteTokens int
+	hasToolUse       bool
+	tools            map[string]*anthropicToolAccumulator
+	creditUsage      float64
+	creditUnit       string
+	creditPlural     string
+	stopReason       string
+	started          bool
+	finished         bool
+	nativeReasoning  bool
+	inlineState      string
+	inlineBuffer     string
+}
+
+func newAnthropicResponseAssembler(request *anthropicAdapterRequest, writer http.ResponseWriter) *anthropicResponseAssembler {
+	assembler := &anthropicResponseAssembler{
+		request:     request,
+		writer:      writer,
+		messageID:   "msg_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		activeIndex: -1,
+		tools:       make(map[string]*anthropicToolAccumulator),
+	}
+	if writer != nil {
+		assembler.flusher, _ = writer.(http.Flusher)
+	}
+	assembler.encoder = json.NewEncoder(&assembler.eventBuffer)
+	return assembler
+}
+
+// appendBlock registers a new content block and its accumulation buffer, keeping
+// both slices index-aligned.
+func (a *anthropicResponseAssembler) appendBlock(block anthropicResponseBlock) int {
+	index := len(a.blocks)
+	a.blocks = append(a.blocks, block)
+	a.buffers = append(a.buffers, &anthropicBlockBuffer{})
+	return index
+}
+
+// contentBlocks materializes the accumulated text/thinking into a copy of the
+// block list. Call it only when a full response body is needed.
+func (a *anthropicResponseAssembler) contentBlocks() []anthropicResponseBlock {
+	blocks := make([]anthropicResponseBlock, len(a.blocks))
+	copy(blocks, a.blocks)
+	for index := range blocks {
+		if index >= len(a.buffers) || a.buffers[index] == nil {
+			continue
+		}
+		if buffer := a.buffers[index]; buffer.text.Len() > 0 {
+			blocks[index].Text = buffer.text.String()
+		}
+		if buffer := a.buffers[index]; buffer.thinking.Len() > 0 {
+			blocks[index].Thinking = buffer.thinking.String()
+		}
+	}
+	return blocks
+}
+
+func (a *anthropicResponseAssembler) start() error {
+	if a.started {
+		return nil
+	}
+	a.started = true
+	return a.emit("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            a.messageID,
+			"type":          "message",
+			"role":          "assistant",
+			"model":         a.request.clientModel,
+			"content":       []any{},
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":                a.request.inputTokens,
+				"output_tokens":               0,
+				"cache_creation_input_tokens": 0,
+				"cache_read_input_tokens":     0,
+			},
+		},
+	})
+}
+
+func (a *anthropicResponseAssembler) addAssistantContent(content string) error {
+	if !a.request.thinkingEnabled || a.nativeReasoning || a.inlineState == "done" {
+		return a.addText(content)
+	}
+	a.inlineBuffer += content
+	for {
+		switch a.inlineState {
+		case "thinking":
+			if index := strings.Index(a.inlineBuffer, "</thinking>"); index >= 0 {
+				if err := a.addThinking(a.inlineBuffer[:index]); err != nil {
+					return err
+				}
+				a.inlineBuffer = a.inlineBuffer[index+len("</thinking>"):]
+				a.inlineState = "done"
+				if a.inlineBuffer != "" {
+					remaining := a.inlineBuffer
+					a.inlineBuffer = ""
+					return a.addText(remaining)
+				}
+				return nil
+			}
+			keep := partialThinkingTagSuffix(a.inlineBuffer, "</thinking>")
+			safe := a.inlineBuffer[:len(a.inlineBuffer)-keep]
+			a.inlineBuffer = a.inlineBuffer[len(a.inlineBuffer)-keep:]
+			return a.addThinking(safe)
+		default:
+			if index := strings.Index(a.inlineBuffer, "<thinking>"); index >= 0 {
+				before := a.inlineBuffer[:index]
+				if strings.TrimSpace(before) != "" {
+					if err := a.addText(before); err != nil {
+						return err
+					}
+				}
+				a.inlineBuffer = a.inlineBuffer[index+len("<thinking>"):]
+				a.inlineState = "thinking"
+				continue
+			}
+			keep := partialThinkingTagSuffix(a.inlineBuffer, "<thinking>")
+			safe := a.inlineBuffer[:len(a.inlineBuffer)-keep]
+			a.inlineBuffer = a.inlineBuffer[len(a.inlineBuffer)-keep:]
+			return a.addText(safe)
+		}
+	}
+}
+
+func (a *anthropicResponseAssembler) flushInlineContent() error {
+	if a.inlineBuffer == "" {
+		return nil
+	}
+	buffer := a.inlineBuffer
+	a.inlineBuffer = ""
+	if a.inlineState == "thinking" {
+		if index := strings.Index(buffer, "</thinking>"); index >= 0 {
+			if err := a.addThinking(buffer[:index]); err != nil {
+				return err
+			}
+			a.inlineState = "done"
+			return a.addText(buffer[index+len("</thinking>"):])
+		}
+		return a.addThinking(buffer)
+	}
+	return a.addText(buffer)
+}
+
+func partialThinkingTagSuffix(content, tag string) int {
+	maximum := len(tag) - 1
+	if len(content) < maximum {
+		maximum = len(content)
+	}
+	for size := maximum; size > 0; size-- {
+		if strings.HasSuffix(content, tag[:size]) {
+			return size
+		}
+	}
+	return 0
+}
+
+func (a *anthropicResponseAssembler) retain(size int) error {
+	if a.retainedBytes+size > anthropicAssemblerMaxRetainedBytes {
+		return fmt.Errorf("upstream response retention exceeds %d bytes", anthropicAssemblerMaxRetainedBytes)
+	}
+	a.retainedBytes += size
+	return nil
+}
+
+func (a *anthropicResponseAssembler) addText(text string) error {
+	if text == "" {
+		return nil
+	}
+	if err := a.retain(len(text)); err != nil {
+		return err
+	}
+	index, err := a.ensureBlock("text")
+	if err != nil {
+		return err
+	}
+	a.buffers[index].text.WriteString(text)
+	a.outputTokens += estimateApproxTokens(text)
+	return a.emit("content_block_delta", anthropicBlockDeltaEvent{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: anthropicTextDelta{Type: "text_delta", Text: text},
+	})
+}
+
+func (a *anthropicResponseAssembler) addThinking(thinking string) error {
+	if thinking == "" {
+		return nil
+	}
+	if err := a.retain(len(thinking)); err != nil {
+		return err
+	}
+	index, err := a.ensureBlock("thinking")
+	if err != nil {
+		return err
+	}
+	a.buffers[index].thinking.WriteString(thinking)
+	a.outputTokens += estimateApproxTokens(thinking)
+	return a.emit("content_block_delta", anthropicBlockDeltaEvent{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: anthropicThinkingDelta{Type: "thinking_delta", Thinking: thinking},
+	})
+}
+
+func (a *anthropicResponseAssembler) addToolUse(id, name, partialJSON string) error {
+	if err := a.closeActive(); err != nil {
+		return err
+	}
+	if len(a.blocks) >= anthropicAssemblerMaxBlocks {
+		return fmt.Errorf("upstream response exceeds %d content blocks", anthropicAssemblerMaxBlocks)
+	}
+	if original := a.request.toolNameMap[name]; original != "" {
+		name = original
+	}
+	var input map[string]any
+	if strings.TrimSpace(partialJSON) == "" {
+		input = map[string]any{}
+	} else if err := json.Unmarshal([]byte(partialJSON), &input); err != nil {
+		return fmt.Errorf("upstream tool %s returned invalid JSON input: %w", name, err)
+	}
+	index := a.appendBlock(anthropicResponseBlock{Type: "tool_use", ID: id, Name: name, Input: &input})
+	a.hasToolUse = true
+	a.outputTokens += estimateApproxTokens(partialJSON)
+	if err := a.emit("content_block_start", anthropicBlockStartEvent{
+		Type:  "content_block_start",
+		Index: index,
+		ContentBlock: anthropicToolUseBlockStart{
+			Type:  "tool_use",
+			ID:    id,
+			Name:  name,
+			Input: map[string]any{},
+		},
+	}); err != nil {
+		return err
+	}
+	if err := a.emit("content_block_delta", anthropicBlockDeltaEvent{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: anthropicInputJSONDelta{Type: "input_json_delta", PartialJSON: partialJSON},
+	}); err != nil {
+		return err
+	}
+	return a.emit("content_block_stop", anthropicBlockIndexEvent{Type: "content_block_stop", Index: index})
+}
+
+func (a *anthropicResponseAssembler) ensureBlock(blockType string) (int, error) {
+	if a.activeType == blockType && a.activeIndex >= 0 {
+		return a.activeIndex, nil
+	}
+	if err := a.closeActive(); err != nil {
+		return -1, err
+	}
+	if len(a.blocks) >= anthropicAssemblerMaxBlocks {
+		return -1, fmt.Errorf("upstream response exceeds %d content blocks", anthropicAssemblerMaxBlocks)
+	}
+	var contentBlock any = anthropicThinkingBlockStart{Type: blockType}
+	if blockType == "text" {
+		contentBlock = anthropicTextBlockStart{Type: blockType}
+	}
+	index := a.appendBlock(anthropicResponseBlock{Type: blockType})
+	a.activeIndex = index
+	a.activeType = blockType
+	if err := a.emit("content_block_start", anthropicBlockStartEvent{
+		Type:         "content_block_start",
+		Index:        index,
+		ContentBlock: contentBlock,
+	}); err != nil {
+		return -1, err
+	}
+	return index, nil
+}
+
+func (a *anthropicResponseAssembler) closeActive() error {
+	if a.activeIndex < 0 {
+		return nil
+	}
+	index := a.activeIndex
+	if a.activeType == "thinking" {
+		signature := a.blocks[index].Signature
+		if signature == "" {
+			signature = strings.TrimSpace(a.request.thinkingSignature)
+			if signature == "" {
+				signature = "ccl-anthropic-signature-unavailable"
+			}
+			a.blocks[index].Signature = signature
+		}
+		if err := a.emit("content_block_delta", anthropicBlockDeltaEvent{
+			Type:  "content_block_delta",
+			Index: index,
+			Delta: anthropicSignatureDelta{Type: "signature_delta", Signature: signature},
+		}); err != nil {
+			return err
+		}
+	}
+	a.activeIndex = -1
+	a.activeType = ""
+	return a.emit("content_block_stop", anthropicBlockIndexEvent{Type: "content_block_stop", Index: index})
+}
+
+func (a *anthropicResponseAssembler) finish() error {
+	if a.finished {
+		return nil
+	}
+	if err := a.flushInlineContent(); err != nil {
+		return err
+	}
+	for id, tool := range a.tools {
+		if strings.TrimSpace(tool.input.String()) != "" {
+			return fmt.Errorf("upstream tool %s (%s) ended before stop=true", tool.name, id)
+		}
+	}
+	if err := a.closeActive(); err != nil {
+		return err
+	}
+	if len(a.blocks) == 0 {
+		if err := a.addText(" "); err != nil {
+			return err
+		}
+		if err := a.closeActive(); err != nil {
+			return err
+		}
+	}
+	usage := a.usage()
+	if err := a.emit("message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   a.resolvedStopReason(),
+			"stop_sequence": nil,
+		},
+		"usage": usage,
+	}); err != nil {
+		return err
+	}
+	if err := a.emit("message_stop", map[string]any{"type": "message_stop"}); err != nil {
+		return err
+	}
+	a.finished = true
+	return nil
+}
+
+// resolvedStopReason reports the Anthropic stop reason for the assembled turn.
+func (a *anthropicResponseAssembler) resolvedStopReason() string {
+	if a.stopReason != "" {
+		return a.stopReason
+	}
+	if a.hasToolUse {
+		return "tool_use"
+	}
+	return "end_turn"
+}
+
+func (a *anthropicResponseAssembler) response() map[string]any {
+	return map[string]any{
+		"id":            a.messageID,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         a.request.clientModel,
+		"content":       a.contentBlocks(),
+		"stop_reason":   a.resolvedStopReason(),
+		"stop_sequence": nil,
+		"usage":         a.usage(),
+	}
+}
+
+// tokenTotals returns the input/output token counts for this turn, using the
+// same fields the Anthropic usage object reports so the session summary matches
+// what was actually billed against the account.
+func (a *anthropicResponseAssembler) tokenTotals() (input, output int) {
+	input = a.request.inputTokens
+	if a.contextTokens > 0 {
+		input = a.contextTokens
+	}
+	return input, a.outputTokens
+}
+
+func (a *anthropicResponseAssembler) usage() map[string]any {
+	inputTokens, outputTokens := a.tokenTotals()
+	usage := map[string]any{
+		"input_tokens":                inputTokens,
+		"output_tokens":               outputTokens,
+		"cache_creation_input_tokens": a.cacheWriteTokens,
+		"cache_read_input_tokens":     a.cacheReadTokens,
+	}
+	if a.creditUnit != "" {
+		usage["credit_usage"] = a.creditUsage
+		usage["credit_unit"] = a.creditUnit
+		usage["credit_unit_plural"] = a.creditPlural
+	}
+	return usage
+}
+
+func (a *anthropicResponseAssembler) emit(event string, data any) error {
+	if a.writer == nil {
+		return nil
+	}
+	// Serialize straight into a reused buffer: one write per event, and no
+	// intermediate []byte/format allocation per streamed token.
+	a.eventBuffer.Reset()
+	a.eventBuffer.WriteString("event: ")
+	a.eventBuffer.WriteString(event)
+	a.eventBuffer.WriteString("\ndata: ")
+	if err := a.encoder.Encode(data); err != nil {
+		return err
+	}
+	// Encode already appended the record newline; SSE needs a blank line too.
+	a.eventBuffer.WriteByte('\n')
+	if _, err := a.writer.Write(a.eventBuffer.Bytes()); err != nil {
+		return err
+	}
+	if a.flusher != nil {
+		a.flusher.Flush()
+	}
+	return nil
+}

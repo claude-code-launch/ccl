@@ -1,6 +1,7 @@
 package oauthproxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -133,6 +134,8 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 
 	// messages -> contents.
 	var contentItems []string
+	var replayCompanion string
+	var replayErr error
 	gjson.GetBytes(raw, "messages").ForEach(func(_, message gjson.Result) bool {
 		role := message.Get("role").String()
 		if role == "" {
@@ -151,13 +154,38 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 			// A mid-conversation system message carries a reminder. Forward only a
 			// plain-text reminder; skip structured content to keep it simple.
 			if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
-				partItems = append(partItems, jsonStringValue(`{"text":`+jsonStringValue(content.String())+`}`))
+				partItems = append(partItems, `{"text":`+jsonStringValue(content.String())+`}`)
 				contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
 			}
 			return true
 		}
 		if content.IsArray() {
 			content.ForEach(func(_, block gjson.Result) bool {
+				kind := block.Get("type").String()
+				if role == "assistant" && replayCompanion != "" {
+					companion := replayCompanion
+					replayCompanion = ""
+					if kind == companion {
+						return true
+					}
+				}
+				if role == "assistant" && kind == "thinking" {
+					if encoded, ok := strings.CutPrefix(block.Get("signature").String(), geminiPartSignaturePrefix); ok {
+						rawPart, err := base64.StdEncoding.DecodeString(encoded)
+						part := gjson.ParseBytes(rawPart)
+						if err != nil || !gjson.ValidBytes(rawPart) || !part.IsObject() || !part.Get("thoughtSignature").Exists() {
+							replayErr = fmt.Errorf("invalid CCL Gemini part signature")
+							return false
+						}
+						partItems = append(partItems, string(rawPart))
+						if part.Get("functionCall").Exists() {
+							replayCompanion = "tool_use"
+						} else if !part.Get("thought").Bool() && part.Get("text").String() != "" {
+							replayCompanion = "text"
+						}
+						return true
+					}
+				}
 				switch block.Get("type").String() {
 				case "text":
 					text := block.Get("text").String()
@@ -201,11 +229,14 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 				contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
 			}
 		} else if content.Type == gjson.String {
-			partItems = append(partItems, jsonStringValue(`{"text":`+jsonStringValue(content.String())+`}`))
+			partItems = append(partItems, `{"text":`+jsonStringValue(content.String())+`}`)
 			contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
 		}
 		return true
 	})
+	if replayErr != nil {
+		return nil, replayErr
+	}
 
 	// Strip a trailing model turn with unanswered function calls: the model is
 	// about to answer them, so the dangling calls must not be replayed upstream.

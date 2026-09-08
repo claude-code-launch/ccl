@@ -23,39 +23,28 @@ import (
 // (light/dark) color set. go-tui has no background detection, so the dark
 // variants — the ones this panel was designed around — are the single source.
 var (
-	colorBorder    = tui.RGBColor(0x68, 0x73, 0x86)
 	colorAccent    = tui.RGBColor(0x65, 0xB7, 0xFF)
 	colorSecondary = tui.RGBColor(0xB7, 0x9C, 0xFF)
 	colorData      = tui.RGBColor(0x41, 0xD7, 0xC8)
 	colorWarning   = tui.RGBColor(0xF0, 0xB8, 0x4D)
 	colorError     = tui.RGBColor(0xFF, 0x8A, 0x80)
-
-	// The unselected button is a dimmer version of the selected accent so
-	// focus is obvious at a glance. Both carry a background so they read as
-	// selectable even when the cursor is elsewhere.
-	buttonFg     = tui.RGBColor(0x9A, 0xA7, 0xBE)
-	buttonBg     = tui.RGBColor(0x2E, 0x3A, 0x50)
-	buttonActive = tui.RGBColor(0x00, 0x00, 0x00) // unused placeholder kept for symmetry
 )
 
 // Text styles used across the panel. A tui.Style is a value; the styled form of
 // a string is a tui.TextSpan produced by span().
 var (
-	stTitle        = tui.NewStyle().Bold()
-	stBadge        = tui.NewStyle().Foreground(colorAccent).Bold()
-	stProtoBadge   = tui.NewStyle().Foreground(colorSecondary)
-	stCyan         = tui.NewStyle().Foreground(colorData)
-	stPurple       = tui.NewStyle().Foreground(colorSecondary)
-	stGray         = tui.NewStyle().Dim()
-	stDivider      = tui.NewStyle().Dim()
-	stSelected     = tui.NewStyle().Foreground(colorAccent).Bold()
-	stFilter       = tui.NewStyle().Foreground(colorAccent)
-	stAvailable    = tui.NewStyle().Foreground(colorData).Bold()
-	stUnavailable  = tui.NewStyle().Foreground(colorError)
-	stOneM         = tui.NewStyle().Foreground(colorWarning).Bold()
-	stButton       = tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
-	stButtonActive = tui.NewStyle().Foreground(tui.White).Background(colorAccent).Bold()
-	stBright       = tui.NewStyle().Foreground(tui.RGBColor(0xFF, 0xFF, 0xFF))
+	stTitle       = tui.NewStyle().Bold()
+	stBadge       = tui.NewStyle().Foreground(colorAccent).Bold()
+	stProtoBadge  = tui.NewStyle().Foreground(colorSecondary)
+	stCyan        = tui.NewStyle().Foreground(colorData)
+	stPurple      = tui.NewStyle().Foreground(colorSecondary)
+	stGray        = tui.NewStyle().Dim()
+	stDivider     = tui.NewStyle().Dim()
+	stSelected    = tui.NewStyle().Foreground(colorAccent).Bold()
+	stFilter      = tui.NewStyle().Foreground(colorAccent)
+	stAvailable   = tui.NewStyle().Foreground(colorData).Bold()
+	stUnavailable = tui.NewStyle().Foreground(colorError)
+	stOneM        = tui.NewStyle().Foreground(colorWarning).Bold()
 )
 
 // span wraps text with a style for tui.WithRichText rows.
@@ -76,7 +65,6 @@ func plainLine(text string) *tui.Element {
 
 const (
 	filterViewHeight      = 15 // max visible items in filter list
-	credentialInputWidth  = 58
 	preferredPanelWidth   = 82
 	minimumPanelWidth     = 54
 	minimumTerminalMargin = 4
@@ -289,14 +277,6 @@ type AdvancedConfigModel struct {
 	availDone  chan modelAvailabilityDoneMsg
 }
 
-type modelFetchTickMsg struct{}
-
-// copiedClearMsg fires shortly after a key is copied, clearing the hint.
-type copiedClearMsg struct{}
-
-// urlCopiedClearMsg fires shortly after the endpoint URL is copied.
-type urlCopiedClearMsg struct{}
-
 type modelAvailability uint8
 
 const (
@@ -308,10 +288,6 @@ const (
 type modelAvailabilityDoneMsg struct {
 	testID   uint64
 	statuses map[string]modelAvailability
-}
-
-type modelAvailabilityTickMsg struct {
-	testID uint64
 }
 
 type modelFetchDoneMsg struct {
@@ -649,31 +625,6 @@ func (m *AdvancedConfigModel) mainRowIndex(kind configRowKind) int {
 	return -1
 }
 
-// renderedCursorLine returns the 0-based line index within a rendered body where
-// the cursor row's label starts. The body is searched line by line for the row's
-// clickable label (matching rowAtLine's label set), so the window slicing in View
-// lines up with the row the cursor is actually on — even when structural blank
-// lines between sections shift rows from the rowLineHeight estimate. Rows that
-// have no rendered label (or a cursor beyond the visible rows) resolve to 0.
-func renderedCursorLine(body string, cursor int, rows []configRow) int {
-	if cursor < 0 || cursor >= len(rows) {
-		return 0
-	}
-	kind := rows[cursor].kind
-	prefixes := rowClickLabelPrefixes(kind)
-	if len(prefixes) == 0 {
-		return 0
-	}
-	for i, line := range strings.Split(body, "\n") {
-		for _, prefix := range prefixes {
-			if strings.Contains(line, prefix) {
-				return i
-			}
-		}
-	}
-	return 0
-}
-
 // scrollBodyBudget returns how many body lines fit under the fixed page chrome
 // (title bar, connection block gap, detection status, panel border, footer tip).
 // Both keepCursorVisible (Update) and View use this so the cursor row the update
@@ -690,49 +641,84 @@ func scrollBodyBudget(height int) int {
 // keepCursorVisible clamps scrollOffset so the cursor row stays inside the
 // visible region. It runs after cursor movement in Update; View never mutates
 // scroll state.
+//
+// scrollWindow slices the body at the *element* index; the previous
+// rowLineHeight estimate counted only focusable rows and ignored structural
+// lines (header, section titles, blank separators, footer), so the cursor
+// drifted off-screen until it happened to hit the tail anchor. Locating the
+// cursor by its rendered label keeps the two in agreement.
 func (m *AdvancedConfigModel) keepCursorVisible() {
-	// Scroll is only meaningful once the terminal height is known and the page
-	// content can exceed it. The view reports its overflow through the same
-	// height; without a height there is nothing to keep visible.
 	if m.height <= 0 {
 		return
 	}
-	// Estimate the row height of the cursor: connection rows take two lines
-	// (label + value); everything else one. The scroll budget is the terminal
-	// height minus the fixed header/panel chrome (must match View).
+	rows := m.bodyRows()
 	visibleHeight := scrollBodyBudget(m.height)
-	rows := m.visibleRows()
-	if len(rows) == 0 {
+	if len(rows) <= visibleHeight {
+		m.scrollOffset = 0
 		return
 	}
-	cursorLine := 0
-	for i := 0; i < m.cursor && i < len(rows); i++ {
-		cursorLine += rowLineHeight(rows[i].kind)
-	}
-	rowH := rowLineHeight(rows[m.cursor].kind)
+	cursorLine := m.cursorBodyLine(rows)
 
 	if cursorLine < m.scrollOffset {
 		m.scrollOffset = cursorLine
 	}
-	if cursorLine+rowH > m.scrollOffset+visibleHeight {
-		m.scrollOffset = cursorLine + rowH - visibleHeight
+	if cursorLine+1 > m.scrollOffset+visibleHeight {
+		m.scrollOffset = cursorLine + 1 - visibleHeight
+	}
+	maxOffset := len(rows) - visibleHeight
+	if m.scrollOffset > maxOffset {
+		m.scrollOffset = maxOffset
 	}
 	if m.scrollOffset < 0 {
 		m.scrollOffset = 0
 	}
 }
 
-// rowLineHeight reports how many rendered lines a row occupies. Connection rows
-// span label + value; the API key value is a 2-line textarea so its row is one
-// line taller than the endpoint. Every other row is a single line.
-func rowLineHeight(kind configRowKind) int {
-	switch kind {
-	case rowEndpoint:
-		return 2
-	case rowAPIKey:
-		return 3
+// cursorBodyLine returns the 0-based body-line index of the cursor row, located
+// by matching the row's rendered label prefix in the sprinted body text. Every
+// body element renders as exactly one line (a no-wrap flex row), so this text
+// line index equals the element index scrollWindow slices at.
+func (m *AdvancedConfigModel) cursorBodyLine(rows []*tui.Element) int {
+	vrows := m.visibleRows()
+	if m.cursor < 0 || m.cursor >= len(vrows) {
+		return 0
 	}
-	return 1
+	kind := vrows[m.cursor].kind
+	// Cancel shares the Save & Activate line; match Save's labels so the row
+	// locates instead of resolving to 0 (which would snap the scroll to the top).
+	if kind == rowCancel {
+		kind = rowSave
+	}
+	prefixes := rowClickLabelPrefixes(kind)
+	if len(prefixes) == 0 {
+		return 0
+	}
+	container := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Column), tui.WithWrap(false))
+	for _, r := range rows {
+		container.AddChild(r)
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	for i, line := range strings.Split(tui.Sprint(container, tui.WithPrintWidth(width)), "\n") {
+		// Sprint emits ANSI SGR codes ahead of every styled span; strip them
+		// before the label match, exactly like the mouse hit-test does.
+		trimmed := strings.TrimLeft(stripANSI(line), " >│")
+		// The Active row leads with a "[x] "/"[ ] " checkbox; skip it so the
+		// label matches.
+		if strings.HasPrefix(trimmed, "[") {
+			if idx := strings.Index(trimmed, "] "); idx >= 0 {
+				trimmed = trimmed[idx+2:]
+			}
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(trimmed, p) {
+				return i
+			}
+		}
+	}
+	return 0
 }
 
 // isModelRow reports whether a row kind is one of the five model slots.
@@ -1220,10 +1206,6 @@ func (m *AdvancedConfigModel) textInputHasKeyboard() bool {
 	return row == rowEndpoint || row == rowAPIKey || m.filterFocused
 }
 
-// vimNavAliases 是导航键的单字母别名。它们同时是合法的输入字符，因此在文本
-// 输入框拥有键盘时必须让位，否则用户打不出这些字母。方向键没有这个歧义。
-var vimNavAliases = map[string]bool{"q": true, "h": true, "j": true, "k": true, "l": true}
-
 // NewAdvancedMappingModel opens the slot mapper with a pre-populated catalog.
 // Model IDs remain the selectable and persisted values; metadata supplies only
 // display labels and context hints.
@@ -1393,6 +1375,25 @@ func (m *AdvancedConfigModel) availabilityCounts() (available, unavailable int) 
 		}
 	}
 	return available, unavailable
+}
+
+// syncTerminalSize refreshes m.width/m.height from the app's terminal each
+// render. Scrolling (keepCursorVisible / scrollWindow) and the mouse
+// hit-test both need the live size; without it a real session never scrolls
+// and the panel is clipped at the terminal bottom, hiding Save/Cancel.
+// A nil app (offline tests) keeps the fields as-is.
+func (m *AdvancedConfigModel) syncTerminalSize(app *tui.App) {
+	if app == nil {
+		return
+	}
+	w, h := app.Size()
+	if w > 0 {
+		m.width = w
+	}
+	if h > 0 {
+		m.height = h
+		m.updateInputWidths()
+	}
 }
 
 func (m *AdvancedConfigModel) panelWidth() int {
@@ -1873,8 +1874,17 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		m.live().probeEndpoint = detectedEndpoint
 	}
 	if !m.usesOAuth() && detectedType != "" {
-		m.p.Type = detectedType
-		m.p.AnthropicAuth = ""
+		// The probe can only tell apart Anthropic / Command Code / the OpenAI
+		// family — it cannot distinguish OpenAI's Chat Completions from its
+		// Responses API (both are reached through the same GET /v1/models list).
+		// Reopening an existing openai_responses provider must not let the
+		// auto-probe downgrade its stored Type back to "openai" (chat); preserve
+		// the user's Responses choice when the probe still lands in the OpenAI
+		// family, and only overwrite the Type when the probe family disagrees.
+		if !(provider.IsOpenAIResponsesType(m.p.Type) && provider.IsOpenAICompatibleType(detectedType)) {
+			m.p.Type = detectedType
+			m.p.AnthropicAuth = ""
+		}
 	}
 	if !m.usesOAuth() && detectedType == "anthropic" {
 		m.p.Endpoint = protocol.NormalizeAnthropicBaseURLForClaude(m.p.Endpoint)
@@ -2697,7 +2707,7 @@ func (m *AdvancedConfigModel) invalidateModelsDevKeyIfChanged() {
 
 // renderModelFetchProgress builds the connection-check in-progress block: a
 // spinner frame, the label, and the hint line.
-func renderModelFetchProgress(progress, frame int, oauth bool, app *tui.App) []*tui.Element {
+func renderModelFetchProgress(progress, frame int, oauth bool) []*tui.Element {
 	if progress < 0 {
 		progress = 0
 	}
@@ -2706,9 +2716,9 @@ func renderModelFetchProgress(progress, frame int, oauth bool, app *tui.App) []*
 	}
 	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spin := spinners[frame%len(spinners)]
-	label := locale.T("Connecting...", "Connecting...")
+	label := locale.T("正在连接...", "Connecting...")
 	if oauth {
-		label = locale.T("Connecting via OAuth...", "Connecting via OAuth...")
+		label = locale.T("正在通过 OAuth 连接...", "Connecting via OAuth...")
 	}
 	return []*tui.Element{
 		plainLine(""),
@@ -2719,23 +2729,23 @@ func renderModelFetchProgress(progress, frame int, oauth bool, app *tui.App) []*
 
 // credentialField renders one credential row: the label line and the value
 // line(s). The API key can span multiple lines (its editor accepts Enter);
-// each line is its own element so the mouse hit-test rows stay stable.
+// each line is its own element so the mouse hit-test rows stay stable. A
+// focused field swaps the label for the accent style and the "> " cursor
+// prefix, matching the stepper rows below.
 func credentialField(label, value string, focused bool) []*tui.Element {
 	prefix := "  "
 	labelStyle := stPurple
+	valueStyle := stGray
 	if focused {
 		prefix = "> "
 		labelStyle = stSelected
+		valueStyle = stSelected
 	}
-	_ = prefix
-	_ = labelStyle
 	rows := []*tui.Element{
-		line(span("  ", tui.NewStyle()), span(label, stPurple)),
+		line(span(prefix, labelStyle), span(label, labelStyle)),
 	}
-	_ = focused
-	_ = rows
 	for _, v := range strings.Split(value, "\n") {
-		rows = append(rows, line(span("  ", tui.NewStyle()), span(v, stGray)))
+		rows = append(rows, line(span("  ", tui.NewStyle()), span(v, valueStyle)))
 	}
 	rows = append(rows, plainLine(""))
 	return rows
@@ -2750,7 +2760,7 @@ func (m *AdvancedConfigModel) renderPageHeader(title, badge string) []*tui.Eleme
 	if !m.live().modelPoolFromDiscovery && !m.usesOAuth() {
 		// Must be a third span, not a later AddChild: block children appended to
 		// a flex Row mis-layout and the text overlaps (see CLAUDE.md go-tui notes).
-		spans = append(spans, span(" Protocol: "+m.getProtocolFamily(), stProtoBadge))
+		spans = append(spans, span(locale.T(" 协议: ", " Protocol: ")+m.getProtocolFamily(), stProtoBadge))
 	}
 	head := line(spans...)
 	dividerWidth := max(m.panelWidth()-6, 16)
@@ -2802,7 +2812,7 @@ func truncateMiddle(s string, max int) string {
 // the main configuration page. A nil app is tolerated so tests can render
 // offline.
 func (m *AdvancedConfigModel) Render(app *tui.App) *tui.Element {
-	_ = app
+	m.syncTerminalSize(app)
 	// Model picker overlay: when the filter input has focus, render only the
 	// filtered model list (search + availability) instead of the main page.
 	if m.filterFocused {
@@ -2816,299 +2826,399 @@ func (m *AdvancedConfigModel) Render(app *tui.App) *tui.Element {
 	return m.viewMainPage()
 }
 
-// viewMainPage renders the single-page configuration panel: header, connection
-// block, model mapping, runtime rows, and the action bar.
+// bodyRows builds the full page body (header through the action bar) as an
+// ordered list of single-line elements. viewMainPage wraps it in the panel;
+// keepCursorVisible reuses it to locate the cursor row's precise body line for
+// scrolling. Section renderers are read-only — they only build elements.
+func (m *AdvancedConfigModel) bodyRows() []*tui.Element {
+	rows := m.renderPageHeader(locale.T("Provider 配置", "Provider Configuration"), m.pageBadge())
+	rows = append(rows, m.viewConnectionSection()...)
+	rows = append(rows, m.viewDetectionSection()...)
+	rows = append(rows, m.viewMappingSection()...)
+	rows = append(rows, m.viewRuntimeSection()...)
+	rows = append(rows, m.viewActionSection()...)
+	return rows
+}
+
 func (m *AdvancedConfigModel) viewMainPage() *tui.Element {
-	var rows []*tui.Element
+	return m.wrapMainPanel(m.bodyRows())
+}
 
-	// ── Title bar ──────────────────────────────────────────────────────────
-	title := locale.T("Provider 配置", "Provider Configuration")
-	badge := "Config"
+// pageBadge labels the header: the connection family this page edits.
+func (m *AdvancedConfigModel) pageBadge() string {
 	if m.usesOAuth() {
-		badge = "OAuth"
+		return "OAuth"
 	}
-	rows = append(rows, m.renderPageHeader(title, badge)...)
+	return "Config"
+}
 
-	// ── Connection ─────────────────────────────────────────────────────────
-	rows = append(rows, spanLine("Connection", stTitle))
+// viewConnectionSection renders the Connection block: subscription metadata
+// for OAuth providers, or the Source stepper plus endpoint/key/protocol rows
+// for Custom and models.dev sources.
+func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
+	rows := []*tui.Element{m.connectionTitleRow()}
 	if m.usesOAuth() {
-		rows = append(rows,
+		// OAuth rows are subscription metadata; the model-fetch action sits
+		// directly under Auth like the non-OAuth detection buttons.
+		return append(rows,
 			kvRow("Provider", span(m.p.OAuthProvider, stCyan)),
 			kvRow("Fast", span(providerFastSummary(*m.p), stCyan)),
-			kvRow("Auth", span(providerAuthLabel(*m.p), stAvailable)),
-			kvRow("Local Proxy", span(locale.T("已就绪（仅本次会话）", "Ready (this session only)"), stAvailable)),
+			kvRow(locale.T("鉴权", "Auth"), span(providerAuthLabel(*m.p), stAvailable)),
+			plainLine(""),
+			m.actionButtonRow(locale.T("Auto Configure", "Auto Configure"), rowTest),
+			kvRow(locale.T("本地代理", "Local Proxy"), span(locale.T("已就绪（仅本次会话）", "Ready (this session only)"), stAvailable)),
 		)
-	} else {
-		copiedHint := ""
-		if m.keyCopied {
-			copiedHint = "  " + locale.T("✓ 已复制", "✓ copied")
-		}
-		urlCopiedHint := ""
-		if m.urlCopied {
-			urlCopiedHint = "  " + locale.T("✓ 已复制", "✓ copied")
-		}
-		// Endpoint and API Key render identically: unfocused they are grey text
-		// (so the two fields match), and only when focused do they show the live
-		// input view with its cursor. Double-clicking a value row copies the full
-		// value. Trailing blank lines from the textarea's fixed height are
-		// trimmed so the field does not consume extra rows in the panel.
-		const idleWidth = 60
-
-		// Source stepper: single-value ‹ › toggle between Custom and models.dev,
-		// styled like the other steppers below (purple when idle, accent when
-		// focused, cycling with ←→).
-		sourceVal := "models.dev"
-		if m.source == sourceCustom {
-			sourceVal = "Custom"
-		}
-		rows = append(rows, stepperRow("Source", "‹ "+sourceVal+" ›", m.cursor == m.mainRowIndex(rowSource)))
-
-		if m.usesModelsDev() {
-			// models.dev: endpoint/protocol come from metadata (read-only). The
-			// Provider row opens the catalog picker; only the API key is editable.
-			rows = append(rows, stepperRow("Provider", truncateMiddle(m.p.Name, idleWidth), m.cursor == m.mainRowIndex(rowProvider)))
-			rows = append(rows, kvRow("Endpoint", span(truncateMiddle(m.p.Endpoint, idleWidth), stCyan)))
-		} else {
-			urlValue := truncateMiddle(m.urlText.Get(), idleWidth) + urlCopiedHint
-			rows = append(rows, credentialField("Endpoint URL", urlValue, false)...)
-		}
-
-		keyValue := truncateMiddle(m.keyText.Get(), idleWidth) + copiedHint
-		rows = append(rows, credentialField("API Key", keyValue, false)...)
-
-		// Protocol moved up from Runtime: Chat/Responses/Anthropic is selectable
-		// for a manual Custom gateway; fixed and per-model runtimes stay read-only.
-		if m.usesModelsDev() {
-			rows = append(rows, kvRow("Protocol", span("auto/mixed", stAvailable)))
-		} else if m.canSelectCustomProtocol() {
-			value := customProtocolLabel(m.p.Type)
-			rows = append(rows, stepperRow("Protocol", "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowProtocol)))
-		} else {
-			rows = append(rows, kvRow("Protocol", span(m.getProtocol(), stAvailable)))
-		}
 	}
 
-	// Detection / auto-configure button. models.dev providers are pre-configured
-	// from metadata (endpoint, model pool, and per-model protocol table are already
-	// in place), so the only missing piece is the API key. It must be verified
-	// against the real endpoint (Test Connection) before the page reports a live
-	// connection — a non-empty string is not proof of validity.
-	if m.live().detecting {
-		rows = append(rows, renderModelFetchProgress(m.live().detectProgress, m.live().detectFrame, m.usesOAuth(), nil)...)
-	} else if m.usesModelsDev() {
-		if !m.live().modelPoolFromDiscovery {
-			rows = append(rows, spanLine(locale.T("尚未选择 Provider", "No provider selected yet"), stGray))
-		} else {
-			// Symmetric with Custom's Auto Configure: the button is always present
-			// so the cursor never lands on an invisible row; the status line below
-			// it reports whether the key has actually been verified.
-			testLabel := locale.T("验证连接", "Test Connection")
-			rows = append(rows, line(
-				span("  ", tui.NewStyle()),
-				span(testLabel, buttonStyle(false, m.cursor == m.mainRowIndex(rowTest))),
-			))
+	copiedHint := ""
+	if m.keyCopied {
+		copiedHint = "  " + locale.T("✓ 已复制", "✓ copied")
+	}
+	urlCopiedHint := ""
+	if m.urlCopied {
+		urlCopiedHint = "  " + locale.T("✓ 已复制", "✓ copied")
+	}
+	// Endpoint and API Key render identically: unfocused they are grey text
+	// (so the two fields match), and only when focused do they show the live
+	// input view with its cursor. Double-clicking a value row copies the full
+	// value. Trailing blank lines from the textarea's fixed height are
+	// trimmed so the field does not consume extra rows in the panel.
+	const idleWidth = 60
 
-			if strings.TrimSpace(m.keyText.Get()) == "" {
-				rows = append(rows, spanLine(locale.T("已选择 Provider · 请输入 API Key", "Provider selected · enter your API key"), stGray))
-			} else if m.live().detectionError != nil {
-				rows = append(rows,
-					spanLine(locale.T("验证失败，无法连接", "Verification failed; cannot connect"), stUnavailable),
-					spanLine(m.live().detectionError.Error(), stUnavailable),
-					plainLine(""),
-				)
-			} else if m.live().keyVerified {
-				status := fmt.Sprintf(locale.T("✓ 已连接 · %s · %d 个模型", "✓ Connected · %s · %d models"), provider.ProtocolLabelForProvider(*m.p), len(m.live().modelPool))
-				rows = append(rows, spanLine(status, stAvailable))
-			} else {
-				rows = append(rows, spanLine(locale.T("Key 尚未验证", "Key not verified yet"), stGray))
-			}
-		}
+	// Source stepper: single-value ‹ › toggle between Custom and models.dev,
+	// styled like the other steppers below (purple when idle, accent when
+	// focused, cycling with ←→).
+	sourceVal := "models.dev"
+	if m.source == sourceCustom {
+		sourceVal = locale.T("自定义", "Custom")
+	}
+	rows = append(rows, stepperRow(locale.T("来源", "Source"), "‹ "+sourceVal+" ›", m.cursor == m.mainRowIndex(rowSource)))
+
+	if m.usesModelsDev() {
+		// models.dev: endpoint/protocol come from metadata (read-only). The
+		// Provider row opens the catalog picker; only the API key is editable.
+		rows = append(rows, stepperRow("Provider", truncateMiddle(m.p.Name, idleWidth), m.cursor == m.mainRowIndex(rowProvider)))
+		rows = append(rows, kvRow(locale.T("端点", "Endpoint"), span(truncateMiddle(m.p.Endpoint, idleWidth), stCyan)))
 	} else {
-		testLabel := locale.T("Auto Configure", "Auto Configure")
-		rows = append(rows, line(
-			span("  ", tui.NewStyle()),
-			span(testLabel, buttonStyle(false, m.cursor == m.mainRowIndex(rowTest))),
-		))
+		urlValue := truncateMiddle(m.urlText.Get(), idleWidth) + urlCopiedHint
+		rows = append(rows, credentialField(locale.T("端点 URL", "Endpoint URL"), urlValue, m.urlFocused || m.cursor == m.mainRowIndex(rowEndpoint))...)
+	}
 
-		if m.live().detectionError != nil {
-			rows = append(rows,
-				spanLine(locale.T("检测失败，无法继续", "Detection failed; cannot continue"), stUnavailable),
+	keyValue := truncateMiddle(m.keyText.Get(), idleWidth) + copiedHint
+	rows = append(rows, credentialField("API Key", keyValue, m.keyFocused || m.cursor == m.mainRowIndex(rowAPIKey))...)
+
+	// Protocol moved up from Runtime: Chat/Responses/Anthropic is selectable
+	// for a manual Custom gateway; fixed and per-model runtimes stay read-only.
+	if m.usesModelsDev() {
+		rows = append(rows, kvRow(locale.T("协议", "Protocol"), span("auto/mixed", stAvailable)))
+	} else if m.canSelectCustomProtocol() {
+		value := customProtocolLabel(m.p.Type)
+		rows = append(rows, stepperRow(locale.T("协议", "Protocol"), "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowProtocol)))
+	} else {
+		rows = append(rows, kvRow(locale.T("协议", "Protocol"), span(m.getProtocol(), stAvailable)))
+	}
+	// Auth row: how the upstream verifies requests (API key / OAuth binding).
+	// For OAuth providers the Connection block is subscription metadata, and
+	// the Auth row above already carries this information.
+	rows = append(rows, kvRow(locale.T("鉴权", "Auth"), span(providerAuthLabel(*m.p), stAvailable)))
+
+	// Auto Configure / Test Connection row under Auth, separated by a blank
+	// line so the action reads as its own group of one.
+	if m.usesModelsDev() {
+		rows = append(rows, plainLine(""), m.actionButtonRow(locale.T("验证连接", "Test Connection"), rowTest))
+	} else {
+		rows = append(rows, plainLine(""), m.actionButtonRow(locale.T("Auto Configure", "Auto Configure"), rowTest))
+	}
+	return rows
+}
+
+// connectionTitleRow renders the section heading with the live connection
+// status on the same line: "Connection  ✓ Connected · Chat · 3 models".
+// The status appears only once a probe has actually succeeded; while dirty,
+// detecting, or failed it stays hidden so the header never shows stale state.
+// models.dev needs a verified key on top of the metadata pool: the pool is
+// populated at construction, so on its own it proves nothing about access.
+func (m *AdvancedConfigModel) connectionTitleRow() *tui.Element {
+	title := span(locale.T("连接", "Connection"), stTitle)
+	if m.live().detecting {
+		return line(title)
+	}
+	if m.usesModelsDev() && (!m.live().modelPoolFromDiscovery || !m.live().keyVerified) {
+		return line(title)
+	}
+	if m.live().detectionError != nil {
+		return line(title)
+	}
+	if m.live().modelPoolFromDiscovery {
+		status := fmt.Sprintf(locale.T("  ✓ 已连接 · %s · %d 个模型", "  ✓ Connected · %s · %d models"), provider.ProtocolLabelForProvider(*m.p), len(m.live().modelPool))
+		return line(title, span(status, stAvailable))
+	}
+	return line(title)
+}
+
+// viewDetectionSection renders the connection-check feedback: the in-flight
+// spinner and error status lines. The Auto Configure / Test Connection button
+// itself lives at the end of the Connection section, directly under Auth.
+func (m *AdvancedConfigModel) viewDetectionSection() []*tui.Element {
+	if m.live().detecting {
+		return renderModelFetchProgress(m.live().detectProgress, m.live().detectFrame, m.usesOAuth())
+	}
+
+	// models.dev providers are pre-configured from metadata (endpoint, model
+	// pool, and per-model protocol table are already in place), so the only
+	// missing piece is the API key. It must be verified against the real
+	// endpoint (Test Connection) before the page reports a live connection —
+	// a non-empty string is not proof of validity.
+	if m.usesModelsDev() {
+		if !m.live().modelPoolFromDiscovery {
+			return []*tui.Element{spanLine(locale.T("尚未选择 Provider", "No provider selected yet"), stGray)}
+		}
+		switch {
+		case strings.TrimSpace(m.keyText.Get()) == "":
+			return []*tui.Element{spanLine(locale.T("已选择 Provider · 请输入 API Key", "Provider selected · enter your API key"), stGray)}
+		case m.live().detectionError != nil:
+			return []*tui.Element{
+				spanLine(locale.T("验证失败，无法连接", "Verification failed; cannot connect"), stUnavailable),
 				spanLine(m.live().detectionError.Error(), stUnavailable),
 				plainLine(""),
-			)
-		} else if m.live().modelPoolFromDiscovery {
-			status := fmt.Sprintf(locale.T("✓ 已连接 · %s · %d 个模型", "✓ Connected · %s · %d models"), provider.ProtocolLabelForProvider(*m.p), len(m.live().modelPool))
-			rows = append(rows, spanLine(status, stAvailable))
-			if !m.usesOAuth() {
-				rows = append(rows, kvRow("Auth", span(providerAuthLabel(*m.p), stAvailable)))
 			}
+		case m.live().keyVerified:
+			// The header line already carries the connected status.
+			return nil
+		default:
+			return []*tui.Element{spanLine(locale.T("Key 尚未验证", "Key not verified yet"), stGray)}
 		}
 	}
 
-	// ── Model Mapping (only after detection) ──────────────────────────────
-	{
-		rows = append(rows, plainLine(""), spanLine("Model Mapping", stTitle))
-		// (the block always renders; rows grey out until connectionReady)
-		ready := m.connectionReady()
-		renderMappingRow := func(kind configRowKind, label, display, modelID string, oneM bool) {
-			val := span(truncateMiddle(display, 52), stPurple)
-			if !ready {
-				// Connection not ready: grey out the row, no focus affordance.
-				val = span(truncateMiddle(display, 52), stGray)
-			} else if m.cursor == m.mainRowIndex(kind) {
-				val = span(truncateMiddle(display, 52), stSelected)
-			}
-			prefix := "  "
-			prefixStyle := tui.NewStyle()
-			if ready && m.cursor == m.mainRowIndex(kind) {
-				prefix = "> "
-				prefixStyle = stSelected
-			}
-			row := line(
-				span(prefix, prefixStyle),
-				span(fmt.Sprintf("%-10s ", label), tui.NewStyle()),
-				span(truncateMiddle(display, 52), styleOf(val)),
-			)
-			// Availability badge, shown only after the optional test ran.
-			badgeText := "    "
-			badgeStyle := tui.NewStyle()
-			if status, ok := m.modelAvailability[modelID]; ok && status != modelAvailabilityUnknown {
-				switch status {
-				case modelAvailabilityAvailable:
-					badgeText = "✓ "
-					badgeStyle = stAvailable
-				case modelAvailabilityUnavailable:
-					badgeText = "✗ "
-					badgeStyle = stUnavailable
-				}
-			} else if oneM && ready {
-				badgeText = "[1M]"
-				badgeStyle = stOneM
-			}
-			row.AddChild(tui.New(tui.WithRichText(span(" "+badgeText, badgeStyle))))
-			rows = append(rows, row)
+	if m.live().detectionError != nil {
+		return []*tui.Element{
+			spanLine(locale.T("检测失败，无法继续", "Detection failed; cannot continue"), stUnavailable),
+			spanLine(m.live().detectionError.Error(), stUnavailable),
+			plainLine(""),
 		}
-		renderMappingRow(rowOpus, "Opus", m.modelDisplayLabel(m.p.OpusModel), m.p.OpusModel, m.live().oneMSlots["opus"])
-		renderMappingRow(rowSonnet, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.p.SonnetModel, m.live().oneMSlots["sonnet"])
-		renderMappingRow(rowHaiku, "Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.p.HaikuModel, m.live().oneMSlots["haiku"])
-		renderMappingRow(rowCustom, "Custom", m.modelDisplayLabel(m.p.CustomModelID), m.p.CustomModelID, m.live().oneMSlots["custom"])
-		renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.p.SubagentModel, m.live().oneMSlots["subagent"])
+	}
+	// Connected: the header line carries the status; nothing extra here.
+	return nil
+}
 
-		// Test Model Availability — optional; each probe consumes quota, so the
-		// user opts in explicitly. Results are shown next to the model rows above.
-		testPrefix := "  "
-		testPrefixStyle := tui.NewStyle()
-		testLabel := locale.T("Test Model Availability", "Test Model Availability")
-		testStyle := stPurple
+// actionButtonRow renders one left-aligned action row (Auto Configure / Test
+// Connection) with the same plain-text affordance as Test Model Availability:
+// purple when idle, "> " + accent when selected. No background button box —
+// the two action rows must read as one visual family.
+func (m *AdvancedConfigModel) actionButtonRow(label string, kind configRowKind) *tui.Element {
+	prefix := "  "
+	prefixStyle := tui.NewStyle()
+	style := stPurple
+	if m.cursor == m.mainRowIndex(kind) {
+		prefix = "> "
+		prefixStyle = stSelected
+		style = stSelected
+	}
+	return line(
+		span(prefix, prefixStyle),
+		span(label, style),
+	)
+}
+
+// viewMappingSection renders Model Mapping: the five model slots with their
+// [1M] / availability badges, the optional availability test, and the
+// provider-wide Context & Compact stepper. Rows grey out until the
+// connection is ready.
+func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
+	rows := []*tui.Element{
+		plainLine(""),
+		spanLine(locale.T("模型映射", "Model Mapping"), stTitle),
+	}
+	ready := m.connectionReady()
+	renderMappingRow := func(kind configRowKind, label, display, modelID string, oneM bool) {
+		val := span(truncateMiddle(display, 52), stPurple)
 		if !ready {
-			testStyle = stGray
-		} else if m.modelTesting {
-			spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-			spin := spinners[m.modelTestFrame%len(spinners)]
-			testLabel = fmt.Sprintf("%s %s", spin, locale.T("正在测试模型可用性...", "Testing model availability..."))
-		} else if m.cursor == m.mainRowIndex(rowTestModels) {
-			testPrefix = "> "
-			testPrefixStyle = stSelected
-			testStyle = stSelected
+			// Connection not ready: grey out the row, no focus affordance.
+			val = span(truncateMiddle(display, 52), stGray)
+		} else if m.cursor == m.mainRowIndex(kind) {
+			val = span(truncateMiddle(display, 52), stSelected)
 		}
-		rows = append(rows, line(
-			span(testPrefix, testPrefixStyle),
-			span(testLabel, testStyle),
-		))
-		if m.modelTesting {
-			rows = append(rows, spanLine("    "+locale.T("测试进行中 · 按 esc 取消", "Testing in progress · press esc to cancel"), stGray))
-		} else if len(m.modelAvailability) > 0 {
-			available, unavailable := m.availabilityCounts()
-			rows = append(rows, spanLine(fmt.Sprintf("    "+locale.T("%d 个可用 · %d 个不可用", "%d available · %d unavailable"), available, unavailable), stGray))
-		} else {
-			rows = append(rows, spanLine(locale.T("    ⚠ 会为每个模型发送一次最小请求，消耗额度", "    ⚠ sends one minimal request per model; consumes quota"), stGray))
-		}
-
-		// Context & Compact — per-slot [1m] via Space on the rows above; the
-		// provider-wide fallback cycles with ←→ (shown as ‹ › like other editable
-		// values).
-		rows = append(rows, stepperRow("Context & Compact", "‹ "+m.compactSummary()+" ›", m.cursor == m.mainRowIndex(rowContext)))
-
-		// ── Runtime ──────────────────────────────────────────────────────
-		rows = append(rows, plainLine(""), spanLine("Runtime", stTitle))
-		renderEditable := func(kind configRowKind, label, value string) {
-			rows = append(rows, stepperRow(label, value, ready && m.cursor == m.mainRowIndex(kind)))
-		}
-		if m.usesOAuth() {
-			// OAuth subscriptions keep the read-only protocol display here: their
-			// Connection block is subscription metadata with no protocol concept.
-			rows = append(rows, kvRow("Protocol", span(m.getProtocol(), stAvailable)))
-		}
-		renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
-		renderEditable(rowTools, "Tools", formatToolsLabel(m.reviewToolsValue()))
-		renderEditable(rowToolSearch, "Tool Search", formatSearchLabel(m.reviewSearchValue()))
-
-		// ── Active checkbox ──────────────────────────────────────────────
-		activeBox := "[ ]"
-		if m.IsActiveChosen {
-			activeBox = "[x]"
-		}
-		activeLabel := locale.T("设为当前激活 Provider", "Set as active provider")
-		activeSelected := m.cursor == m.mainRowIndex(rowActive)
-		boxStyle := stPurple
-		labelStyle := stPurple
 		prefix := "  "
 		prefixStyle := tui.NewStyle()
-		if activeSelected {
+		if ready && m.cursor == m.mainRowIndex(kind) {
 			prefix = "> "
 			prefixStyle = stSelected
-			boxStyle = stSelected
-			labelStyle = stSelected
 		}
-		rows = append(rows, line(
+		// Availability badge, shown only after the optional test ran. The
+		// badge is a span inside the row's single RichText — adding it as a
+		// second flex child makes the row compress and overlap the label.
+		badgeText := "    "
+		badgeStyle := tui.NewStyle()
+		if status, ok := m.modelAvailability[modelID]; ok && status != modelAvailabilityUnknown {
+			switch status {
+			case modelAvailabilityAvailable:
+				badgeText = "✓ "
+				badgeStyle = stAvailable
+			case modelAvailabilityUnavailable:
+				badgeText = "✗ "
+				badgeStyle = stUnavailable
+			}
+		} else if oneM && ready {
+			badgeText = "[1M]"
+			badgeStyle = stOneM
+		}
+		row := line(
 			span(prefix, prefixStyle),
-			span(activeBox+" ", boxStyle),
-			span(activeLabel, labelStyle),
-		))
+			span(fmt.Sprintf("%-10s ", label), tui.NewStyle()),
+			span(truncateMiddle(display, 52), styleOf(val)),
+			span(" "+badgeText, badgeStyle),
+		)
+		rows = append(rows, row)
+	}
+	renderMappingRow(rowOpus, "Opus", m.modelDisplayLabel(m.p.OpusModel), m.p.OpusModel, m.live().oneMSlots["opus"])
+	renderMappingRow(rowSonnet, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.p.SonnetModel, m.live().oneMSlots["sonnet"])
+	renderMappingRow(rowHaiku, "Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.p.HaikuModel, m.live().oneMSlots["haiku"])
+	renderMappingRow(rowCustom, "Custom", m.modelDisplayLabel(m.p.CustomModelID), m.p.CustomModelID, m.live().oneMSlots["custom"])
+	renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.p.SubagentModel, m.live().oneMSlots["subagent"])
 
-		// ── Actions ──────────────────────────────────────────────────────
-		applyLabel := locale.T("保存并激活", "Save & Activate")
-		if !m.IsActiveChosen {
-			applyLabel = locale.T("保存 Provider", "Save Provider")
-		}
-		cancelLabel := locale.T("取消", "Cancel")
-		applyDisabled := !m.canSave()
-		applyStyle := tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
-		if applyDisabled {
-			// Not connected (or a dirty connection not yet re-tested): the button
-			// is greyed out and not focusable.
-			applyStyle = stGray
-		} else if m.cursor == m.mainRowIndex(rowSave) {
-			applyStyle = stButtonActive
-		}
-		cancelStyle := tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
-		if m.cursor == m.mainRowIndex(rowCancel) {
-			cancelStyle = stButtonActive
-		}
-		rows = append(rows, plainLine(""), line(
-			span("  ", tui.NewStyle()),
-			span(applyLabel, applyStyle),
-			span("     ", tui.NewStyle()),
-			span(cancelLabel, cancelStyle),
-		))
-
-		if m.live().connectionDirty && !m.usesOAuth() {
-			rows = append(rows, spanLine(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving"), stGray))
-		}
-		if m.customDraft != nil && m.customDraft.saveGuardPending {
-			rows = append(rows, spanLine(locale.T(
-				"保存将覆盖同名 models.dev Provider（逐模型协议表会丢失）；再次点击保存确认，或切回 models.dev",
-				"Saving replaces the same-named models.dev provider (its per-model protocol table is lost); press Save again to confirm, or switch back to models.dev",
-			), stUnavailable))
-		}
-		rows = append(rows, spanLine(locale.T(
-			"↑↓ 选择 · ←→ 调整 · enter 确认 · 模型行 enter 筛选",
-			"↑↓ select · ←→ adjust · enter confirm · enter on a model row to filter",
-		), stGray))
+	// Test Model Availability — optional; each probe consumes quota, so the
+	// user opts in explicitly. Results are shown next to the model rows above.
+	// A blank line separates it from the model slots, matching the action rows.
+	rows = append(rows, plainLine(""))
+	testPrefix := "  "
+	testPrefixStyle := tui.NewStyle()
+	testLabel := locale.T("Test Model Availability", "Test Model Availability")
+	testStyle := stPurple
+	if !ready {
+		testStyle = stGray
+	} else if m.modelTesting {
+		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		spin := spinners[m.modelTestFrame%len(spinners)]
+		testLabel = fmt.Sprintf("%s %s", spin, locale.T("正在测试模型可用性...", "Testing model availability..."))
+	} else if m.cursor == m.mainRowIndex(rowTestModels) {
+		testPrefix = "> "
+		testPrefixStyle = stSelected
+		testStyle = stSelected
+	}
+	rows = append(rows, line(
+		span(testPrefix, testPrefixStyle),
+		span(testLabel, testStyle),
+	))
+	if m.modelTesting {
+		rows = append(rows, spanLine("    "+locale.T("测试进行中 · 按 esc 取消", "Testing in progress · press esc to cancel"), stGray))
+	} else if len(m.modelAvailability) > 0 {
+		available, unavailable := m.availabilityCounts()
+		rows = append(rows, spanLine(fmt.Sprintf("    "+locale.T("%d 个可用 · %d 个不可用", "%d available · %d unavailable"), available, unavailable), stGray))
+	} else if m.cursor == m.mainRowIndex(rowTestModels) {
+		// go-tui has no tooltip API: the quota warning behaves like a hover hint
+		// and only renders while the row is selected.
+		rows = append(rows, spanLine(locale.T("    ⚠ 会为每个模型发送一次最小请求，消耗额度", "    ⚠ sends one minimal request per model; consumes quota"), stGray))
 	}
 
-	// Panel: the rows above are the page body, wrapped in a rounded border with
-	// horizontal padding.
+	return rows
+}
+
+// viewRuntimeSection renders the Runtime block: the OAuth read-only protocol
+// display (when applicable), the Context & Compact stepper, the
+// Fast/Tools/Tool Search steppers, plus the active-provider checkbox.
+func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
+	rows := []*tui.Element{
+		plainLine(""),
+		spanLine(locale.T("运行时", "Runtime"), stTitle),
+	}
+	ready := m.connectionReady()
+	renderEditable := func(kind configRowKind, label, value string) {
+		rows = append(rows, stepperRow(label, value, ready && m.cursor == m.mainRowIndex(kind)))
+	}
+	if m.usesOAuth() {
+		// OAuth subscriptions keep the read-only protocol display here: their
+		// Connection block is subscription metadata with no protocol concept.
+		rows = append(rows, kvRow(locale.T("协议", "Protocol"), span(m.getProtocol(), stAvailable)))
+	}
+	// Context & Compact — per-slot [1m] via Space on the model rows above; the
+	// provider-wide fallback cycles with ←→ (shown as ‹ › like other editable
+	// values).
+	renderEditable(rowContext, locale.T("上下文与压缩", "Context & Compact"), "‹ "+m.compactSummary()+" ›")
+	renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
+	renderEditable(rowTools, locale.T("工具", "Tools"), formatToolsLabel(m.reviewToolsValue()))
+	renderEditable(rowToolSearch, locale.T("工具搜索", "Tool Search"), formatSearchLabel(m.reviewSearchValue()))
+
+	// Active checkbox.
+	activeBox := "[ ]"
+	if m.IsActiveChosen {
+		activeBox = "[x]"
+	}
+	activeLabel := locale.T("设为当前激活 Provider", "Set as active provider")
+	activeSelected := m.cursor == m.mainRowIndex(rowActive)
+	boxStyle := stPurple
+	labelStyle := stPurple
+	prefix := "  "
+	prefixStyle := tui.NewStyle()
+	if activeSelected {
+		prefix = "> "
+		prefixStyle = stSelected
+		boxStyle = stSelected
+		labelStyle = stSelected
+	}
+	return append(rows, line(
+		span(prefix, prefixStyle),
+		span(activeBox+" ", boxStyle),
+		span(activeLabel, labelStyle),
+	))
+}
+
+// viewActionSection renders the Save/Cancel action bar, the save-gating
+// warnings, and the key hint footer.
+func (m *AdvancedConfigModel) viewActionSection() []*tui.Element {
+	applyLabel := locale.T("保存并激活", "Save & Activate")
+	if !m.IsActiveChosen {
+		applyLabel = locale.T("保存 Provider", "Save Provider")
+	}
+	cancelLabel := locale.T("取消", "Cancel")
+	applyDisabled := !m.canSave()
+	applyPrefix := "  "
+	applyPrefixStyle := tui.NewStyle()
+	applyStyle := stPurple
+	if applyDisabled {
+		// Not connected (or a dirty connection not yet re-tested): the button
+		// is greyed out and not focusable.
+		applyStyle = stGray
+	} else if m.cursor == m.mainRowIndex(rowSave) {
+		applyPrefix = "> "
+		applyPrefixStyle = stSelected
+		applyStyle = stSelected
+	}
+	cancelPrefix := "  "
+	cancelPrefixStyle := tui.NewStyle()
+	cancelStyle := stPurple
+	if m.cursor == m.mainRowIndex(rowCancel) {
+		cancelPrefix = "> "
+		cancelPrefixStyle = stSelected
+		cancelStyle = stSelected
+	}
+	rows := []*tui.Element{
+		plainLine(""),
+		line(
+			span(applyPrefix, applyPrefixStyle),
+			span(applyLabel, applyStyle),
+			span("     ", tui.NewStyle()),
+			span(cancelPrefix, cancelPrefixStyle),
+			span(cancelLabel, cancelStyle),
+		),
+	}
+	if m.live().connectionDirty && !m.usesOAuth() {
+		rows = append(rows, spanLine(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving"), stGray))
+	}
+	if m.customDraft != nil && m.customDraft.saveGuardPending {
+		rows = append(rows, spanLine(locale.T(
+			"保存将覆盖同名 models.dev Provider（逐模型协议表会丢失）；再次点击保存确认，或切回 models.dev",
+			"Saving replaces the same-named models.dev provider (its per-model protocol table is lost); press Save again to confirm, or switch back to models.dev",
+		), stUnavailable))
+	}
+	return append(rows, spanLine(locale.T(
+		"↑↓ 选择 · ←→ 调整 · enter 确认 · 模型行 enter 筛选",
+		"↑↓ select · ←→ adjust · enter confirm · enter on a model row to filter",
+	), stGray))
+}
+
+// wrapMainPanel wraps the page body in the rounded, scrollable panel plus the
+// outer content chrome (scroll indicator and language tip).
+func (m *AdvancedConfigModel) wrapMainPanel(rows []*tui.Element) *tui.Element {
 	panel := tui.New(
 		tui.WithDisplay(tui.DisplayFlex),
 		tui.WithDirection(tui.Column),
@@ -3121,7 +3231,9 @@ func (m *AdvancedConfigModel) viewMainPage() *tui.Element {
 	}
 
 	content := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Column), tui.WithWrap(false), tui.WithPaddingTRBL(1, 0, 1, 0))
-	if m.scrollOffset > 0 {
+	// The indicator mirrors scrollWindow's actual offset: both derive from
+	// scrollBodyBudget, so the indicator appears exactly when the body was cut.
+	if m.height > 0 && len(rows) > scrollBodyBudget(m.height) && m.scrollWindowOffset(rows) > 0 {
 		content.AddChild(spanLine(locale.T("▲ 上滚 · ↑ 查看", "▲ scrolled up · ↑ to view"), stGray))
 	}
 	content.AddChild(panel)
@@ -3133,32 +3245,46 @@ func (m *AdvancedConfigModel) viewMainPage() *tui.Element {
 	return content
 }
 
-// scrollWindow slices the page body rows to the visible window when the body
-// exceeds the terminal height. The offset mirrors keepCursorVisible (the model
-// field), anchored to the tail when the action bar would fall off.
-func (m *AdvancedConfigModel) scrollWindow(rows []*tui.Element) []*tui.Element {
-	if m.height <= 0 || len(rows) <= m.height {
-		return rows
+// scrollWindowOffset reports the body offset scrollWindow would slice at: it is
+// the model's scrollOffset, anchored to the tail once the cursor reaches the
+// action bar. The indicator logic uses it so the two can never disagree.
+func (m *AdvancedConfigModel) scrollWindowOffset(rows []*tui.Element) int {
+	if m.height <= 0 {
+		return 0
 	}
 	maxBody := scrollBodyBudget(m.height)
+	if len(rows) <= maxBody {
+		return 0
+	}
 	offset := m.scrollOffset
 	if offset < 0 {
 		offset = 0
 	}
-	// The Save/Cancel action bar is the most important thing to keep reachable,
-	// so when the cursor is on it (or the offset would slice it off) the window
-	// anchors to the tail.
 	if m.cursor >= m.mainRowIndex(rowSave) {
 		offset = len(rows) - maxBody
-	}
-	if offset < 0 {
-		offset = 0
 	}
 	if offset+maxBody > len(rows) {
 		offset = len(rows) - maxBody
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	return offset
+}
+
+// scrollWindow slices the page body rows to the visible window when the body
+// exceeds the terminal height. The offset mirrors keepCursorVisible (the model
+// field), anchored to the tail when the action bar would fall off.
+func (m *AdvancedConfigModel) scrollWindow(rows []*tui.Element) []*tui.Element {
+	// No terminal size yet (offline render / first frame): the min-clamped
+	// budget below would slice the body to 6 rows, so return everything.
+	if m.height <= 0 {
+		return rows
+	}
+	maxBody := scrollBodyBudget(m.height)
+	offset := m.scrollWindowOffset(rows)
+	if offset == 0 && len(rows) <= maxBody {
+		return rows
 	}
 	window := rows[offset : offset+maxBody]
 	if len(window) == 0 {
@@ -3168,21 +3294,23 @@ func (m *AdvancedConfigModel) scrollWindow(rows []*tui.Element) []*tui.Element {
 }
 
 // kvRow renders a read-only key/value line ("  Key  Value") with styled value.
+// The label column shares stepperLabelPad with stepperRow so read-only and
+// editable rows stay aligned.
 func kvRow(key string, value tui.TextSpan) *tui.Element {
+	labelText := key + strings.Repeat(" ", max(stepperLabelPad(key)-tui.StringWidth(key), 0)) + " "
 	return line(
-		span(fmt.Sprintf("  %-12s ", key), tui.NewStyle()),
+		span("  ", tui.NewStyle()),
+		span(labelText, tui.NewStyle()),
 		value,
 	)
 }
 
 // stepperRow renders an editable value row: a label plus a ‹ value › style value
-// that highlights when the cursor is on the row. labelPad keeps the columns of
-// differently-long labels aligned.
+// that highlights when the cursor is on the row. The label is padded to a fixed
+// column measured in terminal cells (tui.StringWidth, not bytes) so CJK labels
+// like "Context & Compact" keep the value column aligned with kvRow.
 func stepperRow(label, value string, selected bool) *tui.Element {
-	labelPad := 12
-	if len(label) > 10 {
-		labelPad = 18
-	}
+	labelPad := stepperLabelPad(label)
 	valueStyle := stPurple
 	prefix := "  "
 	prefixStyle := tui.NewStyle()
@@ -3191,29 +3319,30 @@ func stepperRow(label, value string, selected bool) *tui.Element {
 		prefix = "> "
 		prefixStyle = stSelected
 	}
+	labelText := label + strings.Repeat(" ", max(labelPad-tui.StringWidth(label), 0)) + " "
 	return line(
 		span(prefix, prefixStyle),
-		span(fmt.Sprintf("%-"+fmt.Sprint(labelPad)+"s ", label), tui.NewStyle()),
+		span(labelText, tui.NewStyle()),
 		span(value, valueStyle),
 	)
+}
+
+// stepperLabelPad returns the label column width shared by stepperRow and the
+// other field rows: wide enough for the longest label ("Tool Search") at 12
+// cells, or the label itself plus two cells of breathing room when it is
+// longer. Measured with tui.StringWidth so wide runes count correctly.
+func stepperLabelPad(label string) int {
+	const base = 12
+	if w := tui.StringWidth(label); w+2 > base {
+		return w + 2
+	}
+	return base
 }
 
 // spanLine renders one single-style text line (no wrap so hit-test rows stay
 // stable).
 func spanLine(text string, st tui.Style) *tui.Element {
 	return tui.New(tui.WithText(text), tui.WithTextStyle(st), tui.WithWrap(false))
-}
-
-// buttonStyle composes the button look: idle = tinted background, active =
-// accent background. The disabled variant greys the text out.
-func buttonStyle(disabled, active bool) tui.Style {
-	if disabled {
-		return stGray
-	}
-	if active {
-		return stButtonActive
-	}
-	return tui.NewStyle().Foreground(buttonFg).Background(buttonBg)
 }
 
 // styleOf is a tiny helper keeping mapping-row construction readable.
@@ -3385,12 +3514,12 @@ type rowClickLabel struct {
 }
 
 var rowClickLabels = map[configRowKind]rowClickLabel{
-	rowSource:     {en: "Source"},
-	rowEndpoint:   {en: "Endpoint URL"},
+	rowSource:     {en: "Source", zh: "来源"},
+	rowEndpoint:   {en: "Endpoint URL", zh: "端点 URL"},
 	rowAPIKey:     {en: "API Key"},
 	rowProvider:   {en: "Provider"},
 	rowTest:       {en: "Auto Configure"},
-	rowProtocol:   {en: "Protocol"},
+	rowProtocol:   {en: "Protocol", zh: "协议"},
 	rowFast:       {en: "Fast"},
 	rowOpus:       {en: "Opus"},
 	rowSonnet:     {en: "Sonnet"},
@@ -3398,9 +3527,9 @@ var rowClickLabels = map[configRowKind]rowClickLabel{
 	rowCustom:     {en: "Custom"},
 	rowSubagent:   {en: "Subagent"},
 	rowTestModels: {en: "Test Model Availability"},
-	rowContext:    {en: "Context & Compact"},
-	rowTools:      {en: "Tools"},
-	rowToolSearch: {en: "Tool Search"},
+	rowContext:    {en: "Context & Compact", zh: "上下文与压缩"},
+	rowTools:      {en: "Tools", zh: "工具"},
+	rowToolSearch: {en: "Tool Search", zh: "工具搜索"},
 	rowActive:     {en: "Set as active provider", zh: "设为当前激活 Provider"},
 	// The Save button also renders as "Save Provider" when activation is not
 	// chosen; matchRowLabel matches prefixes, so the shorter shared prefix of
@@ -3543,6 +3672,7 @@ func (m *AdvancedConfigModel) viewModelsDevPicker() *tui.Element {
 // panelWrap wraps an overlay body in the shared rounded panel.
 func panelWrap(body *tui.Element, width int) *tui.Element {
 	panel := tui.New(
+		tui.WithDisplay(tui.DisplayFlex),
 		tui.WithDirection(tui.Column),
 		tui.WithWrap(false),
 		tui.WithBorder(tui.BorderRounded),

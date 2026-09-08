@@ -1779,3 +1779,24 @@ func TestDetectCommandCodeHandshakeUnauthorizedReportsInvalidKey(t *testing.T) {
 		t.Fatalf("unexpected error: %v", result.err)
 	}
 }
+
+func TestRandomProviderNameUniqueAndPrefixed(t *testing.T) {
+	existing := map[string]provider.Provider{
+		"provider-abc": {},
+		"provider-xyz": {},
+	}
+	seen := make(map[string]bool)
+	for i := 0; i < 200; i++ {
+		name := randomProviderName(existing)
+		if !strings.HasPrefix(name, "provider-") {
+			t.Fatalf("name %q missing provider- prefix", name)
+		}
+		if _, collides := existing[name]; collides {
+			t.Fatalf("name %q collides with an existing provider", name)
+		}
+		if seen[name] {
+			t.Fatalf("name %q was generated twice", name)
+		}
+		seen[name] = true
+	}
+}
