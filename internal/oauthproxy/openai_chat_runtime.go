@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 const (
@@ -285,7 +287,7 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 		converted.model = route
 		converted.upstreamModel = route
 		var body map[string]any
-		if json.Unmarshal(converted.body, &body) == nil {
+		if decodeProtocolJSON(converted.body, &body) == nil {
 			body["model"] = route
 			converted.body, _ = json.Marshal(body)
 		}
@@ -397,7 +399,7 @@ func (s *chatCompletionsService) call(ctx context.Context, converted *chatComple
 }
 
 func (s *chatCompletionsService) callOnce(ctx context.Context, converted *chatCompletionsConvertedRequest) (*http.Response, error) {
-	target := strings.TrimRight(s.endpoint, "/") + "/chat/completions"
+	target := protocol.NormalizeOpenAIChatCompletionsURL(s.endpoint)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(converted.body))
 	if err != nil {
 		return nil, err

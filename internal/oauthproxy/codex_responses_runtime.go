@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
+	"github.com/claude-code-launch/ccl/internal/protocol"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -326,7 +328,7 @@ func (s *codexResponsesService) handleCountTokens(writer http.ResponseWriter, re
 	}
 	if route := s.modelRoute[strings.ToLower(converted.clientModel)]; route != "" {
 		var body map[string]any
-		if json.Unmarshal(converted.body, &body) == nil {
+		if decodeProtocolJSON(converted.body, &body) == nil {
 			body["model"] = route
 			converted.body, _ = json.Marshal(body)
 		}
@@ -384,7 +386,7 @@ func (s *codexResponsesService) handleMessages(writer http.ResponseWriter, reque
 		converted.model = route
 		converted.upstreamModel = route
 		var body map[string]any
-		if json.Unmarshal(converted.body, &body) == nil {
+		if decodeProtocolJSON(converted.body, &body) == nil {
 			body["model"] = route
 			converted.body, _ = json.Marshal(body)
 		}
@@ -645,6 +647,15 @@ func (s *codexResponsesService) recordUsage(converted *codexResponsesConvertedRe
 // as-is, letting Claude Code do its own full backoff over the relayed
 // status/body/Retry-After. The 401 refresh below is part of one attempt.
 func (s *codexResponsesService) call(ctx context.Context, body []byte, sessionID string, dumpPayload bool) (*http.Response, error) {
+	// The Codex subscription backend does not accept max_output_tokens.
+	// Generic Responses gateways (including xAI) keep the caller's limit.
+	if _, subscription := s.authorizer.(*codexOAuthAuthorizer); subscription {
+		var err error
+		body, err = sjson.DeleteBytes(body, "max_output_tokens")
+		if err != nil {
+			return nil, err
+		}
+	}
 	return retryUpstream(ctx, "codex_responses", func() (*http.Response, error) {
 		var err error
 		if !s.xai {
@@ -692,7 +703,7 @@ func (s *codexResponsesService) call(ctx context.Context, body []byte, sessionID
 }
 
 func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessionID string, auth codexResponsesAuthorization, dumpPayload bool) (*http.Response, error) {
-	target := strings.TrimRight(s.endpoint, "/") + "/responses"
+	target := protocol.NormalizeOpenAIResponsesURL(s.endpoint)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -746,7 +757,7 @@ func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessi
 
 func (s *codexResponsesService) addClientMetadata(body []byte, sessionID string) ([]byte, error) {
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := decodeProtocolJSON(body, &payload); err != nil {
 		return nil, fmt.Errorf("decode Codex Responses request metadata: %w", err)
 	}
 	metadata, _ := payload["client_metadata"].(map[string]any)
@@ -809,7 +820,7 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 		return
 	}
 	var payload map[string]any
-	if json.Unmarshal(body, &payload) != nil {
+	if decodeProtocolJSON(body, &payload) != nil {
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Responses request JSON")
 		return
 	}

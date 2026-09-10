@@ -19,14 +19,15 @@ type codexFunctionCall struct {
 }
 
 type codexResponsesStreamState struct {
-	assembler     *anthropicResponseAssembler
-	functions     map[string]*codexFunctionCall
-	retained      int
-	textDeltaSeen bool
-	reasoningSeen bool
-	reasoningDone map[string]bool
-	terminalSeen  bool
-	metrics       codexResponsesStreamMetrics
+	assembler          *anthropicResponseAssembler
+	functions          map[string]*codexFunctionCall
+	retained           int
+	textPartsSeen      map[string]bool
+	outputAliases      map[string]string
+	reasoningPartsSeen map[string]bool
+	reasoningDone      map[string]bool
+	terminalSeen       bool
+	metrics            codexResponsesStreamMetrics
 }
 
 type codexResponsesStreamMetrics struct {
@@ -59,7 +60,7 @@ func processCodexResponsesStreamObserved(reader io.Reader, assembler *anthropicR
 		}
 	}
 	if !state.terminalSeen {
-		return state.metrics, assembler.finish()
+		return state.metrics, fmt.Errorf("Responses stream ended before terminal event: %w", io.ErrUnexpectedEOF)
 	}
 	return state.metrics, nil
 }
@@ -170,27 +171,18 @@ func (s *codexResponsesStreamState) process(payload []byte) error {
 	case "response.created", "response.in_progress":
 		return nil
 	case "response.reasoning_summary_part.added":
-		if s.assembler.activeType == "thinking" {
-			return s.assembler.addThinking("\n\n")
-		}
+		return nil
 	case "response.reasoning_summary_text.delta":
-		s.reasoningSeen = true
-		return s.assembler.addThinking(stringValue(event["delta"]))
+		return s.addReasoningPart(event, nil, intValue(event["summary_index"]), stringValue(event["delta"]), true)
 	case "response.reasoning_summary_text.done":
-		if !s.reasoningSeen {
-			s.reasoningSeen = true
-			return s.assembler.addThinking(stringValue(event["text"]))
-		}
+		return s.addReasoningPart(event, nil, intValue(event["summary_index"]), stringValue(event["text"]), false)
 	case "response.reasoning_summary_part.done":
-		if !s.reasoningSeen {
-			part := mapValue(event["part"])
-			if text := stringValue(part["text"]); text != "" {
-				s.reasoningSeen = true
-				return s.assembler.addThinking(text)
-			}
-		}
+		return s.addReasoningPart(event, nil, intValue(event["summary_index"]), stringValue(mapValue(event["part"])["text"]), false)
 	case "response.output_text.delta", "response.refusal.delta":
-		s.textDeltaSeen = true
+		s.markTextPart(event, nil, intValue(event["content_index"]))
+		if eventType == "response.refusal.delta" {
+			s.assembler.stopReason = "refusal"
+		}
 		return s.assembler.addText(stringValue(event["delta"]))
 	case "response.function_call_arguments.delta":
 		call := s.functionForEvent(event)
@@ -217,9 +209,8 @@ func (s *codexResponsesStreamState) process(payload []byte) error {
 		}
 	case "response.output_item.added":
 		item := mapValue(event["item"])
-		if stringValue(item["type"]) == "reasoning" {
-			s.reasoningSeen = false
-		} else if stringValue(item["type"]) == "function_call" {
+		s.textItemKey(event, item)
+		if stringValue(item["type"]) == "function_call" {
 			if _, err := s.updateFunction(event, item); err != nil {
 				return err
 			}
@@ -238,14 +229,18 @@ func (s *codexResponsesStreamState) processOutputItem(event map[string]any) erro
 	item := mapValue(event["item"])
 	switch stringValue(item["type"]) {
 	case "message":
-		if s.textDeltaSeen {
-			return nil
-		}
-		for _, part := range sliceValue(item["content"]) {
+		for index, part := range sliceValue(item["content"]) {
+			if s.markTextPart(event, item, index) {
+				continue
+			}
 			content := mapValue(part)
 			if kind := stringValue(content["type"]); kind == "output_text" || kind == "refusal" {
-				if text := stringValue(content["text"]); text != "" {
-					s.textDeltaSeen = true
+				text := stringValue(content["text"])
+				if kind == "refusal" {
+					s.assembler.stopReason = "refusal"
+					text = stringValue(content["refusal"])
+				}
+				if text != "" {
 					if err := s.assembler.addText(text); err != nil {
 						return err
 					}
@@ -268,11 +263,9 @@ func (s *codexResponsesStreamState) processOutputItem(event map[string]any) erro
 		if err := s.assembler.retain(len(signature)); err != nil {
 			return err
 		}
-		if !s.reasoningSeen {
-			for _, raw := range sliceValue(item["summary"]) {
-				if err := s.assembler.addThinking(stringValue(mapValue(raw)["text"])); err != nil {
-					return err
-				}
+		for index, raw := range sliceValue(item["summary"]) {
+			if err := s.addReasoningPart(event, item, index, stringValue(mapValue(raw)["text"]), false); err != nil {
+				return err
 			}
 		}
 		index, err := s.assembler.ensureBlock("thinking")
@@ -280,7 +273,6 @@ func (s *codexResponsesStreamState) processOutputItem(event map[string]any) erro
 			return err
 		}
 		s.assembler.blocks[index].Signature = signature
-		s.reasoningSeen = false
 		return s.assembler.closeActive()
 	case "function_call":
 		call, err := s.updateFunction(event, item)
@@ -290,6 +282,71 @@ func (s *codexResponsesStreamState) processOutputItem(event map[string]any) erro
 		return s.emitFunction(call)
 	}
 	return nil
+}
+
+// Track each content part independently; terminal output repeats streamed
+// parts but may also contain additional messages or unstreamed parts.
+func (s *codexResponsesStreamState) textItemKey(event, item map[string]any) string {
+	if s.outputAliases == nil {
+		s.outputAliases = make(map[string]string)
+	}
+	id := stringValue(item["id"])
+	if id == "" {
+		id = stringValue(event["item_id"])
+	}
+	if _, ok := event["output_index"]; ok {
+		key := fmt.Sprintf("index:%d", intValue(event["output_index"]))
+		if id != "" {
+			s.outputAliases[id] = key
+		}
+		return key
+	}
+	if key := s.outputAliases[id]; key != "" {
+		return key
+	}
+	if id != "" {
+		return "id:" + id
+	}
+	return "index:0"
+}
+
+func (s *codexResponsesStreamState) markTextPart(event, item map[string]any, index int) bool {
+	return s.markSeenPart(&s.textPartsSeen, event, item, index)
+}
+
+func (s *codexResponsesStreamState) addReasoningPart(event, item map[string]any, index int, text string, delta bool) error {
+	if text == "" {
+		return nil
+	}
+	seen := s.markSeenPart(&s.reasoningPartsSeen, event, item, index)
+	if seen && !delta {
+		return nil
+	}
+	if !seen && s.assembler.activeType == "thinking" && s.assembler.buffers[s.assembler.activeIndex].thinking.Len() > 0 {
+		if err := s.assembler.addThinking("\n\n"); err != nil {
+			return err
+		}
+	}
+	return s.assembler.addThinking(text)
+}
+
+func (s *codexResponsesStreamState) markSeenPart(parts *map[string]bool, event, item map[string]any, index int) bool {
+	if *parts == nil {
+		*parts = make(map[string]bool)
+	}
+	key := fmt.Sprintf("%s/part:%d", s.textItemKey(event, item), index)
+	seen := (*parts)[key]
+	id := stringValue(item["id"])
+	if id == "" {
+		id = stringValue(event["item_id"])
+	}
+	if id != "" {
+		idKey := fmt.Sprintf("id:%s/part:%d", id, index)
+		seen = seen || (*parts)[idKey]
+		(*parts)[idKey] = true
+	}
+	(*parts)[key] = true
+	return seen
 }
 
 func (s *codexResponsesStreamState) processTerminal(eventType string, response map[string]any) error {
@@ -309,11 +366,9 @@ func (s *codexResponsesStreamState) processTerminal(eventType string, response m
 		}
 	}
 	usage := mapValue(response["usage"])
-	if value := intValue(usage["input_tokens"]); value > 0 {
-		s.assembler.contextTokens = value
-	}
-	if value := intValue(usage["output_tokens"]); value > 0 {
-		s.assembler.outputTokens = value
+	in := intValue(usage["input_tokens"])
+	if value, ok := usage["output_tokens"]; ok && value != nil {
+		s.assembler.outputTokens = intValue(value)
 	}
 	if details := mapValue(usage["input_tokens_details"]); details != nil {
 		s.assembler.cacheReadTokens = intValue(details["cached_tokens"])
@@ -321,6 +376,13 @@ func (s *codexResponsesStreamState) processTerminal(eventType string, response m
 	}
 	if s.assembler.cacheWriteTokens == 0 {
 		s.assembler.cacheWriteTokens = intValue(usage["cache_write_tokens"])
+	}
+	// Responses input_tokens already includes cached/ written tokens; subtract
+	// them so the Anthropic input_tokens field holds only fresh input, matching
+	// qoder and keeping cache tokens out of the billed/ reported input total.
+	if value, ok := usage["input_tokens"]; ok && value != nil {
+		s.assembler.inputUsageKnown = true
+		s.assembler.contextTokens = max(0, in-s.assembler.cacheReadTokens-s.assembler.cacheWriteTokens)
 	}
 	if eventType == "response.incomplete" {
 		details := mapValue(response["incomplete_details"])

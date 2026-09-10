@@ -183,7 +183,7 @@ func TestProcessChatCompletionsStream(t *testing.T) {
 		t.Fatalf("stop_reason=%v", response["stop_reason"])
 	}
 	usage := response["usage"].(map[string]any)
-	if usage["input_tokens"] != 9 || usage["output_tokens"] != 4 || usage["cache_read_input_tokens"] != 3 {
+	if usage["input_tokens"] != 6 || usage["output_tokens"] != 4 || usage["cache_read_input_tokens"] != 3 {
 		t.Fatalf("usage=%v", usage)
 	}
 }

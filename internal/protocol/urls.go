@@ -6,124 +6,84 @@ import (
 )
 
 func normalizeEndpoint(endpoint, fallback string) string {
-	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return fallback
 	}
 	return endpoint
 }
 
-func NormalizeOpenAIModelsURL(baseURL string) string {
-	endpoint := normalizeEndpoint(baseURL, "https://api.openai.com/v1")
-
-	switch {
-	case strings.HasSuffix(endpoint, "/models"):
-		return endpoint
-	case strings.HasSuffix(endpoint, "/chat/completions"):
-		return strings.TrimSuffix(endpoint, "/chat/completions") + "/models"
-	default:
-		return endpoint + "/models"
+// Rewrite only the escaped path. Query parameters, fragments and encoded path
+// components must survive endpoint normalization unchanged.
+func rewriteEndpointPath(endpoint string, rewrite func(string) string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return rewrite(endpoint)
 	}
+	escaped := rewrite(strings.TrimRight(u.EscapedPath(), "/"))
+	path, err := url.PathUnescape(escaped)
+	if err != nil {
+		return endpoint
+	}
+	u.Path, u.RawPath = path, escaped
+	return u.String()
+}
+
+func normalizeOpenAIPath(baseURL, suffix string) string {
+	return rewriteEndpointPath(normalizeEndpoint(baseURL, "https://api.openai.com/v1"), func(path string) string {
+		for _, existing := range []string{"/chat/completions", "/responses", "/models"} {
+			if strings.HasSuffix(path, existing) {
+				path = strings.TrimSuffix(path, existing)
+				break
+			}
+		}
+		return path + suffix
+	})
+}
+
+func NormalizeOpenAIModelsURL(baseURL string) string {
+	return normalizeOpenAIPath(baseURL, "/models")
 }
 
 func NormalizeOpenAIChatCompletionsURL(baseURL string) string {
-	endpoint := normalizeEndpoint(baseURL, "https://api.openai.com/v1")
-
-	switch {
-	case strings.HasSuffix(endpoint, "/chat/completions"):
-		return endpoint
-	case strings.HasSuffix(endpoint, "/models"):
-		return strings.TrimSuffix(endpoint, "/models") + "/chat/completions"
-	default:
-		return endpoint + "/chat/completions"
-	}
+	return normalizeOpenAIPath(baseURL, "/chat/completions")
 }
 
 func NormalizeOpenAIResponsesURL(baseURL string) string {
-	endpoint := normalizeEndpoint(baseURL, "https://api.openai.com/v1")
+	return normalizeOpenAIPath(baseURL, "/responses")
+}
 
-	switch {
-	case strings.HasSuffix(endpoint, "/responses"):
-		return endpoint
-	case strings.HasSuffix(endpoint, "/chat/completions"):
-		return strings.TrimSuffix(endpoint, "/chat/completions") + "/responses"
-	case strings.HasSuffix(endpoint, "/models"):
-		return strings.TrimSuffix(endpoint, "/models") + "/responses"
-	default:
-		return endpoint + "/responses"
-	}
+func normalizeAnthropicPath(baseURL, suffix string) string {
+	return rewriteEndpointPath(normalizeEndpoint(baseURL, "https://api.anthropic.com/v1"), func(path string) string {
+		for _, existing := range []string{"/messages", "/models"} {
+			if strings.HasSuffix(path, existing) {
+				return strings.TrimSuffix(path, existing) + suffix
+			}
+		}
+		last := path[strings.LastIndex(path, "/")+1:]
+		if path == "" || strings.EqualFold(last, "anthropic") || strings.EqualFold(last, "claude") {
+			path += "/v1"
+		}
+		return path + suffix
+	})
 }
 
 func NormalizeAnthropicModelsURL(baseURL string) string {
-	endpoint := normalizeEndpoint(baseURL, "https://api.anthropic.com/v1")
-
-	switch {
-	case strings.HasSuffix(endpoint, "/models"):
-		return endpoint
-	case strings.HasSuffix(endpoint, "/messages"):
-		return strings.TrimSuffix(endpoint, "/messages") + "/models"
-	default:
-		return appendAnthropicPath(endpoint, "/models")
-	}
+	return normalizeAnthropicPath(baseURL, "/models")
 }
 
 func NormalizeAnthropicMessagesURL(baseURL string) string {
-	endpoint := normalizeEndpoint(baseURL, "https://api.anthropic.com/v1")
-
-	switch {
-	case strings.HasSuffix(endpoint, "/messages"):
-		return endpoint
-	case strings.HasSuffix(endpoint, "/models"):
-		return strings.TrimSuffix(endpoint, "/models") + "/messages"
-	default:
-		return appendAnthropicPath(endpoint, "/messages")
-	}
+	return normalizeAnthropicPath(baseURL, "/messages")
 }
 
-// NormalizeAnthropicBaseURLForClaude returns the base URL shape expected by
-// Claude Code's Anthropic client. Claude appends /v1/messages itself, so a
-// configured endpoint ending in /v1, /v1/messages, or /v1/models would otherwise
-// become /v1/v1/messages at runtime.
+// NormalizeAnthropicBaseURLForClaude removes the suffix Claude appends itself.
 func NormalizeAnthropicBaseURLForClaude(baseURL string) string {
-	endpoint := normalizeEndpoint(baseURL, "https://api.anthropic.com")
-	for _, suffix := range []string{"/v1/messages", "/v1/models", "/v1"} {
-		if strings.HasSuffix(endpoint, suffix) {
-			return strings.TrimSuffix(endpoint, suffix)
+	return rewriteEndpointPath(normalizeEndpoint(baseURL, "https://api.anthropic.com"), func(path string) string {
+		for _, suffix := range []string{"/v1/messages", "/v1/models", "/v1"} {
+			if strings.HasSuffix(path, suffix) {
+				return strings.TrimSuffix(path, suffix)
+			}
 		}
-	}
-	return endpoint
-}
-
-func appendAnthropicPath(endpoint, suffix string) string {
-	if endpointPathEmpty(endpoint) || endpointPathHasAnySuffix(endpoint, "anthropic", "claude") {
-		return endpoint + "/v1" + suffix
-	}
-	return endpoint + suffix
-}
-
-func endpointPathEmpty(endpoint string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	return strings.Trim(u.Path, "/") == ""
-}
-
-func endpointPathHasAnySuffix(endpoint string, suffixes ...string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	path := strings.Trim(u.Path, "/")
-	if path == "" {
-		return false
-	}
-	parts := strings.Split(path, "/")
-	last := parts[len(parts)-1]
-	for _, suffix := range suffixes {
-		if strings.EqualFold(last, suffix) {
-			return true
-		}
-	}
-	return false
+		return path
+	})
 }

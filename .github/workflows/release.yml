@@ -4,141 +4,200 @@ on:
   push:
     tags:
       - 'v*'
+    # Tag-scoped caches are unavailable to later tags. Warm reusable target
+    # caches on main when dependencies/build settings change.
+    branches:
+      - main
+    paths:
+      - go.mod
+      - go.sum
+      - scripts/build-release.sh
+      - .github/workflows/release.yml
   workflow_dispatch:
 
 permissions:
-  contents: write  # 允许创建 GitHub Release 和上传 Assets
-  id-token: write  # 💡 核心修改：允许通过 OIDC 向 npm 进行可信发布认证
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build, Release and Publish
+  prepare:
+    name: Resolve version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
       - name: Validate release tag
+        id: version
         env:
+          REF_TYPE: ${{ github.ref_type }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-            echo "Release tags must use vMAJOR.MINOR.PATCH (or the legacy vMAJOR.MINOR.PATCH.BUILD form): $TAG_NAME"
+          if [[ "$REF_TYPE" != tag ]]; then
+            echo 'version=dev' >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "version=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release tags must use vMAJOR.MINOR.PATCH (or legacy vMAJOR.MINOR.PATCH.BUILD): $TAG_NAME"
             exit 1
           fi
 
+  verify:
+    name: Verify release
+    if: github.ref_type == 'tag'
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Test and vet
+        run: |
+          go test -race ./...
+          go vet ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            asset: ccl-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            asset: ccl-darwin-arm64
+          - goos: linux
+            goarch: amd64
+            asset: ccl-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset: ccl-linux-arm64
+          - goos: windows
+            goarch: amd64
+            asset: ccl-win32-x64.exe
+          - goos: windows
+            goarch: arm64
+            asset: ccl-win32-arm64.exe
+    steps:
+      - uses: actions/checkout@v5
       - name: Set up Go
+        id: go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
-          # 不用 setup-go 自带缓存：它的 key 与 main CI 相同，CI 先存后这里
-          # “not saving cache”，6 平台的编译产物永远进不了缓存
+          go-version-file: go.mod
           cache: false
-
-      - name: Cache Go modules and build cache
+      - name: Cache target dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ccl-release-${{ runner.os }}-go-${{ hashFiles('go.sum') }}
+          key: ccl-release-v2-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum', 'scripts/build-release.sh') }}
           restore-keys: |
-            ccl-release-${{ runner.os }}-go-
-
-      - name: Build Binaries
+            ccl-release-v2-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.go.outputs.go-version }}-
+      - name: Build binary
         env:
-          CGO_ENABLED: 0
-          # Optional override of the built-in public Desktop OAuth client secret.
-          # The default is compiled into source; set GOOGLE_OAUTH_CLIENT_SECRET only
-          # when rotating the Google Cloud client without a source change.
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          OUTPUT: dist/${{ matrix.asset }}
+          # Optional rotation of the built-in public Desktop OAuth client.
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+        run: bash scripts/build-release.sh
+      - name: Upload binary
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 3
+
+  release:
+    name: Release and publish npm
+    if: github.ref_type == 'tag'
+    needs: [prepare, verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccl-*
+          path: dist
+          merge-multiple: true
+      - name: Verify asset set and create checksums
         run: |
-          mkdir -p dist
-          # 先单进程填满模块缓存，避免下面 6 个并行 build 各自重复报 downloading
-          go mod download
-          VERSION="${{ github.ref_name }}"
-          LDFLAGS="-s -w -X github.com/claude-code-launch/ccl/cmd.Version=${VERSION}"
-          if [[ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ]]; then
-            LDFLAGS="$LDFLAGS -X github.com/claude-code-launch/ccl/internal/cloudsync.googleOAuthClientSecret=${GOOGLE_OAUTH_CLIENT_SECRET}"
-          fi
-          # 💡 注意：为了对齐 Node.js 的 process.platform，Windows 这里统一命名为 win32
-          pids=()
-          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/ccl-darwin-amd64 main.go & pids+=($!)
-          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/ccl-darwin-arm64 main.go & pids+=($!)
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/ccl-linux-amd64 main.go & pids+=($!)
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/ccl-linux-arm64 main.go & pids+=($!)
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/ccl-win32-x64.exe main.go & pids+=($!)
-          GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/ccl-win32-arm64.exe main.go & pids+=($!)
-          for pid in "${pids[@]}"; do
-            wait "$pid"
+          for asset in ccl-darwin-amd64 ccl-darwin-arm64 ccl-linux-amd64 ccl-linux-arm64 ccl-win32-x64.exe ccl-win32-arm64.exe; do
+            test -s "dist/$asset"
           done
-
-      - name: List dist files
-        run: ls -lh dist
-
+          chmod +x dist/ccl-*
+          (cd dist && sha256sum ccl-* > SHA256SUMS)
+          ls -lh dist
+      - name: Resolve release notes
+        id: notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [[ -f "docs/releases/$VERSION.md" ]]; then
+            echo "path=docs/releases/$VERSION.md" >> "$GITHUB_OUTPUT"
+          fi
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/ccl-darwin-amd64
-            dist/ccl-darwin-arm64
-            dist/ccl-linux-amd64
-            dist/ccl-linux-arm64
-            dist/ccl-win32-x64.exe
-            dist/ccl-win32-arm64.exe
+            dist/*
             THIRD_PARTY_NOTICES.md
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-
       - name: Prepare npm Assets
         run: |
-          cp dist/* bin/
-          chmod +x bin/ccl-*
-          chmod +x bin/wrapper.js
-
-      # 💡 核心注入：从 Git Tag 中提取版本号（去掉开头的 v），并直接动态写入 package.json
+          cp dist/ccl-* bin/
+          chmod +x bin/ccl-* bin/wrapper.js
       - name: Sync Version from Git Tag
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ needs.prepare.outputs.version }}
         run: |
-          # TAG_NAME 在 tag 触发时可能是 "v1.0.1"、"1.0.1" 或 "release/v1.0.1"。
-          # 取最后一段并剥离开头的 v，得到 npm 可用版本号。
-          TAG_VERSION="${TAG_NAME##*/}"
-          RAW_VERSION="${TAG_VERSION#v}"
+          RAW_VERSION="${TAG_NAME#v}"
           if [[ "$RAW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              CLEAN_VERSION=$(echo "$RAW_VERSION" | sed -E 's/\.([0-9]+)$/-\1/')
+            CLEAN_VERSION=$(echo "$RAW_VERSION" | sed -E 's/\.([0-9]+)$/-\1/')
           else
-              CLEAN_VERSION="$RAW_VERSION"
+            CLEAN_VERSION="$RAW_VERSION"
           fi
-          echo "Original Tag: $TAG_NAME"
-          echo "Sanitized npm version: $CLEAN_VERSION"
-
-          # 使用 npm 官方自带命令动态修改 package.json 的版本号，且不触发任何 git commit
           npm version "$CLEAN_VERSION" --no-git-tag-version
-
       - name: Check npm Version
         id: npm_version
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
           if npm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
             echo "${PKG_NAME}@${PKG_VERSION} already exists; skipping npm publish."
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
-
       - name: Publish to npm with Trusted Publishing
         if: steps.npm_version.outputs.exists != 'true'
         run: npm publish --provenance --access public

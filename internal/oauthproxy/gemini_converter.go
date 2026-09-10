@@ -103,8 +103,19 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 		maxTokens = 32_000
 	}
 
-	toolNameMap := make(map[string]string)
+	toolNames, err := buildGeminiToolNames(raw)
+	if err != nil {
+		return nil, err
+	}
 	out := []byte(`{"contents":[]}`)
+	out, _ = sjson.SetBytes(out, "generationConfig.maxOutputTokens", maxTokens)
+	if stops := gjson.GetBytes(raw, "stop_sequences"); stops.Exists() && stops.Type != gjson.Null {
+		var sequences []string
+		if err := json.Unmarshal([]byte(stops.Raw), &sequences); err != nil {
+			return nil, fmt.Errorf("stop_sequences must be an array of strings: %w", err)
+		}
+		out, _ = sjson.SetBytes(out, "generationConfig.stopSequences", sequences)
+	}
 
 	// system instruction (string or array of text blocks).
 	systemResult := gjson.GetBytes(raw, "system")
@@ -200,13 +211,9 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 					if name == "" {
 						name = toolNameFromClaudeToolUseID(block.Get("id").String())
 					}
-					originalName := name
-					name = sanitizeFunctionName(name)
+					name = toolNames.byOriginal[name]
 					if name == "" {
 						return true
-					}
-					if originalName != "" {
-						toolNameMap[name] = originalName
 					}
 					args := block.Get("input").String()
 					if gjson.Valid(args) && gjson.Parse(args).IsObject() {
@@ -216,7 +223,7 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 						partItems = append(partItems, string(part))
 					}
 				case "tool_result":
-					parts := geminiToolResultParts(block, toolNameMap)
+					parts := geminiToolResultParts(block, toolNames)
 					partItems = append(partItems, parts...)
 				case "image":
 					if part, ok := geminiImagePart(block); ok {
@@ -267,12 +274,9 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 				return true
 			}
 			originalName := strings.TrimSpace(tool.Get("name").String())
-			name := sanitizeFunctionName(originalName)
+			name := toolNames.byOriginal[originalName]
 			if name == "" {
 				return true
-			}
-			if originalName != "" {
-				toolNameMap[name] = originalName
 			}
 			declaration := []byte(`{"name":""}`)
 			declaration, _ = sjson.SetBytes(declaration, "name", name)
@@ -311,7 +315,7 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 		case "tool":
 			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "ANY")
 			if choiceName != "" {
-				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{sanitizeFunctionName(choiceName)})
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolNames.byOriginal[choiceName]})
 			}
 		}
 	}
@@ -353,7 +357,7 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 			thinkingSignature: "gemini",
 			maxTokens:         maxTokens,
 			inputTokens:       estimateApproxTokensBytes(raw),
-			toolNameMap:       toolNameMap,
+			toolNameMap:       toolNames.byWire,
 		},
 		model:      upstreamModel,
 		geminiBody: out,
@@ -388,22 +392,13 @@ func geminiImagePart(block gjson.Result) (string, bool) {
 }
 
 // geminiToolResultParts converts a Claude tool_result content block into Gemini
-// functionResponse/inline_data parts, recording the sanitized->original name
-// mapping so the response path can restore the client tool name.
-func geminiToolResultParts(block gjson.Result, toolNameMap map[string]string) []string {
+// functionResponse/inline_data parts using the same name map as declarations.
+func geminiToolResultParts(block gjson.Result, names *geminiToolNames) []string {
 	toolUseID := block.Get("tool_use_id").String()
 	if toolUseID == "" {
 		return nil
 	}
-	funcName := toolNameFromClaudeToolUseID(toolUseID)
-	if funcName == "" {
-		funcName = toolUseID
-	}
-	originalName := funcName
-	funcName = sanitizeFunctionName(funcName)
-	if originalName != "" {
-		toolNameMap[funcName] = originalName
-	}
+	funcName := names.byOriginal[names.resultName(toolUseID)]
 
 	result, resultIsRaw, images := geminiToolResultContent(block.Get("content"))
 	parts := make([]string, 0, 1+len(images))

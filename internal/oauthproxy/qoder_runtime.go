@@ -774,6 +774,7 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 			usage.input = max(int64(0), event.Usage.PromptTokens-usage.cacheRead-usage.cacheWrite)
 			usage.output = event.Usage.CompletionTokens
 			assembler.contextTokens = int(usage.input)
+			assembler.inputUsageKnown = true
 			assembler.cacheReadTokens = int(usage.cacheRead)
 			assembler.cacheWriteTokens = int(usage.cacheWrite)
 			if event.Usage.CompletionTokens > 0 {

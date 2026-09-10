@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // anthropicPassthroughService is a pure native-Anthropic Messages passthrough:
@@ -200,7 +202,33 @@ func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming 
 	if err != nil {
 		return nil, fmt.Errorf("authorize upstream: %w", err)
 	}
-	target := strings.TrimRight(s.baseURL, "/") + path
+	base, err := url.Parse(s.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream base URL: %w", err)
+	}
+	route, err := url.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	escaped := strings.TrimRight(base.EscapedPath(), "/") + route.EscapedPath()
+	base.Path, _ = url.PathUnescape(escaped)
+	base.RawPath = escaped
+	if route.RawQuery != "" {
+		if base.RawQuery != "" {
+			base.RawQuery += "&"
+		}
+		base.RawQuery += route.RawQuery
+	}
+	target := base.String()
+	// Context-window suffixes are local aliases, not upstream model IDs.
+	if model := gjson.GetBytes(body, "model"); model.Type == gjson.String {
+		if upstream := stripContextModelSuffix(model.String()); upstream != model.String() {
+			body, err = sjson.SetBytes(body, "model", upstream)
+			if err != nil {
+				return nil, fmt.Errorf("resolve upstream model: %w", err)
+			}
+		}
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

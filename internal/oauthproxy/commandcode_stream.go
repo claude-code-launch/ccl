@@ -42,10 +42,11 @@ func processCommandCodeNonStream(body []byte, assembler *anthropicResponseAssemb
 
 // processCommandCodeEvents dispatches NDJSON lines. Event shapes mirror the
 // reference client: text-delta/reasoning-delta carry incremental text, tool-call
-// carries a complete call, finish-step/finish carry usage and finishReason, and
-// error/start/lifecycle events are ignorable.
+// carries a complete call, finish-step/finish carry usage and finishReason.
+// Errors abort immediately; only finish confirms a complete response.
 func processCommandCodeEvents(scanner *bufio.Scanner, assembler *anthropicResponseAssembler) error {
 	pendingFinish := ""
+	terminalSeen := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || line == "[DONE]" || strings.HasPrefix(line, ":") {
@@ -84,6 +85,7 @@ func processCommandCodeEvents(scanner *bufio.Scanner, assembler *anthropicRespon
 			}
 			commandcodeApplyUsage(assembler, root.Get("usage"))
 		case "finish":
+			terminalSeen = true
 			if reason := strings.TrimSpace(root.Get("finishReason").String()); reason != "" {
 				pendingFinish = reason
 			}
@@ -106,6 +108,9 @@ func processCommandCodeEvents(scanner *bufio.Scanner, assembler *anthropicRespon
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read CommandCode stream: %w", err)
 	}
+	if !terminalSeen {
+		return fmt.Errorf("CommandCode stream ended before finish: %w", io.ErrUnexpectedEOF)
+	}
 	return nil
 }
 
@@ -114,9 +119,14 @@ func commandcodeApplyUsage(assembler *anthropicResponseAssembler, usage gjson.Re
 	if !usage.Exists() {
 		return
 	}
-	assembler.contextTokens = int(usage.Get("inputTokens").Int())
+	in := int(usage.Get("inputTokens").Int())
+	cached := int(usage.Get("cachedInputTokens").Int())
+	// Command Code inputTokens already includes cached tokens; subtract them so
+	// input_tokens holds only fresh input (see codex_responses_stream).
+	assembler.contextTokens = max(0, in-cached)
+	assembler.inputUsageKnown = usage.Get("inputTokens").Exists()
 	assembler.outputTokens = int(usage.Get("outputTokens").Int())
-	assembler.cacheReadTokens = int(usage.Get("cachedInputTokens").Int())
+	assembler.cacheReadTokens = cached
 }
 
 // commandcodeStopReason maps a CommandCode finish reason onto the Anthropic

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -37,8 +39,8 @@ var updateCmd = &cobra.Command{
 			fmt.Printf("Latest version: %s\n\n", latestVersion)
 		}
 
-		cleanCurrent := strings.TrimPrefix(Version, "v")
-		cleanLatest := strings.TrimPrefix(latestVersion, "v")
+		cleanCurrent := canonicalReleaseTag(Version)
+		cleanLatest := canonicalReleaseTag(latestVersion)
 
 		if Version != "dev" && latestVersion != "unknown" && cleanCurrent == cleanLatest {
 			fmt.Println("✨ You are already on the latest version!")
@@ -175,9 +177,17 @@ func releaseAssetName() (string, error) {
 // known it pins the exact release; otherwise it follows GitHub's /latest redirect.
 func releaseDownloadURL(version, asset string) string {
 	if version != "" && version != "unknown" {
-		return fmt.Sprintf("%s/%s/%s", cclRepoReleases, version, asset)
+		return fmt.Sprintf("%s/%s/%s", cclRepoReleases, canonicalReleaseTag(version), asset)
 	}
 	return fmt.Sprintf("https://github.com/claude-code-launch/ccl/releases/latest/download/%s", asset)
+}
+
+var legacyNpmRelease = regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$`)
+
+func canonicalReleaseTag(version string) string {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	version = legacyNpmRelease.ReplaceAllString(version, "$1.$2")
+	return "v" + version
 }
 
 // downloadReleaseBinary streams url into dest, rendering a progress bar on stderr
@@ -234,12 +244,45 @@ func downloadReleaseBinary(ctx context.Context, url, dest string) error {
 		os.Remove(dest)
 		return err
 	}
+	if err := validateReleaseBinary(dest); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
 
 	if isTerm {
 		renderDownloadProgress(done, total)
 		fmt.Fprintln(os.Stderr)
 	} else {
 		fmt.Fprintf(os.Stderr, "Downloaded %s\n", humanSize(done))
+	}
+	return nil
+}
+
+// Inspect without executing downloaded code. Accept both package builds and
+// release builds made from main.go (which list this module as a dependency).
+func validateReleaseBinary(path string) error {
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("download is not a Go executable: %w", err)
+	}
+	const module = "github.com/claude-code-launch/ccl"
+	ours := info.Path == module || info.Main.Path == module
+	if info.Path == "command-line-arguments" {
+		for _, dep := range info.Deps {
+			if dep.Path == module {
+				ours = true
+			}
+		}
+	}
+	if !ours {
+		return fmt.Errorf("download is not a ccl executable")
+	}
+	settings := make(map[string]string)
+	for _, entry := range info.Settings {
+		settings[entry.Key] = entry.Value
+	}
+	if settings["GOOS"] != runtime.GOOS || settings["GOARCH"] != runtime.GOARCH {
+		return fmt.Errorf("download targets %s/%s, expected %s/%s", settings["GOOS"], settings["GOARCH"], runtime.GOOS, runtime.GOARCH)
 	}
 	return nil
 }
@@ -300,7 +343,16 @@ func selfUpdate(ctx context.Context, version string) error {
 	}
 
 	dir := filepath.Dir(target)
-	tmp := filepath.Join(dir, "."+filepath.Base(target)+".download")
+	staging, err := os.CreateTemp(dir, "."+filepath.Base(target)+".download-*")
+	if err != nil {
+		return err
+	}
+	tmp := staging.Name()
+	if err := staging.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	defer os.Remove(tmp)
 
 	if err := downloadReleaseBinary(ctx, releaseDownloadURL(version, asset), tmp); err != nil {
 		os.Remove(tmp)
@@ -311,20 +363,54 @@ func selfUpdate(ctx context.Context, version string) error {
 		return err
 	}
 
-	backup := target + ".old"
-	_ = os.Remove(backup)
-	if err := os.Rename(target, backup); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("replace current binary: %w", err)
+	backup, err := installReleaseBinary(target, tmp)
+	if err != nil {
+		return err
 	}
-	if err := os.Rename(tmp, target); err != nil {
-		// Best-effort restore so the user is not left without a binary.
-		_ = os.Rename(backup, target)
-		os.Remove(tmp)
-		return fmt.Errorf("install new binary: %w", err)
-	}
-	_ = os.Remove(backup)
+	fmt.Printf("Previous version retained at: %s\n", backup)
 	return nil
+}
+
+func installReleaseBinary(target, downloaded string) (backupPath string, err error) {
+	if err := validateReleaseBinary(downloaded); err != nil {
+		return "", err
+	}
+	current, err := os.Open(target)
+	if err != nil {
+		return "", err
+	}
+	defer current.Close()
+	info, err := current.Stat()
+	if err != nil {
+		return "", err
+	}
+	backup, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".backup-*")
+	if err != nil {
+		return "", err
+	}
+	backupPath = backup.Name()
+	defer func() {
+		_ = backup.Close()
+		if err != nil {
+			_ = os.Remove(backupPath)
+		}
+	}()
+	if err = backup.Chmod(info.Mode().Perm()); err != nil {
+		return backupPath, err
+	}
+	if _, err = io.Copy(backup, current); err != nil {
+		return backupPath, err
+	}
+	if err = backup.Sync(); err != nil {
+		return backupPath, err
+	}
+	if err = backup.Close(); err != nil {
+		return backupPath, err
+	}
+	if err = os.Rename(downloaded, target); err != nil {
+		return backupPath, fmt.Errorf("install new binary: %w", err)
+	}
+	return backupPath, nil
 }
 
 func init() {

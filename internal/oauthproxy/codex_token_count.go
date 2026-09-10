@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tiktoken-go/tokenizer"
+	"github.com/tiktoken-go/tokenizer/codec"
 )
 
 const (
@@ -26,8 +26,7 @@ const (
 
 var (
 	codexTokenizerOnce  sync.Once
-	codexTokenizerCodec tokenizer.Codec
-	codexTokenizerErr   error
+	codexTokenizerCodec *codec.Codec
 )
 
 // countCodexResponsesInputTokens counts the request in the representation sent
@@ -37,11 +36,11 @@ var (
 // upstream context window has already been exceeded.
 func countCodexResponsesInputTokens(body []byte) (int, error) {
 	codexTokenizerOnce.Do(func() {
-		codexTokenizerCodec, codexTokenizerErr = tokenizer.Get(tokenizer.O200kBase)
+		// CCL only counts o200k_base. The generic encoding dispatcher retains
+		// every vocabulary in release binaries; use the concrete constructor so
+		// the linker can discard the unused cl100k/p50k/r50k tables.
+		codexTokenizerCodec = codec.NewO200kBase()
 	})
-	if codexTokenizerErr != nil {
-		return 0, codexTokenizerErr
-	}
 	return codexTokenizerCodec.Count(string(body))
 }
 
@@ -99,7 +98,7 @@ func trimCodexCompactionBody(body []byte, targetTokens int) ([]byte, codexCompac
 	}
 
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := decodeProtocolJSON(body, &payload); err != nil {
 		return nil, stats, fmt.Errorf("decode Codex compaction request: %w", err)
 	}
 	input, _ := payload["input"].([]any)

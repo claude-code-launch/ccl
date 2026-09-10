@@ -46,7 +46,13 @@ func TestGeminiSignedPartsRoundTrip(t *testing.T) {
 				} else {
 					messages = append(messages, map[string]any{"role": "assistant", "content": blocks})
 				}
-				messages = append(messages, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "lookup-1", "content": "found"}}})
+				var toolID string
+				for _, block := range blocks {
+					if block.Type == "tool_use" {
+						toolID = block.ID
+					}
+				}
+				messages = append(messages, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": toolID, "content": "found"}}})
 				request, _ := json.Marshal(map[string]any{"model": "gemini-test", "messages": messages})
 				converted, err := convertAnthropicToGemini(request)
 				if err != nil {

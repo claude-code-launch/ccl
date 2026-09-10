@@ -21,10 +21,11 @@ type chatToolCall struct {
 }
 
 type chatCompletionsStreamState struct {
-	assembler *anthropicResponseAssembler
-	tools     map[string]*chatToolCall
-	usage     map[string]any
-	retained  int
+	assembler    *anthropicResponseAssembler
+	tools        map[string]*chatToolCall
+	usage        map[string]any
+	retained     int
+	terminalSeen bool
 }
 
 // processChatCompletionsStream converts an OpenAI Chat Completions SSE stream
@@ -36,6 +37,9 @@ func processChatCompletionsStream(reader io.Reader, assembler *anthropicResponse
 	}
 	if err := readChatCompletionsSSE(reader, state.process); err != nil {
 		return err
+	}
+	if !state.terminalSeen {
+		return fmt.Errorf("OpenAI Chat stream ended before finish_reason: %w", io.ErrUnexpectedEOF)
 	}
 	if !assembler.started {
 		if err := assembler.start(); err != nil {
@@ -118,6 +122,12 @@ func (s *chatCompletionsStreamState) process(payload []byte) error {
 	}
 	choice := mapValue(choices[0])
 	if delta := mapValue(choice["delta"]); delta != nil {
+		if refusal := stringValue(delta["refusal"]); refusal != "" {
+			s.assembler.stopReason = "refusal"
+			if err := s.assembler.addText(refusal); err != nil {
+				return err
+			}
+		}
 		if text := stringValue(delta["content"]); text != "" {
 			if err := s.assembler.addText(text); err != nil {
 				return err
@@ -135,7 +145,10 @@ func (s *chatCompletionsStreamState) process(payload []byte) error {
 		}
 	}
 	if finish := stringValue(choice["finish_reason"]); finish != "" {
-		s.assembler.stopReason = chatStopReason(finish)
+		s.terminalSeen = true
+		if finish != "stop" || s.assembler.stopReason != "refusal" {
+			s.assembler.stopReason = chatStopReason(finish)
+		}
 	}
 	return nil
 }
@@ -228,6 +241,12 @@ func processChatCompletionsNonStream(body []byte, assembler *anthropicResponseAs
 	if err := chatAddContent(assembler, message["content"]); err != nil {
 		return err
 	}
+	if refusal := stringValue(message["refusal"]); refusal != "" {
+		assembler.stopReason = "refusal"
+		if err := assembler.addText(refusal); err != nil {
+			return err
+		}
+	}
 	for index, rawCall := range sliceValue(message["tool_calls"]) {
 		call := mapValue(rawCall)
 		function := mapValue(call["function"])
@@ -248,7 +267,9 @@ func processChatCompletionsNonStream(body []byte, assembler *anthropicResponseAs
 		}
 	}
 	if finish := stringValue(choice["finish_reason"]); finish != "" {
-		assembler.stopReason = chatStopReason(finish)
+		if finish != "stop" || assembler.stopReason != "refusal" {
+			assembler.stopReason = chatStopReason(finish)
+		}
 	}
 	chatApplyUsage(assembler, mapValue(payload["usage"]))
 	return assembler.finish()
@@ -283,14 +304,18 @@ func chatApplyUsage(assembler *anthropicResponseAssembler, usage map[string]any)
 	if usage == nil {
 		return
 	}
-	if value := intValue(usage["prompt_tokens"]); value > 0 {
-		assembler.contextTokens = value
-	}
-	if value := intValue(usage["completion_tokens"]); value > 0 {
-		assembler.outputTokens = value
+	in := intValue(usage["prompt_tokens"])
+	if value, ok := usage["completion_tokens"]; ok && value != nil {
+		assembler.outputTokens = intValue(value)
 	}
 	if details := mapValue(usage["prompt_tokens_details"]); details != nil {
 		assembler.cacheReadTokens = intValue(details["cached_tokens"])
+	}
+	// OpenAI prompt_tokens already includes cached tokens; report only fresh
+	// input in the Anthropic input_tokens field (see codex_responses_stream).
+	if value, ok := usage["prompt_tokens"]; ok && value != nil {
+		assembler.inputUsageKnown = true
+		assembler.contextTokens = max(0, in-assembler.cacheReadTokens)
 	}
 }
 

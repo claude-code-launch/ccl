@@ -20,16 +20,10 @@ import (
 // previewSettingsJSON decodes what PreviewSettings would write to the settings
 // file. Providers with an OAuth backend need real credentials in ~/.ccl/auth to
 // start the embedded runtime, so on a machine without them (CI, a fresh clone)
-// the case is skipped instead of failing on the returned error string.
+// the case is skipped when the returned error indicates missing credentials.
 func previewSettingsJSON(t *testing.T, p provider.Provider) settingsJSON {
 	t.Helper()
-	raw := claude.PreviewSettings(p)
-	if rest, isError := strings.CutPrefix(raw, "Error: "); isError {
-		if strings.Contains(rest, "credentials found") || strings.Contains(rest, "credential") {
-			t.Skipf("requires local OAuth credentials: %s", rest)
-		}
-		t.Fatalf("PreviewSettings failed: %s", rest)
-	}
+	raw := previewSettingsRaw(t, p)
 	var settings settingsJSON
 	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
 		t.Fatalf("decode settings: %v; result=%s", err, raw)
@@ -260,7 +254,7 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := claude.PreviewSettings(tt.provider)
+			result := previewSettingsRaw(t, tt.provider)
 			var s settingsJSON
 			if err := json.Unmarshal([]byte(result), &s); err != nil {
 				t.Fatalf("Failed to parse settings JSON: %v. JSON: %s", err, result)
@@ -271,7 +265,7 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 }
 
 func TestPreviewSettingsReservesEmbeddedProxyTransportEnv(t *testing.T) {
-	result := claude.PreviewSettings(provider.Provider{
+	result := previewSettingsRaw(t, provider.Provider{
 		Name:     "responses-proxy",
 		Type:     "openai_responses",
 		Endpoint: "https://api.example.com/v1",
@@ -303,7 +297,7 @@ func TestPreviewSettingsReservesEmbeddedProxyTransportEnv(t *testing.T) {
 }
 
 func TestPreviewSettingsKeepsDirectAnthropicAPIKey(t *testing.T) {
-	result := claude.PreviewSettings(provider.Provider{
+	result := previewSettingsRaw(t, provider.Provider{
 		Name:     "anthropic-direct",
 		Type:     "anthropic",
 		Endpoint: "https://api.anthropic.com",
@@ -334,7 +328,7 @@ func TestPreviewSettingsWithEmbeddedCodexOAuth(t *testing.T) {
 		t.Fatalf("write credential: %v", err)
 	}
 
-	result := claude.PreviewSettings(provider.Provider{
+	result := previewSettingsRaw(t, provider.Provider{
 		Name:                   "gpt",
 		Type:                   "openai_responses",
 		Endpoint:               "oauth://codex",
@@ -395,7 +389,7 @@ func TestPreviewSettingsPinsFastMode(t *testing.T) {
 		t.Fatalf("write credential: %v", err)
 	}
 
-	result := claude.PreviewSettings(provider.Provider{
+	result := previewSettingsRaw(t, provider.Provider{
 		Name:                   "chatgpt-fast",
 		Type:                   "openai_responses",
 		Endpoint:               "oauth://codex",
@@ -549,7 +543,7 @@ func TestLauncherDynamicDiscovery(t *testing.T) {
 	}
 
 	// PreviewSettings should trigger proxy starting, synchronous discovery, and populate Model
-	settingsJSONStr := claude.PreviewSettings(p)
+	settingsJSONStr := previewSettingsRaw(t, p)
 
 	var settings settingsJSON
 	if err := json.Unmarshal([]byte(settingsJSONStr), &settings); err != nil {
@@ -586,7 +580,7 @@ func TestPreviewSettingsOmitsDefaultEffortAndTopLevelModel(t *testing.T) {
 		Model:    "claude-sonnet-4",
 	}
 
-	settingsJSONStr := claude.PreviewSettings(p)
+	settingsJSONStr := previewSettingsRaw(t, p)
 
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(settingsJSONStr), &raw); err != nil {
@@ -614,7 +608,7 @@ func TestPreviewSettingsSingleModelPoolFillsDefaultSlots(t *testing.T) {
 		Model:    "sensenova-u1-fast",
 	}
 
-	settingsJSONStr := claude.PreviewSettings(p)
+	settingsJSONStr := previewSettingsRaw(t, p)
 
 	var settings settingsJSON
 	if err := json.Unmarshal([]byte(settingsJSONStr), &settings); err != nil {
@@ -707,7 +701,7 @@ func TestPreviewSettingsModelPoolDoesNotOverrideExplicitSlots(t *testing.T) {
 		SonnetModel: "",
 	}
 
-	settingsJSONStr := claude.PreviewSettings(p)
+	settingsJSONStr := previewSettingsRaw(t, p)
 
 	var settings settingsJSON
 	if err := json.Unmarshal([]byte(settingsJSONStr), &settings); err != nil {
@@ -740,7 +734,7 @@ func TestLauncherDropsUnsupportedContextEnv(t *testing.T) {
 		},
 	}
 
-	settingsJSONStr := claude.PreviewSettings(p)
+	settingsJSONStr := previewSettingsRaw(t, p)
 
 	var settings settingsJSON
 	if err := json.Unmarshal([]byte(settingsJSONStr), &settings); err != nil {
@@ -762,7 +756,7 @@ func TestLauncherDropsUnsupportedContextEnv(t *testing.T) {
 }
 
 func TestPreviewSettingsUsesDisplayNameWithoutTechnicalSuffix(t *testing.T) {
-	result := claude.PreviewSettings(provider.Provider{
+	result := previewSettingsRaw(t, provider.Provider{
 		Type:          "anthropic",
 		Endpoint:      "https://example.test",
 		APIKey:        "k",
@@ -956,4 +950,16 @@ func TestPreviewSettingsGPTPreferredDefaultsValidatedAgainstCatalog(t *testing.T
 	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "" {
 		t.Fatal("haiku should be auto-mapped from catalog after preferred clear")
 	}
+}
+
+func previewSettingsRaw(t *testing.T, p provider.Provider) string {
+	t.Helper()
+	raw, err := claude.PreviewSettings(p)
+	if err != nil {
+		if strings.Contains(err.Error(), "credential") {
+			t.Skipf("requires local OAuth credentials: %v", err)
+		}
+		t.Fatalf("PreviewSettings failed: %v", err)
+	}
+	return raw
 }

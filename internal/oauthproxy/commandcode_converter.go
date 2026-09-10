@@ -171,11 +171,15 @@ func commandcodePartFromAnthropic(block gjson.Result, toolNames map[string]strin
 		if strings.TrimSpace(input) == "" || !gjson.Valid(input) {
 			input = "{}"
 		}
+		var inputValue any
+		if err := decodeProtocolJSON([]byte(input), &inputValue); err != nil {
+			return nil, false
+		}
 		return map[string]any{
 			"type":       "tool-call",
 			"toolCallId": block.Get("id").String(),
 			"toolName":   name,
-			"input":      gjson.Parse(input).Value(),
+			"input":      inputValue,
 		}, true
 	case "tool_result":
 		id := strings.TrimSpace(block.Get("tool_use_id").String())
@@ -265,11 +269,15 @@ func commandcodeTools(tools gjson.Result) []any {
 		if strings.TrimSpace(schema) == "" || !gjson.Valid(schema) {
 			schema = `{"type":"object","properties":{}}`
 		}
+		var schemaValue any
+		if err := decodeProtocolJSON([]byte(schema), &schemaValue); err != nil {
+			continue
+		}
 		converted = append(converted, map[string]any{
 			"type":         "function",
 			"name":         name,
 			"description":  tool.Get("description").String(),
-			"input_schema": gjson.Parse(schema).Value(),
+			"input_schema": schemaValue,
 		})
 	}
 	return converted

@@ -262,7 +262,7 @@ func TestProcessCommandCodeStreamEmitsAnthropicSSE(t *testing.T) {
 		t.Fatalf("stop_reason=%v", response["stop_reason"])
 	}
 	usage := response["usage"].(map[string]any)
-	if usage["input_tokens"] != 11 || usage["output_tokens"] != 3 || usage["cache_read_input_tokens"] != 5 {
+	if usage["input_tokens"] != 6 || usage["output_tokens"] != 3 || usage["cache_read_input_tokens"] != 5 {
 		t.Fatalf("usage=%v", usage)
 	}
 }
@@ -345,7 +345,7 @@ func TestCommandCodeEndToEndStreamingWithInitHandshake(t *testing.T) {
 	}
 
 	body := postClaudeMessage(t, context.Background(), runtime, "claude-sonnet-4-6")
-	for _, want := range []string{"message_start", "Hello from Command Code", "message_stop", `"input_tokens":12`} {
+	for _, want := range []string{"message_start", "Hello from Command Code", "message_stop", `"input_tokens":9`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("response missing %q: %s", want, body)
 		}

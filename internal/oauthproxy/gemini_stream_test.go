@@ -69,8 +69,8 @@ func TestProcessGeminiStreamTextThinkingToolUse(t *testing.T) {
 		t.Errorf("stop reason = %q, want tool_use", got)
 	}
 	input, output := assembler.tokenTotals()
-	if input != 100 || output != 25 {
-		t.Errorf("token totals = (%d, %d), want (100, 25)", input, output)
+	if input != 97 || output != 25 {
+		t.Errorf("token totals = (%d, %d), want (97, 25)", input, output)
 	}
 	if assembler.cacheReadTokens != 3 {
 		t.Errorf("cache read tokens = %d, want 3", assembler.cacheReadTokens)

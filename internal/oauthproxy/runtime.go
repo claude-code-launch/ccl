@@ -407,13 +407,14 @@ func normalizeOpenAIBaseURL(endpoint string) string {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return strings.TrimRight(endpoint, "/")
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	escapedPath := strings.TrimRight(parsed.EscapedPath(), "/")
 	for _, suffix := range []string{"/responses", "/chat/completions", "/models"} {
-		if rest, ok := strings.CutSuffix(parsed.Path, suffix); ok {
-			parsed.Path = rest
+		if rest, ok := strings.CutSuffix(escapedPath, suffix); ok {
+			escapedPath = rest
 			break
 		}
 	}
-	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/")
+	parsed.Path, _ = url.PathUnescape(escapedPath)
+	parsed.RawPath = escapedPath
+	return parsed.String()
 }

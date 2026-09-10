@@ -44,6 +44,7 @@ func processGeminiStream(reader io.Reader, assembler *anthropicResponseAssembler
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), geminiStreamScannerBuffer)
 	toolCounter := 0
+	terminalSeen := false
 	for scanner.Scan() {
 		payload := geminiJSONPayload(scanner.Text())
 		if payload == "" {
@@ -52,9 +53,14 @@ func processGeminiStream(reader io.Reader, assembler *anthropicResponseAssembler
 		if err := processGeminiChunk([]byte(payload), assembler, &toolCounter); err != nil {
 			return err
 		}
+		root := gjson.Parse(payload)
+		terminalSeen = terminalSeen || geminiResponsePayload(root).Get("candidates.0.finishReason").String() != "" || geminiPromptBlockReason(root) != ""
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read Gemini stream: %w", err)
+	}
+	if !terminalSeen {
+		return fmt.Errorf("Gemini stream ended before finishReason: %w", io.ErrUnexpectedEOF)
 	}
 	return assembler.finish()
 }
@@ -66,7 +72,37 @@ func processGeminiNonStream(body []byte, assembler *anthropicResponseAssembler) 
 	if err := processGeminiChunk(body, assembler, &toolCounter); err != nil {
 		return err
 	}
+	root := gjson.ParseBytes(body)
+	if geminiResponsePayload(root).Get("candidates.0.finishReason").String() == "" && geminiPromptBlockReason(root) == "" {
+		return fmt.Errorf("Gemini response ended without a finishReason or prompt block reason: %w", io.ErrUnexpectedEOF)
+	}
 	return assembler.finish()
+}
+
+func geminiResponsePayload(root gjson.Result) gjson.Result {
+	if response := root.Get("response"); response.Exists() {
+		return response
+	}
+	return root
+}
+
+func geminiPromptBlockReason(root gjson.Result) string {
+	reason := geminiResponsePayload(root).Get("promptFeedback.blockReason").String()
+	if reason == "" {
+		reason = root.Get("promptFeedback.blockReason").String()
+	}
+	if reason == "BLOCK_REASON_UNSPECIFIED" {
+		return ""
+	}
+	return reason
+}
+
+func geminiRefusalReason(reason string) bool {
+	switch reason {
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION":
+		return true
+	}
+	return false
 }
 
 // processGeminiChunk processes one Gemini response JSON object: it unwraps the
@@ -80,16 +116,25 @@ func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, t
 	if upstreamError := root.Get("error"); upstreamError.Exists() {
 		return fmt.Errorf("Gemini upstream error: %s", upstreamError.Raw)
 	}
-	responseNode := root.Get("response")
+	responseNode := geminiResponsePayload(root)
 	if upstreamError := responseNode.Get("error"); upstreamError.Exists() {
 		return fmt.Errorf("Gemini upstream error: %s", upstreamError.Raw)
 	}
-	if !responseNode.Exists() {
-		if root.Get("candidates").Exists() {
-			responseNode = root
-		} else {
-			return nil
+	finishReason := strings.TrimSpace(responseNode.Get("candidates.0.finishReason").String())
+	blockReason := geminiPromptBlockReason(root)
+	if blockReason != "" || geminiRefusalReason(finishReason) {
+		if blockReason == "" {
+			blockReason = finishReason
 		}
+		assembler.stopReason = "refusal"
+		if err := assembler.addText("Gemini blocked this response (" + blockReason + ")."); err != nil {
+			return err
+		}
+		geminiApplyUsage(root, assembler)
+		return nil
+	}
+	if finishReason != "" && finishReason != "STOP" && finishReason != "MAX_TOKENS" {
+		return fmt.Errorf("Gemini generation failed: %s", finishReason)
 	}
 
 	if parts := responseNode.Get("candidates.0.content.parts"); parts.IsArray() {
@@ -129,7 +174,9 @@ func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, t
 					args = "{}"
 				}
 				(*toolCounter)++
-				id := sanitizeClaudeToolID(name + "-" + strconv.Itoa(*toolCounter))
+				// The counter is response-local; a random component prevents IDs
+				// from colliding across turns or after name sanitization.
+				id := sanitizeClaudeToolID(name + "-" + strings.ReplaceAll(uuidString(), "-", "") + "_" + strconv.Itoa(*toolCounter))
 				if err := assembler.addToolUse(id, name, args); err != nil {
 					return err
 				}
@@ -154,22 +201,30 @@ func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, t
 		}
 	}
 
-	// Terminal chunk: finishReason and usageMetadata arrive together.
-	finishReason := strings.TrimSpace(responseNode.Get("candidates.0.finishReason").String())
-	if finishReason == "" {
-		return nil
-	}
-	usage := responseNode.Get("usageMetadata")
-	if !usage.Exists() {
-		usage = root.Get("usageMetadata")
-	}
-	if usage.Exists() {
-		assembler.contextTokens = int(usage.Get("promptTokenCount").Int())
-		assembler.outputTokens = int(usage.Get("candidatesTokenCount").Int() + usage.Get("thoughtsTokenCount").Int())
-		assembler.cacheReadTokens = int(usage.Get("cachedContentTokenCount").Int())
-	}
+	geminiApplyUsage(root, assembler)
 	if finishReason == "MAX_TOKENS" {
 		assembler.stopReason = "max_tokens"
 	}
 	return nil
+}
+
+func geminiApplyUsage(root gjson.Result, assembler *anthropicResponseAssembler) {
+	usage := geminiResponsePayload(root).Get("usageMetadata")
+	if !usage.Exists() {
+		usage = root.Get("usageMetadata")
+	}
+	if usage.Exists() {
+		if cached := usage.Get("cachedContentTokenCount"); cached.Exists() {
+			assembler.cacheReadTokens = int(cached.Int())
+		}
+		// Gemini promptTokenCount already includes cached content tokens; subtract
+		// them so input_tokens holds only fresh input (see codex_responses_stream).
+		if in := usage.Get("promptTokenCount"); in.Exists() {
+			assembler.contextTokens = max(0, int(in.Int())-assembler.cacheReadTokens)
+			assembler.inputUsageKnown = true
+		}
+		if usage.Get("candidatesTokenCount").Exists() || usage.Get("thoughtsTokenCount").Exists() {
+			assembler.outputTokens = int(usage.Get("candidatesTokenCount").Int() + usage.Get("thoughtsTokenCount").Int())
+		}
+	}
 }

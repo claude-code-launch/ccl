@@ -21,7 +21,11 @@ func runPreview() error {
 		return err
 	}
 
-	fmt.Println(claude.PreviewSettings(p))
+	settings, err := claude.PreviewSettings(p)
+	if err != nil {
+		return err
+	}
+	fmt.Println(settings)
 	return nil
 }
 

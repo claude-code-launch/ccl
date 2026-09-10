@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 const codexResponsesNameLimit = 64
@@ -76,6 +78,17 @@ func convertAnthropicToCodexResponses(raw []byte, fallbackSessionID ...string) (
 		"stream":              true,
 		"store":               false,
 		"include":             []string{"reasoning.encrypted_content"},
+	}
+	if request.MaxTokens > 0 {
+		body["max_output_tokens"] = request.MaxTokens
+	}
+	format, err := messagesStructuredOutput(request.OutputConfig)
+	if err != nil {
+		return nil, err
+	}
+	if format != nil {
+		format["type"] = "json_schema"
+		body["text"] = map[string]any{"format": format}
 	}
 	if tier := codexServiceTier(request.ServiceTier, request.Speed); tier != "" {
 		body["service_tier"] = tier
@@ -280,7 +293,7 @@ func codexMessageItems(message anthropicMessage, toolNames map[string]string) ([
 	}
 
 	var blocks []map[string]any
-	if err := json.Unmarshal(message.Content, &blocks); err != nil {
+	if err := decodeProtocolJSON(message.Content, &blocks); err != nil {
 		return nil, fmt.Errorf("invalid %s message content: %w", role, err)
 	}
 	result := make([]any, 0, len(blocks))
@@ -292,7 +305,7 @@ func codexMessageItems(message anthropicMessage, toolNames map[string]string) ([
 		result = append(result, map[string]any{"type": "message", "role": role, "content": content})
 		content = make([]any, 0, len(blocks))
 	}
-	for _, block := range blocks {
+	for index, block := range blocks {
 		kind, _ := block["type"].(string)
 		switch kind {
 		case "text":
@@ -334,16 +347,13 @@ func codexMessageItems(message anthropicMessage, toolNames map[string]string) ([
 			} else {
 				name = codexShortName(name)
 			}
-			arguments, err := json.Marshal(block["input"])
-			if err != nil {
-				return nil, fmt.Errorf("encode tool %s input: %w", name, err)
-			}
-			if string(arguments) == "null" {
-				arguments = []byte("{}")
+			arguments := gjson.GetBytes(message.Content, fmt.Sprintf("%d.input", index)).Raw
+			if arguments == "" || arguments == "null" {
+				arguments = "{}"
 			}
 			result = append(result, map[string]any{
 				"type": "function_call", "call_id": codexShortCallID(stringValue(block["id"])),
-				"name": name, "arguments": string(arguments),
+				"name": name, "arguments": arguments,
 			})
 		case "tool_result":
 			flush()
@@ -425,7 +435,7 @@ func codexTools(tools []anthropicTool, names map[string]string) ([]any, error) {
 		}
 		parameters := map[string]any{}
 		if len(tool.InputSchema) > 0 && string(tool.InputSchema) != "null" {
-			if err := json.Unmarshal(tool.InputSchema, &parameters); err != nil {
+			if err := decodeProtocolJSON(tool.InputSchema, &parameters); err != nil {
 				return nil, fmt.Errorf("invalid input_schema for tool %s: %w", tool.Name, err)
 			}
 		}
@@ -599,7 +609,19 @@ func codexReasoningFromSignature(signature string) (any, error) {
 
 func codexReplayableSignature(signature string) bool {
 	signature = strings.TrimSpace(signature)
-	return signature != "" && signature != "ccl-codex-signature-unavailable"
+	if strings.HasPrefix(signature, codexReasoningSignaturePrefix) {
+		return true
+	}
+	// Other adapters' envelopes and synthetic placeholders are not encrypted
+	// Responses state. Keep raw legacy Responses payloads replayable.
+	if strings.HasPrefix(signature, "ccl-") {
+		return false
+	}
+	switch signature {
+	case "", "kiro", "gemini", "qoder":
+		return false
+	}
+	return true
 }
 
 func stringValue(value any) string {

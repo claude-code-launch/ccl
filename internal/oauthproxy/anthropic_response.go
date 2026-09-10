@@ -116,6 +116,7 @@ type anthropicResponseAssembler struct {
 	outputTokens     int
 	retainedBytes    int
 	contextTokens    int
+	inputUsageKnown  bool
 	cacheReadTokens  int
 	cacheWriteTokens int
 	hasToolUse       bool
@@ -337,7 +338,7 @@ func (a *anthropicResponseAssembler) addToolUse(id, name, partialJSON string) er
 	var input map[string]any
 	if strings.TrimSpace(partialJSON) == "" {
 		input = map[string]any{}
-	} else if err := json.Unmarshal([]byte(partialJSON), &input); err != nil {
+	} else if err := decodeProtocolJSON([]byte(partialJSON), &input); err != nil {
 		return fmt.Errorf("upstream tool %s returned invalid JSON input: %w", name, err)
 	}
 	index := a.appendBlock(anthropicResponseBlock{Type: "tool_use", ID: id, Name: name, Input: &input})
@@ -489,7 +490,7 @@ func (a *anthropicResponseAssembler) response() map[string]any {
 // what was actually billed against the account.
 func (a *anthropicResponseAssembler) tokenTotals() (input, output int) {
 	input = a.request.inputTokens
-	if a.contextTokens > 0 {
+	if a.inputUsageKnown || a.contextTokens > 0 {
 		input = a.contextTokens
 	}
 	return input, a.outputTokens

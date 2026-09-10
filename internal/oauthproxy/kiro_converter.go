@@ -58,7 +58,8 @@ type anthropicThinking struct {
 }
 
 type anthropicOutput struct {
-	Effort string `json:"effort"`
+	Effort string          `json:"effort"`
+	Format json.RawMessage `json:"format"`
 }
 
 type anthropicRequestMetadata struct {

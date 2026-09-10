@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 // chatCompletionsConvertedRequest is the CCL-owned wire representation of one
@@ -20,7 +22,7 @@ type chatCompletionsConvertedRequest struct {
 // rather than on anthropicMessagesRequest so other adapters are unaffected.
 type chatAnthropicRequest struct {
 	anthropicMessagesRequest
-	Temperature   float64  `json:"temperature"`
+	Temperature   *float64 `json:"temperature"`
 	TopP          float64  `json:"top_p"`
 	StopSequences []string `json:"stop_sequences"`
 	User          string   `json:"user"`
@@ -64,8 +66,8 @@ func convertAnthropicToChatCompletions(raw []byte) (*chatCompletionsConvertedReq
 	if request.MaxTokens > 0 {
 		body["max_tokens"] = request.MaxTokens
 	}
-	if request.Temperature > 0 {
-		body["temperature"] = request.Temperature
+	if request.Temperature != nil {
+		body["temperature"] = *request.Temperature
 	} else if request.TopP > 0 {
 		body["top_p"] = request.TopP
 	}
@@ -87,6 +89,16 @@ func convertAnthropicToChatCompletions(raw []byte) (*chatCompletionsConvertedReq
 		if choice, ok := chatToolChoice(request.ToolChoice); ok {
 			body["tool_choice"] = choice
 		}
+		if disabled := gjson.GetBytes(request.ToolChoice, "disable_parallel_tool_use"); disabled.Exists() {
+			body["parallel_tool_calls"] = !disabled.Bool()
+		}
+	}
+	format, err := messagesStructuredOutput(request.OutputConfig)
+	if err != nil {
+		return nil, err
+	}
+	if format != nil {
+		body["response_format"] = map[string]any{"type": "json_schema", "json_schema": format}
 	}
 	// Ask the upstream to include usage in the final streaming chunk so token
 	// statistics survive even when no dedicated usage event is emitted. Only
@@ -236,8 +248,9 @@ type chatContentBlock struct {
 	text       string
 	thinking   string
 	toolUseID  string
-	toolUseIn  map[string]any
+	toolUseIn  json.RawMessage
 	toolResult string
+	toolImages []string
 	imageURL   string
 }
 
@@ -252,11 +265,11 @@ func chatParseContent(raw json.RawMessage) ([]chatContentBlock, error) {
 		return []chatContentBlock{{blockType: "text", text: direct}}, nil
 	}
 	var blocks []map[string]any
-	if err := json.Unmarshal(raw, &blocks); err != nil {
+	if err := decodeProtocolJSON(raw, &blocks); err != nil {
 		return nil, fmt.Errorf("message content must be a string or content block array")
 	}
 	result := make([]chatContentBlock, 0, len(blocks))
-	for _, block := range blocks {
+	for index, block := range blocks {
 		switch strings.ToLower(metadataString(block, "type")) {
 		case "text":
 			if text := metadataString(block, "text"); text != "" {
@@ -271,30 +284,44 @@ func chatParseContent(raw json.RawMessage) ([]chatContentBlock, error) {
 				result = append(result, chatContentBlock{blockType: "image", imageURL: url})
 			}
 		case "tool_use":
-			input, _ := block["input"].(map[string]any)
-			if input == nil {
-				input = map[string]any{}
+			input := gjson.GetBytes(raw, fmt.Sprintf("%d.input", index))
+			inputJSON := json.RawMessage(`{}`)
+			if input.IsObject() {
+				inputJSON = json.RawMessage(input.Raw)
 			}
 			result = append(result, chatContentBlock{
 				blockType: "tool_use",
 				toolUseID: metadataString(block, "id"),
-				toolUseIn: input,
+				toolUseIn: inputJSON,
 				text:      metadataString(block, "name"),
 			})
 		case "tool_result":
+			var images []string
+			for _, item := range sliceValue(block["content"]) {
+				part := mapValue(item)
+				if metadataString(part, "type") == "image" {
+					if imageURL := chatImageURL(part); imageURL != "" {
+						images = append(images, imageURL)
+					}
+				}
+			}
 			result = append(result, chatContentBlock{
 				blockType:  "tool_result",
 				toolUseID:  metadataString(block, "tool_use_id"),
 				toolResult: chatToolResultContent(block["content"]),
+				toolImages: images,
 			})
 		}
 	}
 	return result, nil
 }
 
-// chatImageURL renders an Anthropic base64 image block as an OpenAI data URL.
+// chatImageURL preserves URL images and renders base64 images as data URLs.
 func chatImageURL(block map[string]any) string {
 	source, _ := block["source"].(map[string]any)
+	if metadataString(source, "type") == "url" {
+		return metadataString(source, "url")
+	}
 	mediaType := metadataString(source, "media_type")
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
@@ -307,8 +334,8 @@ func chatImageURL(block map[string]any) string {
 }
 
 // chatToolResultContent stringifies a tool_result content field. Text is
-// concatenated; images and other unsupported blocks are marked as omitted, the
-// same collapse used for image-less upstreams.
+// concatenated; images are referenced here and attached to the following user
+// message by chatConvertMessage.
 func chatToolResultContent(value any) string {
 	switch typed := value.(type) {
 	case string:
@@ -325,8 +352,14 @@ func chatToolResultContent(value any) string {
 				if text := metadataString(block, "text"); text != "" {
 					parts = append(parts, text)
 				}
-			case "image", "image_url", "input_image":
-				parts = append(parts, "[image omitted: unsupported by upstream]")
+			case "image":
+				if chatImageURL(block) != "" {
+					parts = append(parts, "[image attached in the following user message]")
+				} else {
+					parts = append(parts, "[image omitted: invalid image source]")
+				}
+			case "image_url", "input_image":
+				parts = append(parts, "[image omitted: unsupported image block]")
 			}
 		}
 		return strings.Join(parts, "\n")
@@ -365,10 +398,9 @@ func chatConvertMessage(message anthropicMessage) ([]map[string]any, error) {
 
 	// Tool results precede their message body, matching OpenAI ordering.
 	var toolResults []map[string]any
-	var textParts []string
+	var contentParts []any
 	var reasoningParts []string
 	var toolCalls []map[string]any
-	var imageParts []any
 
 	for _, block := range blocks {
 		switch block.blockType {
@@ -379,6 +411,14 @@ func chatConvertMessage(message anthropicMessage) ([]map[string]any, error) {
 					"tool_call_id": block.toolUseID,
 					"content":      block.toolResult,
 				})
+				// Chat tool messages accept text only. Keep images in a user
+				// message after all tool replies and label their originating call.
+				if len(block.toolImages) > 0 {
+					contentParts = append(contentParts, map[string]any{"type": "text", "text": "Images from tool result " + block.toolUseID + ":"})
+					for _, imageURL := range block.toolImages {
+						contentParts = append(contentParts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageURL}})
+					}
+				}
 			}
 		case "thinking":
 			// Only assistant reasoning is honored; user/system thinking is dropped
@@ -387,19 +427,18 @@ func chatConvertMessage(message anthropicMessage) ([]map[string]any, error) {
 				reasoningParts = append(reasoningParts, block.thinking)
 			}
 		case "text":
-			textParts = append(textParts, block.text)
+			contentParts = append(contentParts, map[string]any{"type": "text", "text": block.text})
 		case "image":
-			imageParts = append(imageParts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": block.imageURL}})
+			contentParts = append(contentParts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": block.imageURL}})
 		case "tool_use":
 			if assistant && block.toolUseID != "" {
 				arguments := block.toolUseIn
-				argsJSON, _ := json.Marshal(arguments)
 				toolCalls = append(toolCalls, map[string]any{
 					"id":   block.toolUseID,
 					"type": "function",
 					"function": map[string]any{
 						"name":      block.text,
-						"arguments": string(argsJSON),
+						"arguments": string(arguments),
 					},
 				})
 			}
@@ -410,11 +449,7 @@ func chatConvertMessage(message anthropicMessage) ([]map[string]any, error) {
 
 	if assistant {
 		message := map[string]any{"role": "assistant"}
-		content := make([]any, 0, len(textParts)+len(imageParts))
-		for _, part := range textParts {
-			content = append(content, map[string]any{"type": "text", "text": part})
-		}
-		content = append(content, imageParts...)
+		content := contentParts
 		if len(content) > 0 {
 			message["content"] = content
 		} else {
@@ -428,11 +463,7 @@ func chatConvertMessage(message anthropicMessage) ([]map[string]any, error) {
 		}
 		out = append(out, message)
 	} else {
-		content := make([]any, 0, len(textParts)+len(imageParts))
-		for _, part := range textParts {
-			content = append(content, map[string]any{"type": "text", "text": part})
-		}
-		content = append(content, imageParts...)
+		content := contentParts
 		if len(content) > 0 {
 			out = append(out, map[string]any{"role": "user", "content": content})
 		}
@@ -462,7 +493,7 @@ func chatTool(tool anthropicTool) map[string]any {
 // field, which the OpenAI function-calling contract requires.
 func ensureObjectSchema(schema json.RawMessage) json.RawMessage {
 	var value map[string]any
-	if json.Unmarshal(schema, &value) != nil {
+	if decodeProtocolJSON(schema, &value) != nil || value == nil {
 		return json.RawMessage(`{"type":"object","properties":{}}`)
 	}
 	if _, ok := value["properties"]; !ok {

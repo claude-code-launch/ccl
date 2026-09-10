@@ -477,18 +477,18 @@ func responseLanguage() string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // PreviewSettings returns the JSON that would be written to the settings temp file.
-func PreviewSettings(p provider.Provider) string {
+func PreviewSettings(p provider.Provider) (string, error) {
 	ctx, err := setupProvider(p)
 	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return "", err
 	}
 	defer ctx.cleanup()
 
 	data, err := json.MarshalIndent(ctx.settings(), "", "  ")
 	if err != nil {
-		return fmt.Sprintf("Error: marshal settings: %v", err)
+		return "", fmt.Errorf("marshal settings: %w", err)
 	}
-	return string(data)
+	return string(data), nil
 }
 
 // Run launches the Claude CLI with settings derived from p, forwarding extra args.
