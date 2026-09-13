@@ -162,9 +162,13 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 		applyModelEnvWithNames(env, p.Model, names)
 	}
 
-	// Gateway discovery & traffic reduction (always enabled for multi-model setups)
+	// CCL owns model discovery and tier mapping. Claude's additional gateway
+	// discovery would append unmapped "From gateway" rows to /model. Set an
+	// explicit default so inherited settings cannot silently re-enable it;
+	// provider-level Env below can still opt in.
+	env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "0"
+	// Reduce unrelated traffic for model-configured providers.
 	if p.Model != "" || p.CustomModelID != "" {
-		env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
 		env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	}
 
@@ -323,7 +327,7 @@ func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[s
 	sonnet := modelrouting.MapModel("claude-3-5-sonnet", "", models)
 	haiku := modelrouting.MapModel("claude-3-5-haiku", "", models)
 
-	setIfEmpty("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1")
+	setIfEmpty("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "0")
 	setIfEmpty("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
 
 	for _, kv := range []struct{ k, v string }{

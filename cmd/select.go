@@ -88,7 +88,7 @@ func (s *selectComponent) backspace() {
 	if t == "" {
 		return
 	}
-	s.text.Set(t[:len(t)-1])
+	s.text.Set(removeLastRune(t))
 	s.applyFilter()
 }
 

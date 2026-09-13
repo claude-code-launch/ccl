@@ -335,6 +335,33 @@ const (
 	anthropicAuthBearer  = "bearer"
 )
 
+// Respect a configured data plane first. A models list verifies credentials,
+// not Chat/Responses support; preserve that user choice without a paid probe.
+func detectProtocolAndModelsPreferred(endpoint, apiKey string, preference ...string) protocolDetectionResult {
+	if len(preference) == 0 || (!provider.IsOpenAICompatibleType(preference[0]) && !provider.IsAnthropicType(preference[0])) {
+		return detectProtocolAndModelsDetailed(endpoint, apiKey)
+	}
+	typ := preference[0]
+	base := normalizeModelBaseURL(endpoint)
+	candidate := modelProbeCandidate{name: "user-preference", baseURL: base, modelsURL: protocol.NormalizeOpenAIModelsURL(base), auth: modelProbeAuthBearer, expect: modelProbeExpectOpenAI}
+	if provider.IsAnthropicType(typ) {
+		candidate.modelsURL = protocol.NormalizeAnthropicModelsURL(base)
+		candidate.expect = modelProbeExpectAnthropic
+		candidate.auth = modelProbeAuthXAPIKey
+		if len(preference) > 1 && preference[1] == anthropicAuthBearer {
+			candidate.auth = modelProbeAuthBearer
+		}
+	}
+	if result, err := fetchCandidateModelsForDetection(candidate, apiKey); err == nil && result.models != "" {
+		detection := protocolDetectionResult{protocol: typ, models: result.models, modelInfos: result.modelInfos, baseURL: base}
+		if provider.IsAnthropicType(typ) {
+			detection.anthropicAuth = string(candidate.auth)
+		}
+		return detection
+	}
+	return detectProtocolAndModelsDetailed(endpoint, apiKey)
+}
+
 func detectProtocolAndModelsDetailed(endpoint, apiKey string) protocolDetectionResult {
 	endpoint = strings.TrimSuffix(endpoint, "/")
 	setDebugf("detectProtocolAndModelsDetailed start endpoint=%q api_key_len=%d", endpoint, len(apiKey))

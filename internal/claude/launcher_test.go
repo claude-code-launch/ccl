@@ -555,9 +555,9 @@ func TestLauncherDynamicDiscovery(t *testing.T) {
 		t.Fatalf("No env block found in settings: %s", settingsJSONStr)
 	}
 
-	// We expect gateway discovery enabled and correct default models mapped!
-	if env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] != "1" {
-		t.Errorf("Expected CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY to be 1")
+	// CCL discovers and maps models; Claude must not append a second catalog.
+	if env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] != "0" {
+		t.Errorf("Expected CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY to be 0")
 	}
 
 	// Sonnet model tier should be mapped to deepseek-v4-pro

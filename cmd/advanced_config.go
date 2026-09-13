@@ -88,6 +88,7 @@ const (
 	rowCopyURL  // click the endpoint value to copy the URL
 	rowTest     // Auto Configure
 	rowProtocol
+	rowAuth
 	rowFast
 	rowOpus
 	rowSonnet
@@ -400,10 +401,10 @@ func fetchModelsDevAsync(done chan<- modelsDevFetchDoneMsg) {
 
 // fetchModelsAsync runs protocol detection + model fetching off the UI thread
 // and delivers the result on the fetch channel.
-func fetchModelsAsync(done chan<- modelFetchDoneMsg, endpoint, apiKey string) {
+func fetchModelsAsync(done chan<- modelFetchDoneMsg, endpoint, apiKey string, preference ...string) {
 	go func() {
 		setDebugf("modelFetch start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
-		result := detectProtocolAndModelsDetailed(endpoint, apiKey)
+		result := detectProtocolAndModelsPreferred(endpoint, apiKey, preference...)
 		setDebugf(
 			"modelFetch done endpoint=%q detected_endpoint=%q protocol=%q anthropic_auth=%q model_count=%d err=%v",
 			endpoint,
@@ -579,8 +580,11 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 			configRow{kind: rowEndpoint},
 			configRow{kind: rowAPIKey},
 			configRow{kind: rowProtocol},
-			configRow{kind: rowTest},
 		)
+		if m.canSelectCustomProtocol() && provider.IsAnthropicType(m.p.Type) {
+			rows = append(rows, configRow{kind: rowAuth})
+		}
+		rows = append(rows, configRow{kind: rowTest})
 	} else {
 		// models.dev: endpoint and protocol come from metadata (read-only); the
 		// Provider row opens the catalog picker and only the API key is editable.
@@ -1184,7 +1188,7 @@ func (m *AdvancedConfigModel) handleModelsDevPickerKey(ke tui.KeyEvent) {
 	case tui.KeyBackspace:
 		t := m.modelsDevText.Get()
 		if t != "" {
-			m.modelsDevText.Set(t[:len(t)-1])
+			m.modelsDevText.Set(removeLastRune(t))
 		}
 		m.updateModelsDevFilter()
 	default:
@@ -1230,7 +1234,7 @@ func (m *AdvancedConfigModel) startAutoDetect() {
 		m.live().detecting = true
 		m.live().detectProgress = 5
 		m.live().detectFrame = 0
-		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey)
+		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth)
 	}
 }
 
@@ -1525,10 +1529,13 @@ func (m *AdvancedConfigModel) canSelectCustomProtocol() bool {
 	if m.p == nil || m.source != sourceCustom || strings.TrimSpace(m.p.OAuthProvider) != "" {
 		return false
 	}
-	return provider.IsOpenAICompatibleType(m.p.Type) || provider.IsAnthropicType(m.p.Type)
+	return strings.TrimSpace(m.p.Type) == "" || provider.IsOpenAICompatibleType(m.p.Type) || provider.IsAnthropicType(m.p.Type)
 }
 
 func customProtocolLabel(providerType string) string {
+	if strings.TrimSpace(providerType) == "" {
+		return "Auto"
+	}
 	switch {
 	case provider.IsOpenAIResponsesType(providerType):
 		return "Responses"
@@ -1555,6 +1562,9 @@ func (m *AdvancedConfigModel) cycleCustomProtocol(delta int) {
 			index = i
 			break
 		}
+	}
+	if strings.TrimSpace(m.p.Type) == "" {
+		index = -1
 	}
 	if provider.IsAnthropicType(m.p.Type) {
 		m.live().anthropicAuth = m.p.AnthropicAuth
@@ -1726,6 +1736,24 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 	// connectionReady would lock a fresh provider out of the models.dev path.
 	if m.currentRow() == rowSource {
 		m.switchSource(m.otherSource())
+		return
+	}
+	if m.currentRow() == rowProtocol && m.canSelectCustomProtocol() {
+		m.cycleCustomProtocol(delta)
+		return
+	}
+	if m.currentRow() == rowAuth && m.canSelectCustomProtocol() {
+		if provider.IsAnthropicType(m.p.Type) {
+			values := []string{"", anthropicAuthXAPIKey, anthropicAuthBearer}
+			index := 0
+			for i, value := range values {
+				if value == m.p.AnthropicAuth {
+					index = i
+				}
+			}
+			m.p.AnthropicAuth = values[(index+delta%len(values)+len(values))%len(values)]
+			m.live().anthropicAuth = m.p.AnthropicAuth
+		}
 		return
 	}
 	if !m.connectionReady() {
@@ -2052,7 +2080,11 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 		m.live().detectProgress = 5
 		m.live().detectFrame = 0
 		setDebugf("start detection endpoint=%q api_key_len=%d oauth=%t", m.live().probeEndpoint, len(m.live().probeAPIKey), m.usesOAuth())
-		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey)
+		if m.canSelectCustomProtocol() {
+			fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth)
+		} else {
+			fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey)
+		}
 	case rowTestModels:
 		if !m.connectionReady() {
 			return
@@ -2376,6 +2408,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		if len(rows) == 0 {
 			return
 		}
+		m.urlFocused, m.keyFocused = false, false
 		if m.cursor > 0 {
 			m.cursor--
 		} else {
@@ -2403,6 +2436,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		if len(rows) == 0 {
 			return
 		}
+		m.urlFocused, m.keyFocused = false, false
 		if m.cursor < len(rows)-1 {
 			m.cursor++
 		} else {
@@ -2423,7 +2457,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
+			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowActive:
 				m.adjustReviewField(-1)
 			}
 		}
@@ -2441,7 +2475,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowFast, rowTools, rowToolSearch, rowActive:
+			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowActive:
 				m.adjustReviewField(1)
 			}
 		}
@@ -2477,6 +2511,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			return
 		}
 		m.cursor = (m.cursor + 1) % len(rows)
+		m.urlFocused, m.keyFocused = false, false
 		m.keepCursorVisible()
 		m.markDirty()
 		return
@@ -2548,20 +2583,20 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		case m.filterFocused:
 			t := m.filterText.Get()
 			if t != "" {
-				m.filterText.Set(t[:len(t)-1])
+				m.filterText.Set(removeLastRune(t))
 			}
 			m.updateFilteredPool()
 		case m.currentRow() == rowEndpoint && !m.usesOAuth():
 			t := m.urlText.Get()
 			if t != "" {
-				m.urlText.Set(t[:len(t)-1])
+				m.urlText.Set(removeLastRune(t))
 			}
 			m.refreshConnectionDirty()
 		case m.currentRow() == rowAPIKey && !m.usesOAuth():
 			before := m.keyText.Get()
 			t := before
 			if t != "" {
-				m.keyText.Set(t[:len(t)-1])
+				m.keyText.Set(removeLastRune(t))
 			}
 			m.refreshConnectionDirty()
 			if m.usesModelsDev() && m.keyText.Get() != before {
@@ -2662,7 +2697,7 @@ func (m *AdvancedConfigModel) handleEnter() {
 		m.activateRow(rowProvider)
 	case rowTest:
 		m.activateRow(rowTest)
-	case rowProtocol, rowFast, rowTools, rowToolSearch:
+	case rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch:
 		m.adjustReviewField(1)
 	case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
 		if !m.connectionReady() {
@@ -2901,11 +2936,11 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 		rows = append(rows, kvRow(locale.T("端点", "Endpoint"), span(truncateMiddle(m.p.Endpoint, idleWidth), stCyan)))
 	} else {
 		urlValue := truncateMiddle(m.urlText.Get(), idleWidth) + urlCopiedHint
-		rows = append(rows, credentialField(locale.T("端点 URL", "Endpoint URL"), urlValue, m.urlFocused || m.cursor == m.mainRowIndex(rowEndpoint))...)
+		rows = append(rows, credentialField(locale.T("端点 URL", "Endpoint URL"), urlValue, m.cursor == m.mainRowIndex(rowEndpoint))...)
 	}
 
 	keyValue := truncateMiddle(m.keyText.Get(), idleWidth) + copiedHint
-	rows = append(rows, credentialField("API Key", keyValue, m.keyFocused || m.cursor == m.mainRowIndex(rowAPIKey))...)
+	rows = append(rows, credentialField("API Key", keyValue, m.cursor == m.mainRowIndex(rowAPIKey))...)
 
 	// Protocol moved up from Runtime: Chat/Responses/Anthropic is selectable
 	// for a manual Custom gateway; fixed and per-model runtimes stay read-only.
@@ -2920,7 +2955,19 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 	// Auth row: how the upstream verifies requests (API key / OAuth binding).
 	// For OAuth providers the Connection block is subscription metadata, and
 	// the Auth row above already carries this information.
-	rows = append(rows, kvRow(locale.T("鉴权", "Auth"), span(providerAuthLabel(*m.p), stAvailable)))
+	if m.canSelectCustomProtocol() && provider.IsAnthropicType(m.p.Type) {
+		value := m.p.AnthropicAuth
+		if value == "" {
+			value = "Auto"
+		}
+		rows = append(rows, stepperRow(locale.T("鉴权", "Auth"), "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowAuth)))
+	} else {
+		value := providerAuthLabel(*m.p)
+		if strings.TrimSpace(m.p.Type) == "" {
+			value = "Auto"
+		}
+		rows = append(rows, kvRow(locale.T("鉴权", "Auth"), span(value, stAvailable)))
+	}
 
 	// Auto Configure / Test Connection row under Auth, separated by a blank
 	// line so the action reads as its own group of one.
@@ -3520,6 +3567,7 @@ var rowClickLabels = map[configRowKind]rowClickLabel{
 	rowProvider:   {en: "Provider"},
 	rowTest:       {en: "Auto Configure"},
 	rowProtocol:   {en: "Protocol", zh: "协议"},
+	rowAuth:       {en: "Auth", zh: "鉴权"},
 	rowFast:       {en: "Fast"},
 	rowOpus:       {en: "Opus"},
 	rowSonnet:     {en: "Sonnet"},
