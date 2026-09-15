@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -14,19 +13,32 @@ import (
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 )
 
+// isolateAutoClawDesktopAuth points the platform's desktop-login lookup at the
+// test's own HOME. Leaving XDG_CONFIG_HOME or APPDATA set would send the real
+// resolution outside it: the fixture below would land in the temp directory
+// while the import looked at the runner's own config directory.
+func isolateAutoClawDesktopAuth(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	return home
+}
+
 // writeAutoClawDesktopAuth seeds the AutoClaw desktop auth.json that
-// `ccl import autoclaw` reads, inside the isolated HOME of a test.
+// `ccl import autoclaw` reads, inside the isolated HOME of a test. The location
+// comes from the same resolver the import uses, so the two cannot disagree.
 func writeAutoClawDesktopAuth(t *testing.T, home, accessToken string) {
 	t.Helper()
-	var dir string
-	switch runtime.GOOS {
-	case "darwin":
-		dir = filepath.Join(home, "Library", "Application Support", "autoclaw")
-	case "windows":
-		dir = filepath.Join(home, "AppData", "Roaming", "autoclaw")
-	default:
-		dir = filepath.Join(home, ".config", "autoclaw")
+	path, err := oauthproxy.AutoClawDesktopAuthPath()
+	if err != nil {
+		t.Fatal(err)
 	}
+	if !strings.HasPrefix(path, home+string(os.PathSeparator)) {
+		t.Fatalf("desktop auth path %q escaped the test HOME %q", path, home)
+	}
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +57,7 @@ func writeAutoClawDesktopAuth(t *testing.T, home, accessToken string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "auth.json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -64,8 +76,7 @@ func readAuthCredential(t *testing.T, home, name string) map[string]any {
 }
 
 func TestRunImportAutoClawCreatesProvider(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := isolateAutoClawDesktopAuth(t)
 	writeAutoClawDesktopAuth(t, home, "imported-access-token")
 
 	var out bytes.Buffer
@@ -126,8 +137,7 @@ func TestRunImportAutoClawCreatesProvider(t *testing.T) {
 }
 
 func TestRunImportAliasBecomesProviderName(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := isolateAutoClawDesktopAuth(t)
 	writeAutoClawDesktopAuth(t, home, "imported-access-token")
 
 	if err := runImport(context.Background(), &bytes.Buffer{}, []string{"autoclaw", "work"}); err != nil {

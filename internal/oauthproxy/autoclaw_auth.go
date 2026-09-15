@@ -57,6 +57,15 @@ type autoclawDesktopUserInfo struct {
 	Email    string      `json:"email"`
 }
 
+// AutoClawDesktopAuthPath reports where AutoClaw's desktop login state lives on
+// this platform. Callers that need to place or inspect that file — a test
+// seeding a fixture, most of all — must ask here rather than re-deriving the
+// per-platform rules: an XDG_CONFIG_HOME or APPDATA in the environment moves the
+// real path, and a second copy of these rules silently drifts out of step.
+func AutoClawDesktopAuthPath() (string, error) {
+	return autoclawDesktopAuthPath()
+}
+
 func defaultAutoClawDesktopAuthPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
