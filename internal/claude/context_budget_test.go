@@ -107,7 +107,7 @@ func TestApplyContextPolicyKeepsSupportedBalancedTiers(t *testing.T) {
 			env := map[string]string{
 				provider.EnvMaxContextTokens:  tokens,
 				provider.EnvAutoCompactWindow: tokens,
-				provider.EnvAutoCompactPct:    "80",
+				provider.EnvAutoCompactPct:    "85",
 			}
 			if applyContextPolicy(env) {
 				t.Fatal("supported Balanced tier must survive the launcher policy")
@@ -161,7 +161,7 @@ func TestSettingsKeepSupportedBalancedContextTriplets(t *testing.T) {
 					Env: map[string]string{
 						provider.EnvMaxContextTokens:  tokens,
 						provider.EnvAutoCompactWindow: tokens,
-						provider.EnvAutoCompactPct:    "80",
+						provider.EnvAutoCompactPct:    "85",
 					},
 				},
 				baseURL: "https://example.test",
@@ -246,7 +246,7 @@ func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 	settings := settingsJSON{Env: map[string]string{
 		provider.EnvMaxContextTokens:  "800000",
 		provider.EnvAutoCompactWindow: "800000",
-		provider.EnvAutoCompactPct:    "80",
+		provider.EnvAutoCompactPct:    "85",
 	}}
 	inherited := []string{"PATH=/usr/bin", provider.EnvAutoCompactPct + "=10", "HOME=/root"}
 
@@ -263,7 +263,7 @@ func TestBuildProcessEnvExportsManagedContextVars(t *testing.T) {
 		t.Fatalf("managed context vars were not exported: %#v", values)
 	}
 	// A ccl-managed value must replace the ambient one, not duplicate it.
-	if values[provider.EnvAutoCompactPct] != "80" || seen[provider.EnvAutoCompactPct] != 1 {
+	if values[provider.EnvAutoCompactPct] != "85" || seen[provider.EnvAutoCompactPct] != 1 {
 		t.Fatalf("pct override = %q (%d entries), want a single managed value", values[provider.EnvAutoCompactPct], seen[provider.EnvAutoCompactPct])
 	}
 	if values["PATH"] != "/usr/bin" || values["HOME"] != "/root" {

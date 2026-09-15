@@ -30,10 +30,10 @@ const (
 
 	Balanced500KMaxContextTokens  = "500000"
 	Balanced500KAutoCompactWindow = "500000"
-	Balanced500KAutoCompactPct    = "80"
+	Balanced500KAutoCompactPct    = "85"
 	Balanced800KMaxContextTokens  = "800000"
 	Balanced800KAutoCompactWindow = "800000"
-	Balanced800KAutoCompactPct    = "80"
+	Balanced800KAutoCompactPct    = "85"
 
 	// BalancedMaxContextTokens and companions retain the original 500K names for
 	// callers that do not need to distinguish the two supported Balanced tiers.
@@ -131,7 +131,7 @@ type Provider struct {
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
 	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, and
-	// commandcode. The legacy chatgpt and codex values remain readable.
+	// autoclaw. The legacy chatgpt and codex values remain readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
 	// (basename of the JSON under ~/.ccl/auth). Subscription runtimes require
@@ -152,6 +152,11 @@ type Provider struct {
 	// the cost of higher usage; only meaningful for the GPT/Codex Responses
 	// OAuth backend. Empty/zero leaves Claude Code's own setting.
 	FastMode bool `yaml:"fastMode,omitempty" mapstructure:"fastMode,omitempty"`
+	// StatuslineDisabled turns off the status line ccl installs for this
+	// provider. ccl writes its status line through Claude Code's --settings,
+	// which outranks the user's own ~/.claude/settings.json, so this flag is the
+	// only way to keep a personal statusLine. Zero means ccl's line is used.
+	StatuslineDisabled bool `yaml:"statuslineDisabled,omitempty" mapstructure:"statuslineDisabled,omitempty"`
 	// ModelProtocols maps a lowercase model ID to its upstream protocol
 	// ("anthropic", "openai", or "openai_responses"). It is only used by the
 	// mixed-protocol gateway (Type == "modelsdev"), whose single endpoint serves
@@ -188,8 +193,8 @@ func OAuthRuntimeType(oauthProvider string) (string, bool) {
 		return "openai", true
 	case "kiro", "qoder":
 		return "anthropic", true
-	case "commandcode":
-		return "commandcode", true
+	case "autoclaw":
+		return "autoclaw", true
 	default:
 		return "", false
 	}
@@ -229,8 +234,6 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "kiro"
 	case "workbuddy":
 		return "workbuddy"
-	case "commandcode":
-		return "commandcode"
 	default:
 		return ""
 	}
@@ -248,12 +251,18 @@ func IsOpenAIResponsesType(providerType string) bool {
 func IsOpenAICompatibleType(providerType string) bool {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	return providerType == "openai" ||
+		providerType == "openai-chat" ||
 		providerType == "openai(chat)" ||
 		IsOpenAIResponsesType(providerType)
 }
 
+// IsAnthropicType reports whether the provider speaks the Anthropic Messages
+// protocol directly. AutoClaw has its own compatibility type because it uses
+// the CCL Anthropic-to-OpenAI adapter; it must not be treated as a direct
+// Anthropic endpoint.
 func IsAnthropicType(providerType string) bool {
-	return strings.EqualFold(strings.TrimSpace(providerType), "anthropic")
+	trimmed := strings.TrimSpace(providerType)
+	return strings.EqualFold(trimmed, "anthropic")
 }
 
 // IsModelsDevType reports whether the provider is a mixed-protocol models.dev
@@ -263,10 +272,11 @@ func IsModelsDevType(providerType string) bool {
 	return strings.EqualFold(strings.TrimSpace(providerType), "modelsdev")
 }
 
-// IsCommandCodeType reports whether the provider is the Command Code API-key
-// gateway, served by ccl's own /alpha/generate data plane.
-func IsCommandCodeType(providerType string) bool {
-	return strings.EqualFold(strings.TrimSpace(providerType), "commandcode")
+// IsAutoClawType reports whether the provider is AutoClaw Code (ZCode coding
+// plan). Its credential is resolved from ~/.ccl/auth and kept inside a local
+// runtime that adds the managed proxy's desktop-compatible headers.
+func IsAutoClawType(providerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(providerType), "autoclaw")
 }
 
 // ProtocolForAISdkNPM maps a models.dev AI SDK package to ccl's provider Type
@@ -332,23 +342,34 @@ func RuntimeModelSpec(p Provider) string {
 // throughout the codebase for dispatch logic (proxy, launcher, doctor, ...).
 //
 // OpenAI exposes two distinct generation protocols behind the same "openai" umbrella:
-//  1. Chat Completions — the old standard, broadest compatibility: labeled "openai(chat)".
-//  2. Responses — the newer agent protocol: labeled "openai(responses)".
+//  1. Chat Completions — the old standard, broadest compatibility.
+//  2. Responses — the newer agent protocol.
+//
+// ProtocolLabel renders a provider type as the protocol name shown in `ccl set`,
+// `ccl ls`, and `ccl doctor`:
+//
+//  1. Chat Completions — the old standard, broadest compatibility: "openai-chat".
+//  2. Responses — the newer agent protocol: "openai-responses".
+//  3. Anthropic Messages — Claude Code's native protocol: "anthropic-messages".
+//
+// A backend whose real behavior is not implied by Type carries a " / " qualifier
+// instead of a second set of parentheses: AutoClaw's CCL Anthropic-to-Chat
+// adapter, Copilot's per-model dispatch, and models.dev's per-model protocols.
 func ProtocolLabel(providerType string) string {
 	trimmed := strings.TrimSpace(providerType)
 	switch {
 	case trimmed == "":
 		return ""
 	case IsModelsDevType(trimmed):
-		return "models.dev (auto)"
-	case IsCommandCodeType(trimmed):
-		return "commandcode"
+		return "models.dev / auto"
+	case IsAutoClawType(trimmed):
+		return "openai-chat / autoclaw"
 	case IsOpenAIResponsesType(trimmed):
-		return "openai(responses)"
+		return "openai-responses"
 	case IsAnthropicType(trimmed):
-		return "anthropic"
+		return "anthropic-messages"
 	default:
-		return "openai(chat)"
+		return "openai-chat"
 	}
 }
 
@@ -356,7 +377,7 @@ func ProtocolLabel(providerType string) string {
 // backends whose real behavior cannot be inferred from the internal Type field.
 func ProtocolLabelForProvider(p Provider) string {
 	if strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "copilot") {
-		return "copilot(auto)"
+		return "copilot / auto"
 	}
 	return ProtocolLabel(p.Type)
 }

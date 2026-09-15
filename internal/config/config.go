@@ -106,7 +106,15 @@ func Load() (*provider.Config, error) {
 	for name, p := range cfg.Providers {
 		changed := false
 		if p.OAuthProvider == "" {
-			if inferred := provider.InferOAuthProvider(name, p.Endpoint); inferred != "" {
+			inferred := provider.InferOAuthProvider(name, p.Endpoint)
+			// AutoClaw providers created during the first integration did not
+			// persist OAuthProvider, but their dedicated type is unambiguous. The
+			// managed endpoint is HTTP-shaped, so it cannot be inferred from an
+			// oauth:// descriptor like the other subscription backends.
+			if inferred == "" && provider.IsAutoClawType(p.Type) {
+				inferred = "autoclaw"
+			}
+			if inferred != "" {
 				p.OAuthProvider = inferred
 				changed = true
 			}

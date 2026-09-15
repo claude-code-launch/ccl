@@ -1039,6 +1039,12 @@ func TestStartKiroRuntimeExposesAnthropicModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// providersession.Prepare and the launcher read Runtime.Models() without
+	// touching the lazy /v1/models catalog, so it must carry the configured set.
+	wantModels := strings.Join(kiroRuntimeModels("claude-sonnet-4-6[1m]"), ",")
+	if got := strings.Join(proxyRuntime.Models(), ","); got != wantModels {
+		t.Fatalf("Runtime.Models() = %q, want %q", got, wantModels)
+	}
 	endpoint := proxyRuntime.Endpoint()
 	request, err := http.NewRequest(http.MethodGet, endpoint+"/models", nil)
 	if err != nil {

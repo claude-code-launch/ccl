@@ -120,7 +120,7 @@ func TestChatToolImagesFollowAllToolReplies(t *testing.T) {
 }
 
 func TestZeroFreshInputUsageIsAuthoritative(t *testing.T) {
-	for _, dialect := range []string{"chat", "responses", "gemini", "commandcode"} {
+	for _, dialect := range []string{"chat", "responses", "gemini"} {
 		t.Run(dialect, func(t *testing.T) {
 			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 777}, nil)
 			switch dialect {
@@ -136,8 +136,6 @@ func TestZeroFreshInputUsageIsAuthoritative(t *testing.T) {
 				if err := processGeminiChunk([]byte(`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":100}}`), a, &n); err != nil {
 					t.Fatal(err)
 				}
-			case "commandcode":
-				commandcodeApplyUsage(a, gjson.Parse(`{"inputTokens":100,"cachedInputTokens":100}`))
 			}
 			if got := a.usage(); got["input_tokens"] != 0 || got["cache_read_input_tokens"] != 100 {
 				t.Fatalf("usage=%v", got)

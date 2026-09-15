@@ -10,26 +10,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCommandCodePreservesToolJSONNumbers(t *testing.T) {
-	const numbers = `{"id":9007199254740993,"values":[1e1000,0.123456789012345678901]}`
-	raw := `{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":` + numbers + `}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}],"tools":[{"name":"f","input_schema":{"type":"object","properties":{"value":{"const":` + numbers + `}}}}]}`
-	c, err := convertAnthropicToCommandCode([]byte(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := json.Marshal(c.body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{"params.messages.0.content.0.input", "params.tools.0.input_schema.properties.value.const"} {
-		for _, field := range []string{"id", "values.0", "values.1"} {
-			if got, want := gjson.GetBytes(body, path+"."+field).Raw, gjson.Get(numbers, field).Raw; got != want {
-				t.Fatalf("%s.%s changed to %s; want %s", path, field, got, want)
-			}
-		}
-	}
-}
-
 func TestGeminiGenerationLimitsPreserved(t *testing.T) {
 	for _, maxTokens := range []int{17, 32000} {
 		request := fmt.Sprintf(`{"model":"gemini","max_tokens":%d,"stop_sequences":["END","STOP"],"messages":[{"role":"user","content":"hi"}]}`, maxTokens)

@@ -366,13 +366,21 @@ func fetchMappingCatalogFromProvider(_ context.Context, p provider.Provider) (pr
 		return p, models, indexModelInfos(infos), nop, nil
 	}
 
-	runtimeProvider, runtime, cleanup, err := prepareProviderRuntime(p)
+	runtimeProvider, runtime, cleanup, err := prepareProviderRuntime(context.Background(), p)
 	if err != nil {
 		return provider.Provider{}, nil, nil, nop, err
 	}
 	infos := fetchModelInfosForProvider(runtimeProvider)
 	metadata := indexModelInfos(infos)
 	models := runtime.Models()
+	if runtime.ModelCatalogIsFallback() {
+		// The runtime answered with a compatibility list, not the account's
+		// models — usually an expired credential. Mapping against it would offer
+		// the user five wrong choices, so prefer the pool already saved.
+		if saved := parseModelList(runtimeProvider.Model); len(saved) > 0 {
+			models = saved
+		}
+	}
 	if len(models) == 0 {
 		models = modelIDs(infos)
 	}

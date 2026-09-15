@@ -169,7 +169,7 @@ func runDoctor(ctx context.Context) error {
 	printProviderExperienceWarnings(p)
 
 	configuredProvider := p
-	p, runtime, cleanup, err := prepareProviderRuntime(p)
+	p, runtime, cleanup, err := prepareProviderRuntime(context.Background(), p)
 	if err != nil {
 		printProviderModelMappings(configuredProvider, nil)
 		if configuredProvider.OAuthProvider != "" {
@@ -190,11 +190,11 @@ func runDoctor(ctx context.Context) error {
 	// 5. Test Endpoint reachability and API Authentication key
 	endpointReachable := false
 	switch {
-	case provider.IsCommandCodeType(configuredProvider.Type) || provider.IsCommandCodeType(p.Type):
-		// Command Code's prepared endpoint is a local compatibility runtime and
-		// its /models response is static. Check that runtime separately from the
-		// real upstream /alpha/whoami health check.
-		endpointReachable = checkDoctorCommandCodeConnectivity(ctx, configuredProvider, p, runtime)
+	case provider.IsAutoClawType(configuredProvider.Type) || provider.IsAutoClawType(p.Type):
+		// AutoClaw is prepared as a local Anthropic runtime. This minimal probe
+		// crosses that runtime and therefore verifies the local credential binding,
+		// CCL's request conversion, and the managed Chat route together.
+		endpointReachable = checkDoctorAutoClawConnectivity(ctx, p)
 	case p.Endpoint != "":
 		endpointReachable = checkDoctorConnectivity(ctx, p)
 	}
@@ -232,8 +232,8 @@ func runDoctor(ctx context.Context) error {
 // printDoctorContextBudget reports how this session will be sized.
 //
 // Default leaves Claude Code on its native 200K/1M per-slot behavior. The two
-// Balanced tiers declare a provider-wide 500K or 800K window and compact at 80%
-// (approximately 400K or 640K). This section shows the effective mode and checks
+// Balanced tiers declare a provider-wide 500K or 800K window and compact at 85%
+// (approximately 425K or 680K). This section shows the effective mode and checks
 // it against advertised backend windows.
 //
 // runtimeProvider carries the live endpoint/key of the embedded runtime;
@@ -246,13 +246,12 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 	compactPct := strings.TrimSpace(configured.Env[provider.EnvAutoCompactPct])
 	overridden := maxContext > 0 || compactWindow > 0 || compactPct != ""
 	// Never probe with an unset endpoint: NormalizeOpenAIModelsURL falls back to
-	// api.openai.com, which would ship this provider's key to OpenAI. Anthropic
-	// gateways do not serve this catalog either.
+	// api.openai.com, which would ship this provider's key to OpenAI. Fixed
+	// managed catalogs such as AutoClaw do not serve this generic catalog either.
 	var windows map[string]int
 	var source string
 	if endpoint := strings.TrimSpace(runtimeProvider.Endpoint); endpoint != "" &&
-		!provider.IsAnthropicType(runtimeProvider.Type) &&
-		!provider.IsCommandCodeType(runtimeProvider.Type) {
+		!provider.IsAnthropicType(runtimeProvider.Type) {
 		windows, source = claude.AdvertisedContextWindows(endpoint, runtimeProvider.APIKey)
 	}
 	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
@@ -270,16 +269,16 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 	switch preset {
 	case provider.ContextPresetBalanced500K:
 		balancedWindow = "500K"
-		balancedCompactAt = "400K"
+		balancedCompactAt = "425K"
 	case provider.ContextPresetBalanced800K:
 		balancedWindow = "800K"
-		balancedCompactAt = "640K"
+		balancedCompactAt = "680K"
 	}
 	if balanced {
 		doctorKV("Sizing", fmt.Sprintf("Balanced %s / %s", balancedWindow, balancedCompactAt))
 		doctorKV("Assumed context", fmt.Sprintf("%s (%d)", balancedWindow, maxContext))
 		doctorKV("Auto-compact window", fmt.Sprintf("%s (%d)", balancedWindow, compactWindow))
-		doctorKV("Auto-compact pct", fmt.Sprintf("80%% (~%s)", balancedCompactAt))
+		doctorKV("Auto-compact pct", fmt.Sprintf("85%% (~%s)", balancedCompactAt))
 	} else if unsupported {
 		doctorKV("Sizing", "Default (unsupported context override is ignored)")
 		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
@@ -332,7 +331,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 			formatTokenCount(maxContext), providerCatalogModelLabel(smallestModel, modelNames), formatTokenCount(smallest)))
 		doctorHint("Requests can be rejected with context_length_exceeded (HTTP 400) before Claude Code auto-compacts")
 	}
-	doctorOK(fmt.Sprintf("Balanced mode; Claude Code compacts at 80%% of the %s window (~%s)", balancedWindow, balancedCompactAt))
+	doctorOK(fmt.Sprintf("Balanced mode; Claude Code compacts at 85%% of the %s window (~%s)", balancedWindow, balancedCompactAt))
 }
 
 // printDoctorOneMConsistency checks the [1m] markers against the advertised
@@ -417,101 +416,105 @@ func formatTokenCount(tokens int) string {
 	}
 }
 
-// checkDoctorCommandCodeConnectivity reports the two independent Command Code
-// health facts: the CCL-owned loopback compatibility runtime and the real
-// upstream GET /alpha/whoami result. The local /models catalog is static, so it
-// is useful for checking the runtime but cannot prove upstream authentication.
-func checkDoctorCommandCodeConnectivity(ctx context.Context, configured, runtimeProvider provider.Provider, runtime *oauthproxy.Runtime) bool {
+// checkDoctorAutoClawConnectivity probes through CCL's local AutoClaw runtime.
+// The runtime imports and refreshes the desktop session itself, then sends the
+// converted request to AutoClaw's managed OpenAI Chat proxy.
+func checkDoctorAutoClawConnectivity(ctx context.Context, p provider.Provider) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	doctorSection("Connectivity")
-
-	localReady := false
-	doctorInfo("Checking local Command Code compatibility runtime...")
-	if runtime == nil {
-		doctorErr("Local compatibility runtime is not available")
-	} else {
-		endpoint := strings.TrimSpace(runtimeProvider.Endpoint)
-		if endpoint == "" {
-			endpoint = strings.TrimSpace(runtime.Endpoint())
-		}
-		if endpoint == "" {
-			doctorErr("Local compatibility runtime has no endpoint")
-		} else {
-			localProvider := runtimeProvider
-			localProvider.Endpoint = endpoint
-			status, err := doctorProbeEndpoint(
-				ctx,
-				&http.Client{Timeout: doctorProbeTimeout},
-				protocol.NormalizeOpenAIModelsURL(endpoint),
-				localProvider,
-			)
-			if err != nil {
-				doctorErr(fmt.Sprintf("Local compatibility runtime is unreachable: %v", err))
-			} else {
-				switch status {
-				case http.StatusOK:
-					localReady = true
-					doctorOK(fmt.Sprintf("Local compatibility runtime available (HTTP %d)", status))
-					if models := runtime.Models(); len(models) > 0 {
-						doctorKV("Local catalog", fmt.Sprintf("%d static models", len(models)))
-					}
-				case http.StatusUnauthorized, http.StatusForbidden:
-					doctorErr(fmt.Sprintf("Local compatibility runtime rejected its session key (HTTP %d)", status))
-				default:
-					doctorWarn(fmt.Sprintf("Local compatibility runtime returned unexpected status (HTTP %d)", status))
-				}
-			}
-		}
-	}
-
-	doctorInfo("Checking upstream Command Code authentication...")
-	var (
-		status int
-		body   string
-		err    error
-	)
-	probeCtx, cancel := context.WithTimeout(ctx, doctorProbeTimeout)
-	defer cancel()
-	if strings.TrimSpace(configured.OAuthProvider) != "" {
-		if runtime == nil {
-			err = fmt.Errorf("subscription runtime is not available")
-		} else {
-			// The OAuth runtime owns the credential loaded from its bound file;
-			// never copy that private key into the resolved provider or doctor.
-			status, body, err = runtime.CheckUpstream(probeCtx)
-		}
-	} else {
-		// CommandCodeProbeWhoami resolves configured endpoint > environment
-		// override > production default and deliberately performs no fallback.
-		status, body, err = oauthproxy.CommandCodeProbeWhoami(
-			probeCtx, configured.Endpoint, configured.APIKey, doctorProbeTimeout,
-		)
-	}
-
+	doctorInfo("Checking the CCL AutoClaw runtime and managed Chat endpoint...")
+	status, body, err := probeAutoClawMessages(ctx, p)
 	if err != nil {
-		doctorErr(fmt.Sprintf("Upstream Command Code is unreachable: %v", err))
-	} else {
-		upstreamBody := doctorCommandCodeBodyPreview(body, configured.APIKey)
-		switch {
-		case status >= 200 && status < 300:
-			doctorOK(fmt.Sprintf("Upstream Command Code authenticated (GET /alpha/whoami, HTTP %d)", status))
-		case status == http.StatusUnauthorized || status == http.StatusForbidden:
-			doctorErr(fmt.Sprintf("Upstream Command Code authentication failed (HTTP %d). Verify the API key or subscription login.", status))
-		case upstreamBody != "":
-			doctorWarn(fmt.Sprintf("Upstream Command Code returned HTTP %d: %s", status, upstreamBody))
-		default:
-			doctorWarn(fmt.Sprintf("Upstream Command Code returned unexpected status (HTTP %d)", status))
-		}
+		doctorErr(fmt.Sprintf("Endpoint is unreachable: %v", err))
+		return false
 	}
-
-	return localReady
+	switch {
+	case status == http.StatusOK && autoClawResponseHasContent(body):
+		doctorOK(fmt.Sprintf("Connected and verified (HTTP %d)", status))
+		return true
+	case status == http.StatusOK:
+		doctorErr("Endpoint answered HTTP 200 with an empty stream")
+		doctorHint("Inspect the CCL debug log and confirm the selected AutoClaw model is available.")
+		return false
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		doctorErr(fmt.Sprintf("Authentication failed (HTTP %d). Run `ccl oauth autoclaw` again.", status))
+		return false
+	case status == http.StatusTooManyRequests:
+		doctorWarn(fmt.Sprintf("The coding plan is rate limited or out of quota (HTTP %d)", status))
+		return false
+	default:
+		if preview := doctorRedactBody(body, p.APIKey); preview != "" {
+			doctorWarn(fmt.Sprintf("Endpoint returned HTTP %d: %s", status, preview))
+		} else {
+			doctorWarn(fmt.Sprintf("Endpoint returned unexpected status (HTTP %d)", status))
+		}
+		return false
+	}
 }
 
-// doctorCommandCodeBodyPreview keeps an upstream diagnostic bounded and avoids
-// echoing the configured API key if a gateway includes it in an error body.
-func doctorCommandCodeBodyPreview(body string, secrets ...string) string {
+// probeAutoClawMessages sends one minimal Anthropic Messages request through
+// CCL's local AutoClaw adapter and returns the status/body for diagnostics.
+func probeAutoClawMessages(parent context.Context, p provider.Provider) (int, string, error) {
+	model := ""
+	if ids := oauthproxy.AutoClawModelIDs(); len(ids) > 0 {
+		model = ids[0]
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if err != nil {
+		return 0, "", err
+	}
+	ctx, cancel := context.WithTimeout(parent, doctorProbeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, buildAnthropicMessagesURL(p.Endpoint), bytes.NewReader(payload))
+	if err != nil {
+		return 0, "", err
+	}
+	setProviderAuthHeaders(request, p)
+	response, err := (&http.Client{Timeout: doctorProbeTimeout}).Do(request)
+	if err != nil {
+		return 0, "", err
+	}
+	defer response.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(response.Body, doctorProbeBodyLimit))
+	if readErr != nil {
+		return response.StatusCode, "", readErr
+	}
+	return response.StatusCode, string(raw), nil
+}
+
+// doctorProbeBodyLimit bounds the body a diagnostic probe keeps in memory.
+const doctorProbeBodyLimit = int64(64 << 10)
+
+// autoClawResponseHasContent reports whether a Messages response carried any
+// payload, either as inline JSON or as a non-empty SSE data event.
+func autoClawResponseHasContent(body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "", strings.HasPrefix(trimmed, ":"), strings.HasPrefix(trimmed, "event:"):
+			continue
+		case strings.HasPrefix(trimmed, "data:"):
+			data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if data == "" || data == "[DONE]" {
+				continue
+			}
+			return true
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// doctorRedactBody keeps an upstream diagnostic bounded and avoids echoing the
+// configured API key if a gateway includes it in an error body.
+func doctorRedactBody(body string, secrets ...string) string {
 	body = strings.TrimSpace(body)
 	for _, secret := range secrets {
 		secret = strings.TrimSpace(secret)
@@ -676,14 +679,17 @@ func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, a
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	wire := "openai"
 	switch {
+	case provider.IsAutoClawType(providerType):
+		// The managed account defines AutoClaw's fixed model catalog, and a live
+		// probe can be refused by the gateway's human verification (which answers
+		// with an empty stream). Availability follows the catalog instead.
+		wire = "autoclaw"
 	case provider.IsAnthropicType(providerType):
 		wire = "anthropic"
 	case provider.IsOpenAIResponsesType(providerType):
 		wire = "openai_responses"
 	case provider.IsModelsDevType(providerType):
 		wire = probeProtocolForModel(protocols, model)
-	case provider.IsCommandCodeType(providerType):
-		wire = "commandcode"
 	}
 	return testSingleModelForProtocolContext(ctx, model, endpoint, apiKey, wire, anthropicAuth, timeout)
 }
@@ -712,10 +718,11 @@ func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, api
 		return testSingleAnthropicModelWithAuthContext(ctx, model, endpoint, apiKey, anthropicAuth, timeout)
 	case "openai_responses":
 		return testSingleOpenAIResponsesModelContext(ctx, model, endpoint, apiKey, timeout)
-	case "commandcode":
-		// Command Code exposes no upstream model probe; the runtime's static
-		// catalog is the authority, so availability is catalog membership.
-		return oauthproxy.CommandCodeSupportsModel(model)
+	case "autoclaw":
+		// The managed AutoClaw catalogue is fixed by the account surface rather
+		// than discovered, so availability is catalog membership (see
+		// testSingleModelWithProtocolsContext).
+		return oauthproxy.AutoClawSupportsModel(model)
 	default:
 		return testSingleOpenAIModelContext(ctx, model, endpoint, apiKey, timeout)
 	}
@@ -1226,14 +1233,29 @@ func modelReportLabel(id string, metadata map[string]protocol.ModelInfo) string 
 	if !ok {
 		return id
 	}
-	displayName := strings.TrimSpace(info.DisplayName)
 	label := id
-	if displayName != "" {
+	if displayName := strings.TrimSpace(info.DisplayName); displayName != "" {
 		label = displayName
 		if !strings.EqualFold(displayName, id) {
 			label += " (" + id + ")"
 		}
 	}
+	return appendModelBadges(label, info)
+}
+
+// modelBadgeLabel renders a model as its ID plus the catalog's cost and
+// freshness markers, without the display alias modelReportLabel prefixes. The
+// interactive picker uses it so a row reads as the ID being chosen while the
+// pricing signals that inform the choice stay visible.
+func modelBadgeLabel(id string, metadata map[string]protocol.ModelInfo) string {
+	info, ok := metadata[strings.ToLower(strings.TrimSpace(id))]
+	if !ok {
+		return id
+	}
+	return appendModelBadges(id, info)
+}
+
+func appendModelBadges(label string, info protocol.ModelInfo) string {
 	if info.RateMultiplier != nil {
 		label += " · " + strconv.FormatFloat(*info.RateMultiplier, 'f', -1, 64) + "x"
 	}

@@ -165,6 +165,21 @@ func TestRecommendPreservesExistingOneMMarker(t *testing.T) {
 	}
 }
 
+// Turning 1M off on an allowlisted model is a user decision, not a default the
+// engine may re-apply. Re-detecting used to re-open it because the slot was
+// still allowlisted; the marker now travels with the slot's own mapping.
+func TestRecommendKeepsOneMOptOutOnAllowlistModel(t *testing.T) {
+	pool := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	current := provider.Provider{OpusModel: "gpt-5.6-sol"}
+	rec := RecommendModels(current, pool, nil)
+	if rec.Opus != "gpt-5.6-sol" {
+		t.Fatalf("slot was not preserved: %q", rec.Opus)
+	}
+	if rec.OneMSlots["opus"] {
+		t.Fatalf("re-detection re-opened a 1M window the user had closed: %+v", rec.OneMSlots)
+	}
+}
+
 func TestRecommendMetadataBreaksTies(t *testing.T) {
 	// Both models score as pro-class by name; the one with the larger window wins.
 	meta := map[string]protocol.ModelInfo{

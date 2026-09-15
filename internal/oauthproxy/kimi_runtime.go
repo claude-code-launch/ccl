@@ -189,7 +189,7 @@ func (a *kimiOAuthAuthorizer) refresh(ctx context.Context, credential *kimiOAuth
 	return credential, nil
 }
 
-func (a *kimiOAuthAuthorizer) decorateHeader(header http.Header) {
+func (a *kimiOAuthAuthorizer) decorateHeader(header http.Header, _ *chatCompletionsConvertedRequest) {
 	deviceID := a.deviceIDLocked()
 	if deviceID == "" {
 		deviceID = kimiDeviceID()

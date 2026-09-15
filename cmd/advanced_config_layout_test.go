@@ -379,7 +379,7 @@ func TestSlotFilterTypesLettersThatAreAlsoShortcuts(t *testing.T) {
 	}
 }
 
-func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
+func TestSlotPickerShowsModelIDWithCatalogBadgesButPersistsModelID(t *testing.T) {
 	p := provider.Provider{Type: "anthropic", SubagentModel: "dfmodel"}
 	rate := 0.5
 	flashRate := 0.1
@@ -398,11 +398,16 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 	if !m.filterFocused {
 		t.Fatalf("enter on the Opus row did not open the model picker")
 	}
+	// Rows read as the ID being chosen; the catalog's pricing markers stay, but
+	// the display alias does not.
 	view := renderView(t, m)
-	for _, want := range []string{"Qwen3.8-Max", "qmodel_38max", "0.5x", "new", "off-peak discount"} {
+	for _, want := range []string{"qmodel_38max", "0.5x", "new", "off-peak discount"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("model picker missing %q: %q", want, view)
 		}
+	}
+	if strings.Contains(view, "Qwen3.8-Max") {
+		t.Fatalf("model picker still shows the display alias: %q", view)
 	}
 
 	// Filtering by the friendly name still keeps the internal ID as the list
@@ -425,10 +430,13 @@ func TestSlotPickerDisplaysCatalogMetadataButPersistsModelID(t *testing.T) {
 	// persisted values remain internal IDs for requests.
 	m.filterFocused = false
 	view = renderView(t, m)
-	for _, want := range []string{"Qwen3.8-Max", "DeepSeek-V4-Flash"} {
+	for _, want := range []string{"qmodel_38max", "dfmodel"} {
 		if !strings.Contains(view, want) {
-			t.Fatalf("main page missing friendly model %q: %q", want, view)
+			t.Fatalf("main page missing model ID %q: %q", want, view)
 		}
+	}
+	if strings.Contains(view, "Qwen3.8-Max") || strings.Contains(view, "DeepSeek-V4-Flash") {
+		t.Fatalf("main page still shows display aliases: %q", view)
 	}
 }
 

@@ -41,6 +41,14 @@ to Claude Code (for example: ccl resume, ccl -p "hello").
 }
 
 func Execute() {
+	// The status line runs on every Claude Code refresh, so it is answered before
+	// anything else: no config load (which can rewrite the file), no logging
+	// setup, and no chance of falling through to a billed Claude session.
+	if len(os.Args) > 1 && os.Args[1] == "statusline" {
+		runStatusline()
+		return
+	}
+
 	configureLogging()
 
 	if len(os.Args) > 1 {

@@ -53,6 +53,27 @@ func TestPreferredOAuthSlotDefaultsKiro(t *testing.T) {
 	}
 }
 
+func TestPreferredOAuthSlotDefaultsKimi(t *testing.T) {
+	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("kimi")
+	if !ok {
+		t.Fatal("expected kimi defaults")
+	}
+	if custom != "kimi-for-coding" || opus != "kimi-for-coding" ||
+		sonnet != "kimi-for-coding" || haiku != "kimi-for-coding-highspeed" {
+		t.Fatalf("kimi defaults = %q %q %q %q", custom, opus, sonnet, haiku)
+	}
+}
+
+// Kimi exposes no model-list endpoint, so the runtime can only start when these
+// defaults have filled the empty slots.
+func TestApplyOAuthSlotDefaultsMakesKimiRunnable(t *testing.T) {
+	p := provider.Provider{OAuthProvider: "kimi"}
+	provider.ApplyOAuthSlotDefaults(&p)
+	if spec := provider.RuntimeModelSpec(p); spec == "" {
+		t.Fatal("kimi still has an empty model spec; the runtime would refuse to start")
+	}
+}
+
 func TestApplyOAuthSlotDefaultsFillsEmptyOnly(t *testing.T) {
 	p := provider.Provider{OAuthProvider: "grok", SonnetModel: "my-custom-sonnet"}
 	provider.ApplyOAuthSlotDefaults(&p)

@@ -14,7 +14,6 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
-	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -259,7 +258,9 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 		OAuthProvider: "gpt",
 	}
 	m := NewAdvancedConfigModel(&p)
-	m.configureOAuthRuntime("http://127.0.0.1:54321/v1", "ccl-session-secret")
+	// A subscription has no Auto Configure row, so the runtime catalog arrives
+	// with the runtime itself instead of through a probe.
+	m.configureOAuthRuntime("http://127.0.0.1:54321/v1", "ccl-session-secret", []string{"gpt-5.6-sol", "gpt-5.6-codex"}, false)
 
 	view := renderView(t, m)
 	for _, want := range []string{"Provider Configuration", "oauth/gpt", "Ready (this session only)"} {
@@ -272,30 +273,26 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 			t.Fatalf("OAuth credential page exposed %q: %q", secret, view)
 		}
 	}
-
-	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
-	if !m.live().detecting {
-		t.Fatalf("OAuth model discovery did not start: detecting=%t", m.live().detecting)
+	if strings.Contains(view, "Auto Configure") {
+		t.Fatalf("OAuth page still offers Auto Configure: %q", view)
 	}
 
-	m.handleFetchDone(modelFetchDoneMsg{
-		endpoint:            "http://127.0.0.1:54321/v1",
-		apiKey:              "ccl-session-secret",
-		detectedType:        "openai",
-		detectedEndpoint:    "http://127.0.0.1:54321/v1",
-		discoveredModelsRaw: "gpt-5.6-sol,gpt-5.6-codex",
-	})
-	if m.live().detectionError != nil {
-		t.Fatalf("OAuth discovery result was not accepted: %v", m.live().detectionError)
+	// The catalog is adopted without any probe.
+	if m.live().detecting {
+		t.Fatalf("OAuth page should not run a connection probe: detecting=%t", m.live().detecting)
 	}
-	if !m.live().autoConfigured || !m.live().modelPoolFromDiscovery {
-		t.Fatalf("OAuth discovery should auto-configure and stay on the page: auto=%t detected=%t", m.live().autoConfigured, m.live().modelPoolFromDiscovery)
+	if !m.live().modelPoolFromDiscovery || !m.live().autoConfigured {
+		t.Fatalf("OAuth runtime catalog was not adopted: detected=%t auto=%t", m.live().modelPoolFromDiscovery, m.live().autoConfigured)
 	}
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("temporary OAuth runtime values leaked into provider: %+v", p)
 	}
 	if p.Model != "gpt-5.6-sol,gpt-5.6-codex" {
 		t.Fatalf("OAuth models = %q", p.Model)
+	}
+	// The catalog auto-maps the empty slots, exactly as the probe used to.
+	if got := strings.TrimSpace(p.OpusModel); !strings.Contains(p.Model, got) || got == "" {
+		t.Fatalf("OAuth catalog did not auto-map slots: Opus=%q", got)
 	}
 }
 
@@ -466,7 +463,7 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	if !allConfiguredModelsRecommendOneM(p) {
 		t.Fatal("all gpt-5.6 slots should recommend 1M")
 	}
-	if !strings.Contains(view, "[1M]") || !strings.Contains(view, "Default  200K / 1M & 80%") {
+	if !strings.Contains(view, "[1M]") || !strings.Contains(view, "Default  200K / 1M & 85%") {
 		t.Fatalf("expected per-slot 1M badges and the default compact summary, got %q", view)
 	}
 
@@ -482,7 +479,7 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	oauth.OAuthProvider = "gpt"
 	mo := NewAdvancedConfigModel(&oauth)
 	enterDetectedReview(mo, "gpt-5.6-sol")
-	if view := renderView(t, mo); !strings.Contains(view, "Default  200K / 1M & 80%") {
+	if view := renderView(t, mo); !strings.Contains(view, "Default  200K / 1M & 85%") {
 		t.Fatalf("expected Default context choice for OAuth, got %q", view)
 	}
 }
@@ -505,9 +502,9 @@ func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 		preset compactPreset
 		label  string
 	}{
-		{compactPresetBalanced500K, "Balanced 500K / 1M & 80%"},
-		{compactPresetBalanced800K, "Balanced 800K / 1M & 80%"},
-		{compactPresetDefault, "Default  200K / 1M & 80%"},
+		{compactPresetBalanced500K, "Balanced 500K / 1M & 85%"},
+		{compactPresetBalanced800K, "Balanced 800K / 1M & 85%"},
+		{compactPresetDefault, "Default  200K / 1M & 85%"},
 	}
 	for _, want := range forward {
 		m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
@@ -583,7 +580,7 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "(auto: subagent-model)") {
 		t.Fatalf("single page does not show Subagent: %q", view)
 	}
-	if !strings.Contains(view, "Default  200K / 1M & 80%") {
+	if !strings.Contains(view, "Default  200K / 1M & 85%") {
 		t.Fatalf("single page missing compact summary: %q", view)
 	}
 	// Space on the Subagent row toggles the per-slot 1M marker and materializes the
@@ -997,38 +994,25 @@ func TestModelProbeCandidatesUseConfiguredBaseAndPathHints(t *testing.T) {
 		endpoint string
 		wantURL  string
 		wantAuth modelProbeAuth
-		wantCC   bool
 	}{
 		{name: "anthropic suffix", endpoint: "https://example.test/anthropic", wantURL: "https://example.test/anthropic/v1/models", wantAuth: modelProbeAuthXAPIKey},
 		{name: "claude suffix", endpoint: "https://example.test/claude", wantURL: "https://example.test/claude/v1/models", wantAuth: modelProbeAuthXAPIKey},
-		{name: "version suffix", endpoint: "https://example.test/api/v4", wantURL: "https://example.test/api/v4/models", wantAuth: modelProbeAuthBearer, wantCC: true},
-		{name: "custom path suffix", endpoint: "https://example.test/codex", wantURL: "https://example.test/codex/models", wantAuth: modelProbeAuthBearer, wantCC: true},
-		{name: "generic OpenAI base", endpoint: "https://example.test/api", wantURL: "https://example.test/api/models", wantAuth: modelProbeAuthBearer, wantCC: true},
+		{name: "version suffix", endpoint: "https://example.test/api/v4", wantURL: "https://example.test/api/v4/models", wantAuth: modelProbeAuthBearer},
+		{name: "custom path suffix", endpoint: "https://example.test/codex", wantURL: "https://example.test/codex/models", wantAuth: modelProbeAuthBearer},
+		{name: "generic OpenAI base", endpoint: "https://example.test/api", wantURL: "https://example.test/api/models", wantAuth: modelProbeAuthBearer},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			candidates := buildModelProbeCandidates(tt.endpoint)
-			wantCount := 2
-			if tt.wantCC {
-				// Generic bases always append the Command Code handshake
-				// candidate after the two OpenAI-shaped probes.
-				wantCount = 3
-			}
-			if len(candidates) != wantCount {
-				t.Fatalf("candidate count = %d, want %d", len(candidates), wantCount)
+			if len(candidates) != 2 {
+				t.Fatalf("candidate count = %d, want 2", len(candidates))
 			}
 			if candidates[0].modelsURL != tt.wantURL {
 				t.Fatalf("first model URL = %q, want %q", candidates[0].modelsURL, tt.wantURL)
 			}
 			if candidates[0].auth != tt.wantAuth {
 				t.Fatalf("first auth = %q, want %q", candidates[0].auth, tt.wantAuth)
-			}
-			if tt.wantCC {
-				last := candidates[len(candidates)-1]
-				if last.expect != modelProbeExpectCommandCode || last.auth != modelProbeAuthBearer {
-					t.Fatalf("last candidate = %+v, want the Command Code bearer handshake probe", last)
-				}
 			}
 		})
 	}
@@ -1117,7 +1101,7 @@ func TestCustomProtocolPreservesDetectedAnthropicBearerAuth(t *testing.T) {
 func TestCustomProtocolSelectorExcludesFixedRoutingProviders(t *testing.T) {
 	tests := []provider.Provider{
 		{Type: "openai_responses", OAuthProvider: "gpt"},
-		{Type: "commandcode"},
+		{Type: "autoclaw", OAuthProvider: "autoclaw"},
 		{Type: "modelsdev"},
 	}
 	for _, p := range tests {
@@ -1718,65 +1702,6 @@ func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 	// Effort row must be gone.
 	if strings.Contains(view, "Claude Code managed") || strings.Contains(view, "Effort") {
 		t.Fatalf("effort row should be removed from review, got %q", view)
-	}
-}
-
-func TestDetectProtocolAndModelsRecognizesCommandCodeHandshake(t *testing.T) {
-	mux := http.NewServeMux()
-	// Both OpenAI-shaped model-list probes fall through (mux 404); the
-	// whoami-first Command Code probe answers 2xx, and the legacy
-	// fingerprint handshake route only exists as a fallback that must
-	// never be reached from an alive whoami route.
-	mux.HandleFunc("/alpha/whoami", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer test-key" {
-			http.Error(w, "missing bearer token", http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("/alpha/fingerprint/record", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "whoami should have answered first", http.StatusTeapot)
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-
-	result := detectProtocolAndModelsDetailed(server.URL, "test-key")
-	if result.err != nil {
-		t.Fatalf("detectProtocolAndModelsDetailed() error: %v", result.err)
-	}
-	if result.protocol != "commandcode" {
-		t.Fatalf("protocol = %q, want commandcode", result.protocol)
-	}
-	if want := len(oauthproxy.CommandCodeModelCatalog()); countCSV(result.models) != want {
-		t.Fatalf("detected catalog has %d models, want %d", countCSV(result.models), want)
-	}
-	if result.baseURL != server.URL {
-		t.Fatalf("baseURL = %q, want %q", result.baseURL, server.URL)
-	}
-}
-
-func TestDetectCommandCodeHandshakeUnauthorizedReportsInvalidKey(t *testing.T) {
-	original := locale.Current()
-	t.Cleanup(func() { locale.SetLanguage(original) })
-	locale.SetLanguage("en")
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/alpha/whoami", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-
-	result := detectProtocolAndModelsDetailed(server.URL, "bad-key")
-	if result.err == nil {
-		t.Fatal("expected detection failure for an invalid Command Code key")
-	}
-	if !strings.Contains(result.err.Error(), "API key or auth type is invalid") {
-		t.Fatalf("unexpected error: %v", result.err)
 	}
 }
 

@@ -180,6 +180,42 @@ func TestLoadInfersOAuthProviderForLegacyAuthEndpoints(t *testing.T) {
 	}
 }
 
+func TestLoadInfersAutoClawProviderFromDedicatedType(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".ccl")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	data := []byte(`providers:
+  autoclaw:
+    name: autoclaw
+    type: autoclaw
+    endpoint: https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw
+    model: zai_auto
+`)
+	path := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	p := cfg.Providers["autoclaw"]
+	if p.OAuthProvider != "autoclaw" || p.Type != "autoclaw" {
+		t.Fatalf("AutoClaw provider migration = %+v", p)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if !strings.Contains(string(rewritten), "oauthProvider: autoclaw") {
+		t.Fatalf("AutoClaw OAuth provider was not persisted:\n%s", rewritten)
+	}
+}
+
 func TestLoadMigratesMismatchedOAuthProtocol(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)

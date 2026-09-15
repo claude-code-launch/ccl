@@ -18,7 +18,6 @@ func TestStreamsRequireTerminalEvent(t *testing.T) {
 		{"responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n", "data: {\"type\":\"response.completed\",\"response\":{}}\n\n", processCodexResponsesStream},
 		{"chat", "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n", "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n", processChatCompletionsStream},
 		{"gemini", "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n", "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n", processGeminiStream},
-		{"commandcode", "{\"type\":\"text-delta\",\"text\":\"partial\"}\n", "{\"type\":\"finish\",\"finishReason\":\"stop\"}\n", processCommandCodeStream},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -38,7 +38,7 @@ func runModels(ctx context.Context, showAll bool) error {
 	if err != nil {
 		return err
 	}
-	p, runtime, cleanup, err := prepareProviderRuntime(p)
+	p, runtime, cleanup, err := prepareProviderRuntime(context.Background(), p)
 	if err != nil {
 		return err
 	}
@@ -65,6 +65,12 @@ func runModels(ctx context.Context, showAll bool) error {
 		} else {
 			modelsStr = strings.Join(fetched, ",")
 			source = "provider catalog"
+			if runtime != nil && runtime.ModelCatalogIsFallback() {
+				// The runtime could not reach the account's catalog and served a
+				// built-in compatibility list; saying "provider catalog" would
+				// present that guess as fact.
+				source = "built-in fallback (provider catalog unavailable)"
+			}
 		}
 	}
 

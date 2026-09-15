@@ -94,7 +94,7 @@ func TestGeminiStringMessagesAreObjectParts(t *testing.T) {
 }
 
 func TestProtocolStreamErrorsDoNotFinishSuccessfully(t *testing.T) {
-	for _, protocol := range []string{"chat", "gemini", "commandcode"} {
+	for _, protocol := range []string{"chat", "gemini"} {
 		t.Run(protocol, func(t *testing.T) {
 			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
 			var err error
@@ -103,8 +103,6 @@ func TestProtocolStreamErrorsDoNotFinishSuccessfully(t *testing.T) {
 				err = processChatCompletionsStream(strings.NewReader("data: {\"error\":{\"message\":\"upstream failed\"}}\n\n"), a)
 			case "gemini":
 				err = processGeminiStream(strings.NewReader("data: {\"error\":{\"message\":\"upstream failed\"}}\n\n"), a)
-			case "commandcode":
-				err = processCommandCodeStream(strings.NewReader("{\"type\":\"error\",\"errorText\":\"upstream failed\"}\n"), a)
 			}
 			if err == nil || !strings.Contains(err.Error(), "upstream failed") || a.finished {
 				t.Fatalf("error=%v finished=%v", err, a.finished)

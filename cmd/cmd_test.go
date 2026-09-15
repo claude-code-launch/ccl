@@ -230,7 +230,7 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"Registered providers:", "NAME", "TYPE", "AUTH", "MODELS", "SLOTS", "beta", "openai(chat)", "bearer", "4", "2/5"} {
+	for _, want := range []string{"Registered providers:", "NAME", "TYPE", "AUTH", "MODELS", "SLOTS", "beta", "openai-chat", "bearer", "4", "2/5"} {
 		if !contains(out, want) {
 			t.Fatalf("expected compact output to contain %q, got:\n%s", want, out)
 		}

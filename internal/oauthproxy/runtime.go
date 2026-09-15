@@ -33,12 +33,13 @@ type Runtime struct {
 	started    chan struct{}
 	models     []string
 	modelNames map[string]string
-	// upstreamCheck is set only by runtimes that can safely validate their
-	// private upstream credential without exposing it to callers (currently
-	// Command Code). The callback returns status/body preview, never the key.
-	upstreamCheck func(context.Context) (int, string, error)
-	ownsLog       bool
-	stopOnce      sync.Once
+	// catalogFallback marks models as a built-in compatibility list rather than
+	// what the account actually reports. A backend sets it when discovery fails,
+	// so callers can keep the catalog they already had instead of overwriting it
+	// with a guess.
+	catalogFallback bool
+	ownsLog         bool
+	stopOnce        sync.Once
 	// usage accumulates per-model token totals for this runtime. It is never nil:
 	// StartProvider always installs one, even when the backend cannot report
 	// usage, so callers do not need a nil check.
@@ -75,17 +76,15 @@ func (r *Runtime) ModelDisplayNames() map[string]string {
 	return names
 }
 
-// CheckUpstream validates a runtime-owned upstream credential without exposing
-// that credential to the caller. It is unsupported for runtimes that do not
-// provide a safe health callback.
-func (r *Runtime) CheckUpstream(ctx context.Context) (int, string, error) {
-	if r == nil || r.upstreamCheck == nil {
-		return 0, "", fmt.Errorf("runtime does not expose an upstream health check")
+// ModelCatalogIsFallback reports whether Models is a built-in compatibility list
+// substituted after the upstream catalog could not be fetched, rather than the
+// account's real models. It means "unknown", not "empty": a caller that already
+// holds a catalog should keep it instead of adopting this one.
+func (r *Runtime) ModelCatalogIsFallback() bool {
+	if r == nil {
+		return false
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return r.upstreamCheck(ctx)
+	return r.catalogFallback
 }
 
 type UpstreamProtocol string
@@ -93,7 +92,6 @@ type UpstreamProtocol string
 const (
 	ProtocolOpenAIChat      UpstreamProtocol = "openai_chat"
 	ProtocolOpenAIResponses UpstreamProtocol = "openai_responses"
-	ProtocolCommandCode     UpstreamProtocol = "commandcode"
 )
 
 type StartOptions struct {
@@ -143,6 +141,9 @@ func StartProvider(parent context.Context, options StartOptions) (*Runtime, erro
 
 func startProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	if strings.TrimSpace(options.OAuthProvider) != "" {
+		if strings.EqualFold(strings.TrimSpace(options.OAuthProvider), ProviderAutoClaw) {
+			return startAutoClawOAuth(parent, options.Endpoint, options.ModelSpec, options.OAuthAccountCredential)
+		}
 		return StartOAuth(parent, options.OAuthProvider, options.ModelSpec, options.OAuthAccountCredential)
 	}
 	if len(options.ModelProtocols) > 0 {
@@ -153,8 +154,6 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		return StartOpenAIChatAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	case ProtocolOpenAIResponses:
 		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
-	case ProtocolCommandCode:
-		return StartCommandCodeAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -193,11 +192,11 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if backend == ProviderKimi {
 		return startKimiOAuth(parent, modelSpec, credentialFile)
 	}
-	if backend == ProviderCommandCode {
-		return startCommandCodeOAuth(parent, modelSpec, credentialFile)
-	}
 	if backend == backendAntigravity {
 		return startAntigravityOAuth(parent, modelSpec, credentialFile)
+	}
+	if backend == ProviderAutoClaw {
+		return startAutoClawOAuth(parent, AutoClawOpenAIBaseURL(), modelSpec, credentialFile)
 	}
 	return nil, fmt.Errorf("unsupported subscription provider %q", providerName)
 }
@@ -243,25 +242,6 @@ func StartOpenAIResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, m
 	}
 	LogInfof("runtime start codex_responses auth=api_key endpoint=%q local_endpoint=%q model_count=%d",
 		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(routes))
-	return proxyRuntime, nil
-}
-
-// StartCommandCodeAPI starts CCL's self-owned Command Code data plane against a
-// Command Code API key. Conversion, NDJSON/SSE handling, identity headers, the
-// fingerprint/lifecycle handshake, error mapping, and usage accounting are all
-// owned by CCL and independent of external runtime upgrades. modelSpec is
-// accepted for StartOptions symmetry only: the runtime serves the authoritative
-// 26-model catalog and never rewrites requested model IDs.
-func StartCommandCodeAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec string) (*Runtime, error) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	proxyRuntime, err := startCommandCodeRuntime(parent, endpoint, upstreamAPIKey)
-	if err != nil {
-		return nil, err
-	}
-	LogInfof("runtime start commandcode endpoint=%q local_endpoint=%q model_count=%d",
-		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(proxyRuntime.Models()))
 	return proxyRuntime, nil
 }
 

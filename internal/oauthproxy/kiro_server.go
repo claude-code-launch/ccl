@@ -108,11 +108,15 @@ func startKiroOAuth(parent context.Context, modelSpec, credentialFile string) (*
 		apiKey:     apiKey,
 		httpServer: server,
 		listAuths:  pool.listAuths,
-		cancel:     cancel,
-		done:       make(chan struct{}),
-		runErr:     make(chan error, 1),
-		started:    started,
-		usage:      usageTracker,
+		// The service's own catalog is loaded lazily by /v1/models, but Runtime
+		// must carry the configured models too: providersession.Prepare and the
+		// launcher read Runtime.Models() without asking the runtime to start.
+		models:  models,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		runErr:  make(chan error, 1),
+		started: started,
+		usage:   usageTracker,
 	}
 	go func() {
 		err := server.Serve(listener)

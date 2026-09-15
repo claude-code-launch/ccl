@@ -1,7 +1,13 @@
 package cmd
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -84,4 +90,82 @@ func TestPrintDoctorOneMConsistencyFlagsOversizedMarkers(t *testing.T) {
 	}
 	// Must not panic or warn when no catalog is available.
 	printDoctorOneMConsistency(p, nil)
+}
+
+// TestProbeAutoClawMessagesUsesLocalAdapter pins the request ccl sends when it
+// diagnoses AutoClaw: the local Messages route, the loopback Bearer key, and a
+// minimal payload for the catalog's first model.
+func TestProbeAutoClawMessagesUsesLocalAdapter(t *testing.T) {
+	var gotPath, gotBearer, gotKey, gotVersion, gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBearer = r.Header.Get("Authorization")
+		gotKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\"}\n\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	p := provider.Provider{
+		Type:     "autoclaw",
+		Endpoint: server.URL + "/v1",
+		APIKey:   "local-runtime-key",
+	}
+	status, body, err := probeAutoClawMessages(context.Background(), p)
+	if err != nil {
+		t.Fatalf("probeAutoClawMessages() error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if gotPath != "/v1/messages" {
+		t.Fatalf("probe path = %q", gotPath)
+	}
+	if gotBearer != "Bearer local-runtime-key" || gotKey != "" || gotVersion != "2023-06-01" {
+		t.Fatalf("auth headers = bearer %q / x-api-key %q / version %q", gotBearer, gotKey, gotVersion)
+	}
+	if !strings.Contains(gotBody, `"model":"zai_auto"`) || !strings.Contains(gotBody, `"max_tokens":1`) {
+		t.Fatalf("probe payload = %s", gotBody)
+	}
+	if !autoClawResponseHasContent(body) {
+		t.Fatalf("a message_start event must count as content: %q", body)
+	}
+}
+
+// TestAutoClawResponseHasContentDetectsEmptyStream pins the diagnosis for an
+// empty stream returned by the local adapter.
+func TestAutoClawResponseHasContentDetectsEmptyStream(t *testing.T) {
+	empty := map[string]bool{
+		"":                 false,
+		"\n\n":             false,
+		": keep-alive\n\n": false,
+		"event: ping\n\n":  false,
+		"data:\n\n":        false,
+		"data: [DONE]\n\n": false,
+		"event: message_start\n\ndata: {\"type\":\"message_start\"}\n\n": true,
+		`{"id":"msg_1","type":"message"}`:                                true,
+	}
+	for body, want := range empty {
+		if got := autoClawResponseHasContent(body); got != want {
+			t.Errorf("autoClawResponseHasContent(%q) = %t, want %t", body, got, want)
+		}
+	}
+}
+
+func TestAutoClawModelAvailabilityUsesCatalogMembership(t *testing.T) {
+	// AutoClaw's model list is fixed by the plan; per-model doctor checks use the
+	// catalog after the one end-to-end runtime connectivity probe.
+	if !testSingleModelForProtocolContext(context.Background(), "glm-5.3", "https://unreachable.invalid", "k", "autoclaw", "", time.Second) {
+		t.Fatal("catalog model reported unavailable")
+	}
+	if testSingleModelForProtocolContext(context.Background(), "gpt-5", "https://unreachable.invalid", "k", "autoclaw", "", time.Second) {
+		t.Fatal("model outside the catalog reported available")
+	}
+	// The provider-type entry point must route AutoClaw to that same catalog
+	// check rather than to the shared Anthropic probe.
+	if !testSingleModelWithProtocolsContext(context.Background(), "GLM-5.3", "https://unreachable.invalid", "k", "autoclaw", "", nil, time.Second) {
+		t.Fatal("autoclaw provider type did not resolve availability from the catalog")
+	}
 }

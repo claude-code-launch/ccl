@@ -14,7 +14,7 @@ func providerAuthLabel(p provider.Provider) string {
 	if p.OAuthProvider != "" {
 		return "oauth/" + p.OAuthProvider
 	}
-	if provider.IsOpenAICompatibleType(p.Type) || provider.IsCommandCodeType(p.Type) {
+	if provider.IsOpenAICompatibleType(p.Type) {
 		return "bearer"
 	}
 	if provider.IsAnthropicType(p.Type) {
@@ -88,20 +88,22 @@ func providerOneMSummary(p provider.Provider) string {
 	contextPart := reviewOneMSummary(oneMSlotsFromProvider(p))
 	switch provider.ContextPresetFromEnv(p.Env) {
 	case provider.ContextPresetBalanced500K:
-		return "500K/400K · " + contextPart
+		return "500K/425K · " + contextPart
 	case provider.ContextPresetBalanced800K:
-		return "800K/640K · " + contextPart
+		return "800K/680K · " + contextPart
 	default:
 		return "default (200K/1M) · " + contextPart
 	}
 }
 
 func setProviderAuthHeaders(req *http.Request, p provider.Provider) {
-	if provider.IsOpenAICompatibleType(p.Type) || provider.IsCommandCodeType(p.Type) {
+	if provider.IsOpenAICompatibleType(p.Type) {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
 		return
 	}
-	if strings.EqualFold(p.AnthropicAuth, "bearer") {
+	if provider.IsAutoClawType(p.Type) || strings.EqualFold(p.AnthropicAuth, "bearer") {
+		// The local Messages adapter accepts the loopback Bearer key. The
+		// AutoClaw authorizer then replaces it with X-Authorization upstream.
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
 	} else {
 		req.Header.Set("x-api-key", p.APIKey)

@@ -5,10 +5,10 @@
 // OpenAI Chat (manual API-key providers, Grok, Kimi, WorkBuddy, and Copilot Chat
 // models), the native-Anthropic Messages passthrough (models.dev
 // @ai-sdk/anthropic models and Copilot native-Messages models), and Gemini
-// (Antigravity conversion). Copilot's mixed catalog, Kiro, Qoder, and
-// Command Code (a direct /alpha/generate NDJSON data plane) run entirely on
-// CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
-// this package altogether.
+// (Antigravity conversion). Copilot's mixed catalog, Kiro, and Qoder run
+// entirely on CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
+// this package altogether. AutoClaw uses a CCL-owned Anthropic-to-OpenAI Chat
+// runtime with its desktop OAuth refresh session and managed-proxy headers.
 //
 // Error recovery follows the data-plane owner. Every CCL-owned data plane
 // first applies the shared fast-retry loop (retry.go): an upstream 429 or 5xx
@@ -19,12 +19,10 @@
 // Kimi refresh once after a 401; WorkBuddy refreshes once after a 401/403;
 // Gemini also falls back from the daily to the prod Antigravity base on
 // network errors, 429s and 5xx responses (so one attempt is up to 2 upstream
-// calls); Qoder rotates credentials and re-signs COSY per attempt. Command
-// Code's 402 maps to 429 for the client but reports its original status to
-// the loop, so billing failures never burn the retry budget. Three layers are
-// deliberately outside the loop: Kiro keeps its own longer 1/2/4s budget with
-// per-round credential rotation (stacking would double the backoff), and the
-// WorkBuddy and Copilot loopback gateways are the INNER hop of a two-hop
+// calls); Qoder rotates credentials and re-signs COSY per attempt. Three layers
+// are deliberately outside the loop: Kiro keeps its own longer 1/2/4s budget
+// with per-round credential rotation (stacking would double the backoff), and
+// the WorkBuddy and Copilot loopback gateways are the INNER hop of a two-hop
 // path — the outer chat/responses service owns the fast retry, so wrapping
 // the gateway too would retry 3×3 = 9 times per request.
 //
@@ -67,19 +65,13 @@
 //     (static key). It resolves the upstream credential and refreshes once
 //     after a 401.
 //
-//  7. Command Code direct runtime (commandcode_*.go)
-//     CCL owns the /alpha/generate NDJSON conversion, client identity, device
-//     registration handshake, error mapping, usage accounting, and the static
-//     model catalog. Command Code answers are surfaced as Anthropic Messages
-//     text blocks so the protocol gap is invisible to Claude Code. Credentials
-//     arrive on two paths: `ccl oauth commandcode` mirrors the official CLI
-//     login (open the studio "Get API key" page, accept the key back through
-//     the loopback callback or as a manual paste, validate via /alpha/whoami),
-//     and `ccl import commandcode` reads the official CLI's long-lived key from
-//     ~/.commandcode/auth.json and validates it the same way. Both store the
-//     result under a deterministic per-account file in ~/.ccl/auth (0600);
-//     the legacy commandcode.json binding remains loadable for compatibility.
-//     Do not route Command Code traffic through a third-party proxy.
+//  7. AutoClaw runtime (autoclaw_*.go)
+//     AutoClaw's desktop login is stored in an encrypted auth.json. `ccl oauth
+//     autoclaw` imports that completed session into ~/.ccl/auth (0600), and
+//     the loopback adapter converts Claude Messages to the managed OpenAI Chat
+//     endpoint. CCL refreshes access_token with refresh_token, sends the
+//     desktop-compatible X-Authorization/X-Request-Model/X-Harness-Type
+//     headers, and never starts or modifies AutoClaw at runtime.
 //
 //  8. Session credentials
 //     All runtimes bind 127.0.0.1 only and use a random per-session API key

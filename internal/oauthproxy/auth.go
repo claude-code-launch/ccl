@@ -3,7 +3,6 @@ package oauthproxy
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +21,10 @@ const (
 	ProviderKimi          = "kimi"
 	ProviderKiro          = "kiro"
 	ProviderWorkBuddy     = "workbuddy"
-	ProviderCommandCode   = "commandcode"
+	// ProviderAutoClaw is the AutoClaw Code (ZCode coding plan) backend. CCL
+	// imports the desktop session, refreshes it locally, and owns the
+	// Anthropic-to-OpenAI Chat adapter used to reach the managed proxy.
+	ProviderAutoClaw = "autoclaw"
 	// backendXAI is the internal backend key for xAI/Grok credentials.
 	backendXAI = "xai"
 )
@@ -31,14 +33,6 @@ type LoginOptions struct {
 	NoBrowser    bool
 	CallbackPort int
 	KiroAuthMode string
-	// Stdin feeds manual credential entry (Command Code API-key paste); nil
-	// disables the interactive paste path.
-	Stdin io.Reader
-	// StdinCancel optionally interrupts a blocking Stdin read when the login
-	// finishes. Login never closes Stdin implicitly because callers retain
-	// ownership of the reader (notably os.Stdin); provide this hook only when
-	// the caller can safely interrupt its reader.
-	StdinCancel func()
 }
 
 type LoginResult struct {
@@ -96,44 +90,43 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 		return loginXai(ctx, authDir, opts)
 	case ProviderKimi:
 		return loginKimi(ctx, authDir, opts)
-	case ProviderCommandCode:
-		return loginCommandCodeOAuth(ctx, authDir, opts)
+	case ProviderAutoClaw:
+		return loginAutoClaw(ctx, authDir, opts)
 	default:
 		return LoginResult{}, fmt.Errorf("unsupported OAuth provider %q", target)
 	}
 }
 
 // ImportCredential is the non-browser import path for backends whose official
-// CLI stores a long-lived key instead of offering a third-party OAuth flow.
-// Browser/device OAuth stays on Login; imports stay here so `ccl oauth` never
-// advertises a backend that cannot do OAuth.
+// CLI or desktop app already stores a long-lived key instead of offering a
+// third-party OAuth flow. Browser OAuth stays on Login; imports stay here so
+// `ccl oauth` never advertises a backend that cannot do OAuth.
 func ImportCredential(ctx context.Context, providerName string) (LoginResult, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderCommandCode:
+	case ProviderAutoClaw:
 		authDir, err := ensureAuthDir()
 		if err != nil {
 			return LoginResult{}, err
 		}
-		return loginCommandCode(ctx, authDir)
+		return ImportAutoClawCredential(ctx, authDir)
 	default:
-		return LoginResult{}, fmt.Errorf("unsupported import provider %q (use commandcode)", providerName)
+		return LoginResult{}, fmt.Errorf("unsupported import provider %q (use autoclaw)", providerName)
 	}
 }
 
 // ValidateLoginProvider returns the canonical public OAuth provider name.
 // Codex remains an internal backend and a legacy runtime value, but new logins
 // use the public GPT name (model family) because both routes authenticate the same account.
-// Copilot is a separate GitHub OAuth and API backend. Command Code uses a
-// browser "Get API key" page plus manual paste (its non-browser alternative is
-// ImportCredential via `ccl import commandcode`).
+// Copilot is a separate GitHub OAuth and API backend. AutoClaw imports the
+// completed desktop session and stores a refreshable managed-proxy credential.
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderCommandCode:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, or commandcode)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, or autoclaw)", providerName)
 	}
 }
 
@@ -155,8 +148,8 @@ func BackendProvider(providerName string) (string, error) {
 		return ProviderKiro, nil
 	case ProviderWorkBuddy:
 		return ProviderWorkBuddy, nil
-	case ProviderCommandCode:
-		return ProviderCommandCode, nil
+	case ProviderAutoClaw:
+		return ProviderAutoClaw, nil
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}

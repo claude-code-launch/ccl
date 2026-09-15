@@ -45,7 +45,7 @@ func TestRunAuthKiroUsesAnthropicRuntimeAndDefaults(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"kiro", "aws"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"kiro", "aws"}, authOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load()
@@ -74,7 +74,7 @@ func TestRunAuthIgnoresLegacyProtocolOverrideInConfigMigration(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"gpt"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gpt"}, authOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.Load()
@@ -113,7 +113,7 @@ func TestRunAuthCreatesChatGPTProviderAndMigratesLegacyCodex(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runAuth(context.Background(), &out, strings.NewReader(""), []string{"gpt"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &out, []string{"gpt"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -147,7 +147,7 @@ func TestRunAuthRejectsPublicCodexAlias(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"codex"}, authOptions{})
+	err := runAuth(context.Background(), &bytes.Buffer{}, []string{"codex"}, authOptions{})
 	if err == nil {
 		t.Fatal("runAuth(codex) should fail")
 	}
@@ -164,7 +164,7 @@ func TestRunAuthGeminiUsesChatAndAntigravityBackend(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"gemini"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gemini"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -204,7 +204,7 @@ func TestRunAuthGeminiPreservesExistingSlotPins(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save initial: %v", err)
 	}
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"gemini", "work"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gemini", "work"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -228,7 +228,7 @@ func TestRunAuthAliasBindsToCredentialAndSetsActive(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"gpt", "work"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gpt", "work"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -255,7 +255,7 @@ func TestRunAuthGrokUsesXaiBackend(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"grok", "personal"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"grok", "personal"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -298,7 +298,7 @@ func TestRunAuthGrokPreservesExistingSlotPins(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save initial: %v", err)
 	}
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"grok", "personal"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"grok", "personal"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -325,7 +325,7 @@ func TestRunAuthCopilotUsesIndependentBackend(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"copilot", "gh"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"copilot", "gh"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -353,7 +353,7 @@ func TestRunAuthQoderUsesDirectAnthropicRuntime(t *testing.T) {
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
 	var output bytes.Buffer
-	if err := runAuth(context.Background(), &output, strings.NewReader(""), []string{"qoder", "qd"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &output, []string{"qoder", "qd"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -377,7 +377,7 @@ func TestRunAuthGrokWithoutAliasDerivesName(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"grok"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"grok"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -402,7 +402,7 @@ func TestRunAuthCopilotWithoutAliasDerivesName(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"copilot"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"copilot"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -426,7 +426,7 @@ func TestRunAuthRejectsReservedAlias(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"gpt", "grok"}, authOptions{}); err == nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gpt", "grok"}, authOptions{}); err == nil {
 		t.Fatal("runAuth(gpt grok) should reject reserved alias")
 	}
 }
@@ -439,7 +439,7 @@ func TestRunAuthKimiUsesOpenAIChatBackend(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"kimi", "moon"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"kimi", "moon"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -466,7 +466,7 @@ func TestRunAuthWorkBuddyUsesOpenAIChatBackend(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"workbuddy", "wb"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"workbuddy", "wb"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -488,7 +488,7 @@ func TestRunAuthKimiWithoutAliasDerivesName(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"kimi"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"kimi"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -527,7 +527,7 @@ func TestRunAuthPreservesFastModeOnReauth(t *testing.T) {
 
 	// Re-auth never rewrites FastMode; only the Claude Code /fast toggle
 	// or ccl set Review & Apply does.
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"gpt", "work"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gpt", "work"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -565,7 +565,7 @@ func TestPrepareProviderRuntimeRoutesManualResponsesThroughSharedAdapter(t *test
 		Model:    "gpt-5.4-mini",
 	}
 
-	runtimeProvider, _, cleanup, err := prepareProviderRuntime(original)
+	runtimeProvider, _, cleanup, err := prepareProviderRuntime(context.Background(), original)
 	if err != nil {
 		t.Fatalf("prepareProviderRuntime() error: %v", err)
 	}
@@ -596,7 +596,7 @@ func TestPrepareProviderRuntimeRoutesManualChatThroughCCLAdapter(t *testing.T) {
 		Model:    "gpt-5.4-mini",
 	}
 
-	runtimeProvider, _, cleanup, err := prepareProviderRuntime(original)
+	runtimeProvider, _, cleanup, err := prepareProviderRuntime(context.Background(), original)
 	if err != nil {
 		t.Fatalf("prepareProviderRuntime() error: %v", err)
 	}
@@ -635,20 +635,18 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 		OAuthProvider:          "gpt",
 		OAuthAccountCredential: "codex-set.json",
 	}
-	runtimeProvider, _, cleanup, err := prepareProviderRuntime(p)
+	runtimeProvider, runtime, cleanup, err := prepareProviderRuntime(context.Background(), p)
 	if err != nil {
 		t.Fatalf("prepareProviderRuntime() error: %v", err)
 	}
 	defer cleanup()
 
 	m := NewAdvancedConfigModel(&p)
-	m.configureOAuthRuntime(runtimeProvider.Endpoint, runtimeProvider.APIKey)
-	m.live().detecting = true
-	done := make(chan modelFetchDoneMsg, 1)
-	fetchModelsAsync(done, runtimeProvider.Endpoint, runtimeProvider.APIKey)
-	msg := <-done
-	m.handleFetchDone(msg)
-
+	// No probe: the runtime ccl started for the page is the catalog.
+	m.configureOAuthRuntime(runtimeProvider.Endpoint, runtimeProvider.APIKey, runtime.Models(), runtime.ModelCatalogIsFallback())
+	if len(runtime.Models()) == 0 {
+		t.Fatal("gpt runtime carries no model catalog")
+	}
 	if m.live().detectionError != nil || !m.live().autoConfigured || !m.live().modelPoolFromDiscovery || p.Model == "" {
 		t.Fatalf("OAuth set discovery failed: auto=%t detected=%t models=%q err=%v", m.live().autoConfigured, m.live().modelPoolFromDiscovery, p.Model, m.live().detectionError)
 	}
@@ -665,7 +663,7 @@ func TestRunAuthGPTAppliesPreferredDefaults(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"gpt", "main"}, authOptions{}); err != nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gpt", "main"}, authOptions{}); err != nil {
 		t.Fatalf("runAuth() error: %v", err)
 	}
 	cfg, err := config.Load()
@@ -693,7 +691,7 @@ func TestRunAuthChatGPTLegacyAliasIsRejected(t *testing.T) {
 	}
 	t.Cleanup(func() { oauthLogin = originalLogin })
 
-	if err := runAuth(context.Background(), &bytes.Buffer{}, strings.NewReader(""), []string{"chatgpt", "legacy"}, authOptions{}); err == nil {
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"chatgpt", "legacy"}, authOptions{}); err == nil {
 		t.Fatal("runAuth(chatgpt) should fail; the legacy login alias was removed")
 	}
 }
@@ -732,5 +730,27 @@ func TestDerivedProviderNameKeepsShortIdentities(t *testing.T) {
 	}
 	if got := derivedProviderName("copilot", "copilot-copilot@example.com.json"); got != "copilot-copilot@example.com" {
 		t.Fatalf("copilot derived name = %q", got)
+	}
+}
+
+// TestConfigureOAuthProviderAutoClawUsesManagedChat pins the persisted
+// provider shape for CCL's AutoClaw Anthropic-to-OpenAI adapter.
+func TestConfigureOAuthProviderAutoClawUsesManagedChat(t *testing.T) {
+	p := configureOAuthProvider(provider.Provider{Name: "autoclaw-x"}, "autoclaw-x",
+		oauthproxy.ProviderAutoClaw, "autoclaw-x.json")
+
+	if p.Type != "autoclaw" {
+		t.Fatalf("type = %q", p.Type)
+	}
+	if p.AnthropicAuth != "" {
+		t.Fatalf("anthropicAuth = %q, want empty for the local adapter", p.AnthropicAuth)
+	}
+	if p.Endpoint != oauthproxy.AutoClawOpenAIBaseURL() {
+		t.Fatalf("endpoint = %q", p.Endpoint)
+	}
+	for _, want := range oauthproxy.AutoClawModelIDs() {
+		if !strings.Contains(p.Model, want) {
+			t.Fatalf("model pool %q is missing catalog model %q", p.Model, want)
+		}
 	}
 }

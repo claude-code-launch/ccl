@@ -144,21 +144,23 @@ func (s *anthropicPassthroughService) handleMessages(writer http.ResponseWriter,
 		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
-	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		defer response.Body.Close()
 		LogUpstreamEvent(response.StatusCode, "request_failed", "component", "anthropic_passthrough", "request_id", requestID,
 			"status", response.StatusCode, "duration", logDuration(started))
 		s.forwardUpstreamError(writer, response)
 		return
 	}
+	upstreamBody := io.Reader(response.Body)
+	defer response.Body.Close()
 	if stream {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("Cache-Control", "no-cache")
 		writer.Header().Set("Connection", "keep-alive")
-		s.streamCopy(writer, response.Body, fallbackModel)
+		s.streamCopy(writer, upstreamBody, fallbackModel)
 	} else {
 		writer.Header().Set("Content-Type", "application/json")
-		body, readErr := io.ReadAll(io.LimitReader(response.Body, chatMaxResponseBytes))
+		body, readErr := io.ReadAll(io.LimitReader(upstreamBody, chatMaxResponseBytes))
 		if len(body) > 0 {
 			s.recordJSONUsage(body, fallbackModel)
 			_, _ = writer.Write(body)
@@ -179,25 +181,25 @@ func (s *anthropicPassthroughService) handleMessages(writer http.ResponseWriter,
 // surfacing the failure.
 func (s *anthropicPassthroughService) forward(ctx context.Context, incoming *http.Request, path string, body []byte) (*http.Response, error) {
 	return retryUpstream(ctx, "anthropic_passthrough", func() (*http.Response, error) {
-		response, err := s.forwardOnce(ctx, incoming, path, body)
-		if err != nil {
-			return nil, err
+		response, callErr := s.forwardOnce(ctx, incoming, path, body, nil)
+		if callErr != nil {
+			return nil, callErr
 		}
 		if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
 			_ = response.Body.Close()
 			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
 				return nil, fmt.Errorf("refresh OAuth token: %w", authErr)
 			}
-			response, err = s.forwardOnce(ctx, incoming, path, body)
-			if err != nil {
-				return nil, err
+			response, callErr = s.forwardOnce(ctx, incoming, path, body, nil)
+			if callErr != nil {
+				return nil, callErr
 			}
 		}
 		return response, nil
 	})
 }
 
-func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming *http.Request, path string, body []byte) (*http.Response, error) {
+func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming *http.Request, path string, body []byte, runtimeHeaders http.Header) (*http.Response, error) {
 	token, err := s.authorizer.authorize(ctx, false)
 	if err != nil {
 		return nil, fmt.Errorf("authorize upstream: %w", err)
@@ -244,6 +246,12 @@ func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming 
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
+	for key, values := range runtimeHeaders {
+		request.Header.Del(key)
+		for _, value := range values {
+			request.Header.Add(key, value)
+		}
+	}
 	if request.Header.Get("Anthropic-Version") == "" {
 		request.Header.Set("Anthropic-Version", "2023-06-01")
 	}

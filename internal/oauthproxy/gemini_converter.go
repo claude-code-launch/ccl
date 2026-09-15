@@ -283,7 +283,10 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 			if description := strings.TrimSpace(tool.Get("description").String()); description != "" {
 				declaration, _ = sjson.SetBytes(declaration, "description", description)
 			}
-			declaration, _ = sjson.SetRawBytes(declaration, "parametersJsonSchema", []byte(schema.Raw))
+			// This converter targets Antigravity, not the public Gemini API.
+			// Its function declarations use parameters for both Gemini and
+			// Claude models (the Claude bridge reconstructs input_schema).
+			declaration, _ = sjson.SetRawBytes(declaration, "parameters", []byte(schema.Raw))
 			toolItems = append(toolItems, string(declaration))
 			return true
 		})

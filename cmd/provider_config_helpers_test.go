@@ -83,7 +83,7 @@ func TestApplyCompactConfigBalancedWritesExactTriplet(t *testing.T) {
 	want := map[string]string{
 		maxContextTokensEnv:  "500000",
 		autoCompactWindowEnv: "500000",
-		autoCompactPctEnv:    "80",
+		autoCompactPctEnv:    "85",
 	}
 	for key, value := range want {
 		if p.Env[key] != value {
@@ -99,7 +99,7 @@ func TestApplyCompactConfigBalanced800KWritesExactTriplet(t *testing.T) {
 	p := provider.Provider{Env: map[string]string{
 		maxContextTokensEnv:  "500000",
 		autoCompactWindowEnv: "500000",
-		autoCompactPctEnv:    "80",
+		autoCompactPctEnv:    "85",
 		"KEEP_ME":            "1",
 	}}
 	applyCompactConfig(&p, nil, compactPresetBalanced800K)
@@ -107,7 +107,7 @@ func TestApplyCompactConfigBalanced800KWritesExactTriplet(t *testing.T) {
 	want := map[string]string{
 		maxContextTokensEnv:  "800000",
 		autoCompactWindowEnv: "800000",
-		autoCompactPctEnv:    "80",
+		autoCompactPctEnv:    "85",
 	}
 	for key, value := range want {
 		if p.Env[key] != value {
@@ -128,10 +128,10 @@ func TestCompactPresetOffersSupportedBalancedTiers(t *testing.T) {
 	}{
 		{name: "default", want: compactPresetDefault},
 		{name: "balanced 500K", env: map[string]string{
-			maxContextTokensEnv: "500000", autoCompactWindowEnv: "500000", autoCompactPctEnv: "80",
+			maxContextTokensEnv: "500000", autoCompactWindowEnv: "500000", autoCompactPctEnv: "85",
 		}, want: compactPresetBalanced500K},
 		{name: "balanced 800K", env: map[string]string{
-			maxContextTokensEnv: "800000", autoCompactWindowEnv: "800000", autoCompactPctEnv: "80",
+			maxContextTokensEnv: "800000", autoCompactWindowEnv: "800000", autoCompactPctEnv: "85",
 		}, want: compactPresetBalanced800K},
 		{name: "old 300K", env: map[string]string{
 			maxContextTokensEnv: "300000", autoCompactWindowEnv: "200000",
@@ -165,11 +165,11 @@ func TestCompactStateSummaries(t *testing.T) {
 		{name: "default", p: provider.Provider{}, want: "default (200K/1M) · off"},
 		{name: "extended slot", p: provider.Provider{OpusModel: "gpt[1m]"}, want: "default (200K/1M) · opus"},
 		{name: "balanced 500K", p: provider.Provider{Env: map[string]string{
-			maxContextTokensEnv: "500000", autoCompactWindowEnv: "500000", autoCompactPctEnv: "80",
-		}}, want: "500K/400K · off"},
+			maxContextTokensEnv: "500000", autoCompactWindowEnv: "500000", autoCompactPctEnv: "85",
+		}}, want: "500K/425K · off"},
 		{name: "balanced 800K", p: provider.Provider{Env: map[string]string{
-			maxContextTokensEnv: "800000", autoCompactWindowEnv: "800000", autoCompactPctEnv: "80",
-		}}, want: "800K/640K · off"},
+			maxContextTokensEnv: "800000", autoCompactWindowEnv: "800000", autoCompactPctEnv: "85",
+		}}, want: "800K/680K · off"},
 		{name: "obsolete becomes default", p: provider.Provider{Env: map[string]string{
 			maxContextTokensEnv: "300000",
 		}}, want: "default (200K/1M) · off"},

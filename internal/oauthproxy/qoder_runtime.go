@@ -101,9 +101,11 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 	usageTracker := NewUsageTracker()
 	service := &qoderService{apiKey: apiKey, pool: pool, client: pool.client, usage: usageTracker}
 	models, discoverErr := service.discoverModels(parent)
+	catalogFallback := false
 	if discoverErr != nil {
 		LogWarnf("Qoder model discovery failed; using compatibility catalog error=%v", discoverErr)
 		models = qoderFallbackModels()
+		catalogFallback = true
 	}
 	// The live catalog is authoritative. Context suffixes such as [1m] are
 	// accepted by qoderSelectModel without being published as phantom upstream
@@ -143,7 +145,12 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 		started:    started,
 		models:     modelIDs,
 		modelNames: modelNames,
-		usage:      usageTracker,
+		// A silent substitution is what let a credential that had simply expired
+		// shrink the saved catalog from 17 models to 5: `ccl set` adopted the
+		// compatibility list as if it were the account's. Recording it lets the
+		// caller keep what it had and say so.
+		catalogFallback: catalogFallback,
+		usage:           usageTracker,
 	}
 	go func() {
 		err := server.Serve(listener)

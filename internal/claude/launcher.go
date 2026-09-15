@@ -41,6 +41,35 @@ type settingsJSON struct {
 	// FastMode is always serialized (no omitempty) so turning it off in ccl set
 	// (or Claude Code /fast) can clear a previously enabled pin.
 	FastMode bool `json:"fastMode"`
+	// StatusLine installs ccl's own status line for the session. It is omitted
+	// when the provider opts out, which lets Claude Code fall back to the user's
+	// statusLine from ~/.claude/settings.json.
+	StatusLine *statusLineConfig `json:"statusLine,omitempty"`
+}
+
+// statusLineConfig is Claude Code's statusLine settings object. Only the
+// command form is supported by Claude Code.
+type statusLineConfig struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// statusLineCommand is the command ccl hands Claude Code. Claude Code runs it
+// through a shell on every status-line refresh, so the executable path is
+// single-quoted to survive spaces, and the subcommand is answered before any
+// config is loaded (see cmd.Execute).
+func statusLineCommand() string {
+	executable, err := os.Executable()
+	if err != nil || strings.TrimSpace(executable) == "" {
+		executable = "ccl"
+	}
+	return quoteForShell(executable) + " statusline"
+}
+
+// quoteForShell wraps s in single quotes, escaping any single quote it already
+// contains, so the shell treats the whole value as one literal word.
+func quoteForShell(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 const (
@@ -455,7 +484,7 @@ func (c *providerContext) settings() settingsJSON {
 	// Applied after the provider Env overrides: a preset an older ccl stored must
 	// not survive into a session Claude Code should size itself.
 	c.droppedContextOverride = applyContextPolicy(env)
-	return settingsJSON{
+	settings := settingsJSON{
 		Env:                    env,
 		HasCompletedOnboarding: true,
 		Model:                  catalogModelRequestName(c.provider.CustomModelID, c.modelNames),
@@ -464,6 +493,15 @@ func (c *providerContext) settings() settingsJSON {
 		Language:               responseLanguage(),
 		FastMode:               c.provider.FastMode,
 	}
+	// ccl's status line wins over the user's, because --settings outranks
+	// ~/.claude/settings.json. Providers that opt out leave the field unset.
+	if !c.provider.StatuslineDisabled {
+		settings.StatusLine = &statusLineConfig{
+			Type:    "command",
+			Command: statusLineCommand(),
+		}
+	}
+	return settings
 }
 
 // responseLanguage maps the user's configured ccl language to the natural-language

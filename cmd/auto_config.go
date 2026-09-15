@@ -149,9 +149,12 @@ func splitHeavyLight(chatPool []string, metadata map[string]protocol.ModelInfo) 
 	return a, b
 }
 
-// applyOneM auto-enables [1m] only for allowlist-confirmed models, preserving an
-// existing marker when the model did not change. Advisory windows (≥900K from the
-// catalog) never auto-enable; the UI surfaces them as "1M reported".
+// applyOneM decides the [1m] marker per slot. A slot the recommendation filled
+// is auto-enabled only for allowlist-confirmed models; a slot that kept its model
+// keeps whatever marker it already had, because that marker is part of a mapping
+// the user is already happy with — re-detecting must never re-open a context
+// window the user closed. Advisory windows (≥900K from the catalog) never
+// auto-enable; the UI surfaces them as "1M reported".
 func (r *AutoRecommendation) applyOneM(current provider.Provider, preserved map[string]bool) {
 	slots := []struct {
 		key   string
@@ -167,17 +170,17 @@ func (r *AutoRecommendation) applyOneM(current provider.Provider, preserved map[
 		if s.model == "" {
 			continue
 		}
-		if recommendedOneMModel(s.model) {
-			r.OneMSlots[s.key] = true
-			continue
-		}
-		// Preserve a marker the user already had on an unchanged model.
 		if preserved[s.key] {
+			// Carry the slot's own marker through, on or off.
 			for _, slot := range advancedSlotRefs(&current) {
 				if slot.key == s.key && hasOneMSuffix(*slot.ptr) {
 					r.OneMSlots[s.key] = true
 				}
 			}
+			continue
+		}
+		if recommendedOneMModel(s.model) {
+			r.OneMSlots[s.key] = true
 		}
 	}
 }

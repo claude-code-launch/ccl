@@ -51,8 +51,9 @@ type chatCompletionsService struct {
 	// it to strip its "kimi-" prefix and remap legacy code aliases.
 	normalizeModel func(string) string
 	// decorateHeader adds backend-specific headers before the upstream request.
-	// Kimi uses it to attach its X-Msh-* device identity headers.
-	decorateHeader func(http.Header)
+	// The converted request is included because some gateways route with one
+	// model ID in a header while requiring a different ID in the JSON body.
+	decorateHeader func(http.Header, *chatCompletionsConvertedRequest)
 	// normalizeBody rewrites the marshalled upstream body after alias routing and
 	// model normalization but before the request is sent. Kimi uses it to link
 	// tool results to tool calls and drop empty assistant messages.
@@ -304,7 +305,8 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 	}
 	LogDebugEvent("request_converted", "component", "openai_chat", "request_id", requestID,
 		"client_model", converted.clientModel, "upstream_model", converted.model,
-		"stream", converted.stream, "body_bytes", len(converted.body))
+		"stream", converted.stream, "body_bytes", len(converted.body),
+		"content_structure", chatContentStructure(converted.body))
 	response, err := s.call(requestCtx, converted)
 	if err != nil {
 		var upstreamErr *chatCompletionsUpstreamError
@@ -414,7 +416,7 @@ func (s *chatCompletionsService) callOnce(ctx context.Context, converted *chatCo
 		request.Header.Set("Accept", "text/event-stream")
 	}
 	if s.decorateHeader != nil {
-		s.decorateHeader(request.Header)
+		s.decorateHeader(request.Header, converted)
 	}
 	LogDebugEvent("upstream_request", "component", "openai_chat", "request_id", requestLogID(ctx),
 		"method", http.MethodPost, "endpoint", SafeLogEndpoint(target),

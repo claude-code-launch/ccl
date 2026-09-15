@@ -23,23 +23,25 @@ var importCmd = newImportCommand()
 // owns.
 func newImportCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "import <commandcode> [alias]",
-		Short: "Import credentials from an official CLI",
-		Long: `Import credentials stored by a provider's official CLI.
+		Use:   "import <autoclaw> [alias]",
+		Short: "Import credentials from an official CLI or desktop app",
+		Long: `Import credentials a provider's official client already stored.
 
-The only supported source is Command Code, which issues one long-lived user_
-API key instead of third-party OAuth:
+The only supported source is AutoClaw, whose desktop app keeps the OAuth
+session used by its managed OpenAI Chat proxy:
 
-  ccl import commandcode        # reads ~/.commandcode/auth.json
-  ccl import commandcode work   # same backend, provider name "work"
+  ccl import autoclaw        # reads AutoClaw's desktop auth.json
+  ccl import autoclaw work   # same backend, provider name "work"
 
 Notes:
-  - Prefer ccl oauth commandcode when you can authorize in a browser; import
-    only reuses a key the official CLI already stored
-  - ccl validates the imported key through /alpha/whoami before storing it
-  - credentials are stored as per-account files under ~/.ccl/auth/ (0600);
-    legacy commandcode.json files remain loadable
-  - The official CLI must be signed in once (it owns the browser login)
+  - ccl oauth autoclaw and ccl import autoclaw both import the completed
+    desktop login; the latter name is kept for scripts and backwards
+    compatibility
+  - CCL stores its own refreshable credential and calls the remote OpenAI Chat
+    proxy through a local Anthropic adapter
+  - credentials are stored as per-account files under ~/.ccl/auth/ (0600)
+  - auth.json is Chromium-safeStorage encrypted on macOS; CCL reads it through
+    the Chromium Safe Storage Keychain item and never modifies desktop files
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {

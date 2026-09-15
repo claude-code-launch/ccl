@@ -15,6 +15,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -99,6 +100,7 @@ const (
 	rowContext    // Context & Compact entry
 	rowTools
 	rowToolSearch
+	rowStatusline // Status Line on/off pin
 	rowActive
 	rowSave
 	rowCancel
@@ -276,6 +278,23 @@ type AdvancedConfigModel struct {
 	verifyDone chan keyVerifyDoneMsg
 	mdDone     chan modelsDevFetchDoneMsg
 	availDone  chan modelAvailabilityDoneMsg
+	oauthDone  chan oauthRuntimeDoneMsg
+
+	// The OAuth runtime is started in the background so the panel opens at once.
+	// oauthStartDone closes when that goroutine finishes, which is also the
+	// happens-before edge that makes runtimeCleanup safe to read from
+	// stopOAuthRuntime.
+	oauthStartDone chan struct{}
+	oauthCancel    context.CancelFunc
+	runtimeCleanup func()
+	runtimeLoading bool
+	runtimeReady   bool
+	runtimeErr     error
+	runtimeFrame   int
+	// runtimeCatalogFallback means the runtime came up but could not fetch the
+	// account's catalog, so it is serving a built-in compatibility list. The page
+	// keeps the models it already had and says why, instead of adopting the guess.
+	runtimeCatalogFallback bool
 }
 
 type modelAvailability uint8
@@ -289,6 +308,20 @@ const (
 type modelAvailabilityDoneMsg struct {
 	testID   uint64
 	statuses map[string]modelAvailability
+}
+
+// oauthRuntimeDoneMsg reports the loopback runtime a subscription needs. The
+// panel is already on screen by the time it arrives: the fields are everything
+// configureOAuthRuntime needs to adopt the runtime.
+type oauthRuntimeDoneMsg struct {
+	endpoint string
+	apiKey   string
+	models   []string
+	names    map[string]string
+	// catalogFallback reports that models is a compatibility list the runtime
+	// fell back to, not the account's catalog.
+	catalogFallback bool
+	err             error
 }
 
 type modelFetchDoneMsg struct {
@@ -417,7 +450,7 @@ func fetchModelsAsync(done chan<- modelFetchDoneMsg, endpoint, apiKey string, pr
 		// Best-effort: pull context_window metadata for OpenAI-family catalogs.
 		// Failures are ignored — IDs still come from detection.
 		windows := map[string]int{}
-		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) && !provider.IsCommandCodeType(result.protocol) {
+		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) {
 			// Subscription runtimes only expose windows through the Codex catalog,
 			// which AdvertisedContextWindows tries before the plain OpenAI list.
 			advertised, source := claude.AdvertisedContextWindows(result.baseURL, apiKey)
@@ -528,11 +561,12 @@ func (m *AdvancedConfigModel) currentRow() configRowKind {
 
 // connectionReady reports whether the Model Mapping and Runtime sections are
 // interactive. For a new provider the Endpoint/API Key must be filled and
-// Auto Configure run (a model pool discovered); OAuth providers are always
-// ready (their credentials are already live).
+// Auto Configure run (a model pool discovered). An OAuth subscription owns its
+// credential from the start, but its catalog arrives with the loopback runtime
+// that is started in the background, so it is ready only once that lands.
 func (m *AdvancedConfigModel) connectionReady() bool {
 	if m.usesOAuth() {
-		return true
+		return m.runtimeReady
 	}
 	// models.dev is ready only after a provider has been picked (which loads the
 	// model pool via metadata) — same gate as a detected Custom connection.
@@ -547,11 +581,11 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 	rows := make([]configRow, 0, 4)
 	if m.usesOAuth() {
 		// OAuth keeps its original row set: no Source stepper, no endpoint input,
-		// and Protocol stays in the Runtime section (its Connection block is
+		// no Auto Configure (a subscription has no connection to probe), and
+		// Protocol stays in the Runtime section (its Connection block is
 		// read-only subscription metadata).
 		rows = append(rows,
 			configRow{kind: rowAPIKey},
-			configRow{kind: rowTest},
 		)
 		ready := m.connectionReady()
 		rows = append(rows,
@@ -566,6 +600,7 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 			configRow{kind: rowFast, editable: ready},
 			configRow{kind: rowTools, editable: ready},
 			configRow{kind: rowToolSearch, editable: ready},
+			configRow{kind: rowStatusline, editable: ready},
 			configRow{kind: rowActive, editable: ready},
 			configRow{kind: rowSave},
 			configRow{kind: rowCancel},
@@ -611,11 +646,24 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		configRow{kind: rowFast, editable: ready},
 		configRow{kind: rowTools, editable: ready},
 		configRow{kind: rowToolSearch, editable: ready},
+		configRow{kind: rowStatusline, editable: ready},
 		configRow{kind: rowActive, editable: ready},
 		configRow{kind: rowSave},
 		configRow{kind: rowCancel},
 	)
 	return rows
+}
+
+// focusDetectionAction moves the cursor onto the Auto Configure / Test Connection
+// row, or onto the first model slot when the page has no detection step to offer
+// (an OAuth subscription, which never probes). Failure paths and the API-key row
+// both use it, so they never strand the cursor on an index of -1.
+func (m *AdvancedConfigModel) focusDetectionAction() {
+	if index := m.mainRowIndex(rowTest); index >= 0 {
+		m.cursor = index
+		return
+	}
+	m.cursor = m.mainRowIndex(rowOpus)
 }
 
 // mainRowIndex maps a kind onto its index in visibleRows, or -1 when the row is
@@ -795,7 +843,10 @@ func (m *AdvancedConfigModel) slotModelForRow(kind configRowKind) string {
 // successful detection first. OAuth providers never detect over HTTP.
 func (m *AdvancedConfigModel) canSave() bool {
 	if m.usesOAuth() {
-		return true
+		// Nothing to probe, but the page must not be saved before the runtime
+		// that owns the catalog has answered — the pool and the slot mapping it
+		// fills are what gets persisted.
+		return m.runtimeReady
 	}
 	if m.live().connectionDirty {
 		return false
@@ -959,6 +1010,8 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		verifyDone:        make(chan keyVerifyDoneMsg, 8),
 		mdDone:            make(chan modelsDevFetchDoneMsg, 2),
 		availDone:         make(chan modelAvailabilityDoneMsg, 2),
+		oauthDone:         make(chan oauthRuntimeDoneMsg, 2),
+		oauthStartDone:    make(chan struct{}),
 	}
 
 	cleanAndPopulate := func(modelStr *string, slotKey string) {
@@ -982,34 +1035,136 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	// it counts as discovered, and it must NOT trigger Init's auto-probe (which
 	// would overwrite Type). Its connection mirrors are seeded from the persisted
 	// values, but the key still needs re-verification (keyVerified stays false).
-	if !m.usesOAuth() {
-		pool := uniqueModels(parseModelList(m.p.Model))
-		if len(pool) > 0 {
-			m.live().modelPool = pool
-			if isModelsDev {
-				m.live().modelPoolFromDiscovery = true
-				m.live().autoDetectOnOpen = false
-				m.live().connectionDirty = false
-				m.live().detectedInputEndpoint = m.p.Endpoint
-				m.live().probeEndpoint = m.p.Endpoint
-				m.live().inputEndpoint = m.p.Endpoint
-				m.live().inputAPIKey = m.p.APIKey
-			} else {
-				m.live().autoDetectOnOpen = true
-			}
+	//
+	// OAuth subscriptions load the pool without any of that: there is no probe to
+	// wait for, so the persisted catalog is available immediately.
+	pool := uniqueModels(parseModelList(m.p.Model))
+	if len(pool) > 0 {
+		m.live().modelPool = pool
+		switch {
+		case isModelsDev:
+			m.live().modelPoolFromDiscovery = true
+			m.live().autoDetectOnOpen = false
+			m.live().connectionDirty = false
+			m.live().detectedInputEndpoint = m.p.Endpoint
+			m.live().probeEndpoint = m.p.Endpoint
+			m.live().inputEndpoint = m.p.Endpoint
+			m.live().inputAPIKey = m.p.APIKey
+		case m.usesOAuth():
+			// A subscription has no probe to run — connectionReady is true from
+			// the start — so the persisted pool is the whole catalog: AutoClaw's
+			// built-in list, or whatever `ccl oauth` discovered. Skipping it here
+			// left the model picker and the availability test with nothing to
+			// show. configureOAuthRuntime refreshes it from the live runtime.
+		default:
+			m.live().autoDetectOnOpen = true
 		}
 	}
 
 	return m
 }
 
-func (m *AdvancedConfigModel) configureOAuthRuntime(endpoint, apiKey string) {
+// configureOAuthRuntime adopts the loopback runtime ccl started for this page.
+// A subscription has no connection to probe, so there is no Auto Configure row:
+// the runtime owns the catalog, and it is copied in directly rather than
+// fetched back over HTTP. This is also where the page becomes editable, so it
+// is the single "the runtime is up" transition.
+// catalogFallback reports that the runtime could not fetch the account's models
+// and is serving a built-in compatibility list. The page then keeps the catalog
+// it already has: adopting the fallback is what silently shrank a saved Qoder
+// list from 17 models to 5 after the credential expired, and saving the page
+// made that permanent.
+func (m *AdvancedConfigModel) configureOAuthRuntime(endpoint, apiKey string, models []string, catalogFallback bool) {
 	m.live().probeEndpoint = endpoint
 	m.live().probeAPIKey = apiKey
 	m.live().connectionDirty = false
-	m.cursor = m.mainRowIndex(rowTest)
+	m.runtimeReady = true
+	m.runtimeCatalogFallback = catalogFallback
+	if catalog := uniqueModels(models); len(catalog) > 0 && !catalogFallback {
+		// Same result the probe used to produce: pool from the runtime, Model
+		// persisted, empty slots auto-mapped. The endpoint and key stay in
+		// live() only — a subscription's persisted Endpoint is oauth://.
+		m.applyModelDetectionResult("", strings.Join(catalog, ","), "", "", nil)
+	}
 	m.urlFocused = false
 	m.keyFocused = false
+}
+
+// beginOAuthRuntime starts the subscription's loopback runtime off the UI
+// thread. Starting it used to happen before the panel existed, which left the
+// terminal blank while the runtime refreshed its credential and fetched its
+// catalog; now the panel renders first and the Local Proxy row shows a spinner
+// until the result lands.
+func (m *AdvancedConfigModel) beginOAuthRuntime(p provider.Provider) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.oauthCancel = cancel
+	m.runtimeLoading = true
+	m.runtimeReady = false
+	m.runtimeErr = nil
+	go func() {
+		defer close(m.oauthStartDone)
+		runtimeProvider, runtime, cleanup, err := prepareProviderRuntime(ctx, p)
+		if err != nil {
+			m.oauthDone <- oauthRuntimeDoneMsg{err: err}
+			return
+		}
+		m.runtimeCleanup = cleanup
+		m.oauthDone <- oauthRuntimeDoneMsg{
+			endpoint:        runtimeProvider.Endpoint,
+			apiKey:          runtimeProvider.APIKey,
+			models:          runtime.Models(),
+			names:           runtime.ModelDisplayNames(),
+			catalogFallback: runtime.ModelCatalogIsFallback(),
+		}
+	}()
+}
+
+// handleOAuthRuntimeDone folds the background start into the page. A failure is
+// reported on the Local Proxy row rather than swallowed: without a runtime the
+// page has no catalog, and the save gate stays shut.
+func (m *AdvancedConfigModel) handleOAuthRuntimeDone(msg oauthRuntimeDoneMsg) {
+	m.runtimeLoading = false
+	if msg.err != nil {
+		m.runtimeErr = msg.err
+		m.runtimeReady = false
+		setDebugf("oauth runtime start failed err=%v", msg.err)
+		m.markDirty()
+		return
+	}
+	m.runtimeErr = nil
+	setDebugf("oauth runtime ready endpoint=%q model_count=%d catalog_fallback=%t",
+		msg.endpoint, len(msg.models), msg.catalogFallback)
+	if msg.catalogFallback {
+		// The runtime is usable — Claude Code can still send requests through it —
+		// but its model list is a guess. Keeping the saved pool means a page that
+		// opens on a broken credential is not a page that quietly deletes the
+		// account's real models when it is saved.
+		setDebugf("oauth runtime catalog unavailable; keeping the saved model pool")
+	}
+	m.configureOAuthRuntime(msg.endpoint, msg.apiKey, msg.models, msg.catalogFallback)
+	m.setRuntimeModelNames(msg.names)
+	m.markDirty()
+}
+
+// stopOAuthRuntime cancels a start that is still in flight and tears down a
+// runtime that came up. It is deferred in RunProviderSet, so it covers every
+// exit path including an early return from app.Run. Session.Close and
+// Runtime.Stop are both idempotent.
+func (m *AdvancedConfigModel) stopOAuthRuntime() {
+	if m.oauthCancel == nil {
+		return
+	}
+	m.oauthCancel()
+	select {
+	case <-m.oauthStartDone:
+		if m.runtimeCleanup != nil {
+			m.runtimeCleanup()
+		}
+	case <-time.After(3 * time.Second):
+		// The start is wedged on the network despite the cancel. Leaving the
+		// goroutine behind is safe: the process is on its way out.
+		setDebugf("oauth runtime start did not finish before exit")
+	}
 }
 
 func (m *AdvancedConfigModel) usesOAuth() bool {
@@ -1278,7 +1433,7 @@ func (m *AdvancedConfigModel) updateFilteredPool() {
 	} else {
 		m.filteredPool = []string{}
 		for _, mod := range m.live().modelPool {
-			searchable := strings.ToLower(mod + " " + m.modelDisplayLabel(mod))
+			searchable := strings.ToLower(mod + " " + m.modelSearchLabel(mod))
 			if strings.Contains(searchable, q) {
 				m.filteredPool = append(m.filteredPool, mod)
 			}
@@ -1312,8 +1467,36 @@ func contextWindowsFromModelInfos(metadata map[string]protocol.ModelInfo) map[st
 	return windows
 }
 
+// modelDisplayLabel renders a mapping or picker row as the plain model ID plus
+// any catalog badges. The provider's display alias (for example AutoClaw's
+// "Auto" for zai_auto) is deliberately left out: the identifier is what gets
+// persisted, what the request carries, and what every other ccl surface prints.
 func (m *AdvancedConfigModel) modelDisplayLabel(id string) string {
+	return modelBadgeLabel(stripOneMSuffix(id), m.live().modelDisplayMetadata)
+}
+
+// modelSearchLabel widens the picker's filter text with the provider's display
+// alias, so a model stays findable by the name its catalog advertises even
+// though the row itself shows the ID.
+func (m *AdvancedConfigModel) modelSearchLabel(id string) string {
 	return modelReportLabel(stripOneMSuffix(id), m.live().modelDisplayMetadata)
+}
+
+func (m *AdvancedConfigModel) setRuntimeModelNames(names map[string]string) {
+	if m.live().modelDisplayMetadata == nil {
+		m.live().modelDisplayMetadata = make(map[string]protocol.ModelInfo)
+	}
+	for id, name := range names {
+		id, name = strings.TrimSpace(id), strings.TrimSpace(name)
+		if id == "" || name == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(id))
+		info := m.live().modelDisplayMetadata[key]
+		info.ID = id
+		info.DisplayName = name
+		m.live().modelDisplayMetadata[key] = info
+	}
 }
 
 func (m *AdvancedConfigModel) subagentDisplayLabel() string {
@@ -1494,15 +1677,12 @@ func (m *AdvancedConfigModel) applyStaleSlotPolicy() {
 // 实时获取/检测协议名称
 func (m *AdvancedConfigModel) getProtocol() string {
 	if m.p.Type != "" {
-		if provider.IsCommandCodeType(m.p.Type) {
-			return "Command Code"
-		}
 		return provider.ProtocolLabelForProvider(*m.p)
 	}
 	if strings.Contains(strings.ToLower(m.urlText.Get()), "anthropic") {
-		return "anthropic"
+		return "anthropic-messages"
 	}
-	return "openai(chat)"
+	return "openai-chat"
 }
 
 func (m *AdvancedConfigModel) getProtocolFamily() string {
@@ -1510,8 +1690,6 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 		switch {
 		case provider.IsAnthropicType(m.p.Type):
 			return "Anthropic"
-		case provider.IsCommandCodeType(m.p.Type):
-			return "Command Code"
 		case provider.IsOpenAICompatibleType(m.p.Type):
 			return "OpenAI"
 		}
@@ -1523,8 +1701,8 @@ func (m *AdvancedConfigModel) getProtocolFamily() string {
 }
 
 // canSelectCustomProtocol is true only for a manual Custom API-key provider
-// whose data plane can be selected by the user. OAuth runtimes, models.dev, and
-// Command Code have fixed or per-model routing and remain read-only.
+// whose data plane can be selected by the user. OAuth and models.dev remain
+// fixed, so the manual protocol selector never appears for them.
 func (m *AdvancedConfigModel) canSelectCustomProtocol() bool {
 	if m.p == nil || m.source != sourceCustom || strings.TrimSpace(m.p.OAuthProvider) != "" {
 		return false
@@ -1564,7 +1742,13 @@ func (m *AdvancedConfigModel) cycleCustomProtocol(delta int) {
 		}
 	}
 	if strings.TrimSpace(m.p.Type) == "" {
-		index = -1
+		// An undetected provider starts one step before the first protocol, so the
+		// first forward step selects Chat rather than skipping it.
+		if delta > 0 {
+			index = -1
+		} else {
+			index = 0
+		}
 	}
 	if provider.IsAnthropicType(m.p.Type) {
 		m.live().anthropicAuth = m.p.AnthropicAuth
@@ -1710,6 +1894,15 @@ func formatToolsLabel(value string) string {
 	return formatEditableValue(value, false)
 }
 
+// formatStatuslineLabel renders the ccl status-line opt-out. The stored field
+// is negative (statuslineDisabled), so On is the zero value.
+func formatStatuslineLabel(disabled bool) string {
+	if disabled {
+		return formatEditableValue("Off", false)
+	}
+	return formatEditableValue("On", false)
+}
+
 func formatSearchLabel(value string) string {
 	switch value {
 	case "":
@@ -1798,6 +1991,10 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		}
 		next := cycleStringOption(cur, reviewSearchOptions, delta)
 		setProviderEnvValue(m.p, claude.ToolSearchEnv, next)
+	case rowStatusline:
+		// Toggle like Fast: left/right/enter all flip the pin.
+		m.p.StatuslineDisabled = !m.p.StatuslineDisabled
+		setDebugf("statusline toggled disabled=%t", m.p.StatuslineDisabled)
 	case rowActive:
 		if delta < 0 {
 			m.IsActiveChosen = true
@@ -1902,9 +2099,9 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		m.live().probeEndpoint = detectedEndpoint
 	}
 	if !m.usesOAuth() && detectedType != "" {
-		// The probe can only tell apart Anthropic / Command Code / the OpenAI
-		// family — it cannot distinguish OpenAI's Chat Completions from its
-		// Responses API (both are reached through the same GET /v1/models list).
+		// The probe can only tell apart the Anthropic and OpenAI families — it
+		// cannot distinguish OpenAI's Chat Completions from its Responses API
+		// (both are reached through the same GET /v1/models list).
 		// Reopening an existing openai_responses provider must not let the
 		// auto-probe downgrade its stored Type back to "openai" (chat); preserve
 		// the user's Responses choice when the probe still lands in the OpenAI
@@ -1939,7 +2136,7 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 
 	if derr != nil {
 		m.live().detectionError = derr
-		m.cursor = m.mainRowIndex(rowTest)
+		m.focusDetectionAction()
 		setDebugf("applyModelDetectionResult detection failed detection_error=%v model_count=%d", m.live().detectionError, len(m.live().modelPool))
 		return
 	}
@@ -1950,7 +2147,7 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 			"未从接口获取到任何可用模型，未使用本地旧模型池",
 			"no models were fetched from the provider API; local cached models were not used",
 		))
-		m.cursor = m.mainRowIndex(rowTest)
+		m.focusDetectionAction()
 		setDebugf("applyModelDetectionResult no models detection_error=%v", m.live().detectionError)
 		return
 	}
@@ -1982,7 +2179,7 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 // records that the config was auto-configured. User-edited fields (identified by
 // not matching the recommendation) are left alone.
 func (m *AdvancedConfigModel) applyRecommendation() {
-	rec := RecommendModels(*m.p, m.live().modelPool, m.live().modelDisplayMetadata)
+	rec := RecommendModels(m.currentWithOneMMarkers(), m.live().modelPool, m.live().modelDisplayMetadata)
 	// Only fill slots the user has not already pinned in this session. Detecting
 	// again must not overwrite a manual choice made after the first detection.
 	if strings.TrimSpace(m.p.OpusModel) == "" {
@@ -2011,6 +2208,21 @@ func (m *AdvancedConfigModel) applyRecommendation() {
 	m.live().connectionDirty = false
 	m.live().hadLocalModelPool = countCSV(m.p.Model) > 0
 	setDebugf("applyRecommendation slots=%s one_m=%s", slotDebugSummary(*m.p), reviewOneMSummary(m.live().oneMSlots))
+}
+
+// currentWithOneMMarkers returns the provider with each configured slot's [1m]
+// marker re-attached. Construction strips the markers into live().oneMSlots, but
+// the recommendation engine reads them back off the slots to tell a window the
+// user opened from one they never touched — so the markers have to be on the
+// value it sees.
+func (m *AdvancedConfigModel) currentWithOneMMarkers() provider.Provider {
+	current := *m.p
+	for _, slot := range advancedSlotRefs(&current) {
+		if *slot.ptr != "" && m.live().oneMSlots[slot.key] {
+			*slot.ptr += "[1m]"
+		}
+	}
+	return current
 }
 
 // activateRow fires the action for a button row on click or Enter: Auto
@@ -2076,6 +2288,30 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 		m.urlFocused = false
 		m.keyFocused = false
 		m.live().detectionError = nil
+		// AutoClaw needs no network model detection: its managed Chat route has a
+		// fixed catalog, so a generic /models probe would either hit the wrong
+		// wire protocol or overwrite the fixed runtime metadata. Deliver the
+		// built-in catalog through the regular detection-success path instead.
+		if provider.IsAutoClawType(m.p.Type) {
+			m.live().probeEndpoint = m.p.Endpoint
+			m.live().probeAPIKey = m.keyText.Get()
+			m.live().detecting = true
+			m.live().detectProgress = 5
+			m.live().detectFrame = 0
+			setDebugf("autoclaw detection skipped: built-in catalog endpoint=%q", m.live().probeEndpoint)
+			go func() {
+				m.fetchDone <- modelFetchDoneMsg{
+					endpoint:            m.live().probeEndpoint,
+					apiKey:              m.live().probeAPIKey,
+					detectedType:        m.p.Type,
+					detectedEndpoint:    m.p.Endpoint,
+					anthropicAuth:       "",
+					discoveredModelsRaw: strings.Join(oauthproxy.AutoClawModelIDs(), ","),
+					modelInfos:          oauthproxy.AutoClawModelCatalog(),
+				}
+			}()
+			return
+		}
 		m.live().detecting = true
 		m.live().detectProgress = 5
 		m.live().detectFrame = 0
@@ -2223,7 +2459,17 @@ func (m *AdvancedConfigModel) handleFetchDone(msg modelFetchDoneMsg) {
 	if msg.contextWindows != nil {
 		m.live().modelContextWindows = msg.contextWindows
 	}
+	previousMetadata := m.live().modelDisplayMetadata
 	m.live().modelDisplayMetadata = indexModelInfos(msg.modelInfos)
+	if m.usesOAuth() {
+		for id, info := range previousMetadata {
+			current := m.live().modelDisplayMetadata[id]
+			if current.DisplayName == "" {
+				current.ID, current.DisplayName = info.ID, info.DisplayName
+				m.live().modelDisplayMetadata[id] = current
+			}
+		}
+	}
 	for id, window := range contextWindowsFromModelInfos(m.live().modelDisplayMetadata) {
 		if _, exists := m.live().modelContextWindows[id]; !exists {
 			m.live().modelContextWindows[id] = window
@@ -2296,6 +2542,10 @@ func (m *AdvancedConfigModel) handleFetchTick() {
 	if m.urlCopied && now.Sub(m.lastUrlCopyAt) >= 2*time.Second {
 		m.urlCopied = false
 	}
+	if m.runtimeLoading {
+		m.runtimeFrame++
+		m.markDirty()
+	}
 	if !m.live().detecting {
 		return
 	}
@@ -2348,7 +2598,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		if ke.Key == tui.KeyEscape {
 			m.live().detecting = false
 			m.live().detectionError = fmt.Errorf("%s", locale.T("已取消连接检查", "connection check canceled"))
-			m.cursor = m.mainRowIndex(rowTest)
+			m.focusDetectionAction()
 			setDebugf("connection check canceled by user")
 			m.markDirty()
 		}
@@ -2457,7 +2707,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowActive:
+			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowStatusline, rowActive:
 				m.adjustReviewField(-1)
 			}
 		}
@@ -2475,7 +2725,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowActive:
+			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowStatusline, rowActive:
 				m.adjustReviewField(1)
 			}
 		}
@@ -2683,13 +2933,9 @@ func (m *AdvancedConfigModel) handleEnter() {
 		m.keyFocused = true
 		setDebugf("enter endpoint -> api key endpoint=%q", m.urlText.Get())
 	case rowAPIKey:
-		// Custom advances to Auto Configure; models.dev has no test step, so
-		// move to the first model slot instead.
-		if m.usesModelsDev() {
-			m.cursor = m.mainRowIndex(rowOpus)
-		} else {
-			m.cursor = m.mainRowIndex(rowTest)
-		}
+		// Custom advances to Auto Configure; models.dev and OAuth have no test
+		// step, so they move to the first model slot instead.
+		m.focusDetectionAction()
 		m.urlFocused = false
 		m.keyFocused = false
 		setDebugf("enter api key -> next api_key_len=%d", len(m.keyText.Get()))
@@ -2697,7 +2943,7 @@ func (m *AdvancedConfigModel) handleEnter() {
 		m.activateRow(rowProvider)
 	case rowTest:
 		m.activateRow(rowTest)
-	case rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch:
+	case rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowStatusline:
 		m.adjustReviewField(1)
 	case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
 		if !m.connectionReady() {
@@ -2742,6 +2988,17 @@ func (m *AdvancedConfigModel) invalidateModelsDevKeyIfChanged() {
 
 // renderModelFetchProgress builds the connection-check in-progress block: a
 // spinner frame, the label, and the hint line.
+// statusSpinners is the frame cycle every in-flight status line shares, so the
+// Local Proxy row and the connection check animate at the same cadence.
+var statusSpinners = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func spinnerAt(frame int) string {
+	if frame < 0 {
+		frame = -frame
+	}
+	return statusSpinners[frame%len(statusSpinners)]
+}
+
 func renderModelFetchProgress(progress, frame int, oauth bool) []*tui.Element {
 	if progress < 0 {
 		progress = 0
@@ -2749,8 +3006,7 @@ func renderModelFetchProgress(progress, frame int, oauth bool) []*tui.Element {
 	if progress > 100 {
 		progress = 100
 	}
-	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	spin := spinners[frame%len(spinners)]
+	spin := spinnerAt(frame)
 	label := locale.T("正在连接...", "Connecting...")
 	if oauth {
 		label = locale.T("正在通过 OAuth 连接...", "Connecting via OAuth...")
@@ -2893,15 +3149,14 @@ func (m *AdvancedConfigModel) pageBadge() string {
 func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 	rows := []*tui.Element{m.connectionTitleRow()}
 	if m.usesOAuth() {
-		// OAuth rows are subscription metadata; the model-fetch action sits
-		// directly under Auth like the non-OAuth detection buttons.
+		// OAuth rows are subscription metadata. There is no Auto Configure
+		// button: the subscription already owns its endpoint, credential, and
+		// model catalog, so there is nothing left to detect.
 		return append(rows,
 			kvRow("Provider", span(m.p.OAuthProvider, stCyan)),
 			kvRow("Fast", span(providerFastSummary(*m.p), stCyan)),
 			kvRow(locale.T("鉴权", "Auth"), span(providerAuthLabel(*m.p), stAvailable)),
-			plainLine(""),
-			m.actionButtonRow(locale.T("Auto Configure", "Auto Configure"), rowTest),
-			kvRow(locale.T("本地代理", "Local Proxy"), span(locale.T("已就绪（仅本次会话）", "Ready (this session only)"), stAvailable)),
+			m.localProxyRow(),
 		)
 	}
 
@@ -2932,7 +3187,11 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 	if m.usesModelsDev() {
 		// models.dev: endpoint/protocol come from metadata (read-only). The
 		// Provider row opens the catalog picker; only the API key is editable.
-		rows = append(rows, stepperRow("Provider", truncateMiddle(m.p.Name, idleWidth), m.cursor == m.mainRowIndex(rowProvider)))
+		name := truncateMiddle(m.p.Name, idleWidth)
+		if name == "" {
+			name = locale.T("选择 Provider", "Select provider")
+		}
+		rows = append(rows, stepperRow("Provider", "‹ "+name+" ›", m.cursor == m.mainRowIndex(rowProvider)))
 		rows = append(rows, kvRow(locale.T("端点", "Endpoint"), span(truncateMiddle(m.p.Endpoint, idleWidth), stCyan)))
 	} else {
 		urlValue := truncateMiddle(m.urlText.Get(), idleWidth) + urlCopiedHint
@@ -2983,8 +3242,6 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 // status on the same line: "Connection  ✓ Connected · Chat · 3 models".
 // The status appears only once a probe has actually succeeded; while dirty,
 // detecting, or failed it stays hidden so the header never shows stale state.
-// models.dev needs a verified key on top of the metadata pool: the pool is
-// populated at construction, so on its own it proves nothing about access.
 func (m *AdvancedConfigModel) connectionTitleRow() *tui.Element {
 	title := span(locale.T("连接", "Connection"), stTitle)
 	if m.live().detecting {
@@ -3001,6 +3258,28 @@ func (m *AdvancedConfigModel) connectionTitleRow() *tui.Element {
 		return line(title, span(status, stAvailable))
 	}
 	return line(title)
+}
+
+// localProxyRow reports the session-only runtime started for a subscription.
+// It is the page's one progress surface for that start: the panel renders
+// before the runtime is up, so this row carries the spinner until it answers.
+func (m *AdvancedConfigModel) localProxyRow() *tui.Element {
+	label := locale.T("本地代理", "Local Proxy")
+	switch {
+	case m.runtimeLoading:
+		return kvRow(label, span(
+			fmt.Sprintf("%s %s", spinnerAt(m.runtimeFrame), locale.T("启动中…", "Starting...")),
+			stSelected,
+		))
+	case m.runtimeErr != nil:
+		return kvRow(label, span(locale.T("启动失败（仅本次会话）", "Start failed (this session only)"), stUnavailable))
+	case m.runtimeCatalogFallback:
+		// Up, but serving a guess. Saying so is the point: otherwise the page
+		// looks healthy while the model list underneath it is wrong.
+		return kvRow(label, span(locale.T("已就绪 · 模型列表获取失败，沿用已保存的", "Ready · model list unavailable, keeping the saved one"), stUnavailable))
+	default:
+		return kvRow(label, span(locale.T("已就绪（仅本次会话）", "Ready (this session only)"), stAvailable))
+	}
 }
 
 // viewDetectionSection renders the connection-check feedback: the in-flight
@@ -3184,6 +3463,10 @@ func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
 	renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
 	renderEditable(rowTools, locale.T("工具", "Tools"), formatToolsLabel(m.reviewToolsValue()))
 	renderEditable(rowToolSearch, locale.T("工具搜索", "Tool Search"), formatSearchLabel(m.reviewSearchValue()))
+	// Status Line — ccl writes its own status line through Claude Code's
+	// --settings, which outranks ~/.claude/settings.json, so this is the only
+	// place a user can keep a personal one.
+	renderEditable(rowStatusline, locale.T("状态栏", "Status Line"), formatStatuslineLabel(m.p.StatuslineDisabled))
 
 	// Active checkbox.
 	activeBox := "[ ]"
@@ -3369,7 +3652,7 @@ func stepperRow(label, value string, selected bool) *tui.Element {
 	labelText := label + strings.Repeat(" ", max(labelPad-tui.StringWidth(label), 0)) + " "
 	return line(
 		span(prefix, prefixStyle),
-		span(labelText, tui.NewStyle()),
+		span(labelText, valueStyle),
 		span(value, valueStyle),
 	)
 }
@@ -3578,6 +3861,7 @@ var rowClickLabels = map[configRowKind]rowClickLabel{
 	rowContext:    {en: "Context & Compact", zh: "上下文与压缩"},
 	rowTools:      {en: "Tools", zh: "工具"},
 	rowToolSearch: {en: "Tool Search", zh: "工具搜索"},
+	rowStatusline: {en: "Status Line", zh: "状态栏"},
 	rowActive:     {en: "Set as active provider", zh: "设为当前激活 Provider"},
 	// The Save button also renders as "Save Provider" when activation is not
 	// chosen; matchRowLabel matches prefixes, so the shorter shared prefix of
@@ -3775,6 +4059,7 @@ func (m *AdvancedConfigModel) Watchers() []tui.Watcher {
 		tui.Watch(m.verifyDone, m.handleVerifyDone),
 		tui.Watch(m.mdDone, m.handleModelsDevDone),
 		tui.Watch(m.availDone, m.handleAvailabilityDone),
+		tui.Watch(m.oauthDone, m.handleOAuthRuntimeDone),
 		tui.OnTimer(120*time.Millisecond, m.handleFetchTick),
 		tui.OnTimer(120*time.Millisecond, m.handleAvailabilityTick),
 	}

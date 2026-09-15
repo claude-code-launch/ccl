@@ -15,10 +15,10 @@ func TestContextPresetFromEnv(t *testing.T) {
 	}{
 		{name: "default", want: provider.ContextPresetDefault},
 		{name: "balanced 500K", env: map[string]string{
-			provider.EnvMaxContextTokens: "500000", provider.EnvAutoCompactWindow: "500000", provider.EnvAutoCompactPct: "80",
+			provider.EnvMaxContextTokens: "500000", provider.EnvAutoCompactWindow: "500000", provider.EnvAutoCompactPct: "85",
 		}, want: provider.ContextPresetBalanced500K, balanced: true},
 		{name: "balanced 800K with whitespace", env: map[string]string{
-			provider.EnvMaxContextTokens: " 800000 ", provider.EnvAutoCompactWindow: "800000\t", provider.EnvAutoCompactPct: " 80",
+			provider.EnvMaxContextTokens: " 800000 ", provider.EnvAutoCompactWindow: "800000\t", provider.EnvAutoCompactPct: " 85",
 		}, want: provider.ContextPresetBalanced800K, balanced: true},
 		{name: "partial 800K", env: map[string]string{
 			provider.EnvMaxContextTokens: "800000", provider.EnvAutoCompactWindow: "800000",
@@ -49,8 +49,8 @@ func TestContextPresetValues(t *testing.T) {
 		ok                                    bool
 	}{
 		{preset: provider.ContextPresetDefault},
-		{preset: provider.ContextPresetBalanced500K, maxContext: "500000", compactWindow: "500000", compactPct: "80", ok: true},
-		{preset: provider.ContextPresetBalanced800K, maxContext: "800000", compactWindow: "800000", compactPct: "80", ok: true},
+		{preset: provider.ContextPresetBalanced500K, maxContext: "500000", compactWindow: "500000", compactPct: "85", ok: true},
+		{preset: provider.ContextPresetBalanced800K, maxContext: "800000", compactWindow: "800000", compactPct: "85", ok: true},
 	}
 	for _, tt := range tests {
 		maxContext, compactWindow, compactPct, ok := provider.ContextPresetValues(tt.preset)
@@ -68,16 +68,17 @@ func TestProtocolLabel(t *testing.T) {
 		providerType string
 		want         string
 	}{
-		{"anthropic", "anthropic", "anthropic"},
-		{"anthropic mixed case", "Anthropic", "anthropic"},
-		{"openai chat", "openai", "openai(chat)"},
-		{"openai chat display label", "openai(chat)", "openai(chat)"},
-		{"openai responses canonical", "openai_responses", "openai(responses)"},
-		{"openai responses hyphenated", "openai-responses", "openai(responses)"},
-		{"openai responses bare", "responses", "openai(responses)"},
-		{"openai responses display label", "openai(responses)", "openai(responses)"},
-		{"openai responses legacy display label", "openai(agent)", "openai(responses)"},
-		{"modelsdev", "modelsdev", "models.dev (auto)"},
+		{"anthropic", "anthropic", "anthropic-messages"},
+		{"anthropic mixed case", "Anthropic", "anthropic-messages"},
+		{"openai chat", "openai", "openai-chat"},
+		{"openai chat display label", "openai(chat)", "openai-chat"},
+		{"openai chat hyphenated", "openai-chat", "openai-chat"},
+		{"openai responses canonical", "openai_responses", "openai-responses"},
+		{"openai responses hyphenated", "openai-responses", "openai-responses"},
+		{"openai responses bare", "responses", "openai-responses"},
+		{"openai responses display label", "openai(responses)", "openai-responses"},
+		{"openai responses legacy display label", "openai(agent)", "openai-responses"},
+		{"modelsdev", "modelsdev", "models.dev / auto"},
 		{"empty", "", ""},
 	}
 
@@ -92,11 +93,11 @@ func TestProtocolLabel(t *testing.T) {
 
 func TestProtocolLabelForCopilotShowsAutomaticRouting(t *testing.T) {
 	p := provider.Provider{Type: "openai_responses", OAuthProvider: "copilot"}
-	if got := provider.ProtocolLabelForProvider(p); got != "copilot(auto)" {
+	if got := provider.ProtocolLabelForProvider(p); got != "copilot / auto" {
 		t.Fatalf("ProtocolLabelForProvider() = %q", got)
 	}
 	p.OAuthProvider = "gpt"
-	if got := provider.ProtocolLabelForProvider(p); got != "openai(responses)" {
+	if got := provider.ProtocolLabelForProvider(p); got != "openai-responses" {
 		t.Fatalf("non-Copilot label = %q", got)
 	}
 }
@@ -262,5 +263,46 @@ func TestOAuthRuntimeType(t *testing.T) {
 	}
 	if _, ok := provider.OAuthRuntimeType(""); ok {
 		t.Fatal("empty should not fix")
+	}
+}
+
+// TestAutoClawProviderType pins the AutoClaw provider wiring: it has its own
+// stored Type and is routed through the OpenAI Chat compatibility adapter.
+func TestAutoClawProviderType(t *testing.T) {
+	if !provider.IsAutoClawType("autoclaw") || !provider.IsAutoClawType(" AutoClaw ") {
+		t.Fatal("IsAutoClawType must accept the canonical value")
+	}
+	for _, other := range []string{"anthropic", "openai", "modelsdev", ""} {
+		if provider.IsAutoClawType(other) {
+			t.Fatalf("IsAutoClawType(%q) = true", other)
+		}
+	}
+	if provider.IsAnthropicType("autoclaw") {
+		t.Fatal("AutoClaw must not be treated as a direct Anthropic endpoint")
+	}
+	if got := provider.ProtocolLabel("autoclaw"); got != "openai-chat / autoclaw" {
+		t.Fatalf("ProtocolLabel(autoclaw) = %q", got)
+	}
+	if got := provider.ProtocolLabel("anthropic"); got != "anthropic-messages" {
+		t.Fatalf("ProtocolLabel(anthropic) = %q", got)
+	}
+	runtimeType, ok := provider.OAuthRuntimeType("autoclaw")
+	if !ok || runtimeType != "autoclaw" {
+		t.Fatalf("OAuthRuntimeType(autoclaw) = %q, %t", runtimeType, ok)
+	}
+}
+
+func TestPreferredAutoClawSlotDefaults(t *testing.T) {
+	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("autoclaw")
+	if !ok {
+		t.Fatal("AutoClaw must ship preferred slot defaults")
+	}
+	if custom != "zai_auto" || opus != "zai_auto" || sonnet != "zaicoding_glm-5.3" || haiku != "zai_glm-5.3-flash" {
+		t.Fatalf("defaults = %q/%q/%q/%q", custom, opus, sonnet, haiku)
+	}
+	p := provider.Provider{OAuthProvider: "autoclaw"}
+	provider.ApplyOAuthSlotDefaults(&p)
+	if p.CustomModelID != "zai_auto" || p.OpusModel != "zai_auto" || p.SonnetModel != "zaicoding_glm-5.3" || p.HaikuModel != "zai_glm-5.3-flash" {
+		t.Fatalf("applied defaults = %+v", p)
 	}
 }

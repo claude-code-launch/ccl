@@ -19,10 +19,10 @@ import (
 //
 //   - Default declares nothing and preserves Claude Code's native 200K/1M
 //     behavior selected per slot by the [1m] marker.
-//   - Balanced 500K declares a 500K context/window and an 80% compact threshold,
-//     which triggers compaction at approximately 400K.
-//   - Balanced 800K declares an 800K context/window and an 80% compact threshold,
-//     which triggers compaction at approximately 640K.
+//   - Balanced 500K declares a 500K context/window and an 85% compact threshold,
+//     which triggers compaction at approximately 425K.
+//   - Balanced 800K declares an 800K context/window and an 85% compact threshold,
+//     which triggers compaction at approximately 680K.
 //
 // Other historical or hand-written combinations are removed at launch so the
 // effective behavior always matches one of those choices. The per-slot [1m]

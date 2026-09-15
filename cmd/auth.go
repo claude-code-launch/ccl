@@ -28,7 +28,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|commandcode> [alias]",
+		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw> [alias]",
 		Aliases: []string{"auth"},
 		Short:   "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
@@ -37,26 +37,27 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|workbuddy
+  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw
 
 Notes:
   - Alias "auth" still works: ccl auth gpt
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
   - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
-  - Command Code opens the official "Get API key" browser page; authorize there,
-    copy the key, and paste it back into the terminal (2-minute window). The
-    non-browser alternative is importing the official CLI's stored key:
-    ccl import commandcode
+  - AutoClaw imports the completed desktop login from
+    ~/Library/Application Support/autoclaw/auth.json. The first sign-in is
+    still done in AutoClaw; after import CCL refreshes the session and calls
+    AutoClaw's remote OpenAI Chat proxy without starting AutoClaw:
+    ccl oauth autoclaw
   - Flags: --no-browser, --callback-port, --kiro-auth
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAuth(cmd.Context(), cmd.OutOrStdout(), cmd.InOrStdin(), args, opts)
+			return runAuth(cmd.Context(), cmd.OutOrStdout(), args, opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/Command Code)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	return cmd
 }
@@ -72,7 +73,7 @@ func supportsFastMode(providerName string) bool {
 	}
 }
 
-func runAuth(ctx context.Context, out io.Writer, in io.Reader, args []string, opts authOptions) error {
+func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions) error {
 	target, err := oauthproxy.ValidateLoginProvider(args[0])
 	if err != nil {
 		return err
@@ -94,7 +95,6 @@ func runAuth(ctx context.Context, out io.Writer, in io.Reader, args []string, op
 		NoBrowser:    opts.noBrowser,
 		CallbackPort: opts.callbackPort,
 		KiroAuthMode: opts.kiroAuthMode,
-		Stdin:        in,
 	})
 	if err != nil {
 		return fmt.Errorf("authenticate %s: %w", target, err)
@@ -171,11 +171,21 @@ func configureOAuthProvider(p provider.Provider, name, oauthProvider, credential
 	backend, _ := oauthproxy.BackendProvider(oauthProvider)
 	p.Name = name
 	p.Type = oauthRuntimeType(oauthProvider)
-	p.Endpoint = "oauth://" + backend
 	p.APIKey = ""
 	p.AnthropicAuth = ""
 	p.OAuthProvider = oauthProvider
 	p.OAuthAccountCredential = strings.TrimSpace(credentialFile)
+	if provider.IsAutoClawType(p.Type) {
+		// The local runtime uses the managed OpenAI Chat proxy and injects
+		// AutoClaw's X-Authorization contract. The built-in model catalog seeds
+		// the pool when the user has not chosen models yet.
+		p.Endpoint = oauthproxy.AutoClawOpenAIBaseURL()
+		if strings.TrimSpace(p.Model) == "" {
+			p.Model = strings.Join(oauthproxy.AutoClawModelIDs(), ",")
+		}
+	} else {
+		p.Endpoint = "oauth://" + backend
+	}
 	if !supportsFastMode(oauthProvider) {
 		p.FastMode = false
 	}
@@ -204,7 +214,7 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderKimi,
 		oauthproxy.ProviderKiro,
 		oauthproxy.ProviderWorkBuddy,
-		oauthproxy.ProviderCommandCode:
+		oauthproxy.ProviderAutoClaw:
 		return true
 	default:
 		return false

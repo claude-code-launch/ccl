@@ -23,9 +23,20 @@ func PreferredOAuthSlotDefaults(oauthProvider string) (custom, opus, sonnet, hai
 	case "gemini":
 		// Gemini / Antigravity subscription defaults. Same missing-catalog fallback.
 		return "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.1-pro-low", true
+	case "kimi":
+		// Kimi Code has no public model-list endpoint, so there is nothing for
+		// runtime discovery to fall back on: without these the runtime refuses to
+		// start. The IDs are the canonical upstream names from kimi_runtime.go's
+		// normalization pass (legacy k2.7-code aliases resolve to the same two).
+		return "kimi-for-coding", "kimi-for-coding", "kimi-for-coding", "kimi-for-coding-highspeed", true
 	case "kiro":
 		// The direct Kiro Messages adapter maps Claude IDs to Amazon Q model IDs.
 		return "claude-opus-4-6", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5", true
+	case "autoclaw":
+		// AutoClaw's managed zai catalog uses provider-prefixed route IDs. CCL
+		// removes that prefix only in the upstream JSON body; the route ID itself
+		// stays in X-Request-Model.
+		return "zai_auto", "zai_auto", "zaicoding_glm-5.3", "zai_glm-5.3-flash", true
 	default:
 		return "", "", "", "", false
 	}

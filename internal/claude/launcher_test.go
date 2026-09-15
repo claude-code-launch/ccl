@@ -39,6 +39,43 @@ type settingsJSON struct {
 	OutputStyle            string            `json:"outputStyle,omitempty"`
 	Language               string            `json:"language,omitempty"`
 	FastMode               bool              `json:"fastMode"`
+	StatusLine             *statusLineJSON   `json:"statusLine,omitempty"`
+}
+
+type statusLineJSON struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// ccl's status line must reach every session, because --settings outranks the
+// user's ~/.claude/settings.json and nothing else would install it.
+func TestPreviewSettingsInjectsStatusLine(t *testing.T) {
+	base := provider.Provider{
+		Name:     "statusline-test",
+		Type:     "anthropic",
+		Endpoint: "https://api.anthropic.com",
+		APIKey:   "sk-test",
+		Model:    "dummy",
+	}
+
+	settings := previewSettingsJSON(t, base)
+	if settings.StatusLine == nil {
+		t.Fatal("statusLine not injected into settings")
+	}
+	if settings.StatusLine.Type != "command" {
+		t.Errorf("statusLine.type = %q, want command", settings.StatusLine.Type)
+	}
+	// The command is the absolute ccl path, single-quoted, plus the subcommand.
+	if !strings.HasPrefix(settings.StatusLine.Command, "'") || !strings.HasSuffix(settings.StatusLine.Command, " statusline") {
+		t.Errorf("statusLine.command = %q, want a quoted executable followed by \" statusline\"", settings.StatusLine.Command)
+	}
+
+	optOut := base
+	optOut.StatuslineDisabled = true
+	raw := previewSettingsRaw(t, optOut)
+	if strings.Contains(raw, "statusLine") {
+		t.Errorf("statusLine should be absent when disabled, got %s", raw)
+	}
 }
 
 func TestPreviewSettingsOutputStyleAndLanguage(t *testing.T) {

@@ -21,10 +21,10 @@ func fetchModelsForProvider(p provider.Provider) []string {
 }
 
 func fetchModelInfosForProvider(p provider.Provider) []protocol.ModelInfo {
-	if provider.IsCommandCodeType(p.Type) {
-		// The Command Code gateway has no upstream model list; the runtime's
-		// static catalog is the authoritative one for the whole CLI as well.
-		return oauthproxy.CommandCodeModelCatalog()
+	if provider.IsAutoClawType(p.Type) {
+		// The managed proxy has a fixed account catalog; the built-in entries are
+		// authoritative for the CLI and avoid probing it as a generic gateway.
+		return oauthproxy.AutoClawModelCatalog()
 	}
 	var infos []protocol.ModelInfo
 	var err error

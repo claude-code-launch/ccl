@@ -45,7 +45,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderCommandCode} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}
@@ -57,20 +57,20 @@ func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
 	}
 }
 
-func TestImportCredentialOnlyAcceptsCommandCode(t *testing.T) {
+func TestImportCredentialOnlyAcceptsAutoClaw(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if err := os.MkdirAll(filepath.Join(home, ".ccl"), 0o700); err != nil {
+	desktopDir := filepath.Join(home, "autoclaw")
+	if err := os.MkdirAll(desktopDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	official := filepath.Join(home, ".commandcode", "auth.json")
-	if err := os.MkdirAll(filepath.Dir(official), 0o700); err != nil {
+	credential := `{"deviceId":"device-1","updatedAt":123,"token":"imported_access_token","refreshToken":"imported_refresh_token","userInfo":{"user_id":"user-1","user_name":"Claw","email":"claw@example.com"}}`
+	if err := os.WriteFile(filepath.Join(desktopDir, "auth.json"), []byte(credential), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(official, []byte(`{"apiKey":"user_import_key"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("COMMANDCODE_API_URL", "http://127.0.0.1:1")
+	originalPath := autoclawDesktopAuthPath
+	autoclawDesktopAuthPath = func() (string, error) { return filepath.Join(desktopDir, "auth.json"), nil }
+	t.Cleanup(func() { autoclawDesktopAuthPath = originalPath })
 
 	// OAuth backends never ride the import path.
 	for _, name := range []string{ProviderChatGPT, ProviderGemini, "unknown", ""} {
@@ -78,10 +78,26 @@ func TestImportCredentialOnlyAcceptsCommandCode(t *testing.T) {
 			t.Fatalf("ImportCredential(%q) should fail", name)
 		}
 	}
-	// The unreachable upstream means a valid import dies at validation, not at
-	// the import-dispatch layer, which proves commandcode is accepted.
-	if _, err := ImportCredential(context.Background(), ProviderCommandCode); err == nil {
-		t.Fatal("ImportCredential(commandcode) against an unreachable upstream should still fail validation")
+	result, err := ImportCredential(context.Background(), ProviderAutoClaw)
+	if err != nil {
+		t.Fatalf("ImportCredential(autoclaw) error: %v", err)
+	}
+	if result.Provider != ProviderAutoClaw || result.Backend != ProviderAutoClaw || result.Path == "" {
+		t.Fatalf("import result = %+v", result)
+	}
+	info, err := os.Stat(result.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("credential mode = %v, want 0600", info.Mode().Perm())
+	}
+	apiKey, err := AutoClawAPIKey(filepath.Base(result.Path))
+	if err != nil {
+		t.Fatalf("AutoClawAPIKey() error: %v", err)
+	}
+	if apiKey != "imported_access_token" {
+		t.Fatalf("resolved API key = %q", apiKey)
 	}
 }
 

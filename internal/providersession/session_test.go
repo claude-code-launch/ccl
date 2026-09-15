@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -77,4 +79,63 @@ func TestPrepareDiscoversModelsAndStartsResponsesRuntime(t *testing.T) {
 	// Session owns runtime teardown and Close is intentionally idempotent.
 	session.Close()
 	session.Close()
+}
+
+// TestPrepareStartsAutoClawRuntime pins the AutoClaw contract: the remote
+// bearer credential remains inside a CCL-owned runtime and Claude Code receives
+// only an ephemeral loopback endpoint/key.
+func TestPrepareStartsAutoClawRuntime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "autoclaw-account.json"),
+		[]byte(`{"type":"autoclaw","api_key":"plan-key.secret"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := Prepare(context.Background(), provider.Provider{
+		Name:                   "autoclaw",
+		Type:                   "autoclaw",
+		Endpoint:               "https://zcode.z.ai/api/v1/zcode-plan/anthropic",
+		OAuthProvider:          "autoclaw",
+		OAuthAccountCredential: "autoclaw-account.json",
+		Model:                  "GLM-5.3,GLM-5.3-Flash,GLM-5-Turbo",
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error: %v", err)
+	}
+	t.Cleanup(session.Close)
+	if !session.UseProxy || session.Runtime == nil {
+		t.Fatalf("AutoClaw provider did not start a runtime: %+v", session)
+	}
+	if !strings.HasPrefix(session.BaseURL, "http://127.0.0.1:") {
+		t.Fatalf("base URL = %q", session.BaseURL)
+	}
+	if session.Provider.APIKey == "" || session.Provider.APIKey == "plan-key.secret" {
+		t.Fatalf("runtime API key = %q", session.Provider.APIKey)
+	}
+	if !strings.HasPrefix(session.Provider.Endpoint, "http://127.0.0.1:") || !strings.HasSuffix(session.Provider.Endpoint, "/v1") {
+		t.Fatalf("runtime endpoint = %q", session.Provider.Endpoint)
+	}
+}
+
+// TestPrepareAutoClawReportsMissingCredential keeps the failure actionable.
+func TestPrepareAutoClawReportsMissingCredential(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := Prepare(context.Background(), provider.Provider{
+		Name:                   "autoclaw",
+		Type:                   "autoclaw",
+		Endpoint:               "https://zcode.z.ai/api/v1/zcode-plan/anthropic",
+		OAuthProvider:          "autoclaw",
+		OAuthAccountCredential: "missing.json",
+	})
+	if err == nil {
+		t.Fatal("Prepare() must fail when the bound credential is missing")
+	}
+	if !strings.Contains(err.Error(), "ccl oauth autoclaw") {
+		t.Fatalf("error = %v", err)
+	}
 }
