@@ -64,7 +64,7 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, " \tNAME\tTYPE\tAUTH\tEFFORT\tCONTEXT\tMODELS\tSLOTS")
+	fmt.Fprintln(tw, " \tNAME\tTYPE/AUTH\tCONTEXT\tMODELS\tSLOTS")
 	for _, name := range names {
 		mark := " "
 		if name == cfg.ActiveProvider {
@@ -73,13 +73,11 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 		p := cfg.Providers[name]
 		fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\n",
 			mark,
 			name,
-			provider.ProtocolLabelForProvider(p),
-			providerAuthLabel(p),
-			providerEffortSummary(p),
-			providerOneMShortSummary(p),
+			providerTypeAuthSummary(p),
+			providerContextPresetSummary(p),
 			formatModelCount(p.Model),
 			formatSlotCount(p),
 		)
@@ -125,15 +123,23 @@ func formatModelCount(modelStr string) string {
 	return fmt.Sprintf("%d", count)
 }
 
-func providerOneMShortSummary(p provider.Provider) string {
-	replacer := strings.NewReplacer(
-		"opus", "O",
-		"sonnet", "S",
-		"haiku", "H",
-		"custom", "C",
-		"enabled", "on",
-	)
-	return replacer.Replace(providerOneMSummary(p))
+func providerTypeAuthSummary(p provider.Provider) string {
+	if oauthProvider := strings.ToLower(strings.TrimSpace(p.OAuthProvider)); oauthProvider != "" {
+		return oauthProvider + "/oauth"
+	}
+	protocol := strings.ReplaceAll(provider.ProtocolLabelForProvider(p), " / ", "/")
+	return protocol + "/" + providerAuthLabel(p)
+}
+
+func providerContextPresetSummary(p provider.Provider) string {
+	switch provider.ContextPresetFromEnv(p.Env) {
+	case provider.ContextPresetBalanced500K:
+		return "500K"
+	case provider.ContextPresetBalanced800K:
+		return "800K"
+	default:
+		return "default"
+	}
 }
 
 func formatSlotSummaryLong(p provider.Provider) string {

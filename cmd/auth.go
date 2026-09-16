@@ -44,11 +44,10 @@ Notes:
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
   - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
-  - AutoClaw imports the completed desktop login from
-    ~/Library/Application Support/autoclaw/auth.json. The first sign-in is
-    still done in AutoClaw; after import CCL refreshes the session and calls
-    AutoClaw's remote OpenAI Chat proxy without starting AutoClaw:
-    ccl oauth autoclaw
+  - AutoClaw opens a CCL-owned browser login, including the provider's human
+    verification step, then stores and refreshes the resulting session without
+    starting AutoClaw. To reuse the desktop login instead, run:
+    ccl import autoclaw
   - Flags: --no-browser, --callback-port, --kiro-auth
 `,
 		Args: cobra.RangeArgs(1, 2),
@@ -57,7 +56,7 @@ Notes:
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	return cmd
 }

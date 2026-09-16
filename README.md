@@ -73,7 +73,7 @@ ccl oauth qoder      # Qoder 浏览器 OAuth（不需要 Qoder CLI）
 ccl oauth kimi       # Kimi / Moonshot
 ccl oauth kiro       # Kiro Portal（Google / GitHub）
 ccl oauth workbuddy  # WorkBuddy 网页登录
-ccl oauth autoclaw   # AutoClaw / ZCode coding plan（本地 Anthropic-to-Chat 代理）
+ccl oauth autoclaw   # AutoClaw / ZCode coding plan（浏览器登录 + 本地 Anthropic-to-Chat 代理）
 
 # 登录成功后直接启动
 ccl
@@ -173,7 +173,7 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 | 接入类型 | 登录、凭据与刷新 | 模型目录 | 请求路由与协议转换 | CCL runtime 所有权 |
 |---|---|---|---|---|
 | Anthropic API Key 网关 | CCL 保存用户 API Key | CCL 直查 Anthropic `/v1/models` | Claude Code 直连 Messages | Claude Code 直连（CCL 不代理） |
-| AutoClaw / ZCode coding plan | 首次在 AutoClaw 桌面端完成登录；`ccl oauth autoclaw` / `ccl import autoclaw` 读取 `auth.json`，CCL 自己刷新 access/refresh token | CCL 使用 AutoClaw managed provider 的六个内建路由 ID 与上下文元数据 | CCL 本地 Anthropic 代理转换到 `{origin}/autoclaw-proxy/proxy/autoclaw/chat/completions` | `X-Authorization` + `X-Request-Model` 等桌面兼容 headers；不启动 AutoClaw 主进程 |
+| AutoClaw / ZCode coding plan | `ccl oauth autoclaw` 由 CCL 打开 Google OAuth 与人机校验；`ccl import autoclaw` 可选读取桌面 `auth.json`；CCL 自己刷新 access/refresh token | CCL 使用 AutoClaw managed provider 的六个内建路由 ID 与上下文元数据 | CCL 本地 Anthropic 代理转换到 `{origin}/autoclaw-proxy/proxy/autoclaw/chat/completions` | `X-Authorization` + `X-Request-Model` 等桌面兼容 headers；不启动 AutoClaw 主进程 |
 | OpenAI Chat API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CCL `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
 | Codex Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查上游 `/models` | CCL 完成 Messages ↔ Responses、Codex 身份头、SSE 与错误透传 | CCL 全部拥有 |
 | GPT 订阅 | CCL 自研 OAuth、绑定凭据并刷新 token | CCL 使用 provider 槽位构建本机会话模型目录 | CCL 完成 Messages ↔ Responses，并携带账号 ID | CCL 全部拥有 |
@@ -352,7 +352,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 | `kimi` | kimi | `openai-chat` | Kimi/Moonshot device-code |
 | `kiro` | kiro | `anthropic` | Kiro Portal PKCE（默认，Google / GitHub）或 AWS Builder ID device-code |
 | `workbuddy` | workbuddy | `openai-chat` | WorkBuddy 网页登录 + token/account 轮询 |
-| `autoclaw` | autoclaw | `openai-chat / autoclaw`（CCL 本地代理） | AutoClaw 桌面端登录后读取 `auth.json` |
+| `autoclaw` | autoclaw | `openai-chat / autoclaw`（CCL 本地代理） | CCL 浏览器 Google OAuth；也可导入桌面 `auth.json` |
 
 说明：
 
@@ -385,7 +385,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 - **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：可在 `ccl set` 单页的 Runtime 区用 `←→` 调整，也可在 Claude Code 内用 `/fast` 开关。
 - **Copilot** 使用独立的 GitHub OAuth 凭据和 `api.githubcopilot.com`；登录写盘前会验证账号确实拥有可用的 Copilot 模型。启动时读取账号实际模型目录，并根据每个模型声明的端点选择 Responses、Chat Completions 或 Anthropic Messages；该目录是 `ccl models --all` 的权威来源，不会混入本地兼容层的内建模型。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `copilot / auto`。
 - **Qoder** 完全由 ccl 直接接入：`ccl oauth qoder` 打开 Qoder 授权页并轮询 OAuth token；运行时直接刷新 token、读取账号模型目录、生成 COSY 签名、编码请求并把 Qoder SSE 转换为 Anthropic Messages。不会调用、探测或读取 `qodercli`，系统无需安装 Qoder CLI。模型目录由账号实时返回；`ccl models` 会显示 Qoder 展示名、内部模型 ID、Credit 倍率以及 New / 错峰优惠标记。暂时无法读取目录时使用最小兼容目录启动。
-- **AutoClaw**（AutoClaw Code / ZCode coding plan）通过 **CCL 本地 Anthropic-to-OpenAI Chat 代理**接入：先在 AutoClaw 桌面端完成一次登录，再运行 `ccl oauth autoclaw` 或 `ccl import autoclaw`。CCL 从 `~/Library/Application Support/autoclaw/auth.json` 读取桌面端保存的 access/refresh token；macOS 下通过 Chromium Safe Storage Keychain 解密，不修改 AutoClaw 文件。随后 CCL 将 `type: autoclaw` provider 绑定到 `~/.ccl/auth/` 的 0600 凭据，在会话内自动刷新 token，并把 Claude Messages 转为 OpenAI Chat Completions，发送到 `https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions`。上游使用 `X-Authorization`、`X-Request-Model`、`X-Harness-Type: zcode` 等桌面兼容 headers；Claude Code 只看到 CCL 的随机 loopback key，运行时不启动 AutoClaw 主进程。
+- **AutoClaw**（AutoClaw Code / ZCode coding plan）通过 **CCL 本地 Anthropic-to-OpenAI Chat 代理**接入：`ccl oauth autoclaw` 启动 CCL 自己的 loopback 页面，完成人机校验和 Google OAuth 回调，并直接换取 access/refresh token；全程不需要启动 AutoClaw 主进程。若要复用桌面端已有账号，可改用 `ccl import autoclaw`，它从 `~/Library/Application Support/autoclaw/auth.json` 读取凭据，macOS 下通过 Chromium Safe Storage Keychain 解密且不修改桌面文件。两条路径都会将 `type: autoclaw` provider 绑定到 `~/.ccl/auth/` 的 0600 凭据，在会话内自动刷新 token，并把 Claude Messages 转为 OpenAI Chat Completions，发送到 `https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions`。上游使用 `X-Authorization`、`X-Request-Model`、`X-Harness-Type: zcode` 等桌面兼容 headers；Claude Code 只看到 CCL 的随机 loopback key。
 - **WorkBuddy** 使用公网 `www.workbuddy.ai` 的官方网页登录轮询流程。登录时由 CCL 获取新的 state 并轮询 token/account；运行时 CCL 刷新凭据、读取 `/v3/config` 模型目录，并把请求发送到 `/v2/chat/completions`。Claude Code Messages 与 OpenAI Chat Completions 的转换由 CCL `chatCompletionsService` 完成；WorkBuddy 的鉴权头、用户/租户头、客户端身份和会话追踪头由 CCL 注入。
 
 `ccl oauth kiro` 默认打开 Kiro Portal，通过 PKCE 登录 Google / GitHub 账号；这样运行时和
@@ -407,7 +407,7 @@ ccl import autoclaw        # 读取 AutoClaw 桌面端 auth.json
 ccl import autoclaw work   # 同上，provider 名用 work
 ```
 
-目前唯一支持的来源是 AutoClaw 桌面端：`ccl import autoclaw` 读取 `~/Library/Application Support/autoclaw/auth.json`（Windows/Linux 使用对应的应用配置目录）。macOS 下 `token` / `refreshToken` 形如 `enc:...` 时，CCL 使用 Chromium Safe Storage Keychain 解密；导入只复制到 `~/.ccl/auth/`（0600），不会修改桌面端文件，也不会把 token 写入 `config.yaml`。首次登录仍需在 AutoClaw 中完成；之后 CCL 可独立刷新并调用 managed proxy。
+目前唯一支持的导入来源是 AutoClaw 桌面端：`ccl import autoclaw` 读取 `~/Library/Application Support/autoclaw/auth.json`（Windows/Linux 使用对应的应用配置目录）。macOS 下 `token` / `refreshToken` 形如 `enc:...` 时，CCL 使用 Chromium Safe Storage Keychain 解密；导入只复制到 `~/.ccl/auth/`（0600），不会修改桌面端文件，也不会把 token 写入 `config.yaml`。首次登录也可以直接使用 `ccl oauth autoclaw`，无需安装或启动桌面端。
 
 ### `ccl cloud` — 端到端加密云同步
 
@@ -635,7 +635,7 @@ providers:
 
 - `type: openai`（显示 `openai-chat`）：经 CCL `chatCompletionsService` 转到上游 Chat Completions；`type: openai_responses`（显示 `openai-responses`）：经 CCL 自研 Codex Responses runtime 走 Responses API；`type: anthropic`（显示 `anthropic-messages`）：由 Claude Code 直连 Anthropic Messages。协议由 `type` 明确选择，不根据 endpoint 路径猜测；Custom provider 可在核对页切换 Chat / Responses / Anthropic。
 - `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用本机 Messages → Amazon Q 适配器；`oauthProvider: qoder` 使用本机 Messages → Qoder 直接适配器。
-- `type: autoclaw`（显示 `openai-chat / autoclaw`）：`ccl oauth autoclaw` / `ccl import autoclaw` 写入的 AutoClaw provider。`endpoint` 保存 managed Chat base，`oauthAccountCredential` 绑定 `~/.ccl/auth/` 的桌面会话凭据；会话启动时 CCL 创建 loopback Anthropic-to-Chat runtime，由 runtime 保管并刷新 access/refresh token，发送 `X-Authorization` 等上游 headers。
+- `type: autoclaw`（显示 `openai-chat / autoclaw`）：`ccl oauth autoclaw` / `ccl import autoclaw` 写入的 AutoClaw provider。`endpoint` 保存 managed Chat base，`oauthAccountCredential` 绑定 `~/.ccl/auth/` 的浏览器登录或桌面导入凭据；会话启动时 CCL 创建 loopback Anthropic-to-Chat runtime，由 runtime 保管并刷新 access/refresh token，发送 `X-Authorization` 等上游 headers。
 - `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
 - `oauthAccountCredential`：该订阅 provider 精确绑定的 `~/.ccl/auth/` 凭据文件名。
 - `bypass_mode`：全局是否自动附加 `--dangerously-skip-permissions`。

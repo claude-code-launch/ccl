@@ -47,6 +47,11 @@ type chatCompletionsService struct {
 	modelRoute map[string]string
 	client     *http.Client
 	usage      *UsageTracker
+	// fastRetry controls CCL's hidden 429/5xx replay loop. It defaults to true
+	// for ordinary OpenAI-compatible gateways. Subscription brokers that charge
+	// per invocation can turn it off so an ambiguous 5xx is never submitted a
+	// second time behind the user's back.
+	fastRetry bool
 	// normalizeModel rewrites the upstream model ID after alias routing. Kimi uses
 	// it to strip its "kimi-" prefix and remap legacy code aliases.
 	normalizeModel func(string) string
@@ -58,6 +63,10 @@ type chatCompletionsService struct {
 	// model normalization but before the request is sent. Kimi uses it to link
 	// tool results to tool calls and drop empty assistant messages.
 	normalizeBody func([]byte) ([]byte, error)
+	// normalizeRequest is the request-aware form of normalizeBody. It may update
+	// both the body and the routed model, which is required when a backend routes
+	// multimodal requests through a dedicated model/header pair.
+	normalizeRequest func(*chatCompletionsConvertedRequest) error
 }
 
 type chatCompletionsUpstreamError struct {
@@ -186,7 +195,7 @@ func newChatCompletionsServiceWithAuthorizer(apiKey, endpoint string, routes []r
 	}
 	return &chatCompletionsService{
 		apiKey: apiKey, endpoint: endpoint, authorizer: authorizer,
-		models: models, modelRoute: modelRoute, usage: usage,
+		models: models, modelRoute: modelRoute, usage: usage, fastRetry: true,
 		client: &http.Client{Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
 			ResponseHeaderTimeout: 90 * time.Second,
@@ -303,6 +312,14 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 		}
 		converted.body = normalized
 	}
+	if s.normalizeRequest != nil {
+		if normalizeErr := s.normalizeRequest(converted); normalizeErr != nil {
+			LogWarnEvent("request_rejected", "component", "openai_chat", "request_id", requestID,
+				"status", http.StatusBadRequest, "reason", "request_normalization", "error", normalizeErr)
+			writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
+			return
+		}
+	}
 	LogDebugEvent("request_converted", "component", "openai_chat", "request_id", requestID,
 		"client_model", converted.clientModel, "upstream_model", converted.model,
 		"stream", converted.stream, "body_bytes", len(converted.body),
@@ -376,7 +393,7 @@ func (s *chatCompletionsService) recordUsage(converted *chatCompletionsConverted
 // as-is, letting Claude Code do its own full backoff over the relayed
 // status/body/Retry-After. The 401 refresh below is part of one attempt.
 func (s *chatCompletionsService) call(ctx context.Context, converted *chatCompletionsConvertedRequest) (*http.Response, error) {
-	return retryUpstream(ctx, "openai_chat", func() (*http.Response, error) {
+	attempt := func() (*http.Response, error) {
 		response, err := s.callOnce(ctx, converted)
 		if err != nil {
 			return nil, err
@@ -397,7 +414,11 @@ func (s *chatCompletionsService) call(ctx context.Context, converted *chatComple
 			return nil, chatDrainError(ctx, response)
 		}
 		return response, nil
-	})
+	}
+	if !s.fastRetry {
+		return attempt()
+	}
+	return retryUpstream(ctx, "openai_chat", attempt)
 }
 
 func (s *chatCompletionsService) callOnce(ctx context.Context, converted *chatCompletionsConvertedRequest) (*http.Response, error) {

@@ -34,9 +34,8 @@ session used by its managed OpenAI Chat proxy:
   ccl import autoclaw work   # same backend, provider name "work"
 
 Notes:
-  - ccl oauth autoclaw and ccl import autoclaw both import the completed
-    desktop login; the latter name is kept for scripts and backwards
-    compatibility
+  - ccl oauth autoclaw starts a fresh browser OAuth flow; this command instead
+    reuses the completed desktop login as a compatibility path
   - CCL stores its own refreshable credential and calls the remote OpenAI Chat
     proxy through a local Anthropic adapter
   - credentials are stored as per-account files under ~/.ccl/auth/ (0600)

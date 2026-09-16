@@ -230,18 +230,40 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"Registered providers:", "NAME", "TYPE", "AUTH", "MODELS", "SLOTS", "beta", "openai-chat", "bearer", "4", "2/5"} {
+	for _, want := range []string{"Registered providers:", "NAME", "TYPE/AUTH", "CONTEXT", "MODELS", "SLOTS", "beta", "openai-chat/bearer", "default", "4", "2/5"} {
 		if !contains(out, want) {
 			t.Fatalf("expected compact output to contain %q, got:\n%s", want, out)
 		}
 	}
-	for _, unwanted := range []string{"manual-opus", "sonnet", "O:manual-opus", "S:sonnet"} {
+	for _, unwanted := range []string{"manual-opus", "sonnet", "O:manual-opus", "S:sonnet", "default (200K/1M)"} {
 		if contains(out, unwanted) {
 			t.Fatalf("compact output should not contain %q, got:\n%s", unwanted, out)
 		}
 	}
+	if contains(out, "EFFORT") {
+		t.Fatalf("compact output should not contain the EFFORT column, got:\n%s", out)
+	}
 	if contains(out, "pool-a,pool-b") {
 		t.Fatalf("compact output should not include full model pool, got:\n%s", out)
+	}
+}
+
+func TestProviderTypeAuthSummaryUsesCompactOAuthBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		p    provider.Provider
+		want string
+	}{
+		{name: "autoclaw oauth", p: provider.Provider{Type: "autoclaw", OAuthProvider: "autoclaw"}, want: "autoclaw/oauth"},
+		{name: "copilot oauth", p: provider.Provider{Type: "openai_responses", OAuthProvider: "copilot"}, want: "copilot/oauth"},
+		{name: "anthropic key", p: provider.Provider{Type: "anthropic"}, want: "anthropic-messages/x-api-key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := providerTypeAuthSummary(tt.p); got != tt.want {
+				t.Fatalf("providerTypeAuthSummary() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

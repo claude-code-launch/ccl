@@ -22,8 +22,8 @@ const (
 	ProviderKiro          = "kiro"
 	ProviderWorkBuddy     = "workbuddy"
 	// ProviderAutoClaw is the AutoClaw Code (ZCode coding plan) backend. CCL
-	// imports the desktop session, refreshes it locally, and owns the
-	// Anthropic-to-OpenAI Chat adapter used to reach the managed proxy.
+	// performs browser OAuth, refreshes the resulting session locally, and owns
+	// the Anthropic-to-OpenAI Chat adapter used to reach the managed proxy.
 	ProviderAutoClaw = "autoclaw"
 	// backendXAI is the internal backend key for xAI/Grok credentials.
 	backendXAI = "xai"
@@ -118,8 +118,8 @@ func ImportCredential(ctx context.Context, providerName string) (LoginResult, er
 // ValidateLoginProvider returns the canonical public OAuth provider name.
 // Codex remains an internal backend and a legacy runtime value, but new logins
 // use the public GPT name (model family) because both routes authenticate the same account.
-// Copilot is a separate GitHub OAuth and API backend. AutoClaw imports the
-// completed desktop session and stores a refreshable managed-proxy credential.
+// Copilot is a separate GitHub OAuth and API backend. AutoClaw runs its Google
+// browser flow and stores a refreshable managed-proxy credential.
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {

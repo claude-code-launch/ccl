@@ -417,8 +417,8 @@ func formatTokenCount(tokens int) string {
 }
 
 // checkDoctorAutoClawConnectivity probes through CCL's local AutoClaw runtime.
-// The runtime imports and refreshes the desktop session itself, then sends the
-// converted request to AutoClaw's managed OpenAI Chat proxy.
+// The runtime loads and refreshes the bound OAuth/imported session itself, then
+// sends the converted request to AutoClaw's managed OpenAI Chat proxy.
 func checkDoctorAutoClawConnectivity(ctx context.Context, p provider.Provider) bool {
 	if ctx == nil {
 		ctx = context.Background()
@@ -680,9 +680,9 @@ func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, a
 	wire := "openai"
 	switch {
 	case provider.IsAutoClawType(providerType):
-		// The managed account defines AutoClaw's fixed model catalog, and a live
-		// probe can be refused by the gateway's human verification (which answers
-		// with an empty stream). Availability follows the catalog instead.
+		// AutoClaw's runtime is a local Anthropic Messages adapter. Probe that
+		// adapter rather than treating catalog membership as availability: plan
+		// quota and per-model entitlements can differ even when the route exists.
 		wire = "autoclaw"
 	case provider.IsAnthropicType(providerType):
 		wire = "anthropic"
@@ -719,10 +719,7 @@ func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, api
 	case "openai_responses":
 		return testSingleOpenAIResponsesModelContext(ctx, model, endpoint, apiKey, timeout)
 	case "autoclaw":
-		// The managed AutoClaw catalogue is fixed by the account surface rather
-		// than discovered, so availability is catalog membership (see
-		// testSingleModelWithProtocolsContext).
-		return oauthproxy.AutoClawSupportsModel(model)
+		return testSingleAnthropicModelWithAuthContext(ctx, model, endpoint, apiKey, "bearer", timeout)
 	default:
 		return testSingleOpenAIModelContext(ctx, model, endpoint, apiKey, timeout)
 	}

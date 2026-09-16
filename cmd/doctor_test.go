@@ -154,18 +154,31 @@ func TestAutoClawResponseHasContentDetectsEmptyStream(t *testing.T) {
 	}
 }
 
-func TestAutoClawModelAvailabilityUsesCatalogMembership(t *testing.T) {
-	// AutoClaw's model list is fixed by the plan; per-model doctor checks use the
-	// catalog after the one end-to-end runtime connectivity probe.
-	if !testSingleModelForProtocolContext(context.Background(), "glm-5.3", "https://unreachable.invalid", "k", "autoclaw", "", time.Second) {
-		t.Fatal("catalog model reported unavailable")
+func TestAutoClawModelAvailabilityUsesLiveLocalRuntime(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls++
+		if request.URL.Path != "/v1/messages" || request.Header.Get("Authorization") != "Bearer local-key" {
+			http.Error(writer, "wrong local runtime contract", http.StatusBadRequest)
+			return
+		}
+		body, _ := io.ReadAll(request.Body)
+		if strings.Contains(string(body), `"model":"available-model"`) {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"id":"msg","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			return
+		}
+		http.Error(writer, `{"error":{"message":"quota used up"}}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	if !testSingleModelForProtocolContext(context.Background(), "available-model", server.URL+"/v1", "local-key", "autoclaw", "", time.Second) {
+		t.Fatal("working AutoClaw route reported unavailable")
 	}
-	if testSingleModelForProtocolContext(context.Background(), "gpt-5", "https://unreachable.invalid", "k", "autoclaw", "", time.Second) {
-		t.Fatal("model outside the catalog reported available")
+	if testSingleModelWithProtocolsContext(context.Background(), "quota-exhausted", server.URL+"/v1", "local-key", "autoclaw", "", nil, time.Second) {
+		t.Fatal("quota-exhausted AutoClaw route reported available")
 	}
-	// The provider-type entry point must route AutoClaw to that same catalog
-	// check rather than to the shared Anthropic probe.
-	if !testSingleModelWithProtocolsContext(context.Background(), "GLM-5.3", "https://unreachable.invalid", "k", "autoclaw", "", nil, time.Second) {
-		t.Fatal("autoclaw provider type did not resolve availability from the catalog")
+	if calls != 2 {
+		t.Fatalf("live availability calls = %d, want 2", calls)
 	}
 }

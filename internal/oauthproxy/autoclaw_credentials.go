@@ -24,6 +24,9 @@ const (
 	autoclawRefreshAppID       = "100003"
 	autoclawRefreshAppKey      = "38d2391985e2369a5fb8227d8e6cd5e5"
 	autoclawRefreshMaxBodySize = int64(1 << 20)
+	autoclawRefreshLockPoll    = 50 * time.Millisecond
+	autoclawRefreshLockStale   = 45 * time.Second
+	autoclawRefreshCoalesce    = 30 * time.Second
 )
 
 var (
@@ -36,8 +39,8 @@ var (
 )
 
 // ImportAutoClawCredential copies the completed AutoClaw desktop login into
-// ~/.ccl/auth. It is intentionally the same operation as `oauth autoclaw` so
-// both command names have one source of truth and neither starts AutoClaw.
+// ~/.ccl/auth. This is the non-browser compatibility path used by
+// `ccl import autoclaw`; `ccl oauth autoclaw` performs a fresh browser login.
 func ImportAutoClawCredential(ctx context.Context, authDir string) (LoginResult, error) {
 	state, sourcePath, err := loadAutoClawDesktopAuth(ctx)
 	if err != nil {
@@ -89,7 +92,7 @@ func newAutoClawOAuthAuthorizer(credentialFile string) (*autoClawOAuthAuthorizer
 	if err != nil {
 		return nil, err
 	}
-	authorizer.version = credential.version
+	authorizer.version = autoClawEffectiveVersion(credential.version)
 	return authorizer, nil
 }
 
@@ -127,7 +130,9 @@ func (a *autoClawOAuthAuthorizer) decorateHeader(header http.Header, converted *
 	header.Set("X-Product", "autoclaw")
 	header.Set("X-Harness-Type", "zcode")
 	header.Set("X-Tm", autoClawPlatformName())
+	a.mu.Lock()
 	version := strings.TrimSpace(a.version)
+	a.mu.Unlock()
 	if version == "" {
 		version = autoClawInstalledVersion()
 	}
@@ -153,7 +158,7 @@ func (a *autoClawOAuthAuthorizer) authorize(ctx context.Context, forceRefresh bo
 	if err != nil {
 		return "", err
 	}
-	a.version = credential.version
+	a.version = autoClawEffectiveVersion(credential.version)
 	if credential.disabled {
 		return "", fmt.Errorf("AutoClaw credential %s is disabled", credential.fileName)
 	}
@@ -161,7 +166,7 @@ func (a *autoClawOAuthAuthorizer) authorize(ctx context.Context, forceRefresh bo
 		return "", fmt.Errorf("AutoClaw credential %s has no access token; run `ccl oauth autoclaw`", credential.fileName)
 	}
 	if forceRefresh || autoClawTokenNeedsRefresh(credential) {
-		credential, err = a.refresh(ctx, credential)
+		credential, err = a.refresh(ctx, credential, forceRefresh)
 		if err != nil {
 			return "", err
 		}
@@ -263,17 +268,46 @@ func autoClawTokenNeedsRefresh(credential *autoClawCredential) bool {
 	return time.Now().Add(time.Minute).After(credential.expiresAt)
 }
 
-func (a *autoClawOAuthAuthorizer) refresh(ctx context.Context, credential *autoClawCredential) (*autoClawCredential, error) {
-	if strings.TrimSpace(credential.refreshToken) == "" {
-		return nil, fmt.Errorf("AutoClaw credential %s has no refresh token; run `ccl oauth autoclaw` again", credential.fileName)
-	}
+func (a *autoClawOAuthAuthorizer) refresh(ctx context.Context, observed *autoClawCredential, forced bool) (*autoClawCredential, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	release, err := acquireAutoClawRefreshLock(refreshCtx, a.path)
+	if err != nil {
+		return nil, fmt.Errorf("lock AutoClaw credential refresh: %w", err)
+	}
+	defer release()
+
+	// Another CCL process may have refreshed and atomically replaced the file
+	// while this caller was waiting for the cross-process lock. Always reload
+	// under the lock and reuse that result instead of replaying a rotating refresh
+	// token. A short last_refresh window also coalesces simultaneous 401s within
+	// one process: each request observed the same stale access token, but their
+	// forced refresh callbacks arrive serially.
+	credential, err := a.load()
+	if err != nil {
+		return nil, err
+	}
+	if observed != nil && credential.accessToken != observed.accessToken && !autoClawTokenNeedsRefresh(credential) {
+		a.version = autoClawEffectiveVersion(credential.version)
+		return credential, nil
+	}
+	if forced && !autoClawTokenNeedsRefresh(credential) && autoClawRecentlyRefreshed(credential, autoclawRefreshCoalesce) {
+		a.version = autoClawEffectiveVersion(credential.version)
+		return credential, nil
+	}
+	if !forced && !autoClawTokenNeedsRefresh(credential) {
+		a.version = autoClawEffectiveVersion(credential.version)
+		return credential, nil
+	}
+	if strings.TrimSpace(credential.refreshToken) == "" {
+		return nil, fmt.Errorf("AutoClaw credential %s has no refresh token; run `ccl oauth autoclaw` again", credential.fileName)
+	}
 	timestamp := time.Now().Unix()
-	headers := autoClawSignedHeaders(timestamp, credential.version)
+	a.version = autoClawEffectiveVersion(credential.version)
+	headers := autoClawSignedHeaders(timestamp, a.version)
 	headers.Set("Authorization", "Bearer "+credential.accessToken)
 	payload := map[string]string{
 		"source_id":     "autoclaw",
@@ -302,7 +336,6 @@ func (a *autoClawOAuthAuthorizer) refresh(ctx context.Context, credential *autoC
 		return nil, errors.New("refresh AutoClaw token: response has no access_token")
 	}
 	credential.accessToken = stripBearerPrefix(access)
-	a.version = credential.version
 	if refresh != "" {
 		credential.refreshToken = refresh
 	}
@@ -310,10 +343,17 @@ func (a *autoClawOAuthAuthorizer) refresh(ctx context.Context, credential *autoC
 	credential.metadata["access_token"] = credential.accessToken
 	credential.metadata["refresh_token"] = credential.refreshToken
 	credential.metadata["device_id"] = credential.deviceID
-	credential.metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+	credential.metadata["app_version"] = a.version
+	refreshedAt := time.Now().UTC()
+	credential.metadata["last_refresh"] = refreshedAt.Format(time.RFC3339Nano)
 	if expiresAt := autoclawJWTExpiry(credential.accessToken); !expiresAt.IsZero() {
 		credential.expiresAt = expiresAt
 		credential.metadata["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
+	} else {
+		// Never retain the previous access token's expiry after a successful
+		// opaque-token refresh; doing so would trigger a refresh on every request.
+		credential.expiresAt = time.Time{}
+		delete(credential.metadata, "expires_at")
 	}
 	if err := persistAutoClawCredential(credential.path, credential.metadata); err != nil {
 		return nil, fmt.Errorf("persist refreshed AutoClaw credential: %w", err)
@@ -321,6 +361,64 @@ func (a *autoClawOAuthAuthorizer) refresh(ctx context.Context, credential *autoC
 	LogInfof("credential refreshed component=autoclaw_chat credential_file=%s expires_at=%s",
 		credential.fileName, credential.expiresAt.UTC().Format(time.RFC3339))
 	return credential, nil
+}
+
+func autoClawRecentlyRefreshed(credential *autoClawCredential, window time.Duration) bool {
+	if credential == nil || window <= 0 {
+		return false
+	}
+	value := strings.TrimSpace(firstMetadataString(credential.metadata, "last_refresh"))
+	if value == "" {
+		return false
+	}
+	refreshedAt, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return false
+	}
+	age := time.Since(refreshedAt)
+	return age >= 0 && age <= window
+}
+
+// acquireAutoClawRefreshLock serializes refresh-token rotation across CCL
+// processes. O_EXCL is portable and atomic on the local filesystems where the
+// credential lives. The owner marker prevents an old process from removing a
+// replacement lock after stale-lock recovery.
+func acquireAutoClawRefreshLock(ctx context.Context, credentialPath string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lockPath := credentialPath + ".refresh.lock"
+	owner := uuid.NewString()
+	for {
+		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			if _, writeErr := file.WriteString(owner); writeErr != nil {
+				_ = file.Close()
+				_ = os.Remove(lockPath)
+				return nil, writeErr
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				_ = os.Remove(lockPath)
+				return nil, closeErr
+			}
+			return func() {
+				current, readErr := os.ReadFile(lockPath)
+				if readErr == nil && strings.TrimSpace(string(current)) == owner {
+					_ = os.Remove(lockPath)
+				}
+			}, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > autoclawRefreshLockStale {
+			_ = os.Remove(lockPath)
+			continue
+		}
+		if waitErr := sleepContext(ctx, autoclawRefreshLockPoll); waitErr != nil {
+			return nil, waitErr
+		}
+	}
 }
 
 type autoClawRefreshResult struct {

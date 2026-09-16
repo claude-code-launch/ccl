@@ -8,12 +8,15 @@ import (
 	"crypto/sha1" // #nosec G505 -- Chromium safeStorage compatibility test.
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,6 +115,62 @@ func TestAutoClawRefreshPersistsRotatedTokens(t *testing.T) {
 	}
 }
 
+func TestAutoClawRefreshCoalescesAcrossAuthorizers(t *testing.T) {
+	authDir := t.TempDir()
+	credentialPath := filepath.Join(authDir, "autoclaw-shared.json")
+	writeAutoClawTestJSON(t, credentialPath, map[string]any{
+		"type":          ProviderAutoClaw,
+		"access_token":  "shared-old-access",
+		"refresh_token": "shared-old-refresh",
+		"device_id":     "shared-device",
+		"app_version":   "1.18.5",
+	})
+
+	var refreshCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		refreshCalls.Add(1)
+		time.Sleep(75 * time.Millisecond)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"code":0,"data":{"access_token":"shared-new-access","refresh_token":"shared-new-refresh"}}`)
+	}))
+	t.Cleanup(server.Close)
+	originalRefresh, originalAgent := autoclawRefreshURL, autoclawAgentRefreshURL
+	autoclawRefreshURL = server.URL
+	autoclawAgentRefreshURL = ""
+	t.Cleanup(func() { autoclawRefreshURL, autoclawAgentRefreshURL = originalRefresh, originalAgent })
+
+	authorizers := []*autoClawOAuthAuthorizer{
+		{path: credentialPath, client: server.Client()},
+		{path: credentialPath, client: server.Client()},
+	}
+	var wg sync.WaitGroup
+	errorsCh := make(chan error, len(authorizers))
+	for _, authorizer := range authorizers {
+		wg.Add(1)
+		go func(a *autoClawOAuthAuthorizer) {
+			defer wg.Done()
+			token, err := a.authorize(context.Background(), true)
+			if err == nil && token != "shared-new-access" {
+				err = fmt.Errorf("access token = %q", token)
+			}
+			errorsCh <- err
+		}(authorizer)
+	}
+	wg.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if refreshCalls.Load() != 1 {
+		t.Fatalf("refresh calls = %d, want one coalesced refresh", refreshCalls.Load())
+	}
+	if _, err := os.Stat(credentialPath + ".refresh.lock"); !os.IsNotExist(err) {
+		t.Fatalf("refresh lock was not released: %v", err)
+	}
+}
+
 func TestAutoClawManagedChatRuntimeUsesDesktopContract(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -204,6 +263,54 @@ func TestAutoClawManagedChatRuntimeUsesDesktopContract(t *testing.T) {
 	}
 	if request.body["model"] != "glm-5.3-flash" {
 		t.Fatalf("managed body model = %v", request.body["model"])
+	}
+}
+
+func TestAutoClawManagedChatDoesNotReplayAmbiguousServerErrors(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentialFile := "autoclaw-no-retry.json"
+	writeAutoClawTestJSON(t, filepath.Join(authDir, credentialFile), map[string]any{
+		"type": ProviderAutoClaw, "access_token": "runtime-access-token",
+		"refresh_token": "runtime-refresh-token", "device_id": "device-runtime-test",
+		"app_version": "1.18.5",
+	})
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(writer, `{"message":"parse response failed"}`)
+	}))
+	t.Cleanup(server.Close)
+	originalOrigin := autoclawAPIOrigin
+	autoclawAPIOrigin = server.URL
+	t.Cleanup(func() { autoclawAPIOrigin = originalOrigin })
+
+	runtime, err := startAutoClawOAuth(context.Background(), "", "zai_glm-5.3-flash", credentialFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Stop)
+	payload := strings.NewReader(`{"model":"GLM-5.3-Flash","max_tokens":1,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", payload)
+	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusInternalServerError {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("ambiguous managed request attempts = %d, want 1", attempts.Load())
 	}
 }
 

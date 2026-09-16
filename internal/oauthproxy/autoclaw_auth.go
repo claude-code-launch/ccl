@@ -89,7 +89,7 @@ func defaultAutoClawDesktopAuthPath() (string, error) {
 
 func readAutoClawSafeStoragePassword(ctx context.Context) (string, error) {
 	if runtime.GOOS != "darwin" {
-		return "", errors.New("AutoClaw safeStorage import is currently supported on macOS; sign in on macOS and run `ccl oauth autoclaw`")
+		return "", errors.New("AutoClaw safeStorage import is currently supported on macOS; sign in on macOS and run `ccl import autoclaw`")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -121,7 +121,7 @@ func loadAutoClawDesktopAuth(ctx context.Context) (autoclawDesktopAuth, string, 
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return autoclawDesktopAuth{}, path, fmt.Errorf("AutoClaw login state was not found at %s; sign in to AutoClaw once, then rerun `ccl oauth autoclaw`", path)
+			return autoclawDesktopAuth{}, path, fmt.Errorf("AutoClaw login state was not found at %s; sign in to AutoClaw once, then rerun `ccl import autoclaw`", path)
 		}
 		return autoclawDesktopAuth{}, path, fmt.Errorf("read AutoClaw login state %s: %w", path, err)
 	}
@@ -216,29 +216,15 @@ func stripBearerPrefix(value string) string {
 // AutoClawOpenAIBaseURL is the OpenAI Chat Completions base used by the
 // AutoClaw desktop app's managed zai provider. CCL appends /chat/completions.
 func AutoClawOpenAIBaseURL() string {
+	if contract, err := loadAutoClawLocalContract(); err == nil && contract.baseURL != "" {
+		return contract.baseURL
+	}
 	return strings.TrimRight(autoclawAPIOrigin, "/") + "/autoclaw-proxy/proxy/autoclaw"
 }
 
 // AutoClawAnthropicBaseURL remains for config migration and old callers. The
 // AutoClaw runtime is now OpenAI Chat based; new providers use OpenAIBaseURL.
 func AutoClawAnthropicBaseURL() string { return AutoClawOpenAIBaseURL() }
-
-// loginAutoClaw imports AutoClaw's completed OAuth session. Google OAuth's
-// redirect terminates at the desktop app's loopback server, so AutoClaw owns
-// the initial sign-in; after this one-time import CCL refreshes independently.
-func loginAutoClaw(ctx context.Context, authDir string, _ LoginOptions) (LoginResult, error) {
-	state, sourcePath, err := loadAutoClawDesktopAuth(ctx)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	metadata := autoClawMetadataFromDesktop(state, sourcePath)
-	result, err := saveAutoClawCredential(authDir, metadata)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	fmt.Println("AutoClaw authentication imported; CCL will refresh it independently")
-	return result, nil
-}
 
 func autoClawMetadataFromDesktop(state autoclawDesktopAuth, sourcePath string) map[string]any {
 	metadata := map[string]any{
@@ -273,6 +259,17 @@ func autoClawMetadataFromDesktop(state autoclawDesktopAuth, sourcePath string) m
 }
 
 func autoClawInstalledVersion() string {
+	return autoClawEffectiveVersion("")
+}
+
+// autoClawEffectiveVersion prefers the exact contract version emitted by the
+// local AutoClaw/OpenClaw runtime, then the installed desktop bundle. A stored
+// credential version remains the fallback for browser-only machines so an app
+// upgrade cannot leave CCL permanently pinned to its compile-time snapshot.
+func autoClawEffectiveVersion(stored string) string {
+	if contract, err := loadAutoClawLocalContract(); err == nil && strings.TrimSpace(contract.version) != "" {
+		return strings.TrimSpace(contract.version)
+	}
 	if runtime.GOOS == "darwin" {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -280,6 +277,9 @@ func autoClawInstalledVersion() string {
 		if err == nil && strings.TrimSpace(string(out)) != "" {
 			return strings.TrimSpace(string(out))
 		}
+	}
+	if stored = strings.TrimSpace(stored); stored != "" {
+		return stored
 	}
 	return autoclawDefaultVersion
 }

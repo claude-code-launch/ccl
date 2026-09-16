@@ -2,10 +2,20 @@ package oauthproxy
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
+func useAutoClawRuntimeConfig(t *testing.T, path string) {
+	t.Helper()
+	original := autoClawRuntimeConfigPath
+	autoClawRuntimeConfigPath = func() (string, error) { return path, nil }
+	t.Cleanup(func() { autoClawRuntimeConfigPath = original })
+}
+
 func TestAutoClawModelCatalogMatchesManagedProvider(t *testing.T) {
+	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
 	want := []struct {
 		id        string
 		name      string
@@ -32,6 +42,7 @@ func TestAutoClawModelCatalogMatchesManagedProvider(t *testing.T) {
 }
 
 func TestAutoClawSupportsManagedModelIDsCaseInsensitive(t *testing.T) {
+	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
 	for _, model := range []string{"zai_auto", "ZAI_AUTO-FAST", "zaicoding_GLM-5.3", "tdpsk_deepseek-v4-pro-202606"} {
 		if !AutoClawSupportsModel(model) {
 			t.Fatalf("AutoClawSupportsModel(%q) = false", model)
@@ -50,6 +61,7 @@ func TestAutoClawSupportsManagedModelIDsCaseInsensitive(t *testing.T) {
 }
 
 func TestAutoClawBodyModelRemovesProviderPrefix(t *testing.T) {
+	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
 	cases := map[string]string{
 		"zai_auto":                       "auto",
 		"zai_auto-fast":                  "auto-fast",
@@ -67,7 +79,8 @@ func TestAutoClawBodyModelRemovesProviderPrefix(t *testing.T) {
 }
 
 func TestNormalizeAutoClawBodyMatchesManagedZAIShape(t *testing.T) {
-	raw := []byte(`{"model":"zai_glm-5.3-flash","stream":true,"stream_options":{"include_usage":true}}`)
+	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
+	raw := []byte(`{"model":"zai_auto","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}]}`)
 	normalized, err := normalizeAutoClawBody(raw)
 	if err != nil {
 		t.Fatalf("normalizeAutoClawBody() error: %v", err)
@@ -76,10 +89,67 @@ func TestNormalizeAutoClawBodyMatchesManagedZAIShape(t *testing.T) {
 	if err := json.Unmarshal(normalized, &body); err != nil {
 		t.Fatalf("normalized body is invalid JSON: %v", err)
 	}
-	if body["model"] != "glm-5.3-flash" {
+	if body["model"] != "auto" {
 		t.Fatalf("normalized model = %v", body["model"])
 	}
 	if _, ok := body["stream_options"]; ok {
 		t.Fatalf("managed ZAI body unexpectedly contains stream_options: %s", normalized)
+	}
+	messages := body["messages"].([]any)
+	assistant := messages[0].(map[string]any)
+	if reasoning, exists := assistant["reasoning_content"]; !exists || reasoning != "" {
+		t.Fatalf("assistant reasoning_content = %#v, want an explicit empty string", reasoning)
+	}
+}
+
+func TestNormalizeAutoClawRequestRoutesImagesToConfiguredImageModel(t *testing.T) {
+	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
+	contract, _ := autoClawEffectiveContract()
+	converted := &chatCompletionsConvertedRequest{
+		anthropicAdapterRequest: anthropicAdapterRequest{upstreamModel: "zai_auto"},
+		model:                   "zai_auto",
+		body:                    []byte(`{"model":"zai_auto","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}`),
+	}
+	if err := normalizeAutoClawRequest(converted, contract); err != nil {
+		t.Fatal(err)
+	}
+	if converted.model != "zai_auto-fast" || converted.upstreamModel != "zai_auto-fast" {
+		t.Fatalf("image route = model %q upstream %q", converted.model, converted.upstreamModel)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(converted.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["model"] != "auto-fast" {
+		t.Fatalf("image body model = %v", body["model"])
+	}
+}
+
+func TestAutoClawLoadsGeneratedOpenClawContract(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openclaw.runtime.json")
+	config := `{
+		"models":{"providers":{"zai":{"baseUrl":"https://future.autoglm.ai/autoclaw-proxy/proxy/autoclaw","api":"openai-completions","models":[
+			{"id":"zai_future","name":"Future","input":["text"],"reasoning":true,"contextWindow":2000000,"maxTokens":200000,"headers":{"X-Version":"2.0.0"},"compat":{"requiresReasoningContentOnAssistantMessages":true}},
+			{"id":"zai_future-vision","name":"Future Vision","input":["text","image"],"reasoning":true,"contextWindow":2000000,"maxTokens":200000,"headers":{"X-Version":"2.0.0"}}
+		]}}},
+		"agents":{"defaults":{"imageModel":{"primary":"zai/zai_future-vision"}}}
+	}`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	useAutoClawRuntimeConfig(t, path)
+
+	contract, local := autoClawEffectiveContract()
+	if !local || contract.version != "2.0.0" || contract.imageModel != "zai_future-vision" || len(contract.models) != 2 {
+		t.Fatalf("local contract = %+v local=%t", contract, local)
+	}
+	if AutoClawOpenAIBaseURL() != "https://future.autoglm.ai/autoclaw-proxy/proxy/autoclaw" || autoClawInstalledVersion() != "2.0.0" {
+		t.Fatalf("dynamic endpoint/version = %q / %q", AutoClawOpenAIBaseURL(), autoClawInstalledVersion())
+	}
+	if !AutoClawSupportsModel("zai_future") || AutoClawSupportsModel("zai_auto") {
+		t.Fatalf("dynamic catalog IDs = %v", AutoClawModelIDs())
+	}
+	if !autoClawModelSupportsImage(contract.models, autoClawPreferredImageModel(contract)) {
+		t.Fatal("generated image model was not adopted")
 	}
 }
