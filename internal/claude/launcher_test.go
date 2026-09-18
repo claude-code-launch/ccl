@@ -829,22 +829,22 @@ func TestPreviewSettingsGrokPreferredDefaultsValidatedAgainstCatalog(t *testing.
 		APIKey:        "sk-test",
 		OAuthProvider: "grok",
 		// Catalog has opus/custom preferred ID, but not sonnet/haiku preferred IDs.
-		Model: "grok-4.5,grok-4,grok-2-mini",
+		Model: "grok-4.6,grok-4,grok-2-mini",
 	}
 
 	settings := previewSettingsJSON(t, p)
-	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.5" {
-		t.Fatalf("opus = %q, want grok-4.5", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.6" {
+		t.Fatalf("opus = %q, want grok-4.6", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
-	if settings.Model != "grok-4.5" {
-		t.Fatalf("custom/top-level model = %q, want grok-4.5", settings.Model)
+	if settings.Model != "grok-4.6" {
+		t.Fatalf("custom/top-level model = %q, want grok-4.6", settings.Model)
 	}
 	// Missing preferred sonnet/haiku should be cleared, then filled from the model pool.
-	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "grok-4.3" {
-		t.Fatalf("missing preferred sonnet should not stay pinned to grok-4.3")
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "grok-4.5" {
+		t.Fatalf("missing preferred sonnet should not stay pinned to grok-4.5")
 	}
-	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "grok-3-mini" {
-		t.Fatalf("missing preferred haiku should not stay pinned to grok-3-mini")
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "grok-4.5" {
+		t.Fatalf("missing preferred haiku should not stay pinned to grok-4.5")
 	}
 	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "" {
 		t.Fatal("sonnet should be auto-mapped from catalog after preferred clear")
@@ -861,19 +861,19 @@ func TestPreviewSettingsGrokUsesPreferredWhenPresent(t *testing.T) {
 		Endpoint:      "https://api.x.ai/v1",
 		APIKey:        "sk-test",
 		OAuthProvider: "grok",
-		Model:         "grok-4.5,grok-4.3,grok-3-mini,grok-2",
+		Model:         "grok-4.6,grok-4.5,grok-2",
 	}
 	settings := previewSettingsJSON(t, p)
-	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.5" {
+	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "grok-4.6" {
 		t.Fatalf("opus = %q", settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
 	}
-	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "grok-4.3" {
+	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "grok-4.5" {
 		t.Fatalf("sonnet = %q", settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 	}
-	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "grok-3-mini" {
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "grok-4.5" {
 		t.Fatalf("haiku = %q", settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 	}
-	if settings.Model != "grok-4.5" {
+	if settings.Model != "grok-4.6" {
 		t.Fatalf("custom model = %q", settings.Model)
 	}
 }

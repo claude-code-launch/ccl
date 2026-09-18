@@ -23,7 +23,7 @@ func TestPreferredOAuthSlotDefaultsGrok(t *testing.T) {
 	if !ok {
 		t.Fatal("expected grok defaults")
 	}
-	if custom != "grok-4.5" || opus != "grok-4.5" || sonnet != "grok-4.3" || haiku != "grok-3-mini" {
+	if custom != "grok-4.6" || opus != "grok-4.6" || sonnet != "grok-4.5" || haiku != "grok-4.5" {
 		t.Fatalf("grok defaults = %q %q %q %q", custom, opus, sonnet, haiku)
 	}
 	if _, _, _, _, ok := provider.PreferredOAuthSlotDefaults("copilot"); ok {
@@ -77,7 +77,7 @@ func TestApplyOAuthSlotDefaultsMakesKimiRunnable(t *testing.T) {
 func TestApplyOAuthSlotDefaultsFillsEmptyOnly(t *testing.T) {
 	p := provider.Provider{OAuthProvider: "grok", SonnetModel: "my-custom-sonnet"}
 	provider.ApplyOAuthSlotDefaults(&p)
-	if p.CustomModelID != "grok-4.5" || p.OpusModel != "grok-4.5" || p.HaikuModel != "grok-3-mini" {
+	if p.CustomModelID != "grok-4.6" || p.OpusModel != "grok-4.6" || p.HaikuModel != "grok-4.5" {
 		t.Fatalf("empty slots not filled: %+v", p)
 	}
 	if p.SonnetModel != "my-custom-sonnet" {
@@ -99,16 +99,16 @@ func TestApplyOAuthSlotDefaultsGeminiFillsEmptyOnly(t *testing.T) {
 func TestClearUnavailablePreferredDefaults(t *testing.T) {
 	p := provider.Provider{
 		OAuthProvider: "grok",
-		CustomModelID: "grok-4.5",
-		OpusModel:     "grok-4.5",
-		SonnetModel:   "grok-4.3",
-		HaikuModel:    "grok-3-mini",
+		CustomModelID: "grok-4.6",
+		OpusModel:     "grok-4.6",
+		SonnetModel:   "grok-4.5",
+		HaikuModel:    "grok-4.5",
 	}
 	// Catalog missing sonnet + haiku preferred IDs; keep a user custom sonnet-like
 	// value that is not the preferred default.
-	available := []string{"grok-4.5", "grok-4", "grok-2-mini"}
+	available := []string{"grok-4.6", "grok-4", "grok-2-mini"}
 	provider.ClearUnavailablePreferredDefaults(&p, available)
-	if p.CustomModelID != "grok-4.5" || p.OpusModel != "grok-4.5" {
+	if p.CustomModelID != "grok-4.6" || p.OpusModel != "grok-4.6" {
 		t.Fatalf("available preferred defaults were cleared: %+v", p)
 	}
 	if p.SonnetModel != "" || p.HaikuModel != "" {
@@ -119,5 +119,22 @@ func TestClearUnavailablePreferredDefaults(t *testing.T) {
 	provider.ClearUnavailablePreferredDefaults(&p, available)
 	if p.SonnetModel != "my-pinned-sonnet" {
 		t.Fatalf("user pin should not be cleared: %q", p.SonnetModel)
+	}
+}
+
+func TestClearUnavailablePreferredDefaultsMigratesLegacyGrokDefaults(t *testing.T) {
+	p := provider.Provider{
+		OAuthProvider: "grok",
+		CustomModelID: "grok-4.5",
+		OpusModel:     "grok-4.5",
+		SonnetModel:   "grok-4.3",
+		HaikuModel:    "grok-3-mini",
+	}
+	provider.ClearUnavailablePreferredDefaults(&p, []string{"grok-4.6", "grok-4.5"})
+	if p.CustomModelID != "grok-4.6" || p.OpusModel != "grok-4.6" {
+		t.Fatalf("legacy top-tier defaults were not migrated: %+v", p)
+	}
+	if p.SonnetModel != "grok-4.5" || p.HaikuModel != "grok-4.5" {
+		t.Fatalf("retired generated defaults were not migrated: %+v", p)
 	}
 }

@@ -40,6 +40,12 @@ type codexResponsesAuthorization struct {
 	token      string
 	accountID  string
 	credential string
+	// userID and email are xAI session identity fields. Codex leaves them empty;
+	// keeping them on the shared authorization value lets the Grok data plane
+	// attach the same account headers as the official Grok Build client without
+	// re-reading the credential on every inference request.
+	userID string
+	email  string
 }
 
 type codexResponsesAuthorizer interface {
@@ -709,7 +715,7 @@ func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessi
 		return nil, err
 	}
 	if s.xai {
-		applyXaiGrokHeaders(request.Header, sessionID)
+		applyXaiGrokHeaders(request.Header, sessionID, uuidString(), s.installationID, codexResponsesModel(body), auth)
 	} else {
 		codexidentity.ApplyTurnHeaders(request.Header, sessionID, sessionID, s.windowID)
 	}
@@ -753,6 +759,16 @@ func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessi
 		"write_to_first_byte", timings.writeToFirstByte, "wrote_request_error", timings.wroteRequestErr,
 		"duration", logDuration(started))
 	return response, nil
+}
+
+func codexResponsesModel(body []byte) string {
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if decodeProtocolJSON(body, &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Model)
 }
 
 func (s *codexResponsesService) addClientMetadata(body []byte, sessionID string) ([]byte, error) {

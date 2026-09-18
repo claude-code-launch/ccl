@@ -52,8 +52,9 @@ Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external pr
 | Ingress | Runtime | Notes |
 |---|---|---|
 | Anthropic API key | none (direct) | Claude Code hits `/v1/messages`; `ccl set` still needs `/v1/models` to auto-detect |
-| OpenAI Chat API key / Grok / Kimi / WorkBuddy | `openai_chat_*.go` | Messages ↔ Chat Completions |
+| OpenAI Chat API key / Kimi / WorkBuddy | `openai_chat_*.go` | Messages ↔ Chat Completions |
 | Codex Responses API key / GPT OAuth | `codex_responses_*.go` + `internal/codexidentity` | All `openai_responses` gateways get CCL-owned Codex identity (`Originator: codex_cli_rs`, UA, `stream=true`, `store=false`). Protocol is `type`, not guessed from `/codex` in the URL |
+| Grok OAuth | `xai_*.go` + `codex_responses_*.go` | cli-chat-proxy Responses; Grok Build identity headers; live `/models` catalog with 4.6/4.5 fallback |
 | Gemini OAuth | `gemini_*.go` | Antigravity conversion |
 | Copilot | `copilot_*.go` | Per-model Chat / Responses / Messages from the account catalog; persisted `type` is only `openai_responses` for local dispatch |
 | Kiro | `kiro_*.go` | Portal PKCE (default) or `--kiro-auth builder`; Amazon Q + EventStream |
@@ -84,6 +85,6 @@ User-facing Chinese lives in `cmd/` via `locale.T`. `internal/` must not contain
 
 ccl is a launcher + protocol proxy, not a fork of Claude Code. Extra CLI args after a non-ccl command are passed through.
 
-OAuth public names: `gpt` `gemini` `grok` `copilot` `qoder` `kimi` `kiro` `workbuddy` `autoclaw`. `ccl oauth chatgpt` is gone; old configs may still store `chatgpt`/`codex` as `oauthProvider`. Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch).
+OAuth public names: `gpt` `gemini` `grok` `copilot` `qoder` `kimi` `kiro` `workbuddy` `autoclaw`. `ccl oauth chatgpt` is gone; old configs may still store `chatgpt`/`codex` as `oauthProvider`. Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch; generated Grok 4.5/4.3/3-mini IDs migrate when the new default is in the catalog).
 
 `bypass` injects `--dangerously-skip-permissions`. `ccl status` is cloud sync, not provider health — use `ccl doctor`.

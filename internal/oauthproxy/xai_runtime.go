@@ -18,23 +18,48 @@ const (
 	xaiChatProxyBaseURL = "https://cli-chat-proxy.grok.com/v1"
 	xaiOAuthClientID    = "b1a00492-073a-47ea-816f-4c329264a828"
 	xaiDefaultTokenURL  = "https://auth.x.ai/oauth2/token"
-	xaiClientVersion    = "0.2.120"
+	// Keep this compatible with the current public xai-org/grok-build client.
+	// cli-chat-proxy uses the value for its client version gate.
+	xaiClientVersion    = "1.0.32"
 	xaiClientIdentifier = "grok-shell"
+	xaiClientMode       = "headless"
 	xaiMaxErrorBytes    = int64(1 << 20)
 )
 
-// applyXaiGrokHeaders attaches the identity headers the Grok CLI chat-proxy
-// expects. These follow the Grok CLI chat-proxy's OAuth (non-using_api)
-// contract: xAI has no Codex-style client_metadata block, so identity travels in
-// headers instead.
-func applyXaiGrokHeaders(header http.Header, sessionID string) {
+// applyXaiClientHeaders attaches the process and account identity expected by
+// cli-chat-proxy. The field names mirror the public Grok Build implementation.
+func applyXaiClientHeaders(header http.Header, auth codexResponsesAuthorization) {
 	header.Set("X-XAI-Token-Auth", "xai-grok-cli")
 	header.Set("x-grok-client-version", xaiClientVersion)
-	header.Set("User-Agent", "xai-grok-workspace/"+xaiClientVersion)
+	header.Set("User-Agent", "grok-shell/"+xaiClientVersion)
 	header.Set("x-grok-client-identifier", xaiClientIdentifier)
+	header.Set("x-grok-client-mode", xaiClientMode)
 	header.Set("x-authenticateresponse", "authenticate-response")
+	if auth.userID != "" {
+		header.Set("x-userid", auth.userID)
+	}
+	if auth.email != "" {
+		header.Set("x-email", auth.email)
+	}
+}
+
+// applyXaiGrokHeaders adds the per-inference routing and trace identity used by
+// Grok Build. In particular, x-grok-model-override is the authoritative model
+// selector at cli-chat-proxy; a model in the JSON body alone is insufficient.
+func applyXaiGrokHeaders(header http.Header, sessionID, requestID, agentID, modelID string, auth codexResponsesAuthorization) {
+	applyXaiClientHeaders(header, auth)
 	if sessionID != "" {
 		header.Set("x-grok-conv-id", sessionID)
+		header.Set("x-grok-session-id", sessionID)
+	}
+	if requestID != "" {
+		header.Set("x-grok-req-id", requestID)
+	}
+	if agentID != "" {
+		header.Set("x-grok-agent-id", agentID)
+	}
+	if modelID != "" {
+		header.Set("x-grok-model-override", modelID)
 	}
 }
 
@@ -53,6 +78,7 @@ type xaiOAuthCredential struct {
 	refreshToken  string
 	tokenEndpoint string
 	email         string
+	userID        string
 	expiresAt     time.Time
 	disabled      bool
 }
@@ -73,7 +99,10 @@ func (a *xaiOAuthAuthorizer) authorize(ctx context.Context, force bool) (codexRe
 			return codexResponsesAuthorization{}, err
 		}
 	}
-	return codexResponsesAuthorization{token: credential.accessToken, credential: filepath.Base(a.path)}, nil
+	return codexResponsesAuthorization{
+		token: credential.accessToken, credential: filepath.Base(a.path),
+		userID: credential.userID, email: credential.email,
+	}, nil
 }
 
 func (*xaiOAuthAuthorizer) isOAuth() bool { return true }
@@ -117,8 +146,10 @@ func (a *xaiOAuthAuthorizer) load() (*xaiOAuthCredential, error) {
 	return &xaiOAuthCredential{
 		metadata: metadata, accessToken: firstMetadataString(metadata, "access_token"),
 		refreshToken: firstMetadataString(metadata, "refresh_token"), tokenEndpoint: tokenEndpoint,
-		email: firstMetadataString(metadata, "email"), expiresAt: parseCodexExpiry(firstMetadataString(metadata, "expired")),
-		disabled: disabled,
+		email:     firstMetadataString(metadata, "email"),
+		userID:    firstMetadataString(metadata, "sub", "user_id", "userid"),
+		expiresAt: parseCodexExpiry(firstMetadataString(metadata, "expired")),
+		disabled:  disabled,
 	}, nil
 }
 
@@ -199,6 +230,9 @@ func (a *xaiOAuthAuthorizer) refresh(ctx context.Context, credential *xaiOAuthCr
 // pipeline, and lifecycle, swapping Codex identity for xAI/Grok identity and the
 // Codex OAuth authorizer for xAI's.
 func startXaiOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	authDir, err := ensureAuthDir()
 	if err != nil {
 		return nil, err
@@ -221,13 +255,31 @@ func startXaiOAuth(parent context.Context, modelSpec, credentialFile string) (*R
 	if credential.accessToken == "" && credential.refreshToken == "" {
 		return nil, fmt.Errorf("xAI credential %s has no access or refresh token", filepath.Base(path))
 	}
-	runtime, err := startCodexResponsesRuntimeWithService(parent, xaiChatProxyBaseURL, modelSpec, authorizer, func(apiKey, endpoint string, routes []runtimeModelRoute, auth codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService {
-		return newXaiResponsesService(apiKey, endpoint, routes, auth, usage)
+	discoveryCtx, cancelDiscovery := context.WithTimeout(parent, 20*time.Second)
+	models, discoverErr := discoverXaiModels(discoveryCtx, xaiChatProxyBaseURL, authorizer)
+	cancelDiscovery()
+	catalogFallback := false
+	if discoverErr != nil || len(models) == 0 {
+		if discoverErr == nil {
+			discoverErr = fmt.Errorf("xAI returned an empty model catalog")
+		}
+		LogWarnf("Grok model discovery failed; using compatibility catalog error=%v", discoverErr)
+		models = xaiFallbackModels()
+		catalogFallback = true
+	}
+	effectiveModelSpec := xaiModelSpec(modelSpec, models)
+	runtime, err := startCodexResponsesRuntimeWithService(parent, xaiChatProxyBaseURL, effectiveModelSpec, authorizer, func(apiKey, endpoint string, routes []runtimeModelRoute, auth codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService {
+		service := newXaiResponsesService(apiKey, endpoint, routes, auth, usage)
+		service.models = xaiModelIDs(models)
+		addXaiDisplayAliases(service, models)
+		return service
 	})
 	if err != nil {
 		return nil, err
 	}
 	runtime.listAuths = authorizer.listAuths
+	runtime.modelNames = xaiModelDisplayNames(models)
+	runtime.catalogFallback = catalogFallback
 	LogInfof("runtime start oauth provider=grok backend=xai protocol=openai_responses port=%s credential_file=%s model_count=%d",
 		strings.TrimPrefix(strings.TrimSuffix(runtime.endpoint, "/v1"), "http://"), filepath.Base(path), len(runtime.models))
 	return runtime, nil

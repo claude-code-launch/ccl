@@ -2151,6 +2151,12 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		setDebugf("applyModelDetectionResult no models detection_error=%v", m.live().detectionError)
 		return
 	}
+	if m.usesOAuth() {
+		// Reconcile generated mappings against the newly fetched account catalog
+		// before filling empty slots. This migrates old Grok defaults such as 4.3
+		// and 3-mini to the current 4.6/4.5 catalog without touching user pins.
+		provider.ClearUnavailablePreferredDefaults(m.p, m.live().modelPool)
+	}
 
 	sort.Strings(m.live().modelPool)
 	// Single page: detection success auto-configures the slots and stays on the

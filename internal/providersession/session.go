@@ -31,6 +31,14 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 		ctx = context.Background()
 	}
 	resolved := configured
+	if strings.TrimSpace(resolved.OAuthProvider) != "" {
+		// Normalize legacy persisted compatibility types to the protocol exposed by
+		// the current embedded runtime. Grok moved from the old Chat classification
+		// to the Responses data plane; probes must therefore use /v1/responses.
+		if runtimeType, ok := provider.OAuthRuntimeType(resolved.OAuthProvider); ok {
+			resolved.Type = runtimeType
+		}
+	}
 	session := &Session{
 		Provider: resolved,
 		BaseURL:  resolved.Endpoint,
@@ -66,8 +74,14 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 
 	resolved.Endpoint = runtime.Endpoint()
 	resolved.APIKey = runtime.APIKey()
-	if strings.TrimSpace(resolved.Model) == "" && len(runtime.Models()) > 0 {
-		resolved.Model = strings.Join(runtime.Models(), ",")
+	if runtimeModels := runtime.Models(); len(runtimeModels) > 0 {
+		// A successful OAuth catalog fetch is authoritative for the account. This
+		// refreshes stale persisted pools (for example Grok 4.5 -> 4.6) before the
+		// launcher validates slot mappings. A compatibility fallback never replaces
+		// a non-empty saved pool because it is only a guess.
+		if strings.TrimSpace(resolved.Model) == "" || (strings.TrimSpace(resolved.OAuthProvider) != "" && !runtime.ModelCatalogIsFallback()) {
+			resolved.Model = strings.Join(runtimeModels, ",")
+		}
 	}
 	session.Provider = resolved
 	session.Runtime = runtime

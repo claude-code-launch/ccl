@@ -177,7 +177,8 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 | OpenAI Chat API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CCL `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
 | Codex Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查上游 `/models` | CCL 完成 Messages ↔ Responses、Codex 身份头、SSE 与错误透传 | CCL 全部拥有 |
 | GPT 订阅 | CCL 自研 OAuth、绑定凭据并刷新 token | CCL 使用 provider 槽位构建本机会话模型目录 | CCL 完成 Messages ↔ Responses，并携带账号 ID | CCL 全部拥有 |
-| Gemini / Grok / Kimi 订阅 | CCL 对应 OAuth/device flow 登录、刷新并绑定凭据 | CCL 读取对应上游模型目录或兼容目录 | CCL 对应 adapter 完成 Messages ↔ 各自上游协议 | CCL 全部拥有 |
+| Gemini / Kimi 订阅 | CCL 对应 OAuth/device flow 登录、刷新并绑定凭据 | CCL 读取对应上游模型目录或兼容目录 | CCL 对应 adapter 完成 Messages ↔ 各自上游协议 | CCL 全部拥有 |
+| Grok 订阅 | CCL 自研 OAuth、刷新并绑定凭据 | CCL 直查 cli-chat-proxy `/models`，失败时使用 `grok-4.6` / `grok-4.5` 兼容目录 | CCL 复用 Responses 转换，并注入 Grok Build 身份头（含 `x-grok-model-override`） | CCL 全部拥有 |
 | WorkBuddy 订阅 | CCL 自研网页登录轮询、凭据绑定与刷新 | CCL 使用认证账号直查 WorkBuddy `/v3/config` | CCL gateway 注入 WorkBuddy 账号/客户端/会话头，并由 `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
 | GitHub Copilot 订阅 | CCL 自研 GitHub device flow、Copilot 换票与凭据状态 | CCL 直查 Copilot 模型目录并读取每个模型声明的 endpoint | CCL 按模型路由；Responses 使用 CCL Codex 转换，Chat / 原生 Messages 使用 CCL 对应 adapter | CCL 全部拥有 |
 | Kiro 订阅 | CCL 自研 Portal PKCE / Builder ID、刷新和单凭据运行时 | CCL 调 Kiro Portal / Amazon Q 模型接口并缓存 | CCL 完成 Messages → Amazon Q、重试、AWS EventStream → Messages | CCL 全部拥有 |
@@ -364,10 +365,10 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
   - Opus / Custom → `gpt-5.6-sol`
   - Sonnet → `gpt-5.6-terra`
   - Haiku → `gpt-5.6-luna`
-- **Grok 默认槽位**（空槽位时写入；已有手动映射会保留）：
-  - Opus / Custom → `grok-4.5`
-  - Sonnet → `grok-4.3`
-  - Haiku → `grok-3-mini`
+- **Grok 默认槽位**（空槽位时写入；已有手动映射会保留；旧版生成的 `grok-4.5` / `grok-4.3` / `grok-3-mini` 会在新默认模型可用时迁移）：
+  - Opus / Custom → `grok-4.6`
+  - Sonnet → `grok-4.5`
+  - Haiku → `grok-4.5`
 - **Gemini 默认槽位**（空槽位时写入；已有手动映射会保留）：
   - Opus / Custom → `claude-opus-4-6-thinking`
   - Sonnet → `claude-sonnet-4-6`

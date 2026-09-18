@@ -246,7 +246,7 @@ func TestOAuthRuntimeType(t *testing.T) {
 		t.Fatalf("gemini = %q %v", got, ok)
 	}
 	got, ok = provider.OAuthRuntimeType("grok")
-	if !ok || got != "openai" {
+	if !ok || got != "openai_responses" {
 		t.Fatalf("grok = %q %v", got, ok)
 	}
 	got, ok = provider.OAuthRuntimeType("kimi")

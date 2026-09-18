@@ -187,9 +187,9 @@ type Config struct {
 // backend is empty or unknown.
 func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
-	case "gpt", "chatgpt", "codex", "copilot":
+	case "gpt", "chatgpt", "codex", "copilot", "grok":
 		return "openai_responses", true
-	case "gemini", "grok", "kimi", "workbuddy":
+	case "gemini", "kimi", "workbuddy":
 		return "openai", true
 	case "kiro", "qoder":
 		return "anthropic", true

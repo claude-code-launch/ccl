@@ -22,7 +22,7 @@ func TestOAuthRuntimeTypeDefaults(t *testing.T) {
 	}{
 		{oauthproxy.ProviderChatGPT, "openai_responses"},
 		{oauthproxy.ProviderGemini, "openai"},
-		{oauthproxy.ProviderGrok, "openai"},
+		{oauthproxy.ProviderGrok, "openai_responses"},
 		{oauthproxy.ProviderKimi, "openai"},
 		{oauthproxy.ProviderKiro, "anthropic"},
 		{oauthproxy.ProviderQoder, "anthropic"},
@@ -266,13 +266,13 @@ func TestRunAuthGrokUsesXaiBackend(t *testing.T) {
 	if !ok {
 		t.Fatalf("no grok provider personal: %+v", cfg.Providers)
 	}
-	if p.Type != "openai" || p.Endpoint != "oauth://xai" || p.OAuthProvider != "grok" {
+	if p.Type != "openai_responses" || p.Endpoint != "oauth://xai" || p.OAuthProvider != "grok" {
 		t.Fatalf("Grok provider = %+v", p)
 	}
 	if p.OAuthAccountCredential != "xai-bob@example.com.json" {
 		t.Fatalf("credential = %q", p.OAuthAccountCredential)
 	}
-	if p.CustomModelID != "grok-4.5" || p.OpusModel != "grok-4.5" || p.SonnetModel != "grok-4.3" || p.HaikuModel != "grok-3-mini" {
+	if p.CustomModelID != "grok-4.6" || p.OpusModel != "grok-4.6" || p.SonnetModel != "grok-4.5" || p.HaikuModel != "grok-4.5" {
 		t.Fatalf("Grok preferred defaults not applied: %+v", p)
 	}
 }
@@ -309,7 +309,7 @@ func TestRunAuthGrokPreservesExistingSlotPins(t *testing.T) {
 	if p.OpusModel != "my-opus" || p.SonnetModel != "my-sonnet" {
 		t.Fatalf("existing pins overwritten: %+v", p)
 	}
-	if p.CustomModelID != "grok-4.5" || p.HaikuModel != "grok-3-mini" {
+	if p.CustomModelID != "grok-4.6" || p.HaikuModel != "grok-4.5" {
 		t.Fatalf("empty slots not filled with defaults: %+v", p)
 	}
 }

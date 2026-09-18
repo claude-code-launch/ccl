@@ -2,11 +2,12 @@
 //
 // Claude Code talks to an Anthropic Messages endpoint. CCL directly owns every
 // data plane: Codex Responses (GPT and openai_responses API-key gateways),
-// OpenAI Chat (manual API-key providers, Grok, Kimi, WorkBuddy, and Copilot Chat
-// models), the native-Anthropic Messages passthrough (models.dev
-// @ai-sdk/anthropic models and Copilot native-Messages models), and Gemini
-// (Antigravity conversion). Copilot's mixed catalog, Kiro, and Qoder run
-// entirely on CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
+// OpenAI Chat (manual API-key providers, Kimi, WorkBuddy, and Copilot Chat
+// models), Grok (cli-chat-proxy Responses with Grok Build identity), the
+// native-Anthropic Messages passthrough (models.dev @ai-sdk/anthropic models
+// and Copilot native-Messages models), and Gemini (Antigravity conversion).
+// Copilot's mixed catalog, Kiro, and Qoder run entirely on CCL-owned
+// runtimes too. Direct Anthropic API-key gateways bypass
 // this package altogether. AutoClaw uses a CCL-owned Anthropic-to-OpenAI Chat
 // runtime with its desktop OAuth refresh session and managed-proxy headers.
 //
