@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -999,4 +1000,59 @@ func previewSettingsRaw(t *testing.T, p provider.Provider) string {
 		t.Fatalf("PreviewSettings failed: %v", err)
 	}
 	return raw
+}
+
+func TestPrepareDoesNotWriteStdout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	name := "claude"
+	body := "#!/bin/sh\nexit 0\n"
+	if runtime.GOOS == "windows" {
+		name = "claude.cmd"
+		body = "@echo off\r\nexit /b 0\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	launch, prepErr := claude.Prepare(provider.Provider{
+		Name:     "prepare-stdout",
+		Type:     "anthropic",
+		Endpoint: "https://api.anthropic.com",
+		APIKey:   "sk-test",
+		Model:    "dummy",
+	})
+	os.Stdout = old
+	_ = w.Close()
+	dumped, _ := io.ReadAll(r)
+	_ = r.Close()
+	if prepErr != nil {
+		t.Fatalf("Prepare: %v", prepErr)
+	}
+	defer launch.Close()
+	if strings.TrimSpace(string(dumped)) != "" {
+		t.Fatalf("Prepare wrote stdout: %q", dumped)
+	}
+	cmd := launch.Command("--print")
+	if cmd.Stdin != nil || cmd.Stdout != nil || cmd.Stderr != nil {
+		t.Fatalf("stdio set: stdin=%v stdout=%v stderr=%v", cmd.Stdin, cmd.Stdout, cmd.Stderr)
+	}
+	if launch.SettingsPath == "" {
+		t.Fatal("empty settings path")
+	}
+	if _, err := os.Stat(launch.SettingsPath); err != nil {
+		t.Fatalf("settings missing: %v", err)
+	}
+	path := launch.SettingsPath
+	launch.Close()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("settings still present: %v", err)
+	}
 }

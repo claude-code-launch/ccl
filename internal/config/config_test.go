@@ -15,6 +15,7 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 
 	want := &provider.Config{
 		ActiveProvider: "gateway",
+		ACPProvider:    "gateway",
 		Providers: map[string]provider.Provider{
 			"gateway": {
 				Name:          "gateway",
@@ -48,6 +49,7 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 	if got.ActiveProvider != want.ActiveProvider ||
+		got.ACPProvider != want.ACPProvider ||
 		got.Providers["gateway"].APIKey != "secret" ||
 		got.Providers["gateway"].OAuthProvider != "codex" ||
 		got.Providers["gateway"].SubagentModel != "model-subagent" {
@@ -72,7 +74,7 @@ func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if got.ActiveProvider != "legacy" || got.Providers["legacy"].Endpoint != "https://example.test/v1" {
+	if got.ActiveProvider != "legacy" || got.ACPProvider != "legacy" || got.Providers["legacy"].Endpoint != "https://example.test/v1" {
 		t.Fatalf("legacy config was not loaded: %+v", got)
 	}
 
@@ -86,6 +88,35 @@ func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
 	}
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
 		t.Fatalf("legacy config should be moved, stat err=%v", err)
+	}
+}
+
+func TestLoadPinsActiveProviderForACPOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".ccl")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "config.yaml")
+	data := []byte("active_provider: alpha\nproviders:\n  alpha:\n    name: alpha\n    type: anthropic\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ACPProvider != "alpha" {
+		t.Fatalf("migrated ACP provider = %q, want alpha", cfg.ACPProvider)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(persisted), "acp_provider: alpha") {
+		t.Fatalf("ACP provider migration was not persisted: %s", persisted)
 	}
 }
 

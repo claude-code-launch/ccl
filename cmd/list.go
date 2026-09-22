@@ -19,7 +19,8 @@ func newProviderListCommand(use string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: "List registered providers",
-		Long: `List providers from ~/.ccl/config.yaml.
+		Long: `List providers from ~/.ccl/config.yaml. The USED BY column shows which
+entry is selected by normal mode, ACP mode, both, or neither.
 
 -a/--all switches the table to a detailed view with full model pools and slot
 details.
@@ -64,18 +65,14 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, " \tNAME\tTYPE/AUTH\tCONTEXT\tMODELS\tSLOTS")
+	fmt.Fprintln(tw, "NAME\tUSED BY\tTYPE/AUTH\tCONTEXT\tMODELS\tSLOTS")
 	for _, name := range names {
-		mark := " "
-		if name == cfg.ActiveProvider {
-			mark = "*"
-		}
 		p := cfg.Providers[name]
 		fmt.Fprintf(
 			tw,
 			"%s\t%s\t%s\t%s\t%s\t%s\n",
-			mark,
 			name,
+			providerUsageSummary(cfg, name),
 			providerTypeAuthSummary(p),
 			providerContextPresetSummary(p),
 			formatModelCount(p.Model),
@@ -88,12 +85,9 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 
 func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) error {
 	for i, name := range names {
-		mark := " "
-		if name == cfg.ActiveProvider {
-			mark = "*"
-		}
 		p := cfg.Providers[name]
-		fmt.Fprintf(out, "%s %s\n", mark, name)
+		fmt.Fprintln(out, name)
+		fmt.Fprintf(out, "    Used By  : %s\n", providerUsageSummary(cfg, name))
 		fmt.Fprintf(out, "    Type     : %s\n", provider.ProtocolLabelForProvider(p))
 		fmt.Fprintf(out, "    Auth     : %s\n", providerAuthLabel(p))
 		if p.OAuthProvider != "" {
@@ -113,6 +107,20 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 		}
 	}
 	return nil
+}
+
+func providerUsageSummary(cfg *provider.Config, name string) string {
+	usedBy := make([]string, 0, 2)
+	if name == cfg.ActiveProvider {
+		usedBy = append(usedBy, "normal")
+	}
+	if name == cfg.ACPProvider {
+		usedBy = append(usedBy, "ACP")
+	}
+	if len(usedBy) == 0 {
+		return "-"
+	}
+	return strings.Join(usedBy, "+")
 }
 
 func formatModelCount(modelStr string) string {

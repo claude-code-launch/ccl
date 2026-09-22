@@ -430,38 +430,41 @@ type providerContext struct {
 
 // setupProvider starts a proxy if needed and resolves the final model list.
 // The caller must call cleanup() to release any proxy resources.
-func setupProvider(p provider.Provider) (*providerContext, error) {
-	session, err := providersession.Prepare(context.TODO(), p)
+func setupProvider(ctx context.Context, p provider.Provider) (*providerContext, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	session, err := providersession.Prepare(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	ctx := &providerContext{
+	prepared := &providerContext{
 		provider: session.Provider,
 		baseURL:  session.BaseURL,
 		useProxy: session.UseProxy,
 		session:  session,
 	}
 	if session.Runtime != nil {
-		ctx.modelNames = session.Runtime.ModelDisplayNames()
+		prepared.modelNames = session.Runtime.ModelDisplayNames()
 	}
 
-	if err := ctx.resolveModel(); err != nil {
-		ctx.cleanup()
+	if err := prepared.resolveModel(ctx); err != nil {
+		prepared.cleanup()
 		return nil, err
 	}
-	return ctx, nil
+	return prepared, nil
 }
 
 // resolveModel seeds preferred OAuth slot defaults for empty tiers, discovers
 // the model list when none is configured, then drops preferred defaults that
 // are absent from the live catalog so auto-mapping can fill those tiers.
 // Mutates the local copy only.
-func (c *providerContext) resolveModel() error {
+func (c *providerContext) resolveModel(ctx context.Context) error {
 	// Apply first so existing Grok providers without saved slot pins still get
 	// the preferred mapping before catalog validation.
 	provider.ApplyOAuthSlotDefaults(&c.provider)
 	if c.provider.Model == "" && c.session != nil && c.session.Runtime != nil {
-		models, err := protocol.GetOpenAIModels(c.provider.Endpoint, c.provider.APIKey)
+		models, err := protocol.GetOpenAIModelsContext(ctx, c.provider.Endpoint, c.provider.APIKey)
 		if err != nil {
 			return fmt.Errorf("discover embedded provider runtime models: %w", err)
 		}
@@ -518,9 +521,55 @@ func responseLanguage() string {
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Launch is a prepared Claude Code process spec: settings file, env, and the
+// optional embedded proxy. The caller must Close it.
+type Launch struct {
+	Path         string
+	SettingsPath string
+	Env          []string
+	Session      *providersession.Session
+
+	baseURL  string
+	useProxy bool
+}
+
+// Close removes the settings file and stops the embedded proxy. It is safe to
+// call more than once.
+func (l *Launch) Close() {
+	if l == nil {
+		return
+	}
+	if l.SettingsPath != "" {
+		_ = os.Remove(l.SettingsPath)
+		l.SettingsPath = ""
+	}
+	if l.Session != nil {
+		l.Session.Close()
+	}
+}
+
+// Command returns a Claude Code process using this launch's path, settings, and
+// env. Extra args are appended after --settings. Stdio is left unset.
+func (l *Launch) Command(args ...string) *exec.Cmd {
+	if l == nil {
+		return nil
+	}
+	claudeArgs := make([]string, 0, 2+len(args))
+	claudeArgs = append(claudeArgs, "--settings", l.SettingsPath)
+	claudeArgs = append(claudeArgs, args...)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", append([]string{"/c", l.Path}, claudeArgs...)...)
+	} else {
+		cmd = exec.Command(l.Path, claudeArgs...)
+	}
+	cmd.Env = l.Env
+	return cmd
+}
+
 // PreviewSettings returns the JSON that would be written to the settings temp file.
 func PreviewSettings(p provider.Provider) (string, error) {
-	ctx, err := setupProvider(p)
+	ctx, err := setupProvider(context.Background(), p)
 	if err != nil {
 		return "", err
 	}
@@ -533,12 +582,22 @@ func PreviewSettings(p provider.Provider) (string, error) {
 	return string(data), nil
 }
 
-// Run launches the Claude CLI with settings derived from p, forwarding extra args.
-func Run(p provider.Provider, args []string) error {
+// Prepare resolves the provider runtime and writes a settings file without
+// attaching stdio or printing. The caller must Close the result.
+func Prepare(p provider.Provider) (*Launch, error) {
+	return PrepareContext(context.Background(), p)
+}
+
+// PrepareContext is Prepare with caller-controlled cancellation for provider
+// discovery and embedded runtime startup.
+func PrepareContext(ctx context.Context, p provider.Provider) (*Launch, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		oauthproxy.LogErrorf("claude CLI not found in PATH: %v", err)
-		return fmt.Errorf("claude CLI not found in PATH (install with: npm install -g @anthropic-ai/claude-code): %w", err)
+		return nil, fmt.Errorf("claude CLI not found in PATH (install with: npm install -g @anthropic-ai/claude-code): %w", err)
 	}
 
 	// Give this temporary Claude session one slog file before the embedded runtime
@@ -546,51 +605,60 @@ func Run(p provider.Provider, args []string) error {
 	session := newSessionName()
 	if oauthproxy.LogConfigured() {
 		if err := oauthproxy.SetLogLevel(oauthproxy.CurrentLogLevel(), oauthproxy.SessionLogPath(session)); err != nil {
-			return fmt.Errorf("open session log: %w", err)
+			return nil, fmt.Errorf("open session log: %w", err)
 		}
 		oauthproxy.LogInfoEvent("session_start", "session", session, "provider", p.Name,
 			"oauth", p.OAuthProvider, "protocol", provider.ProtocolLabelForProvider(p))
 	}
 
-	ctx, err := setupProvider(p)
+	prepared, err := setupProvider(ctx, p)
 	if err != nil {
 		oauthproxy.LogErrorEvent("session_setup_failed", "session", session, "provider", p.Name,
 			"oauth", p.OAuthProvider, "protocol", provider.ProtocolLabelForProvider(p), "error", err)
-		return err
+		return nil, err
 	}
-	defer ctx.cleanup()
 	dataPlane := "direct"
-	if ctx.useProxy {
+	if prepared.useProxy {
 		dataPlane = "ccl_proxy"
 	}
 	oauthproxy.LogInfoEvent("provider_ready", "session", session, "provider", p.Name,
 		"oauth", p.OAuthProvider, "protocol", provider.ProtocolLabelForProvider(p),
-		"data_plane", dataPlane, "upstream_errors_visible", ctx.useProxy,
-		"base", oauthproxy.SafeLogEndpoint(ctx.baseURL))
+		"data_plane", dataPlane, "upstream_errors_visible", prepared.useProxy,
+		"base", oauthproxy.SafeLogEndpoint(prepared.baseURL))
 
-	sessionSettings := ctx.settings()
+	sessionSettings := prepared.settings()
 	settingsPath, err := writeSettingsFile(sessionSettings, session)
 	if err != nil {
+		prepared.cleanup()
 		oauthproxy.LogErrorEvent("session_settings_failed", "session", session, "error", err)
-		return fmt.Errorf("create settings file: %w", err)
+		return nil, fmt.Errorf("create settings file: %w", err)
 	}
-	defer os.Remove(settingsPath)
-	logSessionContextBudget(p, sessionSettings, ctx.droppedContextOverride)
+	logSessionContextBudget(p, sessionSettings, prepared.droppedContextOverride)
 
-	fmt.Println("Using provider-specific claude config:", settingsPath)
+	return &Launch{
+		Path:         claudePath,
+		SettingsPath: settingsPath,
+		Env:          buildProcessEnv(os.Environ(), sessionSettings, prepared.useProxy),
+		Session:      prepared.session,
+		baseURL:      prepared.baseURL,
+		useProxy:     prepared.useProxy,
+	}, nil
+}
 
-	claudeArgs := append([]string{"--settings", settingsPath}, args...)
-
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", append([]string{"/c", claudePath}, claudeArgs...)...)
-	} else {
-		cmd = exec.Command(claudePath, claudeArgs...)
+// Run launches the Claude CLI with settings derived from p, forwarding extra args.
+func Run(p provider.Provider, args []string) error {
+	launch, err := Prepare(p)
+	if err != nil {
+		return err
 	}
+	defer launch.Close()
+
+	fmt.Println("Using provider-specific claude config:", launch.SettingsPath)
+
+	cmd := launch.Command(args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = buildProcessEnv(os.Environ(), sessionSettings, ctx.useProxy)
 
 	start := time.Now()
 	runErr := cmd.Run()
@@ -600,7 +668,7 @@ func Run(p provider.Provider, args []string) error {
 	// for providers that never start an embedded runtime (plain Anthropic
 	// endpoints), and Usage()/Snapshot() are nil-safe, so this is a no-op for
 	// them rather than a special case here.
-	if summary := oauthproxy.FormatUsageSummary(usageSnapshot(ctx.session.Runtime)); summary != "" {
+	if summary := oauthproxy.FormatUsageSummary(usageSnapshot(launch.Session.Runtime)); summary != "" {
 		fmt.Fprintln(os.Stderr, "\n"+summary)
 	}
 
@@ -618,8 +686,8 @@ func Run(p provider.Provider, args []string) error {
 			outcome = runErr.Error()
 		}
 		oauthproxy.LogInfoEvent("session_exit", "provider", p.Name, "oauth", p.OAuthProvider,
-			"protocol", provider.ProtocolLabelForProvider(p), "base", oauthproxy.SafeLogEndpoint(ctx.baseURL),
-			"use_proxy", ctx.useProxy, "model_count", modelCount, "env_override", len(p.Env),
+			"protocol", provider.ProtocolLabelForProvider(p), "base", oauthproxy.SafeLogEndpoint(launch.baseURL),
+			"use_proxy", launch.useProxy, "model_count", modelCount, "env_override", len(p.Env),
 			"custom_model", p.CustomModelID, "fast", p.FastMode, "outcome", outcome,
 			"duration", time.Since(start).Round(time.Millisecond))
 	}

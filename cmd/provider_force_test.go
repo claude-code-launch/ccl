@@ -97,6 +97,40 @@ func TestProviderCopyAndMoveOverwriteOnlyWithYes(t *testing.T) {
 	})
 }
 
+func TestProviderRemoveRepairsACPSelection(t *testing.T) {
+	seedProviders(t, "keep", "keep", "drop")
+	cfg := loadProviders(t)
+	cfg.ACPProvider = "drop"
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runProviderRemove("drop", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg = loadProviders(t)
+	if cfg.ActiveProvider != "keep" || cfg.ACPProvider != "keep" {
+		t.Fatalf("provider selections = active:%q ACP:%q", cfg.ActiveProvider, cfg.ACPProvider)
+	}
+}
+
+func TestProviderMoveRepairsACPSelection(t *testing.T) {
+	seedProviders(t, "keep", "keep", "src")
+	cfg := loadProviders(t)
+	cfg.ACPProvider = "src"
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runProviderMove("src", "dst", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg = loadProviders(t)
+	if cfg.ActiveProvider != "keep" || cfg.ACPProvider != "dst" {
+		t.Fatalf("provider selections = active:%q ACP:%q", cfg.ActiveProvider, cfg.ACPProvider)
+	}
+}
+
 func TestDestructiveCommandsExposeYesOnBothSpellings(t *testing.T) {
 	// Each constructor runs twice — once for the root shortcut, once under
 	// `ccl provider` — so the flag var has to be per command, not shared. Two

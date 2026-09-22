@@ -27,7 +27,7 @@ There is no Makefile or golangci-lint config.
 
 ### Do not run the `ccl` binary as a test harness
 
-Unknown first args are **not** errors: `cmd/root.go` forwards them to Claude Code and starts a billed session (`ccl resume`, `ccl -p "..."`, a quoted typo like `./ccl "provider --help"`). Prefer `go test` and `--help` with unquoted subcommand args. `ccl statusline` is the one exception — it is intercepted at the top of `cmd.Execute` and reads a Claude Code payload from stdin.
+Unknown first args are **not** errors: `cmd/root.go` forwards them to Claude Code and starts a billed session (`ccl resume`, `ccl -p "..."`, a quoted typo like `./ccl "provider --help"`). Prefer `go test` and `--help` with unquoted subcommand args. `ccl statusline` and `ccl acp-permission` are intercepted at the top of `cmd.Execute` (before config load) and are not cobra commands.
 
 Bare `ccl lang` is interactive; use `ccl lang zh` / `ccl lang en`. Do not run `set` / `map` / `oauth` / `cloud` / `import` against the developer's real `~/.ccl/` unless asked.
 
@@ -40,6 +40,8 @@ Bare `ccl lang` is interactive; use `ccl lang zh` / `ccl lang en`. Do not run `s
 Data flow:
 
 `main.go` → `cmd/` (Cobra + TUI) → `internal/config` + `internal/provider` → `internal/providersession.Prepare` → `internal/claude` (temp `settings.json`, env cleanup, `claude --settings ...`) → `internal/oauthproxy` when a proxy is required.
+
+`ccl acp` is an Agent Client Protocol frontend on that same launch path: Xcode (or any ACP client) speaks JSON-RPC on stdio, and each ACP session owns a lease on a shared, reference-counted provider launch generation. `ccl use --acp <name>` changes `acp_provider`; this field is only a name selector into the same `providers` map used by normal mode, never a second provider definition. `ccl ls` shows both selectors in `USED BY`. Before each new prompt, ACP compares the selected provider's full persisted snapshot; a change swaps generations, restarts that session's Claude Code process, and resumes with `--resume`. In-flight prompts are never switched. Retired generations close only after their final lease is released. Permissions go through `session/request_permission` (a hidden `ccl acp-permission` MCP helper plus a Unix socket); `ccl bypass` does not apply. Tool calls, diffs, images, client MCP servers, and `session/load` are forwarded; ACP-to-Claude mappings persist under `~/.ccl/acp/sessions/` across `ccl acp` restarts, without provider or MCP credentials. There is no live `terminal/*` PTY.
 
 `providersession.Session` is a **copy** of the persisted provider. `UseProxy` is true for OpenAI-compatible types, `modelsdev`, or any non-empty `OAuthProvider` (including AutoClaw). Direct Anthropic API-key providers skip the proxy; Claude Code talks upstream with `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` (`anthropicAuth: bearer`).
 
@@ -69,7 +71,7 @@ Shared 429/5xx fast retry is `retry.go` (500ms + 1s, then relay status/body/`Ret
 ### Config, launch, TUI
 
 - `internal/config`: `~/.ccl/config.yaml`, migrate `~/.cc/config.yaml`, atomic write 0600. Load may rewrite inferred `oauthProvider` / OAuth `type`.
-- Global fields: `active_provider`, `lang`, `bypass_mode` (not `auto_mode`), `log_level` (`off` default; `ccl log`).
+- Global fields: `active_provider`, `acp_provider` (both are name selectors into one `providers` map), `lang`, `bypass_mode` (not `auto_mode`), `log_level` (`off` default; `ccl log`).
 - `internal/claude`: settings pin `outputStyle: Concise`, `language` from `ccl lang`, and a `statusLine` running `ccl statusline` (a per-provider `statuslineDisabled` opts out, since `--settings` outranks the user's `~/.claude/settings.json`); context presets Default / Balanced 500K / 800K are also exported as env because Claude Code has ignored settings-only auto-compact. Provider `Env` overrides defaults except proxy transport keys.
 - TUI (`cmd/advanced_config.go`, `github.com/grindlemire/go-tui`): components implement `Render` / `KeyMap` / `HandleMouse` / `Watchers`; use `tui.WithDisplay(tui.DisplayFlex)`. Single-page set wizard.
 

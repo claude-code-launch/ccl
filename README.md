@@ -139,6 +139,7 @@ ccl bypass off      # 关闭
 | 多个账号互相覆盖 | 登录时加别名：`ccl oauth gpt work` |
 | 想换中英文界面 | `ccl lang zh` / `ccl lang en` |
 | 旧文档里的 `ccl auto` | 已更名为 **`ccl bypass`**，配置字段是 `bypass_mode` |
+| 想在 Xcode 27 里用 CCL | 先用 `ccl use --acp <name>` 选择已有配置，再配置 `ccl acp`；Executable 必须是 `ccl` 的绝对路径，Arguments 填 `acp` |
 
 ---
 
@@ -198,9 +199,11 @@ CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上
 
 ```text
 ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参数会透传
+├─ acp                                在 stdio 上提供 Agent Client Protocol（Xcode 等）
 ├─ set [name]                         新增或修改 provider
-├─ ls [-a|--all]                      列出 provider
-├─ use <provider>                     切换 active provider
+├─ ls [-a|--all]                      列出 provider，并显示普通模式 / ACP 的选择
+├─ use <provider>                     切换普通模式使用的 provider
+├─ use --acp <provider>               让 ACP 使用同一份 provider 配置
 ├─ cp <source> <target> [-y]          复制 provider
 ├─ mv <source> <target> [-y]          重命名 provider
 ├─ rm <name> [-y]                     删除 provider
@@ -268,6 +271,27 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 
 `ccl oauth` 只负责登录并创建绑定单个凭据的 provider，不提供凭据导入或目录对账命令。`ccl status` 是云同步状态；provider 体检使用 `ccl doctor`。根命令支持 `--help` 和 `--version`，每个子命令都支持 `-h/--help`。
 
+### 在 Xcode 27 里用 CCL
+
+Xcode 通过 Agent Client Protocol（stdio 上的 JSON-RPC）驱动编辑器内 Agent。Claude Code CLI 没有原生 `--acp`，所以由 `ccl acp` 做这一层：
+
+```
+Xcode 27  →  ccl acp  →  Claude Code (stream-json)  →  当前 acp_provider
+```
+
+Settings → Intelligence → Agents → Add an Agent：
+
+```
+Name:        CCL
+Executable:  $(command -v ccl) 的绝对路径（Xcode 不展开 ~，也不搜 PATH）
+Arguments:   acp
+Interpreter: 留空
+```
+
+先用 `ccl oauth` / `ccl set` 创建 provider，再运行 `ccl use --acp <name>` 选择 ACP 使用的配置。`ccl ls` 的 `USED BY` 列会显示 `normal`、`ACP` 或 `normal+ACP`。普通模式与 ACP 可以选择不同名称，例如普通终端用 `ccl use a`，Xcode 同时用 `ccl use --acp b`；两者始终引用同一个 `providers` 配置表，不会复制出一份 ACP provider。运行中的 `ccl acp` 会在**下一条 prompt 开始前**检测 ACP 选择及所选 provider 的 endpoint、model、env、OAuth account 等变化，重启该会话的 Claude 子进程并通过 `--resume` 保留上下文；当前正在流式执行的 prompt 不会被中断，也无需重启 Xcode Agent。
+
+工具调用会以 `session/update`（Edit/Write 带 diff）发给 Xcode；权限走 `session/request_permission`（`ccl bypass` 对 `ccl acp` 无效）。图片和 Xcode 提供的 MCP 会转给 Claude Code；ACP 到 Claude 的映射持久化在 `~/.ccl/acp/sessions/`，所以重启 `ccl acp` 后仍可恢复。该 store 不保存 provider 凭据或 MCP credentials。没有直播终端（Bash 只作为 `tool_call` `kind=execute`）。如果 `session/new` 报找不到 `claude`，给这个 Agent 配一份 GUI 能看到的 `PATH`。
+
 ---
 
 ### 启动 Claude Code
@@ -286,7 +310,7 @@ ccl bypass on       # 开启
 ccl bypass off      # 关闭
 ```
 
-全局开关，写入 `~/.ccl/config.yaml` 的 `bypass_mode`。开启后，所有由 `ccl` 拉起的 Claude Code 会话都会自动带上 `--dangerously-skip-permissions`。
+全局开关，写入 `~/.ccl/config.yaml` 的 `bypass_mode`。开启后，由 `ccl` 拉起的交互式 Claude Code 会话会自动带上 `--dangerously-skip-permissions`。`ccl acp` 不走这条路径，权限由 Xcode 的 `session/request_permission` 处理。
 
 > 旧版命令 `ccl auto` / 字段 `auto_mode` 已更名为 `ccl bypass` / `bypass_mode`。
 
@@ -607,6 +631,7 @@ ccl completion zsh      # shell 补全（也支持 bash/fish/powershell）
 
 ```yaml
 active_provider: deepseek
+acp_provider: gpt
 lang: zh-CN
 bypass_mode: false
 providers:
@@ -634,6 +659,7 @@ providers:
 
 字段要点：
 
+- `active_provider` 和 `acp_provider` 都只是 `providers` 里的名称引用，分别由 `ccl use <name>` 与 `ccl use --acp <name>` 设置；ACP 不保存第二份 provider 配置。
 - `type: openai`（显示 `openai-chat`）：经 CCL `chatCompletionsService` 转到上游 Chat Completions；`type: openai_responses`（显示 `openai-responses`）：经 CCL 自研 Codex Responses runtime 走 Responses API；`type: anthropic`（显示 `anthropic-messages`）：由 Claude Code 直连 Anthropic Messages。协议由 `type` 明确选择，不根据 endpoint 路径猜测；Custom provider 可在核对页切换 Chat / Responses / Anthropic。
 - `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用本机 Messages → Amazon Q 适配器；`oauthProvider: qoder` 使用本机 Messages → Qoder 直接适配器。
 - `type: autoclaw`（显示 `openai-chat / autoclaw`）：`ccl oauth autoclaw` / `ccl import autoclaw` 写入的 AutoClaw provider。`endpoint` 保存 managed Chat base，`oauthAccountCredential` 绑定 `~/.ccl/auth/` 的浏览器登录或桌面导入凭据；会话启动时 CCL 创建 loopback Anthropic-to-Chat runtime，由 runtime 保管并刷新 access/refresh token，发送 `X-Authorization` 等上游 headers。

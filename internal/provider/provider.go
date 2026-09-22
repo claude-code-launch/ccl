@@ -167,7 +167,10 @@ type Provider struct {
 
 type Config struct {
 	ActiveProvider string `yaml:"active_provider" mapstructure:"active_provider"`
-	Lang           string `yaml:"lang,omitempty" mapstructure:"lang,omitempty"`
+	// ACPProvider is only the name selected by `ccl use --acp`. Its settings stay
+	// in the shared Providers map; ACP never owns a duplicate provider config.
+	ACPProvider string `yaml:"acp_provider,omitempty" mapstructure:"acp_provider,omitempty"`
+	Lang        string `yaml:"lang,omitempty" mapstructure:"lang,omitempty"`
 	// BypassMode automatically passes --dangerously-skip-permissions to Claude
 	// Code for every ccl-launched session. It is a global launcher setting.
 	BypassMode bool `yaml:"bypass_mode,omitempty" mapstructure:"bypass_mode,omitempty"`

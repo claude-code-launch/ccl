@@ -35,7 +35,7 @@ func TestShortVerboseFlagStaysWithClaudeCode(t *testing.T) {
 func TestRegisteredCommandsAreNotForwarded(t *testing.T) {
 	// A command that ccl owns but isCclCommand misses would launch a billed
 	// session on a plain typo-free invocation.
-	for _, name := range []string{"doctor", "set", "ls", "use", "map", "models", "env", "lang", "version", "provider"} {
+	for _, name := range []string{"doctor", "set", "ls", "use", "map", "models", "env", "lang", "version", "provider", "acp"} {
 		if !isCclCommand(name) {
 			t.Fatalf("%q is a ccl command but would be forwarded to Claude Code", name)
 		}

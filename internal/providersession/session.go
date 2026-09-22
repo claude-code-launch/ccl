@@ -52,7 +52,7 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 	// The provider has not declared its own model pool: discover it from the
 	// gateway's OpenAI-shaped model list before the runtime starts.
 	if resolved.OAuthProvider == "" && strings.TrimSpace(resolved.Model) == "" {
-		models, err := protocol.GetOpenAIModels(resolved.Endpoint, resolved.APIKey)
+		models, err := protocol.GetOpenAIModelsContext(ctx, resolved.Endpoint, resolved.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("discover OpenAI models before starting the provider runtime: %w", err)
 		}

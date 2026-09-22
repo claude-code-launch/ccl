@@ -51,12 +51,12 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  oauth", "  bypass", "  log", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
+	for _, want := range []string{"  acp", "  oauth", "  bypass", "  log", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
 	}
-	for _, unwanted := range []string{"\n  conf", "\n  list", "\n  run", "\n  settings"} {
+	for _, unwanted := range []string{"\n  conf", "\n  list", "\n  run", "\n  settings", "acp-permission"} {
 		if contains(out, unwanted) {
 			t.Fatalf("root help should not contain old command %q, got:\n%s", unwanted, out)
 		}
@@ -212,6 +212,7 @@ func TestCredentialPageShowsAPIKeyPlaintext(t *testing.T) {
 func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	cfg := &provider.Config{
 		ActiveProvider: "beta",
+		ACPProvider:    "beta",
 		Providers: map[string]provider.Provider{
 			"beta": {
 				Name:        "beta",
@@ -230,7 +231,7 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"Registered providers:", "NAME", "TYPE/AUTH", "CONTEXT", "MODELS", "SLOTS", "beta", "openai-chat/bearer", "default", "4", "2/5"} {
+	for _, want := range []string{"Registered providers:", "NAME", "USED BY", "TYPE/AUTH", "CONTEXT", "MODELS", "SLOTS", "beta", "normal+ACP", "openai-chat/bearer", "default", "4", "2/5"} {
 		if !contains(out, want) {
 			t.Fatalf("expected compact output to contain %q, got:\n%s", want, out)
 		}
@@ -245,6 +246,29 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 	if contains(out, "pool-a,pool-b") {
 		t.Fatalf("compact output should not include full model pool, got:\n%s", out)
+	}
+}
+
+func TestPrintProvidersShowsNormalAndACPSelections(t *testing.T) {
+	cfg := &provider.Config{
+		ActiveProvider: "normal-config",
+		ACPProvider:    "acp-config",
+		Providers: map[string]provider.Provider{
+			"normal-config": {Name: "normal-config", Type: "anthropic"},
+			"acp-config":    {Name: "acp-config", Type: "openai"},
+			"unused":        {Name: "unused", Type: "anthropic"},
+		},
+	}
+
+	buf := new(bytes.Buffer)
+	if err := printProviders(buf, cfg, false, "empty", "Registered providers:"); err != nil {
+		t.Fatalf("printProviders failed: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"normal-config  normal", "acp-config     ACP", "unused         -"} {
+		if !contains(out, want) {
+			t.Fatalf("provider selection %q missing from:\n%s", want, out)
+		}
 	}
 }
 
@@ -270,6 +294,7 @@ func TestProviderTypeAuthSummaryUsesCompactOAuthBackend(t *testing.T) {
 func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	cfg := &provider.Config{
 		ActiveProvider: "beta",
+		ACPProvider:    "beta",
 		Providers: map[string]provider.Provider{
 			"beta": {
 				Name:     "beta",
@@ -286,7 +311,7 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"* beta", "Endpoint : https://example.com/v1", "Models   : 4", "Pool IDs : pool-a,pool-b,pool-c,pool-d"} {
+	for _, want := range []string{"beta", "Used By  : normal+ACP", "Endpoint : https://example.com/v1", "Models   : 4", "Pool IDs : pool-a,pool-b,pool-c,pool-d"} {
 		if !contains(out, want) {
 			t.Fatalf("expected detailed output to contain %q, got:\n%s", want, out)
 		}

@@ -103,6 +103,15 @@ func Load() (*provider.Config, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]provider.Provider)
 	}
+	// Existing installations used active_provider for both ordinary Claude and
+	// ACP sessions. Pin that current choice once so later `ccl use` calls can move
+	// independently without changing ACP.
+	if cfg.ACPProvider == "" && cfg.ActiveProvider != "" {
+		if _, ok := cfg.Providers[cfg.ActiveProvider]; ok {
+			cfg.ACPProvider = cfg.ActiveProvider
+			dirty = true
+		}
+	}
 	for name, p := range cfg.Providers {
 		changed := false
 		if p.OAuthProvider == "" {

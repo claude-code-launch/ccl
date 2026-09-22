@@ -19,7 +19,8 @@ var providerCmd = &cobra.Command{
 Subcommands:
   set [name]     Interactive add/update (TUI)
   ls             List providers
-  use [name]     Switch active provider
+  use [--acp] [name]
+                 Switch the provider selected by normal or ACP mode
   cp/mv/rm       Copy, rename, delete
   map            Slot → model mapping (Opus/Sonnet/Haiku/Custom)
   models         Availability check for the model pool
@@ -46,18 +47,56 @@ func newProviderSetCommand(use string) *cobra.Command {
 }
 
 func newProviderUseCommand(use string) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   use,
-		Short: "Switch the active provider",
-		Args:  cobra.MaximumNArgs(1),
+		Short: "Switch the provider used by normal or ACP mode",
+		Long: `Switch which shared provider configuration a launch mode uses.
+
+Without --acp, the selection applies to normal ccl launches. With --acp, the
+same provider entry is selected for ccl acp; no provider settings are copied or
+maintained separately.
+
+Examples:
+  ccl use cc
+  ccl use --acp cc`,
+		// Parse the tiny grammar without retaining mutable flag state between
+		// invocations of the reusable Cobra root used by embedders and tests.
+		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := ""
-			if len(args) > 0 {
-				name = args[0]
+			name, forACP, showHelp, err := parseProviderUseArgs(args)
+			if err != nil {
+				return err
 			}
-			return runProviderUse(name)
+			if showHelp {
+				return cmd.Help()
+			}
+			return runProviderUse(name, forACP)
 		},
 	}
+	// Register the flag for help and completion metadata. Parsing is handled
+	// above so repeated in-process command execution does not retain its value.
+	cmd.Flags().Bool("acp", false, "Switch the provider used by ACP mode")
+	return cmd
+}
+
+func parseProviderUseArgs(args []string) (name string, forACP, showHelp bool, err error) {
+	for _, arg := range args {
+		switch arg {
+		case "--acp":
+			forACP = true
+		case "-h", "--help":
+			showHelp = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", false, false, fmt.Errorf("unknown flag: %s", arg)
+			}
+			if name != "" {
+				return "", false, false, fmt.Errorf("accepts at most 1 provider name, received %q and %q", name, arg)
+			}
+			name = arg
+		}
+	}
+	return name, forACP, showHelp, nil
 }
 
 func newProviderPreviewCommand(use string) *cobra.Command {
@@ -114,7 +153,7 @@ func newProviderMoveCommand(use string) *cobra.Command {
 	return cmd
 }
 
-func runProviderUse(name string) error {
+func runProviderUse(name string, forACP bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -124,7 +163,7 @@ func runProviderUse(name string) error {
 	if target == "" {
 		// 没有传 provider name：弹出与 `ccl set` 一致的已有 Provider 过滤列
 		// 表，选中即切换；取消则静默退出。
-		target, err = selectProviderToUse(cfg)
+		target, err = selectProviderToUse(cfg, forACP)
 		if err != nil {
 			return err
 		}
@@ -137,13 +176,21 @@ func runProviderUse(name string) error {
 		return fmt.Errorf(locale.T("未找到 Provider %q。请先用 'ccl set' 添加，或用 'ccl ls' 检查拼写", "provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'"), target)
 	}
 
-	cfg.ActiveProvider = target
+	if forACP {
+		cfg.ACPProvider = target
+	} else {
+		cfg.ActiveProvider = target
+	}
 	err = config.Save(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Printf(locale.T("已切换到激活 Provider：%s\n", "Switched to active provider: %s\n"), target)
+	if forACP {
+		fmt.Printf(locale.T("ACP 已切换为使用 Provider 配置：%s\n", "ACP now uses provider configuration: %s\n"), target)
+	} else {
+		fmt.Printf(locale.T("已切换到激活 Provider：%s\n", "Switched to active provider: %s\n"), target)
+	}
 	return nil
 }
 
@@ -151,7 +198,7 @@ func runProviderUse(name string) error {
 // `ccl use` without arguments can switch interactively, mirroring the selection
 // list `ccl set` shows (but without the create-new entry — use only switches
 // between existing providers). It returns "" when the user cancels.
-func selectProviderToUse(cfg *provider.Config) (string, error) {
+func selectProviderToUse(cfg *provider.Config, forACP bool) (string, error) {
 	names := make([]string, 0, len(cfg.Providers))
 	for name := range cfg.Providers {
 		names = append(names, name)
@@ -160,8 +207,12 @@ func selectProviderToUse(cfg *provider.Config) (string, error) {
 	if len(names) == 0 {
 		return "", fmt.Errorf("%s", locale.T("没有可用的 Provider，请先用 'ccl set' 添加", "no providers configured. Add one first using 'ccl set'"))
 	}
+	selected := cfg.ActiveProvider
+	if forACP {
+		selected = cfg.ACPProvider
+	}
 	labelFor := func(name string) string {
-		if name == cfg.ActiveProvider {
+		if name == selected {
 			return fmt.Sprintf("%s %s", name, locale.T("(当前使用)", "(active)"))
 		}
 		return name
@@ -170,7 +221,11 @@ func selectProviderToUse(cfg *provider.Config) (string, error) {
 	for _, name := range names {
 		items = append(items, labelFor(name))
 	}
-	chosen, err := runSelect(locale.T("选择要切换的 Provider:", "Select a provider to switch to:"), items)
+	prompt := locale.T("选择普通模式要使用的 Provider:", "Select the provider for normal mode:")
+	if forACP {
+		prompt = locale.T("选择 ACP 要使用的 Provider:", "Select the provider for ACP mode:")
+	}
+	chosen, err := runSelect(prompt, items)
 	if err != nil {
 		return "", err
 	}
@@ -259,18 +314,29 @@ func runProviderRemove(name string, force bool) error {
 
 	delete(cfg.Providers, targetName)
 
+	replacement := ""
+	if len(cfg.Providers) > 0 {
+		remaining := make([]string, 0, len(cfg.Providers))
+		for name := range cfg.Providers {
+			remaining = append(remaining, name)
+		}
+		sort.Strings(remaining)
+		replacement = remaining[0]
+	}
 	if cfg.ActiveProvider == targetName {
-		cfg.ActiveProvider = ""
-		if len(cfg.Providers) > 0 {
-			var remaining []string
-			for name := range cfg.Providers {
-				remaining = append(remaining, name)
-			}
-			sort.Strings(remaining)
-			cfg.ActiveProvider = remaining[0]
-			fmt.Printf(locale.T("当前 Provider 已重置，切换到 %q\n", "Active provider reset. Switched to %q\n"), cfg.ActiveProvider)
+		cfg.ActiveProvider = replacement
+		if replacement != "" {
+			fmt.Printf(locale.T("当前 Provider 已重置，切换到 %q\n", "Active provider reset. Switched to %q\n"), replacement)
 		} else {
 			fmt.Println(locale.T("当前 Provider 已清空。", "Active provider cleared."))
+		}
+	}
+	if cfg.ACPProvider == targetName {
+		cfg.ACPProvider = replacement
+		if replacement != "" {
+			fmt.Printf(locale.T("ACP 使用的配置已重置，切换到 %q\n", "ACP selection reset. Switched to %q\n"), replacement)
+		} else {
+			fmt.Println(locale.T("ACP 使用的配置已清空。", "ACP selection cleared."))
 		}
 	}
 
@@ -318,6 +384,9 @@ func runProviderMove(sourceName, targetName string, force bool) error {
 	if cfg.ActiveProvider == source {
 		cfg.ActiveProvider = target
 	}
+	if cfg.ACPProvider == source {
+		cfg.ACPProvider = target
+	}
 
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
@@ -349,7 +418,7 @@ func init() {
 	providerCmd.AddCommand(
 		newProviderSetCommand("set [name]"),
 		newProviderListCommand("ls"),
-		newProviderUseCommand("use [provider]"),
+		newProviderUseCommand("use [--acp] [provider]"),
 		newProviderCopyCommand("cp <source> <target>"),
 		newProviderMoveCommand("mv <source> <target>"),
 		newProviderRemoveCommand("rm <name>"),

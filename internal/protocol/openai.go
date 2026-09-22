@@ -74,7 +74,12 @@ type ModelResponse struct {
 // GetOpenAIModels fetches the comma-separated model IDs from an OpenAI-compatible
 // /models endpoint.
 func GetOpenAIModels(baseURL, apiKey string) (string, error) {
-	infos, err := GetOpenAIModelInfos(baseURL, apiKey)
+	return GetOpenAIModelsContext(context.Background(), baseURL, apiKey)
+}
+
+// GetOpenAIModelsContext is GetOpenAIModels with caller-controlled cancellation.
+func GetOpenAIModelsContext(ctx context.Context, baseURL, apiKey string) (string, error) {
+	infos, err := GetOpenAIModelInfosContext(ctx, baseURL, apiKey)
 	if err != nil {
 		return "", err
 	}
@@ -85,14 +90,17 @@ func GetOpenAIModels(baseURL, apiKey string) (string, error) {
 	return strings.Join(ids, ","), nil
 }
 
-// fetchModelsPayload performs an authenticated GET against a models endpoint and
-// decodes the JSON body into out.
-func fetchModelsPayload(url, apiKey string, out any) error {
-	return fetchModelsPayloadWithHeaders(url, apiKey, nil, out)
+// fetchModelsPayloadWithHeaders performs an authenticated GET against a models
+// endpoint and decodes the JSON body into out.
+func fetchModelsPayloadWithHeaders(url, apiKey string, headers http.Header, out any) error {
+	return fetchModelsPayloadWithContext(context.Background(), url, apiKey, headers, out)
 }
 
-func fetchModelsPayloadWithHeaders(url, apiKey string, headers http.Header, out any) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+func fetchModelsPayloadWithContext(ctx context.Context, url, apiKey string, headers http.Header, out any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -121,8 +129,13 @@ func fetchModelsPayloadWithHeaders(url, apiKey string, headers http.Header, out 
 
 // GetOpenAIModelInfos fetches model IDs and optional context_window metadata.
 func GetOpenAIModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
+	return GetOpenAIModelInfosContext(context.Background(), baseURL, apiKey)
+}
+
+// GetOpenAIModelInfosContext is GetOpenAIModelInfos with caller-controlled cancellation.
+func GetOpenAIModelInfosContext(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error) {
 	var result ModelResponse
-	if err := fetchModelsPayload(NormalizeOpenAIModelsURL(baseURL), apiKey, &result); err != nil {
+	if err := fetchModelsPayloadWithContext(ctx, NormalizeOpenAIModelsURL(baseURL), apiKey, nil, &result); err != nil {
 		return nil, err
 	}
 	models := make([]ModelInfo, 0, len(result.Data))

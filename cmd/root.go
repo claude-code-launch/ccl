@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/claude-code-launch/ccl/internal/acp"
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
@@ -20,11 +21,14 @@ var rootCmd = &cobra.Command{
 
 Common commands:
   ccl                         Start Claude Code with the active provider
-  ccl ls / ccl use [name]     List or switch providers
+  ccl ls                      List providers and normal/ACP selections
+  ccl use [name]              Switch the normal-mode provider
+  ccl use --acp [name]        Select a shared provider configuration for ACP
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
   ccl oauth <gpt|grok|workbuddy|...>
                               Log in with a subscription account
   ccl doctor                  Environment + provider + subscription health
+  ccl acp                     Agent Client Protocol on stdio (Xcode 27 and other ACP clients)
   ccl cloud login|push|pull   Encrypted multi-remote config sync
   ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)
 
@@ -46,6 +50,13 @@ func Execute() {
 	// setup, and no chance of falling through to a billed Claude session.
 	if len(os.Args) > 1 && os.Args[1] == "statusline" {
 		runStatusline()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "acp-permission" {
+		if err := acp.RunPermissionMCP(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -76,7 +87,11 @@ func Execute() {
 	rootCmd.FParseErrWhitelist.UnknownFlags = true
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		if acpQuietErrors {
+			fmt.Fprintln(os.Stderr, err)
+		} else {
+			fmt.Println(err)
+		}
 		var exitCoder interface{ ExitCode() int }
 		if errors.As(err, &exitCoder) {
 			os.Exit(exitCoder.ExitCode())
@@ -167,7 +182,10 @@ func resolveProvider() (provider.Provider, error) {
 		return p, nil
 	}
 
-	// No config — fallback to environment variables
+	return resolveProviderFromEnvironment()
+}
+
+func resolveProviderFromEnvironment() (provider.Provider, error) {
 	envAnthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 	envAnthropicAuthToken := os.Getenv("ANTHROPIC_AUTH_TOKEN")
 	envAnthropicBase := os.Getenv("ANTHROPIC_BASE_URL")
