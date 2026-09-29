@@ -65,18 +65,16 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tUSED BY\tTYPE/AUTH\tCONTEXT\tMODELS\tSLOTS")
+	fmt.Fprintln(tw, "NAME\tUSED BY\tTYPE/AUTH\tMODELS")
 	for _, name := range names {
 		p := cfg.Providers[name]
 		fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\n",
 			name,
 			providerUsageSummary(cfg, name),
 			providerTypeAuthSummary(p),
-			providerContextPresetSummary(p),
 			formatModelCount(p.Model),
-			formatSlotCount(p),
 		)
 	}
 
@@ -139,33 +137,12 @@ func providerTypeAuthSummary(p provider.Provider) string {
 	return protocol + "/" + providerAuthLabel(p)
 }
 
-func providerContextPresetSummary(p provider.Provider) string {
-	switch provider.ContextPresetFromEnv(p.Env) {
-	case provider.ContextPresetBalanced500K:
-		return "500K"
-	case provider.ContextPresetBalanced800K:
-		return "800K"
-	default:
-		return "default"
-	}
-}
-
 func formatSlotSummaryLong(p provider.Provider) string {
 	parts := compactSlotParts(p)
 	if len(parts) == 0 {
 		return "-"
 	}
 	return strings.Join(parts, ", ")
-}
-
-func formatSlotCount(p provider.Provider) string {
-	configured := 0
-	for _, model := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.CustomModelID, p.SubagentModel} {
-		if stripOneMSuffix(model) != "" {
-			configured++
-		}
-	}
-	return fmt.Sprintf("%d/5", configured)
 }
 
 func compactSlotParts(p provider.Provider) []string {

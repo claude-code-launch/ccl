@@ -231,7 +231,7 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"Registered providers:", "NAME", "USED BY", "TYPE/AUTH", "CONTEXT", "MODELS", "SLOTS", "beta", "normal+ACP", "openai-chat/bearer", "default", "4", "2/5"} {
+	for _, want := range []string{"Registered providers:", "NAME", "USED BY", "TYPE/AUTH", "MODELS", "beta", "normal+ACP", "openai-chat/bearer", "4"} {
 		if !contains(out, want) {
 			t.Fatalf("expected compact output to contain %q, got:\n%s", want, out)
 		}
@@ -241,8 +241,10 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 			t.Fatalf("compact output should not contain %q, got:\n%s", unwanted, out)
 		}
 	}
-	if contains(out, "EFFORT") {
-		t.Fatalf("compact output should not contain the EFFORT column, got:\n%s", out)
+	for _, unwanted := range []string{"CONTEXT", "SLOTS", "EFFORT"} {
+		if contains(out, unwanted) {
+			t.Fatalf("compact output should not contain the %s column, got:\n%s", unwanted, out)
+		}
 	}
 	if contains(out, "pool-a,pool-b") {
 		t.Fatalf("compact output should not include full model pool, got:\n%s", out)
