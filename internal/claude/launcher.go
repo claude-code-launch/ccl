@@ -73,11 +73,9 @@ func quoteForShell(s string) string {
 }
 
 const (
-	SubagentModelEnv          = "CLAUDE_CODE_SUBAGENT_MODEL"
-	ToolUseConcurrencyEnv     = "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"
-	ToolSearchEnv             = "ENABLE_TOOL_SEARCH"
-	DefaultToolUseConcurrency = "3"
-	DefaultToolSearch         = "false"
+	SubagentModelEnv      = "CLAUDE_CODE_SUBAGENT_MODEL"
+	ToolUseConcurrencyEnv = "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"
+	ToolSearchEnv         = "ENABLE_TOOL_SEARCH"
 	// DefaultOutputStyle sets Claude Code's output style for every ccl-launched
 	// session. "Concise" favors terse, direct responses over extra explanation.
 	DefaultOutputStyle = "Concise"
@@ -86,9 +84,7 @@ const (
 // RuntimeSettings are ccl's Claude Code process defaults. Provider Env values
 // override these defaults so advanced users retain an escape hatch.
 type RuntimeSettings struct {
-	SubagentModel      string
-	ToolUseConcurrency string
-	ToolSearch         string
+	SubagentModel string
 }
 
 func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
@@ -96,19 +92,9 @@ func ResolveRuntimeSettings(p provider.Provider) RuntimeSettings {
 	if subagentModel == "" {
 		subagentModel = defaultSubagentModel(p)
 	}
-	settings := RuntimeSettings{
-		SubagentModel:      subagentModel,
-		ToolUseConcurrency: DefaultToolUseConcurrency,
-		ToolSearch:         DefaultToolSearch,
-	}
+	settings := RuntimeSettings{SubagentModel: subagentModel}
 	if value, ok := p.Env[SubagentModelEnv]; ok {
 		settings.SubagentModel = value
-	}
-	if value, ok := p.Env[ToolUseConcurrencyEnv]; ok {
-		settings.ToolUseConcurrency = value
-	}
-	if value, ok := p.Env[ToolSearchEnv]; ok {
-		settings.ToolSearch = value
 	}
 	return settings
 }
@@ -201,15 +187,13 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 		env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	}
 
-	// Claude Code runtime defaults. Subagents use the explicit mapping when set
-	// and otherwise follow the effective main model. Provider-level Env values
-	// below can override every default.
+	// Subagents use the explicit mapping when set and otherwise follow the
+	// effective main model. Leave tool concurrency and MCP tool search to
+	// Claude Code unless the provider explicitly overrides them in Env.
 	runtimeSettings := ResolveRuntimeSettings(p)
 	if runtimeSettings.SubagentModel != "" {
 		env[SubagentModelEnv] = catalogModelRequestName(runtimeSettings.SubagentModel, names)
 	}
-	env[ToolUseConcurrencyEnv] = runtimeSettings.ToolUseConcurrency
-	env[ToolSearchEnv] = runtimeSettings.ToolSearch
 
 	// Provider-level overrides take final precedence except for embedded-proxy
 	// transport values, which must match the runtime started for this session.

@@ -678,11 +678,11 @@ func TestPreviewSettingsAppliesRuntimeDefaults(t *testing.T) {
 	if settings.Env[claude.SubagentModelEnv] != "gpt-5.6-sol" {
 		t.Fatalf("subagent model = %q", settings.Env[claude.SubagentModelEnv])
 	}
-	if settings.Env[claude.ToolUseConcurrencyEnv] != claude.DefaultToolUseConcurrency {
-		t.Fatalf("tool concurrency = %q", settings.Env[claude.ToolUseConcurrencyEnv])
+	if _, ok := settings.Env[claude.ToolUseConcurrencyEnv]; ok {
+		t.Fatalf("tool concurrency should use Claude Code default, got %q", settings.Env[claude.ToolUseConcurrencyEnv])
 	}
-	if settings.Env[claude.ToolSearchEnv] != claude.DefaultToolSearch {
-		t.Fatalf("tool search = %q", settings.Env[claude.ToolSearchEnv])
+	if _, ok := settings.Env[claude.ToolSearchEnv]; ok {
+		t.Fatalf("tool search should use Claude Code default, got %q", settings.Env[claude.ToolSearchEnv])
 	}
 }
 
