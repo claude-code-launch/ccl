@@ -182,3 +182,83 @@ func TestAutoClawModelAvailabilityUsesLiveLocalRuntime(t *testing.T) {
 		t.Fatalf("live availability calls = %d, want 2", calls)
 	}
 }
+
+// TestModelProbeTargetUsesConfiguredUpstreamForKeyProviders pins the target
+// selection: an API-key provider must be probed on its configured upstream
+// (the loopback runtime exposes no Chat/Responses route, so probing it marks
+// every healthy model unavailable), while an OAuth subscription — whose
+// persisted endpoint is oauth:// — keeps the loopback runtime.
+func TestModelProbeTargetUsesConfiguredUpstreamForKeyProviders(t *testing.T) {
+	configured := provider.Provider{
+		Name:     "cline",
+		Type:     "modelsdev",
+		Endpoint: "https://upstream.example/v1",
+		APIKey:   "upstream-key",
+	}
+	runtime := provider.Provider{
+		Name:     "cline",
+		Type:     "modelsdev",
+		Endpoint: "http://127.0.0.1:39999/v1",
+		APIKey:   "ccl-local-key",
+	}
+	target := modelProbeTarget(configured, runtime)
+	if target.Endpoint != configured.Endpoint || target.APIKey != configured.APIKey {
+		t.Fatalf("API-key probe target = %q, want configured upstream %q", target.Endpoint, configured.Endpoint)
+	}
+
+	configured.OAuthProvider = "gpt"
+	target = modelProbeTarget(configured, runtime)
+	if target.Endpoint != runtime.Endpoint || target.APIKey != runtime.APIKey {
+		t.Fatalf("OAuth probe target = %q, want loopback runtime %q", target.Endpoint, runtime.Endpoint)
+	}
+}
+
+// TestModelVerificationProbesLoopbackMessagesSurface reproduces the doctor 0/18
+// failure shape: a loopback runtime that serves only the Anthropic Messages
+// surface (like every ccl embedded runtime) and an upstream that answers Chat
+// probes. Verification through modelProbeTarget must hit the upstream and
+// report the models available; probing the loopback the old way 404s them.
+func TestModelVerificationProbesLoopbackMessagesSurface(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	// The loopback runtime shape: /v1/messages and /v1/models only.
+	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer loopback.Close()
+
+	configured := provider.Provider{
+		Type:           "modelsdev",
+		Endpoint:       upstream.URL + "/v1",
+		APIKey:         "upstream-key",
+		ModelProtocols: map[string]string{"model-a": "openai", "model-b": "openai"},
+	}
+	runtime := provider.Provider{
+		Type:     "modelsdev",
+		Endpoint: loopback.URL + "/v1",
+		APIKey:   "ccl-local-key",
+	}
+	models := []string{"model-a", "model-b"}
+
+	target := modelProbeTarget(configured, runtime)
+	available := testModelsConcurrently(context.Background(), models, target.Endpoint, target.APIKey, target.Type, target.AnthropicAuth, target.ModelProtocols)
+	if len(available) != len(models) {
+		t.Fatalf("upstream verification available = %d/%d, want %d", len(available), len(models), len(models))
+	}
+
+	available = testModelsConcurrently(context.Background(), models, runtime.Endpoint, runtime.APIKey, runtime.Type, runtime.AnthropicAuth, runtime.ModelProtocols)
+	if len(available) != 0 {
+		t.Fatalf("loopback Chat probe available = %d, want 0 (runtime has no Chat route)", len(available))
+	}
+}

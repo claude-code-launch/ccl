@@ -56,10 +56,6 @@ when the Claude session ends (default ~/.ccl/logs/ccl-debug-claude_<id>.log).
 
 // ANSI 24-bit color helpers. doctor prints plain terminal output (no TUI), so
 // it escapes directly instead of pulling in a styling library.
-func ansiFg(r, g, b uint8) string {
-	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
-}
-
 const ansiReset = "\x1b[0m"
 const (
 	ansiAccent    = "\x1b[38;2;101;183;255m" // #65B7FF
@@ -204,7 +200,8 @@ func runDoctor(ctx context.Context) error {
 		configuredModels := parseModelList(p.Model)
 		if len(configuredModels) > 0 {
 			doctorSection("Model verification")
-			availableSet := testModelsConcurrently(ctx, configuredModels, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth, p.ModelProtocols)
+			probeTarget := modelProbeTarget(configuredProvider, p)
+			availableSet := testModelsConcurrently(ctx, configuredModels, probeTarget.Endpoint, probeTarget.APIKey, probeTarget.Type, probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
 			available, unavailable := classifyModels(configuredModels, availableSet)
 			doctorKV("Summary", modelVerificationSummary(available, unavailable))
 			if len(unavailable) > 0 {
@@ -607,6 +604,22 @@ func printCloudSyncDiagnostics() {
 	}
 }
 
+// modelProbeTarget picks the provider a model-verification probe should hit.
+// An API-key provider (OpenAI-compatible, models.dev, direct Anthropic) is
+// probed on its configured upstream: the loopback runtime only exposes
+// /v1/messages, so upstream-shaped probes (Chat/Responses/Models) against it
+// systematically 404 and mark every healthy model unavailable. An OAuth
+// subscription has no HTTP endpoint of its own — its persisted endpoint is
+// oauth:// — so it keeps the loopback runtime, whose Anthropic Messages
+// surface is exactly what Claude Code talks to. This mirrors the ccl set page,
+// which probes probeEndpoint (raw input for API-key, runtime for OAuth).
+func modelProbeTarget(configured, runtime provider.Provider) provider.Provider {
+	if strings.TrimSpace(configured.OAuthProvider) != "" {
+		return runtime
+	}
+	return configured
+}
+
 // testModelsConcurrently tests multiple models in small concurrent batches.
 // Each worker sends a lightweight provider-specific POST to verify the model
 // works. protocols carries the per-model wire table for mixed-protocol
@@ -617,9 +630,10 @@ func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiK
 		ctx = context.Background()
 	}
 	// 8 workers, not 50: a large concurrent burst against one gateway trips
-	// per-key rate limits and marks healthy models unavailable.
+	// per-key rate limits and marks healthy models unavailable. doctor is a
+	// deliberate one-shot diagnosis, so it batches wider than the ccl set page's
+	// interactive slotTestConcurrency (2), which re-runs probes while typing.
 	const batchSize = 8
-	const requestTimeout = 10 * time.Second
 
 	available := make(map[string]bool)
 	var mu sync.Mutex
@@ -649,7 +663,7 @@ func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiK
 			wg.Add(1)
 			go func(m string) {
 				defer wg.Done()
-				ok := testSingleModelWithProtocolsContext(ctx, m, endpoint, apiKey, providerType, anthropicAuth, protocols, requestTimeout)
+				ok := testSingleModelWithProtocolsContext(ctx, m, endpoint, apiKey, providerType, anthropicAuth, protocols, modelProbeTimeout)
 				if ok {
 					mu.Lock()
 					available[m] = true
@@ -666,16 +680,17 @@ func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiK
 	return available
 }
 
-func testSingleModelContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, timeout time.Duration) bool {
-	return testSingleModelWithProtocolsContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, nil, timeout)
+// testSingleModelWithProtocolsContext probes one model using a per-model
+// protocol table. Mixed-protocol models.dev gateways expose chat, Responses
+// and native-Anthropic models behind one endpoint, so the probe for each model
+// must follow that model's declared wire protocol — probing them all as Chat
+// Completions marks working models unavailable.
+func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, timeout time.Duration) bool {
+	status, err := probeSingleModelWithProtocolsStatusContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, timeout)
+	return err == nil && status >= 200 && status < 300
 }
 
-// testSingleModelWithProtocolsContext is testSingleModelContext with a
-// per-model protocol table. Mixed-protocol models.dev gateways expose chat,
-// Responses and native-Anthropic models behind one endpoint, so the probe for
-// each model must follow that model's declared wire protocol — probing them
-// all as Chat Completions marks working models unavailable.
-func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, timeout time.Duration) bool {
+func probeSingleModelWithProtocolsStatusContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, timeout time.Duration) (int, error) {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	wire := "openai"
 	switch {
@@ -691,7 +706,7 @@ func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, a
 	case provider.IsModelsDevType(providerType):
 		wire = probeProtocolForModel(protocols, model)
 	}
-	return testSingleModelForProtocolContext(ctx, model, endpoint, apiKey, wire, anthropicAuth, timeout)
+	return probeSingleModelForProtocolStatusContext(ctx, model, endpoint, apiKey, wire, anthropicAuth, timeout)
 }
 
 // probeProtocolForModel resolves the wire protocol a mixed-protocol models.dev
@@ -709,35 +724,29 @@ func probeProtocolForModel(protocols map[string]string, model string) string {
 // else. A trailing [1m] context marker is stripped first — it is a ccl slot
 // directive, not part of the upstream model name.
 func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, apiKey, wireProtocol, anthropicAuth string, timeout time.Duration) bool {
+	status, err := probeSingleModelForProtocolStatusContext(ctx, model, endpoint, apiKey, wireProtocol, anthropicAuth, timeout)
+	return err == nil && status >= 200 && status < 300
+}
+
+func probeSingleModelForProtocolStatusContext(ctx context.Context, model, endpoint, apiKey, wireProtocol, anthropicAuth string, timeout time.Duration) (int, error) {
 	model = stripOneMSuffix(model)
 	switch wireProtocol {
 	case "anthropic":
 		if strings.TrimSpace(anthropicAuth) == "" {
 			anthropicAuth = "x-api-key"
 		}
-		return testSingleAnthropicModelWithAuthContext(ctx, model, endpoint, apiKey, anthropicAuth, timeout)
+		return probeSingleAnthropicModelStatusContext(ctx, model, endpoint, apiKey, anthropicAuth, timeout)
 	case "openai_responses":
-		return testSingleOpenAIResponsesModelContext(ctx, model, endpoint, apiKey, timeout)
+		return protocol.ProbeOpenAIResponsesStatusContext(ctx, endpoint, apiKey, model, timeout)
 	case "autoclaw":
-		return testSingleAnthropicModelWithAuthContext(ctx, model, endpoint, apiKey, "bearer", timeout)
+		return probeSingleAnthropicModelStatusContext(ctx, model, endpoint, apiKey, "bearer", timeout)
 	default:
-		return testSingleOpenAIModelContext(ctx, model, endpoint, apiKey, timeout)
+		return probeSingleOpenAIModelStatusContext(ctx, model, endpoint, apiKey, timeout)
 	}
 }
 
-// probeModel sends one minimal completion request and reports whether the
-// upstream accepted it. The OpenAI and Anthropic probes differ only in URL,
-// payload and auth headers.
-func probeModel(parent context.Context, url string, payload map[string]any, headers map[string]string, timeout time.Duration) bool {
-	status, err := probeModelStatus(parent, url, payload, headers, timeout)
-	if err != nil {
-		return false
-	}
-	return status >= 200 && status < 300
-}
-
-// probeModelStatus is probeModel but reports the upstream HTTP status code (0 on
-// transport error) instead of a boolean. The models.dev key verifier relies on
+// probeModelStatus reports the upstream HTTP status code (0 on transport
+// error). The models.dev key verifier relies on
 // the distinction between an auth rejection (401/403) and a valid key that hits a
 // model/parameter/rate-limit problem (any other 4xx).
 func probeModelStatus(parent context.Context, url string, payload map[string]any, headers map[string]string, timeout time.Duration) (int, error) {
@@ -768,49 +777,58 @@ func probeModelStatus(parent context.Context, url string, payload map[string]any
 }
 
 func testSingleOpenAIModelContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) bool {
+	status, err := probeSingleOpenAIModelStatusContext(parent, model, endpoint, apiKey, timeout)
+	return err == nil && status >= 200 && status < 300
+}
+
+func probeSingleOpenAIModelStatusContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) (int, error) {
 	headers := map[string]string{"Authorization": "Bearer " + apiKey}
 	payload := func(tokenField string) map[string]any {
 		return map[string]any{
 			"model":    model,
-			"messages": []map[string]string{{"role": "user", "content": "hi"}},
+			"messages": []map[string]string{{"role": "user", "content": "Reply OK."}},
+			"stream":   false,
 			tokenField: 1,
 		}
 	}
+	// ClinePass documents a Chat Completions request with the full model slug,
+	// messages, and stream:false, without a token-limit field. Sending
+	// max_tokens:1 can reject otherwise usable models on this gateway.
+	if strings.HasPrefix(strings.ToLower(model), "cline-pass/") {
+		return probeModelStatus(parent, buildChatURL(endpoint), map[string]any{
+			"model":    model,
+			"messages": []map[string]string{{"role": "user", "content": "Reply OK."}},
+			"stream":   false,
+		}, headers, timeout)
+	}
 	status, err := probeModelStatus(parent, buildChatURL(endpoint), payload("max_tokens"), headers, timeout)
 	if err != nil {
-		return false
+		return 0, err
 	}
 	if status >= 200 && status < 300 {
-		return true
+		return status, nil
 	}
 	// Reasoning-model families renamed max_tokens to max_completion_tokens and
 	// reject the old parameter with a 400; retry once before declaring the
 	// model unavailable.
 	if status == http.StatusBadRequest {
 		status, err = probeModelStatus(parent, buildChatURL(endpoint), payload("max_completion_tokens"), headers, timeout)
-		if err != nil {
-			return false
-		}
 	}
-	return status >= 200 && status < 300
+	return status, err
 }
 
-func testSingleAnthropicModelWithAuthContext(parent context.Context, model, endpoint, apiKey, authStyle string, timeout time.Duration) bool {
+func probeSingleAnthropicModelStatusContext(parent context.Context, model, endpoint, apiKey, authStyle string, timeout time.Duration) (int, error) {
 	headers := map[string]string{"anthropic-version": "2023-06-01"}
 	if strings.EqualFold(authStyle, "bearer") {
 		headers["Authorization"] = "Bearer " + apiKey
 	} else {
 		headers["x-api-key"] = apiKey
 	}
-	return probeModel(parent, buildAnthropicMessagesURL(endpoint), map[string]any{
+	return probeModelStatus(parent, buildAnthropicMessagesURL(endpoint), map[string]any{
 		"model":      model,
 		"max_tokens": 1,
 		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
 	}, headers, timeout)
-}
-
-func testSingleOpenAIResponsesModelContext(ctx context.Context, model, endpoint, apiKey string, timeout time.Duration) bool {
-	return protocol.ProbeOpenAIResponsesSupportContext(ctx, endpoint, apiKey, model, timeout)
 }
 
 // buildChatURL constructs a chat completions endpoint URL from a provider endpoint.
@@ -1158,22 +1176,24 @@ func maskAPIKey(key string) string {
 }
 
 func providerToolsSummary(p provider.Provider) string {
-	runtimes := claude.ResolveRuntimeSettings(p)
-	if runtimes.ToolUseConcurrency == "" || runtimes.ToolUseConcurrency == claude.DefaultToolUseConcurrency {
-		return "default (3)"
+	value := strings.TrimSpace(p.Env[claude.ToolUseConcurrencyEnv])
+	if value == "" {
+		return "Claude default"
 	}
-	return runtimes.ToolUseConcurrency
+	return value
 }
 
 func providerToolSearchSummary(p provider.Provider) string {
-	runtimes := claude.ResolveRuntimeSettings(p)
-	switch strings.ToLower(strings.TrimSpace(runtimes.ToolSearch)) {
-	case "", "false", "0", "off", "no":
+	value := strings.TrimSpace(p.Env[claude.ToolSearchEnv])
+	switch strings.ToLower(value) {
+	case "":
+		return "Claude default"
+	case "false", "0", "off", "no":
 		return "off"
 	case "true", "1", "on", "yes":
 		return "on"
 	default:
-		return runtimes.ToolSearch
+		return value
 	}
 }
 
@@ -1197,11 +1217,6 @@ func printProviderModelMappings(p provider.Provider, modelNames map[string]strin
 		}
 		doctorKV(mapping.label, model)
 	}
-}
-
-// printModelReport displays the complete availability report for `ccl models`.
-func printModelReport(available, unavailable []string) {
-	printModelReportWithMetadata(available, unavailable, nil)
 }
 
 func printModelReportWithMetadata(available, unavailable []string, metadata map[string]protocol.ModelInfo) {

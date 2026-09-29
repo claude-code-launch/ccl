@@ -38,6 +38,7 @@ func runModels(ctx context.Context, showAll bool) error {
 	if err != nil {
 		return err
 	}
+	configured := p
 	p, runtime, cleanup, err := prepareProviderRuntime(context.Background(), p)
 	if err != nil {
 		return err
@@ -80,10 +81,15 @@ func runModels(ctx context.Context, showAll bool) error {
 		return nil
 	}
 
+	// Probe the same target ccl set uses: API-key providers are verified on
+	// their configured upstream (the loopback runtime has no Chat/Responses
+	// route), OAuth subscriptions on their loopback runtime.
+	probeTarget := modelProbeTarget(configured, p)
+
 	fmt.Printf("Models · %s\n", p.Name)
 	fmt.Printf("Source: %s · %d model(s)\n\n", source, len(modelList))
 
-	availableSet := testModelsConcurrently(ctx, modelList, p.Endpoint, p.APIKey, p.Type, p.AnthropicAuth, p.ModelProtocols)
+	availableSet := testModelsConcurrently(ctx, modelList, probeTarget.Endpoint, probeTarget.APIKey, probeTarget.Type, probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
 	available, unavailable := classifyModels(modelList, availableSet)
 	fmt.Println()
 	printModelReportWithMetadata(available, unavailable, indexModelInfos(catalog))
