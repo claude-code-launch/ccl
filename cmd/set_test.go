@@ -12,7 +12,6 @@ import (
 
 	tui "github.com/grindlemire/go-tui"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -605,7 +604,7 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	}
 }
 
-func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
+func TestManualReviewPageShowsRuntimeSettings(t *testing.T) {
 	p := provider.Provider{
 		Type:          "openai_responses",
 		Endpoint:      "https://example.test/v1",
@@ -618,14 +617,16 @@ func TestManualReviewPageShowsRuntimeDefaults(t *testing.T) {
 	for _, expected := range []string{
 		"Runtime",
 		"Subagent", "gpt-5.6-sol",
-		"Tools", "‹ Default · 3 ›",
-		"Tool Search", "‹ Default · Off ›",
+		"Fast", "Status Line",
 		"Set as active provider",
 		"Save & Activate",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("expected manual review to contain %q, got %q", expected, view)
 		}
+	}
+	if strings.Contains(view, "Tool Search") || strings.Contains(view, "Default · 3") {
+		t.Fatalf("tool settings should not be shown in review: %q", view)
 	}
 }
 
@@ -659,14 +660,14 @@ func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
 	}
 }
 
-func TestAutoReviewPageOmitsRuntimeDefaults(t *testing.T) {
+func TestAutoReviewPageShowsRuntimeControls(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", CustomModelID: "gpt-5.6-sol"}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol")
 
 	view := renderView(t, m)
 	// Runtime editors are always available on the single page.
-	if !strings.Contains(view, "Runtime") || !strings.Contains(view, "Tools") {
+	if !strings.Contains(view, "Runtime") || !strings.Contains(view, "Status Line") {
 		t.Fatalf("review should show runtime editors, got %q", view)
 	}
 }
@@ -682,7 +683,7 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 		t.Fatalf("protocol toggle stored %q, want openai_responses", p.Type)
 	}
 	view := renderView(t, m)
-	for _, want := range []string{"‹ Responses ›", "Tools"} {
+	for _, want := range []string{"‹ Responses ›", "Status Line"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("Responses review should contain %q, got %q", want, view)
 		}
@@ -783,6 +784,33 @@ func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
 	}
 }
 
+func TestInconclusiveModelProbeIsNotDisplayedAsUnavailable(t *testing.T) {
+	previous := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(previous) })
+	locale.SetLanguage("en")
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
+	m := NewAdvancedMappingModel(&p, []string{"model-a"}, nil)
+	m.modelTesting = true
+	m.modelTestID = 7
+	m.handleAvailabilityDone(modelAvailabilityDoneMsg{
+		testID:   7,
+		statuses: map[string]modelAvailability{"model-a": modelAvailabilityInconclusive},
+	})
+	mainView := renderView(t, m)
+	if !strings.Contains(mainView, "0 available · 0 unavailable · 1 inconclusive") {
+		t.Fatalf("inconclusive count missing: %q", mainView)
+	}
+	m.filterFocused = true
+	m.updateFilteredPool()
+	view := renderView(t, m)
+	if !strings.Contains(view, "? inconclusive") {
+		t.Fatalf("inconclusive probe was not shown accurately: %q", view)
+	}
+	if strings.Contains(view, "✗ unavailable") {
+		t.Fatalf("inconclusive probe was marked unavailable: %q", view)
+	}
+}
+
 func TestParseModelListForDetectionPreservesDisplayMetadata(t *testing.T) {
 	result, err := parseModelListForDetection([]byte(`{"data":[{"id":"qmodel_38max","display_name":"Qwen3.8-Max","max_input_tokens":1000000,"max_output_tokens":32768,"rate_multiplier":0.5,"rate_unit":"credits","is_new":true,"promotion_available":true}],"has_more":false}`))
 	if err != nil {
@@ -853,6 +881,7 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 		"",
 		nil,
 		lowCostProbeModel,
+		false,
 	)
 	msg := <-done
 	if requestCount.Load() != 1 {
@@ -1682,22 +1711,18 @@ func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-test")
-	m.cursor = m.mainRowIndex(rowTools)
+	m.cursor = m.mainRowIndex(rowStatusline)
 
-	// Cycle tool concurrency away from Default.
 	m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
-	if got := m.reviewToolsValue(); got != "1" {
-		t.Fatalf("tool concurrency after right = %q, want 1", got)
-	}
-	if m.p.Env == nil || m.p.Env[claude.ToolUseConcurrencyEnv] != "1" {
-		t.Fatalf("provider env tool concurrency = %v, want 1", m.p.Env)
+	if !m.p.StatuslineDisabled {
+		t.Fatal("status line should be disabled after right")
 	}
 	view := renderView(t, m)
 	if !strings.Contains(view, "‹ ") || !strings.Contains(view, " ›") {
 		t.Fatalf("expected editable ‹ › markers, got %q", view)
 	}
-	if strings.Contains(view, "Max Output") || !strings.Contains(view, "Tools") || !strings.Contains(view, "Tool Search") {
-		t.Fatalf("expected runtime editors, got %q", view)
+	if strings.Contains(view, "Max Output") || strings.Contains(view, "Tool Search") || !strings.Contains(view, "Status Line") {
+		t.Fatalf("expected only supported runtime editors, got %q", view)
 	}
 	// Effort row must be gone.
 	if strings.Contains(view, "Claude Code managed") || strings.Contains(view, "Effort") {

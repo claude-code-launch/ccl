@@ -79,3 +79,11 @@ func modelsDevProviderToDraft(p modelsdev.Provider) (provider.Provider, map[stri
 	draft.Model = strings.Join(pool, ",")
 	return draft, metadata
 }
+
+// modelsDevCatalogModelIDs returns the routable model IDs one catalog provider
+// currently advertises — the same set modelsDevProviderToDraft would build a
+// pool from, without the display metadata.
+func modelsDevCatalogModelIDs(p modelsdev.Provider) []string {
+	draft, _ := modelsDevProviderToDraft(p)
+	return uniqueModels(parseModelList(draft.Model))
+}

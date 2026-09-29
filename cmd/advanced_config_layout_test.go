@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -622,6 +623,36 @@ func TestModelsDevSourceHasNoEditableEndpoint(t *testing.T) {
 	}
 }
 
+func TestModelsDevConnectionDoesNotShowManualVerification(t *testing.T) {
+	p := provider.Provider{
+		Type: "modelsdev", Endpoint: "https://example.test/v1", APIKey: "test-key",
+		Model: "provider/model", ModelProtocols: map[string]string{"provider/model": "openai"},
+	}
+	m := NewAdvancedConfigModel(&p)
+	if m.mainRowIndex(rowTest) != -1 {
+		t.Fatal("models.dev connection should not offer a manual Test Connection action")
+	}
+	m.activateRow(rowTestModels)
+	if m.modelTesting {
+		t.Fatal("model availability must wait for automatic key verification")
+	}
+	m.cursor = m.mainRowIndex(rowAPIKey)
+	m.live().detecting = true
+	m.live().probeAPIKey = p.APIKey
+	m.handleVerifyDone(keyVerifyDoneMsg{endpoint: p.Endpoint, apiKey: p.APIKey})
+	if m.mainRowIndex(rowTest) != -1 {
+		t.Fatal("verified connection should not offer Test Connection")
+	}
+	if m.currentRow() != rowAPIKey {
+		t.Fatalf("focus after verification = %v, want API Key", m.currentRow())
+	}
+	m.keyText.Set("changed-key")
+	m.invalidateModelsDevKeyIfChanged()
+	if m.mainRowIndex(rowTest) != -1 || !m.live().autoVerifyPending {
+		t.Fatal("changed key should schedule automatic verification without a button")
+	}
+}
+
 // TestModelsDevSourceNotReadyUntilProviderSelected verifies a freshly switched
 // models.dev source (no provider picked, no key) is NOT connection-ready and
 // cannot be saved — the "✓ Connected" status and the Model Mapping/Runtime
@@ -640,6 +671,93 @@ func TestModelsDevSourceNotReadyUntilProviderSelected(t *testing.T) {
 	m.applyModelsDevProvider(testModelsDevProvider())
 	if !m.connectionReady() {
 		t.Fatalf("models.dev source should be ready after picking a provider")
+	}
+}
+
+// TestModelsDevRefreshMergesCatalog verifies the one-shot refresh that runs
+// after key verification: models added to the catalog appear, models the
+// catalog dropped leave the pool along with any slot that pointed at them,
+// and surviving slots keep their values and [1M] markers.
+func TestModelsDevRefreshMergesCatalog(t *testing.T) {
+	p := provider.Provider{
+		Type: "modelsdev", Name: "test-gw", Endpoint: "https://example.test/v1", APIKey: "key",
+		Model:         "kept,dropped,legacy-extra",
+		OpusModel:     "kept",         // survives
+		SonnetModel:   "dropped",      // cleared: left the catalog
+		CustomModelID: "legacy-extra", // kept: absent from catalog but locally pinned
+		ModelProtocols: map[string]string{
+			"kept": "openai", "dropped": "openai", "legacy-extra": "openai", "fresh": "openai",
+		},
+	}
+	m := NewAdvancedConfigModel(&p)
+	if !m.live().modelsDevRefreshPending {
+		t.Fatal("opening a persisted models.dev provider should arm the catalog refresh")
+	}
+	// Simulate a verified key, which is what fires the refresh.
+	m.live().keyVerified = true
+	m.live().modelsDevRefreshPending = false
+
+	catalog := testModelsDevProvider()
+	catalog.Models["kept"] = modelsdev.Model{ID: "kept", Name: "Kept"}
+	catalog.Models["fresh"] = modelsdev.Model{ID: "fresh", Name: "Fresh"}
+	delete(catalog.Models, "test-model")
+	m.handleModelsDevRefreshDone(modelsDevFetchDoneMsg{
+		providers:  []modelsdev.Provider{catalog},
+		refreshFor: "test-gw",
+	})
+
+	got := strings.Join(m.live().modelPool, ",")
+	want := "kept,legacy-extra,fresh"
+	if got != want {
+		t.Fatalf("merged pool = %q, want %q (saved models kept, dropped cleared, fresh appended)", got, want)
+	}
+	if p.Model != want {
+		t.Fatalf("persisted Model = %q, want %q", p.Model, want)
+	}
+	if p.OpusModel != "kept" {
+		t.Fatalf("surviving slot was touched: opus = %q", p.OpusModel)
+	}
+	if p.SonnetModel != "" {
+		t.Fatalf("slot pointing at a dropped model should be cleared, sonnet = %q", p.SonnetModel)
+	}
+	if p.CustomModelID != "legacy-extra" {
+		t.Fatalf("locally pinned slot absent from the catalog should survive, custom = %q", p.CustomModelID)
+	}
+}
+
+// TestModelsDevRefreshIgnoredForOtherProvider verifies a refresh result for a
+// different provider id does not touch the current pool.
+func TestModelsDevRefreshIgnoredForOtherProvider(t *testing.T) {
+	p := provider.Provider{
+		Type: "modelsdev", Name: "mine", Endpoint: "https://example.test/v1", APIKey: "key",
+		Model: "a,b", ModelProtocols: map[string]string{"a": "openai", "b": "openai"},
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.live().modelsDevRefreshPending = false
+	before := strings.Join(m.live().modelPool, ",")
+
+	catalog := testModelsDevProvider() // id "test-gw"
+	m.handleModelsDevRefreshDone(modelsDevFetchDoneMsg{
+		providers:  []modelsdev.Provider{catalog},
+		refreshFor: "test-gw",
+	})
+	if got := strings.Join(m.live().modelPool, ","); got != before {
+		t.Fatalf("pool changed on a foreign refresh: %q -> %q", before, got)
+	}
+}
+
+// TestModelsDevRefreshKeepsPoolOnFetchError verifies a failed catalog fetch
+// leaves the saved pool intact.
+func TestModelsDevRefreshKeepsPoolOnFetchError(t *testing.T) {
+	p := provider.Provider{
+		Type: "modelsdev", Name: "mine", Endpoint: "https://example.test/v1", APIKey: "key",
+		Model: "a,b", ModelProtocols: map[string]string{"a": "openai", "b": "openai"},
+	}
+	m := NewAdvancedConfigModel(&p)
+	before := strings.Join(m.live().modelPool, ",")
+	m.handleModelsDevRefreshDone(modelsDevFetchDoneMsg{err: fmt.Errorf("offline"), refreshFor: "mine"})
+	if got := strings.Join(m.live().modelPool, ","); got != before {
+		t.Fatalf("pool changed on failed refresh: %q -> %q", before, got)
 	}
 }
 

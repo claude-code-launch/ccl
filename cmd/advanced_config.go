@@ -69,10 +69,13 @@ const (
 	preferredPanelWidth   = 82
 	minimumPanelWidth     = 54
 	minimumTerminalMargin = 4
-	// 8 workers, not 50: a concurrent burst against one gateway trips per-key
-	// rate limits and marks healthy models unavailable.
-	slotTestConcurrency = 8
+	// Availability checks are optional and quota-consuming. Keep the burst small
+	// so gateway rate limits do not make healthy models look unavailable.
+	slotTestConcurrency = 2
 	lowCostProbeModel   = "gpt-5.4-mini"
+	// Cold-start gateways routinely answer a first inference request in well
+	// over ten seconds; the timeout must outlast that without hanging the test.
+	modelProbeTimeout = 20 * time.Second
 )
 
 // configRowKind enumerates the focusable rows of the single configuration page.
@@ -98,8 +101,6 @@ const (
 	rowSubagent
 	rowTestModels // Test model availability (optional, costs quota)
 	rowContext    // Context & Compact entry
-	rowTools
-	rowToolSearch
 	rowStatusline // Status Line on/off pin
 	rowActive
 	rowSave
@@ -190,6 +191,17 @@ type connDraft struct {
 	// the provider endpoint (a real /models probe, not just a non-empty string).
 	// It is cleared whenever the key input is edited or the provider changes.
 	keyVerified bool
+	// A models.dev key is verified automatically after editing settles or the
+	// input loses focus. Clearing this before dispatch prevents repeated probes
+	// after a failed attempt; editing the key schedules a fresh check.
+	autoVerifyPending bool
+	lastKeyEditAt     time.Time
+	verifyGeneration  uint64
+	// modelsDevRefreshPending arms a one-shot catalog refresh that fires after
+	// the key verifies: an already-saved provider opens on its persisted pool,
+	// and only a verified connection proves the refresh would not run against a
+	// stale endpoint/key. Cleared once the refresh result is consumed.
+	modelsDevRefreshPending bool
 
 	// saveGuardPending marks that the user pressed Save on the Custom source
 	// while the models.dev side still holds the same-named provider, and the
@@ -303,6 +315,7 @@ const (
 	modelAvailabilityUnknown modelAvailability = iota
 	modelAvailabilityAvailable
 	modelAvailabilityUnavailable
+	modelAvailabilityInconclusive
 )
 
 type modelAvailabilityDoneMsg struct {
@@ -341,14 +354,18 @@ type modelFetchDoneMsg struct {
 // config — the metadata-derived Type, endpoint, and per-model protocol table are
 // left untouched; only the key's validity (keyVerified) is recorded.
 type keyVerifyDoneMsg struct {
-	endpoint string
-	apiKey   string
-	err      error
+	endpoint   string
+	apiKey     string
+	generation uint64
+	err        error
 }
 
 // keyVerifyTimeout bounds the single authenticated inference request used to
-// verify a models.dev API key.
-const keyVerifyTimeout = 10 * time.Second
+// verify a models.dev API key. It matches modelProbeTimeout: cold-start
+// gateways routinely answer a first inference request in well over ten
+// seconds, and a shorter verify budget would block saving a key the
+// availability probe itself could reach.
+const keyVerifyTimeout = 20 * time.Second
 
 // keyVerifyAsync sends one minimal, authenticated inference request for the
 // given model and protocol, and reports only whether the key was accepted at
@@ -356,10 +373,10 @@ const keyVerifyTimeout = 10 * time.Second
 // the metadata-derived Type, endpoint, and per-model protocol table are left
 // untouched; only the key's validity (keyVerified) is recorded. The result is
 // delivered on the verify channel consumed by Watchers().
-func keyVerifyAsync(done chan<- keyVerifyDoneMsg, endpoint, apiKey, model, proto string) {
+func keyVerifyAsync(done chan<- keyVerifyDoneMsg, endpoint, apiKey, model, proto string, generation uint64) {
 	go func() {
 		err := verifyProviderAPIKey(context.Background(), model, endpoint, apiKey, proto, keyVerifyTimeout)
-		done <- keyVerifyDoneMsg{endpoint: endpoint, apiKey: apiKey, err: err}
+		done <- keyVerifyDoneMsg{endpoint: endpoint, apiKey: apiKey, generation: generation, err: err}
 	}()
 }
 
@@ -381,11 +398,7 @@ func verifyProviderAPIKey(parent context.Context, model, endpoint, apiKey, proto
 	case "openai_responses":
 		status, err = protocol.ProbeOpenAIResponsesStatusContext(parent, endpoint, apiKey, model, timeout)
 	default: // "openai" (Chat Completions)
-		status, err = probeModelStatus(parent, buildChatURL(endpoint), map[string]any{
-			"model":      model,
-			"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-			"max_tokens": 1,
-		}, map[string]string{"Authorization": "Bearer " + apiKey}, timeout)
+		status, err = probeSingleOpenAIModelStatusContext(parent, model, endpoint, apiKey, timeout)
 	}
 	if err != nil {
 		return err
@@ -417,10 +430,12 @@ func (m *AdvancedConfigModel) firstRoutableModel() (model, proto string, ok bool
 }
 
 // modelsDevFetchDoneMsg carries the models.dev catalog (or its fetch error) back
-// to the picker overlay.
+// to the picker overlay. A refresh of an already-picked provider is flagged by
+// refreshFor so the picker handler ignores it.
 type modelsDevFetchDoneMsg struct {
-	providers []modelsdev.Provider
-	err       error
+	providers  []modelsdev.Provider
+	err        error
+	refreshFor string
 }
 
 // fetchModelsDevAsync fetches the models.dev catalog off the UI thread and
@@ -429,6 +444,20 @@ func fetchModelsDevAsync(done chan<- modelsDevFetchDoneMsg) {
 	go func() {
 		providers, err := modelsDevProviders(context.Background())
 		done <- modelsDevFetchDoneMsg{providers: providers, err: err}
+	}()
+}
+
+// fetchModelsDevRefreshAsync refreshes the catalog for an already-selected
+// models.dev provider. The page opens on the persisted model pool and never
+// re-probes it (a probe would destroy the per-model routing), so without this
+// the pool is a snapshot from whenever the provider was last saved: models the
+// catalog dropped stay selectable and new ones never appear. The result merges
+// additively in handleModelsDevRefreshDone; a failed fetch just keeps the
+// saved list.
+func fetchModelsDevRefreshAsync(done chan<- modelsDevFetchDoneMsg, providerID string) {
+	go func() {
+		providers, err := modelsDevProviders(context.Background())
+		done <- modelsDevFetchDoneMsg{providers: providers, err: err, refreshFor: providerID}
 	}()
 }
 
@@ -474,10 +503,10 @@ func fetchModelsAsync(done chan<- modelFetchDoneMsg, endpoint, apiKey string, pr
 }
 
 // testModelsAsync probes every model in the pool concurrently and delivers the
-// statuses on the availability channel. 8 workers, not 50: a concurrent burst
-// against one gateway trips per-key rate limits and marks healthy models
-// unavailable.
-func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, smokeTestModel string) {
+// statuses on the availability channel. A rejected probe is not necessarily
+// evidence that the model itself is unavailable; keyVerified lets a verified
+// models.dev source upgrade a 404 to a concrete "unavailable" verdict.
+func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, smokeTestModel string, keyVerified bool) {
 	models = append([]string(nil), models...)
 	go func() {
 		statuses := make(map[string]modelAvailability, len(models))
@@ -486,10 +515,7 @@ func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, 
 			return
 		}
 		if smokeTestModel != "" {
-			status := modelAvailabilityUnavailable
-			if testSingleModelWithProtocolsContext(ctx, smokeTestModel, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
-				status = modelAvailabilityAvailable
-			}
+			status := probeModelAvailability(ctx, smokeTestModel, endpoint, apiKey, providerType, anthropicAuth, protocols, keyVerified)
 			if ctx.Err() == nil {
 				for _, model := range models {
 					statuses[model] = status
@@ -520,10 +546,7 @@ func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, 
 						if !ok {
 							return
 						}
-						status := modelAvailabilityUnavailable
-						if testSingleModelWithProtocolsContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, 10*time.Second) {
-							status = modelAvailabilityAvailable
-						}
+						status := probeModelAvailability(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, keyVerified)
 						if ctx.Err() != nil {
 							return
 						}
@@ -538,6 +561,42 @@ func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, 
 		wg.Wait()
 		done <- modelAvailabilityDoneMsg{testID: testID, statuses: statuses}
 	}()
+}
+
+// A non-2xx response does not establish model availability by itself: even a
+// 404 can mean the endpoint path is wrong rather than the model. Once the API
+// key has been verified against this endpoint, though, a 404 on a known-correct
+// path is real evidence the model is gone, so it becomes "unavailable". Other
+// 4xx stay inconclusive: 400 can be a parameter mismatch and 429 a rate limit.
+// keyVerified only flips the 404 verdict for models.dev-style sources whose
+// endpoint and per-model protocol table come from catalog metadata.
+func probeModelAvailability(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, keyVerified bool) modelAvailability {
+	const attempts = 3
+	for attempt := range attempts {
+		status, err := probeSingleModelWithProtocolsStatusContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, modelProbeTimeout)
+		if err != nil || status == 0 {
+			return modelAvailabilityInconclusive
+		}
+		switch {
+		case status >= 200 && status < 300:
+			return modelAvailabilityAvailable
+		case keyVerified && status == http.StatusNotFound:
+			return modelAvailabilityUnavailable
+		case status != http.StatusTooManyRequests && status < 500:
+			return modelAvailabilityInconclusive
+		}
+		if attempt == attempts-1 || ctx.Err() != nil {
+			break
+		}
+		timer := time.NewTimer(time.Duration(1<<attempt) * 250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return modelAvailabilityInconclusive
+		case <-timer.C:
+		}
+	}
+	return modelAvailabilityInconclusive
 }
 
 // live returns the connection draft for the currently active source. Every
@@ -598,8 +657,6 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 			configRow{kind: rowContext, editable: ready},
 			configRow{kind: rowProtocol, editable: ready},
 			configRow{kind: rowFast, editable: ready},
-			configRow{kind: rowTools, editable: ready},
-			configRow{kind: rowToolSearch, editable: ready},
 			configRow{kind: rowStatusline, editable: ready},
 			configRow{kind: rowActive, editable: ready},
 			configRow{kind: rowSave},
@@ -624,28 +681,26 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		// models.dev: endpoint and protocol come from metadata (read-only); the
 		// Provider row opens the catalog picker and only the API key is editable.
 		// Protocol stays rendered inline (like Endpoint) but is not a navigable
-		// stop — there is nothing to toggle on a mixed-protocol gateway. The Test
-		// Connection row verifies the entered key against the real endpoint.
+		// stop — there is nothing to toggle on a mixed-protocol gateway. The
+		// entered key is checked automatically, without a separate action row.
 		rows = append(rows,
 			configRow{kind: rowProvider},
 			configRow{kind: rowAPIKey},
-			configRow{kind: rowTest},
 		)
 	}
 	ready := m.connectionReady()
+	modelTestReady := ready && (!m.usesModelsDev() || m.live().keyVerified)
 	// Render order matches View: Connection → Model Mapping → Context →
-	// Runtime (Fast/Tools/...) → Active → actions.
+	// Runtime (Fast/Status Line) → Active → actions.
 	rows = append(rows,
 		configRow{kind: rowOpus, editable: ready},
 		configRow{kind: rowSonnet, editable: ready},
 		configRow{kind: rowHaiku, editable: ready},
 		configRow{kind: rowCustom, editable: ready},
 		configRow{kind: rowSubagent, editable: ready},
-		configRow{kind: rowTestModels, editable: ready},
+		configRow{kind: rowTestModels, editable: modelTestReady},
 		configRow{kind: rowContext, editable: ready},
 		configRow{kind: rowFast, editable: ready},
-		configRow{kind: rowTools, editable: ready},
-		configRow{kind: rowToolSearch, editable: ready},
 		configRow{kind: rowStatusline, editable: ready},
 		configRow{kind: rowActive, editable: ready},
 		configRow{kind: rowSave},
@@ -654,10 +709,8 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 	return rows
 }
 
-// focusDetectionAction moves the cursor onto the Auto Configure / Test Connection
-// row, or onto the first model slot when the page has no detection step to offer
-// (an OAuth subscription, which never probes). Failure paths and the API-key row
-// both use it, so they never strand the cursor on an index of -1.
+// focusDetectionAction moves the cursor onto Auto Configure, or onto the first
+// model slot when the page has no manual connection action (OAuth/models.dev).
 func (m *AdvancedConfigModel) focusDetectionAction() {
 	if index := m.mainRowIndex(rowTest); index >= 0 {
 		m.cursor = index
@@ -1050,6 +1103,10 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 			m.live().probeEndpoint = m.p.Endpoint
 			m.live().inputEndpoint = m.p.Endpoint
 			m.live().inputAPIKey = m.p.APIKey
+			m.live().autoVerifyPending = strings.TrimSpace(m.p.APIKey) != ""
+			// The persisted pool is a snapshot from the last save. Arm a one-shot
+			// catalog refresh that runs once the key re-verifies.
+			m.live().modelsDevRefreshPending = true
 		case m.usesOAuth():
 			// A subscription has no probe to run — connectionReady is true from
 			// the start — so the persisted pool is the whole catalog: AutoClaw's
@@ -1245,8 +1302,13 @@ func (m *AdvancedConfigModel) otherSource() connectionSource {
 // current side's text inputs are saved to its mirror, the pointer rebinds to the
 // target draft, and the shared widget values refresh from the target mirror.
 func (m *AdvancedConfigModel) switchSource(target connectionSource) {
-	if m.source == target || m.live().detecting {
+	if m.source == target || (m.live().detecting && !m.usesModelsDev()) {
 		return
+	}
+	if m.usesModelsDev() && m.live().detecting {
+		m.live().detecting = false
+		m.live().verifyGeneration++
+		m.live().autoVerifyPending = !m.live().keyVerified && strings.TrimSpace(m.keyText.Get()) != ""
 	}
 	// Abort an in-flight availability test: its results belong to the old pool.
 	if m.modelTesting && m.modelTestCancel != nil {
@@ -1271,6 +1333,9 @@ func (m *AdvancedConfigModel) switchSource(target connectionSource) {
 	m.updateFilteredPool()
 	m.cursor = m.mainRowIndex(rowSource)
 	m.keepCursorVisible()
+	if m.usesModelsDev() {
+		m.startModelsDevVerification()
+	}
 }
 
 // applyModelsDevProvider fills the models.dev draft with the chosen provider and
@@ -1291,6 +1356,9 @@ func (m *AdvancedConfigModel) applyModelsDevProvider(p modelsdev.Provider) {
 	d.autoDetectOnOpen = false
 	d.detectionError = nil
 	d.keyVerified = false
+	d.autoVerifyPending = false
+	d.lastKeyEditAt = time.Time{}
+	d.verifyGeneration++
 	d.probeEndpoint = draft.Endpoint
 	d.probeAPIKey = ""
 	d.inputEndpoint = draft.Endpoint
@@ -1385,12 +1453,63 @@ func NewAdvancedMappingModel(p *provider.Provider, modelPool []string, metadata 
 // providers are always ready so they skip this. Called once from Watchers()
 // startup (go-tui has no Init() on the SetRootComponent path).
 func (m *AdvancedConfigModel) startAutoDetect() {
+	if m.usesModelsDev() {
+		m.startModelsDevVerification()
+		return
+	}
 	if m.live().autoDetectOnOpen && !m.usesOAuth() && !m.usesModelsDev() && strings.TrimSpace(m.live().probeEndpoint) != "" {
 		m.live().detecting = true
 		m.live().detectProgress = 5
 		m.live().detectFrame = 0
 		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth)
 	}
+}
+
+// startModelsDevVerification checks only the credential. Metadata already
+// supplies the endpoint, model catalog, and per-model routing, so running full
+// protocol detection here would destroy that configuration.
+func (m *AdvancedConfigModel) startModelsDevVerification() {
+	if !m.usesModelsDev() || !m.live().autoVerifyPending || m.live().detecting {
+		return
+	}
+	key := strings.TrimSpace(m.keyText.Get())
+	if key == "" || strings.TrimSpace(m.p.Endpoint) == "" {
+		return
+	}
+	m.live().autoVerifyPending = false
+	model, proto, ok := m.firstRoutableModel()
+	if !ok {
+		m.live().detectionError = fmt.Errorf("%s", locale.T(
+			"该 Provider 没有可用模型（AI SDK 包暂不支持），无法验证 key",
+			"this provider has no usable models (unsupported AI SDK package); cannot verify the key",
+		))
+		m.live().keyVerified = false
+		setDebugf("models.dev key verify aborted: no routable model endpoint=%q", m.p.Endpoint)
+		m.markDirty()
+		return
+	}
+	m.live().probeEndpoint = m.p.Endpoint
+	m.live().probeAPIKey = key
+	m.live().detectionError = nil
+	m.live().keyVerified = false
+	m.live().detecting = true
+	m.live().detectProgress = 5
+	m.live().detectFrame = 0
+	setDebugf("start models.dev key verify endpoint=%q api_key_len=%d model=%q proto=%q", m.p.Endpoint, len(key), model, proto)
+	m.live().verifyGeneration++
+	keyVerifyAsync(m.verifyDone, m.p.Endpoint, key, model, proto, m.live().verifyGeneration)
+	m.markDirty()
+}
+
+// A failed automatic check may have been a transient network/server failure.
+// Enter on API Key explicitly retries without forcing the user to alter a
+// valid credential just to re-arm the automatic verifier.
+func (m *AdvancedConfigModel) retryModelsDevVerification() {
+	if !m.usesModelsDev() || m.live().keyVerified || m.live().detecting {
+		return
+	}
+	m.live().autoVerifyPending = strings.TrimSpace(m.keyText.Get()) != ""
+	m.startModelsDevVerification()
 }
 
 func (m *AdvancedConfigModel) availabilitySmokeTestModel() string {
@@ -1547,21 +1666,25 @@ func (m *AdvancedConfigModel) availabilitySpan(model string) tui.TextSpan {
 		return span(locale.T("✓ 可用", "✓ available"), stAvailable)
 	case modelAvailabilityUnavailable:
 		return span(locale.T("✗ 不可用", "✗ unavailable"), stUnavailable)
+	case modelAvailabilityInconclusive:
+		return span(locale.T("? 未确认", "? inconclusive"), stGray)
 	default:
 		return span(locale.T("? 未测试", "? not tested"), stGray)
 	}
 }
 
-func (m *AdvancedConfigModel) availabilityCounts() (available, unavailable int) {
+func (m *AdvancedConfigModel) availabilityCounts() (available, unavailable, inconclusive int) {
 	for _, model := range m.live().modelPool {
 		switch m.availabilityFor(model) {
 		case modelAvailabilityAvailable:
 			available++
 		case modelAvailabilityUnavailable:
 			unavailable++
+		case modelAvailabilityInconclusive:
+			inconclusive++
 		}
 	}
-	return available, unavailable
+	return available, unavailable, inconclusive
 }
 
 // syncTerminalSize refreshes m.width/m.height from the app's terminal each
@@ -1810,88 +1933,11 @@ func (m *AdvancedConfigModel) advertisedWindow(modelVal string) (int, bool) {
 	return window, true
 }
 
-// Runtime option cycles. Index 0 is always "Default" (delete managed env).
-var (
-	reviewToolsOptions  = []string{"", "1", "2", "3", "4", "6", "8"}
-	reviewSearchOptions = []string{"", "true", "false"} // Default / On / Off
-)
-
-func ensureProviderEnvMap(p *provider.Provider) {
-	if p.Env == nil {
-		p.Env = make(map[string]string)
-	}
-}
-
-func deleteProviderEnvKey(p *provider.Provider, key string) {
-	if p.Env == nil {
-		return
-	}
-	delete(p.Env, key)
-	if len(p.Env) == 0 {
-		p.Env = nil
-	}
-}
-
-func setProviderEnvValue(p *provider.Provider, key, value string) {
-	if value == "" {
-		deleteProviderEnvKey(p, key)
-		return
-	}
-	ensureProviderEnvMap(p)
-	p.Env[key] = value
-}
-
-func cycleStringOption(current string, options []string, delta int) string {
-	idx := 0
-	for i, opt := range options {
-		if opt == current {
-			idx = i
-			break
-		}
-	}
-	n := len(options)
-	idx = (idx + delta) % n
-	if idx < 0 {
-		idx += n
-	}
-	return options[idx]
-}
-
-func (m *AdvancedConfigModel) reviewToolsValue() string {
-	if m.p.Env == nil {
-		return ""
-	}
-	v := strings.TrimSpace(m.p.Env[claude.ToolUseConcurrencyEnv])
-	return v
-}
-
-func (m *AdvancedConfigModel) reviewSearchValue() string {
-	if m.p.Env == nil {
-		return ""
-	}
-	v := strings.ToLower(strings.TrimSpace(m.p.Env[claude.ToolSearchEnv]))
-	switch v {
-	case "true", "1", "on", "yes":
-		return "true"
-	case "false", "0", "off", "no":
-		return "false"
-	default:
-		return v
-	}
-}
-
 func formatEditableValue(label string, isDefault bool) string {
 	if isDefault {
 		return "‹ Default · " + label + " ›"
 	}
 	return "‹ " + label + " ›"
-}
-
-func formatToolsLabel(value string) string {
-	if value == "" {
-		return formatEditableValue("3", true)
-	}
-	return formatEditableValue(value, false)
 }
 
 // formatStatuslineLabel renders the ccl status-line opt-out. The stored field
@@ -1901,19 +1947,6 @@ func formatStatuslineLabel(disabled bool) string {
 		return formatEditableValue("Off", false)
 	}
 	return formatEditableValue("On", false)
-}
-
-func formatSearchLabel(value string) string {
-	switch value {
-	case "":
-		return formatEditableValue("Off", true)
-	case "true":
-		return formatEditableValue("On", false)
-	case "false":
-		return formatEditableValue("Off", false)
-	default:
-		return formatEditableValue(value, false)
-	}
 }
 
 func formatFastLabel(on bool) string {
@@ -1963,34 +1996,6 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		// Toggle like Protocol; left/right/enter all flip the pin.
 		m.p.FastMode = !m.p.FastMode
 		setDebugf("fast toggled fast_mode=%t", m.p.FastMode)
-	case rowTools:
-		cur := m.reviewToolsValue()
-		known := false
-		for _, opt := range reviewToolsOptions {
-			if opt == cur {
-				known = true
-				break
-			}
-		}
-		if !known {
-			cur = ""
-		}
-		next := cycleStringOption(cur, reviewToolsOptions, delta)
-		setProviderEnvValue(m.p, claude.ToolUseConcurrencyEnv, next)
-	case rowToolSearch:
-		cur := m.reviewSearchValue()
-		known := false
-		for _, opt := range reviewSearchOptions {
-			if opt == cur {
-				known = true
-				break
-			}
-		}
-		if !known {
-			cur = ""
-		}
-		next := cycleStringOption(cur, reviewSearchOptions, delta)
-		setProviderEnvValue(m.p, claude.ToolSearchEnv, next)
 	case rowStatusline:
 		// Toggle like Fast: left/right/enter all flip the pin.
 		m.p.StatuslineDisabled = !m.p.StatuslineDisabled
@@ -2243,43 +2248,6 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 	case rowSource:
 		m.switchSource(m.otherSource())
 	case rowTest:
-		// models.dev providers are pre-configured from metadata: the endpoint,
-		// model pool, and per-model protocol table are already populated. The one
-		// thing metadata cannot prove is the API key, so this row sends a real
-		// authenticated inference request instead of re-running full detection —
-		// which would overwrite Type ("modelsdev") and drop routing.
-		if m.usesModelsDev() {
-			key := strings.TrimSpace(m.keyText.Get())
-			if key == "" {
-				return
-			}
-			model, proto, ok := m.firstRoutableModel()
-			if !ok {
-				// No model with a known protocol means the provider has no usable
-				// model pool (its AI SDK package is unrecognized), so there is nothing
-				// to verify a key against. Report that instead of claiming a connection.
-				m.live().probeEndpoint = m.p.Endpoint
-				m.live().probeAPIKey = key
-				m.live().detectionError = fmt.Errorf("%s", locale.T(
-					"该 Provider 没有可用模型（AI SDK 包暂不支持），无法验证 key",
-					"this provider has no usable models (unsupported AI SDK package); cannot verify the key",
-				))
-				m.live().keyVerified = false
-				setDebugf("models.dev key verify aborted: no routable model endpoint=%q", m.p.Endpoint)
-				return
-			}
-			m.live().probeEndpoint = m.p.Endpoint
-			m.live().probeAPIKey = key
-			m.live().detectionError = nil
-			m.live().keyVerified = false
-			m.live().detecting = true
-			m.live().detectProgress = 5
-			m.live().detectFrame = 0
-			m.keyFocused = false
-			setDebugf("start models.dev key verify endpoint=%q api_key_len=%d model=%q proto=%q", m.live().probeEndpoint, len(key), model, proto)
-			keyVerifyAsync(m.verifyDone, m.live().probeEndpoint, key, model, proto)
-			return
-		}
 		// Start detection with the current input values (OAuth uses the session
 		// runtime endpoint/key already injected by configureOAuthRuntime).
 		if !m.usesOAuth() {
@@ -2328,7 +2296,7 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 			fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey)
 		}
 	case rowTestModels:
-		if !m.connectionReady() {
+		if !m.connectionReady() || m.usesModelsDev() && !m.live().keyVerified {
 			return
 		}
 		if len(m.live().modelPool) == 0 {
@@ -2343,7 +2311,7 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 		m.modelTestFrame = 0
 		m.modelTestCanceled = false
 		setDebugf("model availability test started model_count=%d", len(m.live().modelPool))
-		testModelsAsync(m.availDone, ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel())
+		testModelsAsync(m.availDone, ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel(), m.usesModelsDev() && m.live().keyVerified)
 	}
 }
 
@@ -2406,6 +2374,7 @@ func (m *AdvancedConfigModel) handleFocusRow(row configRowKind) {
 	if idx < 0 {
 		return
 	}
+	wasKeyRow := m.usesModelsDev() && m.currentRow() == rowAPIKey
 	alreadySelected := m.cursor == idx && !m.textInputHasKeyboard()
 	m.cursor = idx
 	m.keepCursorVisible()
@@ -2433,6 +2402,9 @@ func (m *AdvancedConfigModel) handleFocusRow(row configRowKind) {
 		}
 	default:
 		m.filterFocused = false
+	}
+	if wasKeyRow && row != rowAPIKey {
+		m.startModelsDevVerification()
 	}
 	m.markDirty()
 }
@@ -2488,7 +2460,7 @@ func (m *AdvancedConfigModel) handleFetchDone(msg modelFetchDoneMsg) {
 // handleVerifyDone applies a models.dev key verification result, guarded the
 // same way as handleFetchDone.
 func (m *AdvancedConfigModel) handleVerifyDone(msg keyVerifyDoneMsg) {
-	if !m.usesModelsDev() || !m.live().detecting || msg.endpoint != m.live().probeEndpoint || msg.apiKey != m.live().probeAPIKey {
+	if !m.usesModelsDev() || !m.live().detecting || msg.endpoint != m.live().probeEndpoint || msg.apiKey != m.live().probeAPIKey || msg.generation != m.live().verifyGeneration {
 		setDebugf(
 			"keyVerifyDone ignored modelsdev=%t detecting=%t endpoint_match=%t api_key_match=%t",
 			m.usesModelsDev(),
@@ -2498,15 +2470,33 @@ func (m *AdvancedConfigModel) handleVerifyDone(msg keyVerifyDoneMsg) {
 		)
 		return
 	}
+	selectedRow := m.currentRow()
 	m.live().detectProgress = 100
 	m.live().detecting = false
 	m.live().detectionError = msg.err
 	m.live().keyVerified = msg.err == nil
+	// The saved pool is a snapshot; once the connection proves live, refresh it
+	// against the current catalog exactly once per verification round.
+	if m.live().keyVerified && m.live().modelsDevRefreshPending {
+		m.live().modelsDevRefreshPending = false
+		setDebugf("models.dev refresh start provider=%q", m.p.Name)
+		fetchModelsDevRefreshAsync(m.mdDone, m.p.Name)
+	}
+	if index := m.mainRowIndex(selectedRow); index >= 0 {
+		m.cursor = index
+	}
+	m.keepCursorVisible()
 	setDebugf("keyVerifyDone verified=%t err=%v", m.live().keyVerified, msg.err)
 	m.markDirty()
 }
 
 func (m *AdvancedConfigModel) handleModelsDevDone(msg modelsDevFetchDoneMsg) {
+	// A background refresh for an already-picked provider carries the provider
+	// id and must not touch the picker overlay state.
+	if msg.refreshFor != "" {
+		m.handleModelsDevRefreshDone(msg)
+		return
+	}
 	if !m.modelsDevPicker {
 		return
 	}
@@ -2516,6 +2506,144 @@ func (m *AdvancedConfigModel) handleModelsDevDone(msg modelsDevFetchDoneMsg) {
 		m.modelsDevItems = msg.providers
 		m.updateModelsDevFilter()
 	}
+	m.markDirty()
+}
+
+// handleModelsDevRefreshDone merges a refreshed catalog into the currently
+// edited models.dev provider's pool. The persisted pool is kept as the base:
+// user-removed models stay removed when they left the catalog on purpose, but
+// models the catalog dropped are gone from the upstream and would only probe
+// as unavailable, so they leave the pool along with any slot pointing at them.
+// The Custom slot is the exception: it is the user's free-form field, so a
+// model pinned there survives even when absent from the catalog (the chat
+// fallback still routes it) and stays in the pool. Slot mappings and [1M]
+// markers survive: a model present in both lists keeps its slot untouched.
+func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneMsg) {
+	if !m.usesModelsDev() || m.modelsDevPicker {
+		return
+	}
+	if msg.err != nil {
+		setDebugf("models.dev refresh failed provider=%q err=%v; keeping the saved model pool", m.p.Name, msg.err)
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(msg.refreshFor), strings.TrimSpace(m.p.Name)) {
+		setDebugf("models.dev refresh ignored: refreshed=%q current=%q", msg.refreshFor, m.p.Name)
+		return
+	}
+	var catalogIDs []string
+	var catalog modelsdev.Provider
+	found := false
+	for _, p := range msg.providers {
+		if strings.EqualFold(strings.TrimSpace(p.ID), strings.TrimSpace(msg.refreshFor)) {
+			catalog = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		// The provider vanished from the catalog entirely. Keep the saved pool
+		// rather than wiping a working configuration off the page.
+		setDebugf("models.dev refresh: provider %q no longer in catalog; keeping the saved model pool", msg.refreshFor)
+		return
+	}
+	catalogIDs = modelsDevCatalogModelIDs(catalog)
+	if len(catalogIDs) == 0 {
+		setDebugf("models.dev refresh: catalog for %q advertises no routable models; keeping the saved model pool", msg.refreshFor)
+		return
+	}
+	_, metadata := modelsDevProviderToDraft(catalog)
+	catalogSet := make(map[string]bool, len(catalogIDs))
+	for _, id := range catalogIDs {
+		catalogSet[strings.ToLower(id)] = true
+	}
+	merged := make([]string, 0, len(catalogIDs)+len(m.live().modelPool))
+	seen := make(map[string]bool, len(catalogIDs)+len(m.live().modelPool))
+	add := func(id string) {
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		merged = append(merged, strings.TrimSpace(id))
+	}
+	// The Custom slot is free-form: a model pinned there survives the merge
+	// even when absent from the catalog, and stays in the pool so the slot
+	// keeps pointing at a listed entry.
+	pinned := make(map[string]bool, 1)
+	if custom := strings.ToLower(strings.TrimSpace(m.p.CustomModelID)); custom != "" {
+		pinned[custom] = true
+	}
+	// Saved pool first so user ordering survives the merge.
+	for _, id := range m.live().modelPool {
+		key := strings.ToLower(strings.TrimSpace(id))
+		if catalogSet[key] || pinned[key] {
+			add(id)
+		}
+	}
+	for _, id := range catalogIDs {
+		add(id)
+	}
+	removed := make([]string, 0, 4)
+	for _, id := range m.live().modelPool {
+		key := strings.ToLower(strings.TrimSpace(id))
+		if !catalogSet[key] && !pinned[key] {
+			removed = append(removed, id)
+		}
+	}
+	if len(removed) == 0 && len(merged) == len(m.live().modelPool) {
+		setDebugf("models.dev refresh: catalog unchanged for %q (%d models)", m.p.Name, len(merged))
+		return
+	}
+	m.live().modelPool = merged
+	m.p.Model = strings.Join(merged, ",")
+	mergedSet := make(map[string]bool, len(merged))
+	for _, id := range merged {
+		mergedSet[strings.ToLower(strings.TrimSpace(id))] = true
+	}
+	// Display metadata tracks the catalog: add fresh entries, drop entries for
+	// models that left the pool (including the Custom-pinned exception, whose
+	// catalog metadata — if any — is gone with the catalog entry).
+	for id := range m.live().modelDisplayMetadata {
+		if !mergedSet[strings.ToLower(strings.TrimSpace(id))] {
+			delete(m.live().modelDisplayMetadata, id)
+		}
+	}
+	for key, info := range metadata {
+		if mergedSet[key] {
+			m.live().modelDisplayMetadata[key] = info
+		}
+	}
+	for id := range m.live().modelContextWindows {
+		if !mergedSet[strings.ToLower(strings.TrimSpace(id))] {
+			delete(m.live().modelContextWindows, id)
+		}
+	}
+	for id, window := range contextWindowsFromModelInfos(metadata) {
+		if mergedSet[id] {
+			if _, exists := m.live().modelContextWindows[id]; !exists {
+				m.live().modelContextWindows[id] = window
+			}
+		}
+	}
+	// A slot pointing at a model the catalog dropped can no longer route;
+	// clear it (and its [1M] marker) instead of leaving a dead mapping. The
+	// free-form Custom slot is exempt: mixedProtocolForModel falls back to
+	// chat for unknown models, so a pinned value can still route.
+	customPinned := strings.ToLower(strings.TrimSpace(m.p.CustomModelID))
+	for _, slot := range advancedSlotRefs(m.p) {
+		model := strings.TrimSpace(*slot.ptr)
+		if model == "" || catalogSet[strings.ToLower(model)] {
+			continue
+		}
+		if slot.key == "custom" && strings.ToLower(model) == customPinned {
+			continue
+		}
+		setDebugf("models.dev refresh cleared stale slot=%s model=%q", slot.key, model)
+		*slot.ptr = ""
+		delete(m.live().oneMSlots, slot.key)
+	}
+	m.updateFilteredPool()
+	setDebugf("models.dev refresh applied provider=%q model_count=%d removed=%d", m.p.Name, len(merged), len(removed))
 	m.markDirty()
 }
 
@@ -2532,8 +2660,8 @@ func (m *AdvancedConfigModel) handleAvailabilityDone(msg modelAvailabilityDoneMs
 	m.live().modelPool = reorderModelsByAvailability(m.live().modelPool, m.modelAvailability)
 	m.p.Model = strings.Join(m.live().modelPool, ",")
 	m.updateFilteredPool()
-	available, unavailable := m.availabilityCounts()
-	setDebugf("model availability test finished model_count=%d available=%d unavailable=%d", len(m.live().modelPool), available, unavailable)
+	available, unavailable, inconclusive := m.availabilityCounts()
+	setDebugf("model availability test finished model_count=%d available=%d unavailable=%d inconclusive=%d", len(m.live().modelPool), available, unavailable, inconclusive)
 	m.markDirty()
 }
 
@@ -2551,6 +2679,9 @@ func (m *AdvancedConfigModel) handleFetchTick() {
 	if m.runtimeLoading {
 		m.runtimeFrame++
 		m.markDirty()
+	}
+	if m.usesModelsDev() && m.live().autoVerifyPending && now.Sub(m.live().lastKeyEditAt) >= 1200*time.Millisecond {
+		m.startModelsDevVerification()
 	}
 	if !m.live().detecting {
 		return
@@ -2600,7 +2731,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 
 	// 模态：连接检查/模型测试进行中。esc 取消操作（或退出等待），其余按键
 	// 等待结束。ctrl+c 已在上面处理。
-	if m.live().detecting {
+	if m.live().detecting && !m.usesModelsDev() {
 		if ke.Key == tui.KeyEscape {
 			m.live().detecting = false
 			m.live().detectionError = fmt.Errorf("%s", locale.T("已取消连接检查", "connection check canceled"))
@@ -2665,12 +2796,16 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			return
 		}
 		m.urlFocused, m.keyFocused = false, false
+		wasKeyRow := m.usesModelsDev() && m.currentRow() == rowAPIKey
 		if m.cursor > 0 {
 			m.cursor--
 		} else {
 			m.cursor = len(rows) - 1
 		}
 		m.keepCursorVisible()
+		if wasKeyRow {
+			m.startModelsDevVerification()
+		}
 		m.markDirty()
 		return
 
@@ -2693,12 +2828,16 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			return
 		}
 		m.urlFocused, m.keyFocused = false, false
+		wasKeyRow := m.usesModelsDev() && m.currentRow() == rowAPIKey
 		if m.cursor < len(rows)-1 {
 			m.cursor++
 		} else {
 			m.cursor = 0
 		}
 		m.keepCursorVisible()
+		if wasKeyRow {
+			m.startModelsDevVerification()
+		}
 		m.markDirty()
 		return
 
@@ -2713,7 +2852,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowStatusline, rowActive:
+			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowStatusline, rowActive:
 				m.adjustReviewField(-1)
 			}
 		}
@@ -2731,7 +2870,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowStatusline, rowActive:
+			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowStatusline, rowActive:
 				m.adjustReviewField(1)
 			}
 		}
@@ -2739,6 +2878,14 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		return
 
 	case tui.KeyEnter:
+		if m.usesModelsDev() && m.currentRow() == rowAPIKey {
+			m.keyFocused = false
+			m.retryModelsDevVerification()
+			m.focusDetectionAction()
+			m.keepCursorVisible()
+			m.markDirty()
+			return
+		}
 		// The API key textarea inserts newlines with Enter, so while it is
 		// focused the key must fall through to the text routing below rather
 		// than advance the page cursor.
@@ -2766,9 +2913,13 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		if len(rows) == 0 {
 			return
 		}
+		wasKeyRow := m.usesModelsDev() && m.currentRow() == rowAPIKey
 		m.cursor = (m.cursor + 1) % len(rows)
 		m.urlFocused, m.keyFocused = false, false
 		m.keepCursorVisible()
+		if wasKeyRow {
+			m.startModelsDevVerification()
+		}
 		m.markDirty()
 		return
 	}
@@ -2939,8 +3090,11 @@ func (m *AdvancedConfigModel) handleEnter() {
 		m.keyFocused = true
 		setDebugf("enter endpoint -> api key endpoint=%q", m.urlText.Get())
 	case rowAPIKey:
-		// Custom advances to Auto Configure; models.dev and OAuth have no test
-		// step, so they move to the first model slot instead.
+		// Custom advances to Auto Configure; models.dev verifies the key in
+		// the background and advances to the first model slot.
+		if m.usesModelsDev() {
+			m.retryModelsDevVerification()
+		}
 		m.focusDetectionAction()
 		m.urlFocused = false
 		m.keyFocused = false
@@ -2949,7 +3103,7 @@ func (m *AdvancedConfigModel) handleEnter() {
 		m.activateRow(rowProvider)
 	case rowTest:
 		m.activateRow(rowTest)
-	case rowProtocol, rowAuth, rowFast, rowTools, rowToolSearch, rowStatusline:
+	case rowProtocol, rowAuth, rowFast, rowStatusline:
 		m.adjustReviewField(1)
 	case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
 		if !m.connectionReady() {
@@ -2986,10 +3140,19 @@ func (m *AdvancedConfigModel) handleEnter() {
 // the probe baseline is resynced too, so a late keyVerifyDoneMsg cannot slip
 // past the guard and mark the unverified new key as connected.
 func (m *AdvancedConfigModel) invalidateModelsDevKeyIfChanged() {
+	if m.modelTesting && m.modelTestCancel != nil {
+		m.modelTestCancel()
+	}
+	m.modelTesting = false
+	m.modelTestCancel = nil
+	m.modelAvailability = make(map[string]modelAvailability)
 	m.live().keyVerified = false
 	m.live().detectionError = nil
 	m.live().detecting = false
 	m.live().probeAPIKey = m.keyText.Get()
+	m.live().verifyGeneration++
+	m.live().autoVerifyPending = strings.TrimSpace(m.keyText.Get()) != ""
+	m.live().lastKeyEditAt = time.Now()
 }
 
 // renderModelFetchProgress builds the connection-check in-progress block: a
@@ -3234,11 +3397,9 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 		rows = append(rows, kvRow(locale.T("鉴权", "Auth"), span(value, stAvailable)))
 	}
 
-	// Auto Configure / Test Connection row under Auth, separated by a blank
-	// line so the action reads as its own group of one.
-	if m.usesModelsDev() {
-		rows = append(rows, plainLine(""), m.actionButtonRow(locale.T("验证连接", "Test Connection"), rowTest))
-	} else {
+	// Custom alone needs a manual Auto Configure action; models.dev verifies
+	// credentials automatically and OAuth uses its managed runtime.
+	if !m.usesModelsDev() {
 		rows = append(rows, plainLine(""), m.actionButtonRow(locale.T("Auto Configure", "Auto Configure"), rowTest))
 	}
 	return rows
@@ -3289,8 +3450,8 @@ func (m *AdvancedConfigModel) localProxyRow() *tui.Element {
 }
 
 // viewDetectionSection renders the connection-check feedback: the in-flight
-// spinner and error status lines. The Auto Configure / Test Connection button
-// itself lives at the end of the Connection section, directly under Auth.
+// spinner and error status lines. Custom's Auto Configure action lives under
+// Auth; models.dev verification is automatic.
 func (m *AdvancedConfigModel) viewDetectionSection() []*tui.Element {
 	if m.live().detecting {
 		return renderModelFetchProgress(m.live().detectProgress, m.live().detectFrame, m.usesOAuth())
@@ -3299,7 +3460,7 @@ func (m *AdvancedConfigModel) viewDetectionSection() []*tui.Element {
 	// models.dev providers are pre-configured from metadata (endpoint, model
 	// pool, and per-model protocol table are already in place), so the only
 	// missing piece is the API key. It must be verified against the real
-	// endpoint (Test Connection) before the page reports a live connection —
+	// endpoint before the page reports a live connection —
 	// a non-empty string is not proof of validity.
 	if m.usesModelsDev() {
 		if !m.live().modelPoolFromDiscovery {
@@ -3312,6 +3473,7 @@ func (m *AdvancedConfigModel) viewDetectionSection() []*tui.Element {
 			return []*tui.Element{
 				spanLine(locale.T("验证失败，无法连接", "Verification failed; cannot connect"), stUnavailable),
 				spanLine(m.live().detectionError.Error(), stUnavailable),
+				spanLine(locale.T("在 API Key 行按 Enter 重试", "Press Enter on API Key to retry"), stGray),
 				plainLine(""),
 			}
 		case m.live().keyVerified:
@@ -3333,8 +3495,8 @@ func (m *AdvancedConfigModel) viewDetectionSection() []*tui.Element {
 	return nil
 }
 
-// actionButtonRow renders one left-aligned action row (Auto Configure / Test
-// Connection) with the same plain-text affordance as Test Model Availability:
+// actionButtonRow renders the left-aligned Auto Configure action row with the
+// same plain-text affordance as Test Model Availability:
 // purple when idle, "> " + accent when selected. No background button box —
 // the two action rows must read as one visual family.
 func (m *AdvancedConfigModel) actionButtonRow(label string, kind configRowKind) *tui.Element {
@@ -3389,6 +3551,9 @@ func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
 			case modelAvailabilityUnavailable:
 				badgeText = "✗ "
 				badgeStyle = stUnavailable
+			case modelAvailabilityInconclusive:
+				badgeText = "? "
+				badgeStyle = stGray
 			}
 		} else if oneM && ready {
 			badgeText = "[1M]"
@@ -3416,7 +3581,8 @@ func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
 	testPrefixStyle := tui.NewStyle()
 	testLabel := locale.T("Test Model Availability", "Test Model Availability")
 	testStyle := stPurple
-	if !ready {
+	testReady := ready && (!m.usesModelsDev() || m.live().keyVerified)
+	if !testReady {
 		testStyle = stGray
 	} else if m.modelTesting {
 		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -3434,12 +3600,12 @@ func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
 	if m.modelTesting {
 		rows = append(rows, spanLine("    "+locale.T("测试进行中 · 按 esc 取消", "Testing in progress · press esc to cancel"), stGray))
 	} else if len(m.modelAvailability) > 0 {
-		available, unavailable := m.availabilityCounts()
-		rows = append(rows, spanLine(fmt.Sprintf("    "+locale.T("%d 个可用 · %d 个不可用", "%d available · %d unavailable"), available, unavailable), stGray))
+		available, unavailable, inconclusive := m.availabilityCounts()
+		rows = append(rows, spanLine(fmt.Sprintf("    "+locale.T("%d 个可用 · %d 个不可用 · %d 个未确认", "%d available · %d unavailable · %d inconclusive"), available, unavailable, inconclusive), stGray))
 	} else if m.cursor == m.mainRowIndex(rowTestModels) {
 		// go-tui has no tooltip API: the quota warning behaves like a hover hint
 		// and only renders while the row is selected.
-		rows = append(rows, spanLine(locale.T("    ⚠ 会为每个模型发送一次最小请求，消耗额度", "    ⚠ sends one minimal request per model; consumes quota"), stGray))
+		rows = append(rows, spanLine(locale.T("    ⚠ 会为每个模型发送测试请求，限流时可能重试，消耗额度", "    ⚠ probes each model; may retry on rate limits and consume quota"), stGray))
 	}
 
 	return rows
@@ -3447,7 +3613,7 @@ func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
 
 // viewRuntimeSection renders the Runtime block: the OAuth read-only protocol
 // display (when applicable), the Context & Compact stepper, the
-// Fast/Tools/Tool Search steppers, plus the active-provider checkbox.
+// Fast and Status Line steppers, plus the active-provider checkbox.
 func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
 	rows := []*tui.Element{
 		plainLine(""),
@@ -3467,8 +3633,6 @@ func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
 	// values).
 	renderEditable(rowContext, locale.T("上下文与压缩", "Context & Compact"), "‹ "+m.compactSummary()+" ›")
 	renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
-	renderEditable(rowTools, locale.T("工具", "Tools"), formatToolsLabel(m.reviewToolsValue()))
-	renderEditable(rowToolSearch, locale.T("工具搜索", "Tool Search"), formatSearchLabel(m.reviewSearchValue()))
 	// Status Line — ccl writes its own status line through Claude Code's
 	// --settings, which outranks ~/.claude/settings.json, so this is the only
 	// place a user can keep a personal one.
@@ -3865,8 +4029,6 @@ var rowClickLabels = map[configRowKind]rowClickLabel{
 	rowSubagent:   {en: "Subagent"},
 	rowTestModels: {en: "Test Model Availability"},
 	rowContext:    {en: "Context & Compact", zh: "上下文与压缩"},
-	rowTools:      {en: "Tools", zh: "工具"},
-	rowToolSearch: {en: "Tool Search", zh: "工具搜索"},
 	rowStatusline: {en: "Status Line", zh: "状态栏"},
 	rowActive:     {en: "Set as active provider", zh: "设为当前激活 Provider"},
 	// The Save button also renders as "Save Provider" when activation is not

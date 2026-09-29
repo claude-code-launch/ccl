@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -8,6 +9,26 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
+
+func TestVerifyClinePassConnectionUsesSupportedProbeShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if _, ok := body["max_tokens"]; ok {
+			t.Error("connection probe sent max_tokens to ClinePass")
+		}
+		if body["stream"] != false {
+			t.Errorf("stream = %v, want false", body["stream"])
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := verifyProviderAPIKey(t.Context(), "cline-pass/qwen3.8-max", server.URL+"/api/v1", "key", "openai", time.Second); err != nil {
+		t.Fatalf("verify ClinePass connection: %v", err)
+	}
+}
 
 // TestVerifyProviderAPIKeyRejectsAuthFailure proves the core fix for the
 // models.dev "Test Connection" flow: a fake/revoked key that reaches the auth
@@ -133,6 +154,98 @@ func TestVerifyProviderAPIKeyOpenAIChatUsesCompletionsPath(t *testing.T) {
 	}
 	if gotPath != "/chat/completions" {
 		t.Errorf("chat branch path = %q, want /chat/completions", gotPath)
+	}
+}
+
+func TestModelsDevExistingProviderVerifiesAutomaticallyOnOpen(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer saved-key" {
+			t.Errorf("unexpected verification request path=%q auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	p := provider.Provider{Type: "modelsdev", Endpoint: server.URL + "/v1", APIKey: "saved-key",
+		Model: "provider/model", ModelProtocols: map[string]string{"provider/model": "openai"}}
+	m := NewAdvancedConfigModel(&p)
+	if m.mainRowIndex(rowTest) != -1 {
+		t.Fatal("models.dev should not expose manual verification")
+	}
+	m.startAutoDetect()
+	select {
+	case result := <-m.verifyDone:
+		m.handleVerifyDone(result)
+	case <-time.After(3 * time.Second):
+		t.Fatal("automatic verification did not finish")
+	}
+	if !m.live().keyVerified || !m.canSave() || calls != 1 {
+		t.Fatalf("automatic verification failed: verified=%t canSave=%t calls=%d err=%v", m.live().keyVerified, m.canSave(), calls, m.live().detectionError)
+	}
+}
+
+func TestModelsDevNewKeyVerifiesAfterEditingSettles(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer new-key" {
+			t.Errorf("unexpected Authorization: %q", r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	p := provider.Provider{Type: "modelsdev", Endpoint: server.URL + "/v1",
+		Model: "provider/model", ModelProtocols: map[string]string{"provider/model": "openai"}}
+	m := NewAdvancedConfigModel(&p)
+	m.startAutoDetect()
+	if m.live().detecting {
+		t.Fatal("empty key should not start verification")
+	}
+	m.keyText.Set("new-key")
+	m.invalidateModelsDevKeyIfChanged()
+	m.live().lastKeyEditAt = time.Now().Add(-2 * time.Second)
+	m.handleFetchTick()
+	if !m.live().detecting {
+		t.Fatal("settled key should start automatic verification")
+	}
+	select {
+	case result := <-m.verifyDone:
+		m.handleVerifyDone(result)
+	case <-time.After(3 * time.Second):
+		t.Fatal("automatic verification did not finish")
+	}
+	if !m.live().keyVerified || !m.canSave() {
+		t.Fatalf("new key not verified: verified=%t canSave=%t err=%v", m.live().keyVerified, m.canSave(), m.live().detectionError)
+	}
+}
+
+func TestModelsDevOldVerificationCannotApproveEditedKey(t *testing.T) {
+	p := provider.Provider{Type: "modelsdev", Endpoint: "https://example.test/v1", APIKey: "old-key",
+		Model: "provider/model", ModelProtocols: map[string]string{"provider/model": "openai"}}
+	m := NewAdvancedConfigModel(&p)
+	m.live().detecting = true
+	m.live().probeEndpoint = p.Endpoint
+	m.live().probeAPIKey = "old-key"
+	m.keyText.Set("new-key")
+	m.invalidateModelsDevKeyIfChanged()
+	m.handleVerifyDone(keyVerifyDoneMsg{endpoint: p.Endpoint, apiKey: "old-key"})
+	if m.live().keyVerified || m.canSave() || !m.live().autoVerifyPending {
+		t.Fatal("late result for old key must not approve the new key")
+	}
+}
+
+func TestModelsDevOldVerificationCannotApproveRestoredKey(t *testing.T) {
+	p := provider.Provider{Type: "modelsdev", Endpoint: "https://example.test/v1", APIKey: "same-key",
+		Model: "provider/model", ModelProtocols: map[string]string{"provider/model": "openai"}}
+	m := NewAdvancedConfigModel(&p)
+	m.live().probeEndpoint = p.Endpoint
+	m.live().probeAPIKey = p.APIKey
+	m.live().detecting = true
+	m.live().verifyGeneration = 2 // New request after editing away and back.
+	m.handleVerifyDone(keyVerifyDoneMsg{endpoint: p.Endpoint, apiKey: p.APIKey, generation: 1})
+	if m.live().keyVerified || !m.live().detecting {
+		t.Fatal("old request for the same restored key must not finish the current verification")
 	}
 }
 
