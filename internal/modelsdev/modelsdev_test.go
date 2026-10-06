@@ -1,9 +1,127 @@
 package modelsdev
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// serveCatalog points the package at a stub catalog server for one test.
+func serveCatalog(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	previous := apiURL
+	apiURL = server.URL
+	t.Cleanup(func() { apiURL = previous })
+	return server
+}
+
+func TestFetchDecodesTheCatalogOverHTTP(t *testing.T) {
+	var gotAccept, gotUserAgent string
+	serveCatalog(t, func(writer http.ResponseWriter, request *http.Request) {
+		gotAccept = request.Header.Get("Accept")
+		gotUserAgent = request.Header.Get("User-Agent")
+		_, _ = writer.Write([]byte(`{
+			"opencode-go": {"id":"opencode-go","name":"OpenCode Go","npm":"@ai-sdk/openai-compatible","api":"https://opencode.ai/zen/go/v1","models":{"glm-5.2":{"id":"glm-5.2"}}},
+			"anonymous": {"api":"https://example.com/v1","models":{"m":{"id":"m"}}},
+			"no-api": {"id":"no-api","models":{"m":{"id":"m"}}},
+			"junk": "not a provider",
+			"empty": {}
+		}`))
+	})
+
+	providers, err := Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if len(providers) != 2 {
+		t.Fatalf("decoded %d providers, want the two with an api and models: %v", len(providers), providers)
+	}
+	if gotAccept != "application/json" || gotUserAgent != "ccl" {
+		t.Fatalf("request headers = accept %q, user-agent %q", gotAccept, gotUserAgent)
+	}
+	// A provider that omits id/name is identified by its catalog key.
+	anonymous, ok := providers["anonymous"]
+	if !ok || anonymous.ID != "anonymous" || anonymous.Name != "anonymous" {
+		t.Fatalf("anonymous provider = %+v (present=%v)", anonymous, ok)
+	}
+	if _, ok := providers["opencode-go"]; !ok {
+		t.Fatal("the well-formed provider was dropped")
+	}
+}
+
+// TestFetchAcceptsANilContext mirrors how the TUI calls in: a caller with no
+// request to thread must not panic inside the request builder.
+func TestFetchAcceptsANilContext(t *testing.T) {
+	serveCatalog(t, func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"p":{"id":"p","api":"https://example.com","models":{"m":{"id":"m"}}}}`))
+	})
+	// A caller with no request to thread passes a nil context; the fetch must
+	// substitute a background one rather than panic in the request builder.
+	var noContext context.Context
+	if _, err := Fetch(noContext); err != nil {
+		t.Fatalf("Fetch(nil) error = %v", err)
+	}
+}
+
+func TestFetchReportsUnusableCatalogs(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		body string
+		want string
+	}{
+		"undecodable":       {body: `not json at all`, want: "decode models.dev catalog"},
+		"top-level array":   {body: `[{"id":"p"}]`, want: "decode models.dev catalog"},
+		"no usable":         {body: `{"p":{"id":"p","models":{"m":{"id":"m"}}}}`, want: "no usable providers"},
+		"empty object":      {body: `{}`, want: "no usable providers"},
+		"models but no api": {body: `{"p":{"id":"p","api":"","models":{"m":{}}}}`, want: "no usable providers"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			serveCatalog(t, func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(testCase.body))
+			})
+			if _, err := Fetch(context.Background()); err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("Fetch() error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
+// TestFetchReportsEveryHTTPFailureMode covers the status check and the two
+// transport-level failures, including that the error keeps the cause.
+func TestFetchReportsEveryHTTPFailureMode(t *testing.T) {
+	serveCatalog(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = writer.Write([]byte("slow down"))
+	})
+	if _, err := Fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 429") {
+		t.Fatalf("Fetch() on a 429 = %v", err)
+	}
+
+	// A connection refused by a closed listener is the "unreachable" path.
+	previous := apiURL
+	apiURL = (&httptest.Server{URL: "http://127.0.0.1:1"}).URL
+	t.Cleanup(func() { apiURL = previous })
+	if _, err := Fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "fetch models.dev catalog") {
+		t.Fatalf("Fetch() against an unreachable host = %v", err)
+	}
+}
+
+// TestFetchStopsAtTheContextDeadline pins that a hung catalog server cannot
+// stall the caller: the injected context ends the request.
+func TestFetchStopsAtTheContextDeadline(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	serveCatalog(t, func(http.ResponseWriter, *http.Request) { <-release })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Fetch(ctx); err == nil || !strings.Contains(err.Error(), "fetch models.dev catalog") {
+		t.Fatalf("Fetch() with a cancelled context = %v", err)
+	}
+}
 
 func TestResolvedNPM(t *testing.T) {
 	p := Provider{NPM: "@ai-sdk/openai-compatible"}

@@ -21,6 +21,9 @@ import (
 
 const defaultAPIURL = "https://models.dev/api.json"
 
+// apiURL is a variable so tests can point the catalog fetch at a local server.
+var apiURL = defaultAPIURL
+
 // Provider is one entry in the models.dev catalog, keyed by its id at the top
 // level. Fields we do not consume (cost, modalities, reasoning options, …) are
 // intentionally omitted.
@@ -115,7 +118,7 @@ func fetchBody(ctx context.Context) ([]byte, error) {
 			Proxy: http.ProxyFromEnvironment,
 		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, defaultAPIURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build models.dev request: %w", err)
 	}
