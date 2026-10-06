@@ -286,7 +286,9 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 			// This converter targets Antigravity, not the public Gemini API.
 			// Its function declarations use parameters for both Gemini and
 			// Claude models (the Claude bridge reconstructs input_schema).
-			declaration, _ = sjson.SetRawBytes(declaration, "parameters", []byte(schema.Raw))
+			// Gemini rejects JSON Schema keywords outside its OpenAPI subset
+			// ($schema, propertyNames, additionalProperties, ...).
+			declaration, _ = sjson.SetRawBytes(declaration, "parameters", sanitizeGeminiSchema([]byte(schema.Raw)))
 			toolItems = append(toolItems, string(declaration))
 			return true
 		})

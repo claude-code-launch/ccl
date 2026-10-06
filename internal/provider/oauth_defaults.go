@@ -9,7 +9,16 @@ import (
 // PreferredOAuthSlotDefaults returns the first-choice Claude slot mapping for a
 // subscription OAuth backend. ok is false when the backend has no built-in
 // preferences and should rely entirely on runtime model discovery.
-func PreferredOAuthSlotDefaults(oauthProvider string) (custom, opus, sonnet, haiku string, ok bool) {
+//
+// fable mirrors opus: no subscription catalog seen so far offers a Fable-family
+// model, so the tier follows the backend's strongest model instead of inventing
+// an upstream ID that would fail discovery.
+func PreferredOAuthSlotDefaults(oauthProvider string) (custom, opus, sonnet, haiku, fable string, ok bool) {
+	custom, opus, sonnet, haiku, ok = preferredOAuthSlots(oauthProvider)
+	return custom, opus, sonnet, haiku, opus, ok
+}
+
+func preferredOAuthSlots(oauthProvider string) (custom, opus, sonnet, haiku string, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
 	case "gpt", "chatgpt":
 		// GPT / Codex subscription defaults. Runtime validation drops any of these
@@ -42,13 +51,14 @@ func PreferredOAuthSlotDefaults(oauthProvider string) (custom, opus, sonnet, hai
 	}
 }
 
-// ApplyOAuthSlotDefaults fills empty Custom/Opus/Sonnet/Haiku slots with the
-// preferred defaults for p.OAuthProvider. Existing user mappings are preserved.
+// ApplyOAuthSlotDefaults fills empty Custom/Opus/Sonnet/Haiku/Fable slots with
+// the preferred defaults for p.OAuthProvider. Existing user mappings are
+// preserved.
 func ApplyOAuthSlotDefaults(p *Provider) {
 	if p == nil {
 		return
 	}
-	custom, opus, sonnet, haiku, ok := PreferredOAuthSlotDefaults(p.OAuthProvider)
+	custom, opus, sonnet, haiku, fable, ok := PreferredOAuthSlotDefaults(p.OAuthProvider)
 	if !ok {
 		return
 	}
@@ -64,6 +74,9 @@ func ApplyOAuthSlotDefaults(p *Provider) {
 	if strings.TrimSpace(p.HaikuModel) == "" {
 		p.HaikuModel = haiku
 	}
+	if strings.TrimSpace(p.FableModel) == "" {
+		p.FableModel = fable
+	}
 }
 
 // ClearUnavailablePreferredDefaults removes preferred-default slot mappings that
@@ -75,13 +88,14 @@ func ClearUnavailablePreferredDefaults(p *Provider, availableModels []string) {
 	if p == nil {
 		return
 	}
-	custom, opus, sonnet, haiku, ok := PreferredOAuthSlotDefaults(p.OAuthProvider)
+	custom, opus, sonnet, haiku, fable, ok := PreferredOAuthSlotDefaults(p.OAuthProvider)
 	if !ok || len(availableModels) == 0 {
 		return
 	}
 	reconcileOAuthDefault(&p.CustomModelID, p.OAuthProvider, "custom", custom, availableModels)
 	reconcileOAuthDefault(&p.OpusModel, p.OAuthProvider, "opus", opus, availableModels)
 	reconcileOAuthDefault(&p.SonnetModel, p.OAuthProvider, "sonnet", sonnet, availableModels)
+	reconcileOAuthDefault(&p.FableModel, p.OAuthProvider, "fable", fable, availableModels)
 	reconcileOAuthDefault(&p.HaikuModel, p.OAuthProvider, "haiku", haiku, availableModels)
 }
 
@@ -177,6 +191,7 @@ func SlotModels(p Provider) []SlotModel {
 		{Slot: "opus", Model: p.OpusModel},
 		{Slot: "sonnet", Model: p.SonnetModel},
 		{Slot: "haiku", Model: p.HaikuModel},
+		{Slot: "fable", Model: p.FableModel},
 		{Slot: "custom", Model: p.CustomModelID},
 		{Slot: "subagent", Model: p.SubagentModel},
 	}

@@ -130,8 +130,8 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty" mapstructure:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
-	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, and
-	// autoclaw. The legacy chatgpt and codex values remain readable.
+	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy,
+	// autoclaw, and zed. The legacy chatgpt and codex values remain readable.
 	OAuthProvider string `yaml:"oauthProvider,omitempty" mapstructure:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
 	// (basename of the JSON under ~/.ccl/auth). Subscription runtimes require
@@ -143,6 +143,7 @@ type Provider struct {
 	OpusModel      string            `yaml:"opusModel,omitempty" mapstructure:"opusModel,omitempty"`           // ANTHROPIC_DEFAULT_OPUS_MODEL
 	SonnetModel    string            `yaml:"sonnetModel,omitempty" mapstructure:"sonnetModel,omitempty"`       // ANTHROPIC_DEFAULT_SONNET_MODEL
 	HaikuModel     string            `yaml:"haikuModel,omitempty" mapstructure:"haikuModel,omitempty"`         // ANTHROPIC_DEFAULT_HAIKU_MODEL
+	FableModel     string            `yaml:"fableModel,omitempty" mapstructure:"fableModel,omitempty"`         // ANTHROPIC_DEFAULT_FABLE_MODEL
 	SubagentModel  string            `yaml:"subagentModel,omitempty" mapstructure:"subagentModel,omitempty"`   // CLAUDE_CODE_SUBAGENT_MODEL
 	ModelOverrides map[string]string `yaml:"modelOverrides,omitempty" mapstructure:"modelOverrides,omitempty"` // modelOverrides in settings.json
 	EffortLevel    string            `yaml:"effortLevel,omitempty" mapstructure:"effortLevel,omitempty"`       // CLAUDE_CODE_EFFORT_LEVEL; empty means Default/follow Claude
@@ -185,12 +186,12 @@ type Config struct {
 }
 
 // OAuthRuntimeType returns the internal compatibility type ccl persists for an
-// OAuth backend. Copilot is represented by openai_responses for local dispatch,
-// but its actual upstream protocol is selected per model. ok is false when the
-// backend is empty or unknown.
+// OAuth backend. Copilot and Zed are represented by openai_responses for local
+// dispatch, but their actual upstream protocol is selected per model. ok is
+// false when the backend is empty or unknown.
 func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
-	case "gpt", "chatgpt", "codex", "copilot", "grok":
+	case "gpt", "chatgpt", "codex", "copilot", "grok", "zed":
 		return "openai_responses", true
 	case "gemini", "kimi", "workbuddy":
 		return "openai", true
@@ -237,6 +238,8 @@ func InferOAuthProvider(providerName, endpoint string) string {
 		return "kiro"
 	case "workbuddy":
 		return "workbuddy"
+	case "zed":
+		return "zed"
 	default:
 		return ""
 	}
@@ -323,6 +326,7 @@ func RuntimeModelSpec(p Provider) string {
 		p.OpusModel,
 		p.SonnetModel,
 		p.HaikuModel,
+		p.FableModel,
 		p.SubagentModel,
 	} {
 		add(model)
@@ -357,7 +361,8 @@ func RuntimeModelSpec(p Provider) string {
 //
 // A backend whose real behavior is not implied by Type carries a " / " qualifier
 // instead of a second set of parentheses: AutoClaw's CCL Anthropic-to-Chat
-// adapter, Copilot's per-model dispatch, and models.dev's per-model protocols.
+// adapter, Copilot's and Zed's per-model dispatch, and models.dev's per-model
+// protocols.
 func ProtocolLabel(providerType string) string {
 	trimmed := strings.TrimSpace(providerType)
 	switch {
@@ -379,8 +384,11 @@ func ProtocolLabel(providerType string) string {
 // ProtocolLabelForProvider reports the user-facing protocol, including OAuth
 // backends whose real behavior cannot be inferred from the internal Type field.
 func ProtocolLabelForProvider(p Provider) string {
-	if strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "copilot") {
+	switch strings.ToLower(strings.TrimSpace(p.OAuthProvider)) {
+	case "copilot":
 		return "copilot / auto"
+	case "zed":
+		return "zed / auto"
 	}
 	return ProtocolLabel(p.Type)
 }

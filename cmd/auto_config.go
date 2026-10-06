@@ -23,6 +23,7 @@ type AutoRecommendation struct {
 	Opus     string
 	Sonnet   string
 	Haiku    string
+	Fable    string
 	Custom   string
 	Subagent string
 	// OneMSlots marks the slots that should carry the [1m] context marker.
@@ -71,6 +72,8 @@ func RecommendModels(current provider.Provider, models []string, metadata map[st
 			rec.Sonnet = model
 		case "haiku":
 			rec.Haiku = model
+		case "fable":
+			rec.Fable = model
 		case "custom":
 			rec.Custom = model
 		case "subagent":
@@ -98,11 +101,13 @@ func RecommendModels(current provider.Provider, models []string, metadata map[st
 		rec.Opus = fill(rec.Opus, func() string { return m })
 		rec.Sonnet = fill(rec.Sonnet, func() string { return m })
 		rec.Haiku = fill(rec.Haiku, func() string { return m })
+		rec.Fable = fill(rec.Fable, func() string { return m })
 		rec.Custom = fill(rec.Custom, func() string { return m })
 	case 2:
 		heavy, light := splitHeavyLight(chatPool, metadata)
 		rec.Opus = fill(rec.Opus, func() string { return heavy })
 		rec.Sonnet = fill(rec.Sonnet, func() string { return heavy })
+		rec.Fable = fill(rec.Fable, func() string { return heavy })
 		rec.Custom = fill(rec.Custom, func() string { return heavy })
 		rec.Haiku = fill(rec.Haiku, func() string { return light })
 	default:
@@ -110,6 +115,11 @@ func RecommendModels(current provider.Provider, models []string, metadata map[st
 		rec.Sonnet = fill(rec.Sonnet, func() string { return recommendForTier(pool, metadata, tierSonnet, rec) })
 		rec.Haiku = fill(rec.Haiku, func() string { return recommendForTier(pool, metadata, tierHaiku, rec) })
 		rec.Custom = fill(rec.Custom, func() string { return firstNonEmpty(rec.Sonnet, rec.Opus) })
+		// Fable is Claude Code's top tier, so it follows the strongest pick.
+		// Unlike the scored tiers it never competes for a distinct model: a
+		// gateway rarely has a Fable-family entry, and /model fable must still
+		// reach a working model instead of the bare claude-fable-5-1 ID.
+		rec.Fable = fill(rec.Fable, func() string { return firstNonEmpty(rec.Opus, rec.Custom) })
 	}
 	// Subagent stays Auto (empty) unless a distinct lighter model exists.
 	if rec.Subagent == "" {
@@ -163,6 +173,7 @@ func (r *AutoRecommendation) applyOneM(current provider.Provider, preserved map[
 		{"opus", r.Opus},
 		{"sonnet", r.Sonnet},
 		{"haiku", r.Haiku},
+		{"fable", r.Fable},
 		{"custom", r.Custom},
 		{"subagent", r.Subagent},
 	}
@@ -298,7 +309,7 @@ func modelMagnitude(model string) int {
 // recommendSubagent picks the lightest chat model that is not already a main
 // slot, or returns empty to keep Claude Code's Auto behavior.
 func recommendSubagent(pool []string, metadata map[string]protocol.ModelInfo, rec AutoRecommendation) string {
-	taken := map[string]bool{rec.Opus: true, rec.Sonnet: true, rec.Haiku: true, rec.Custom: true}
+	taken := map[string]bool{rec.Opus: true, rec.Sonnet: true, rec.Haiku: true, rec.Fable: true, rec.Custom: true}
 	// Exclude the main slots only when the pool still has a distinct lighter
 	// candidate. With one or two chat models, reuse keeps subagent functional.
 	if rec.chatPoolSize < 3 {

@@ -59,12 +59,13 @@ Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external pr
 | Grok OAuth | `xai_*.go` + `codex_responses_*.go` | cli-chat-proxy Responses; Grok Build identity headers; live `/models` catalog with 4.6/4.5 fallback |
 | Gemini OAuth | `gemini_*.go` | Antigravity conversion |
 | Copilot | `copilot_*.go` | Per-model Chat / Responses / Messages from the account catalog; persisted `type` is only `openai_responses` for local dispatch |
+| Zed | `zed_*.go` | zed.dev native-app login (RSA-encrypted loopback callback) → LLM token; per-model dispatch by catalog `provider` (anthropic→passthrough, open_ai→Responses, x_ai→Chat, google→`zedGeminiService`) behind an inner `zedGateway` that owns the `{provider,model,provider_request}` envelope; persisted `type` is only `openai_responses` for local dispatch |
 | Kiro | `kiro_*.go` | Portal PKCE (default) or `--kiro-auth builder`; Amazon Q + EventStream |
 | Qoder | `qoder_*.go` | Browser OAuth, COSY, WAF; `session_type=qodercli` is a wire field only |
 | models.dev mixed | `mixed_runtime.go` + `anthropic_passthrough.go` | `ModelProtocols` map per model |
 | AutoClaw / ZCode | `autoclaw_*.go` | CCL-owned Anthropic-to-OpenAI Chat adapter to `{origin}/autoclaw-proxy/proxy/autoclaw`; imports encrypted desktop `auth.json`, refreshes the session, and sends desktop-compatible managed-proxy headers without starting AutoClaw |
 
-Shared 429/5xx fast retry is `retry.go` (500ms + 1s, then relay status/body/`Retry-After` untouched). Per-backend 401 refresh happens **inside** one attempt. Kiro has its own 1/2/4s loop; WorkBuddy/Copilot inner gateways must not wrap the outer retry (would 3×3).
+Shared 429/5xx fast retry is `retry.go` (500ms + 1s, then relay status/body/`Retry-After` untouched). Per-backend 401 refresh happens **inside** one attempt. Kiro has its own 1/2/4s loop; WorkBuddy/Copilot/Zed inner gateways must not wrap the outer retry (would 3×3).
 
 `ccl set` Auto Configure only GETs `/models` metadata for generic gateways. OAuth subscriptions have no Auto Configure row at all: `configureOAuthRuntime` copies the catalog straight from the loopback runtime (`runtime.Models()`), so a subscription is never probed as a generic endpoint. Per-slot `[1m]` markers live in `live().oneMSlots`; a slot that kept its model keeps its marker, so re-detection cannot re-open a window the user closed.
 
@@ -87,6 +88,6 @@ User-facing Chinese lives in `cmd/` via `locale.T`. `internal/` must not contain
 
 ccl is a launcher + protocol proxy, not a fork of Claude Code. Extra CLI args after a non-ccl command are passed through.
 
-OAuth public names: `gpt` `gemini` `grok` `copilot` `qoder` `kimi` `kiro` `workbuddy` `autoclaw`. `ccl oauth chatgpt` is gone; old configs may still store `chatgpt`/`codex` as `oauthProvider`. Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch; generated Grok 4.5/4.3/3-mini IDs migrate when the new default is in the catalog).
+OAuth public names: `gpt` `gemini` `grok` `copilot` `qoder` `kimi` `kiro` `workbuddy` `autoclaw` `zed`. `ccl oauth chatgpt` is gone; old configs may still store `chatgpt`/`codex` as `oauthProvider`. Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch; generated Grok 4.5/4.3/3-mini IDs migrate when the new default is in the catalog).
 
 `bypass` injects `--dangerously-skip-permissions`. `ccl status` is cloud sync, not provider health — use `ccl doctor`.

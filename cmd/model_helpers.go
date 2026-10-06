@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"strings"
+
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -37,4 +39,20 @@ func fetchModelInfosForProvider(p provider.Provider) []protocol.ModelInfo {
 		return nil
 	}
 	return infos
+}
+
+// probeWireType returns the provider type a model-availability probe must use.
+//
+// An embedded subscription runtime serves exactly one surface — the Anthropic
+// Messages endpoint Claude Code talks to — while its persisted Type is only the
+// local-dispatch compatibility value (openai for Kimi/Gemini/WorkBuddy,
+// openai_responses for GPT/Grok/Copilot/Zed). The loopback routes neither
+// /v1/chat/completions nor /v1/responses, so probing it under the compatibility
+// type 404s every model of a healthy subscription. AutoClaw keeps its own type:
+// it has a dedicated probe branch that crosses the adapter with bearer auth.
+func probeWireType(p provider.Provider) string {
+	if strings.TrimSpace(p.OAuthProvider) == "" || provider.IsAutoClawType(p.Type) {
+		return p.Type
+	}
+	return "anthropic"
 }

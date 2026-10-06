@@ -122,6 +122,7 @@ func oneMSlotsFromProvider(p provider.Provider) map[string]bool {
 		{"opus", p.OpusModel},
 		{"sonnet", p.SonnetModel},
 		{"haiku", p.HaikuModel},
+		{"fable", p.FableModel},
 		{"custom", p.CustomModelID},
 		{"subagent", p.SubagentModel},
 	} {

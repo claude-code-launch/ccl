@@ -25,6 +25,10 @@ const (
 	// performs browser OAuth, refreshes the resulting session locally, and owns
 	// the Anthropic-to-OpenAI Chat adapter used to reach the managed proxy.
 	ProviderAutoClaw = "autoclaw"
+	// ProviderZed is the Zed hosted-model plan (Zed Pro and friends). CCL owns the
+	// native-app browser sign-in, the LLM-token exchange, and a per-model router
+	// over Zed's Anthropic / OpenAI / Google / xAI models.
+	ProviderZed = "zed"
 	// backendXAI is the internal backend key for xAI/Grok credentials.
 	backendXAI = "xai"
 )
@@ -92,6 +96,8 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 		return loginKimi(ctx, authDir, opts)
 	case ProviderAutoClaw:
 		return loginAutoClaw(ctx, authDir, opts)
+	case ProviderZed:
+		return loginZed(ctx, authDir, opts)
 	default:
 		return LoginResult{}, fmt.Errorf("unsupported OAuth provider %q", target)
 	}
@@ -123,10 +129,10 @@ func ImportCredential(ctx context.Context, providerName string) (LoginResult, er
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw, ProviderZed:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, or autoclaw)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, autoclaw, or zed)", providerName)
 	}
 }
 
@@ -150,6 +156,8 @@ func BackendProvider(providerName string) (string, error) {
 		return ProviderWorkBuddy, nil
 	case ProviderAutoClaw:
 		return ProviderAutoClaw, nil
+	case ProviderZed:
+		return ProviderZed, nil
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}

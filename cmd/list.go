@@ -153,6 +153,7 @@ func compactSlotParts(p provider.Provider) []string {
 		{"O", p.OpusModel},
 		{"S", p.SonnetModel},
 		{"H", p.HaikuModel},
+		{"F", p.FableModel},
 		{"C", p.CustomModelID},
 		{"A", p.SubagentModel},
 	}

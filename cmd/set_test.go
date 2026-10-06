@@ -547,7 +547,7 @@ func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
 	m.cursor = m.mainRowIndex(rowSubagent)
 
 	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
-	if !m.filterFocused || m.activeSlot != 4 {
+	if !m.filterFocused || modelSlotKeys[m.activeSlot] != "subagent" {
 		t.Fatalf("subagent picker was not opened: focused=%t activeSlot=%d", m.filterFocused, m.activeSlot)
 	}
 	m.slotListCursor = 2 // clear/unset is index 0

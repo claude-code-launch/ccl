@@ -146,6 +146,8 @@ func normalizeCredentialBackend(value string) (string, error) {
 		return ProviderWorkBuddy, nil
 	case ProviderAutoClaw:
 		return ProviderAutoClaw, nil
+	case ProviderZed:
+		return ProviderZed, nil
 	default:
 		return "", fmt.Errorf("unsupported credential type %q", value)
 	}

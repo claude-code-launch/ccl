@@ -22,8 +22,8 @@ const (
 
 var (
 	kiroSessionUUIDPattern = regexp.MustCompile(`(?i)session_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-	kiroModernModelPattern = regexp.MustCompile(`(?i)^claude-(sonnet|opus|haiku)-([0-9]+)[-.]([0-9]+)(?:-[0-9]{8})?(?:-thinking|-latest)?$`)
-	kiroLegacyModelPattern = regexp.MustCompile(`(?i)^claude-([0-9]+)-([0-9]+)-(sonnet|opus|haiku)(?:-[0-9]{8})?(?:-thinking|-latest)?$`)
+	kiroModernModelPattern = regexp.MustCompile(`(?i)^claude-(sonnet|opus|haiku|fable)-([0-9]+)[-.]([0-9]+)(?:-[0-9]{8})?(?:-thinking|-latest)?$`)
+	kiroLegacyModelPattern = regexp.MustCompile(`(?i)^claude-([0-9]+)-([0-9]+)-(sonnet|opus|haiku|fable)(?:-[0-9]{8})?(?:-thinking|-latest)?$`)
 )
 
 type anthropicMessagesRequest struct {

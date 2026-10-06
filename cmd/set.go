@@ -287,10 +287,11 @@ func countCSV(csv string) int {
 
 func slotDebugSummary(p provider.Provider) string {
 	return fmt.Sprintf(
-		"opus_set=%t sonnet_set=%t haiku_set=%t custom_set=%t subagent_set=%t",
+		"opus_set=%t sonnet_set=%t haiku_set=%t fable_set=%t custom_set=%t subagent_set=%t",
 		strings.TrimSpace(p.OpusModel) != "",
 		strings.TrimSpace(p.SonnetModel) != "",
 		strings.TrimSpace(p.HaikuModel) != "",
+		strings.TrimSpace(p.FableModel) != "",
 		strings.TrimSpace(p.CustomModelID) != "",
 		strings.TrimSpace(p.SubagentModel) != "",
 	)

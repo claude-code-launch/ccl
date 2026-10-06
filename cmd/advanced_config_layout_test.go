@@ -725,6 +725,47 @@ func TestModelsDevRefreshMergesCatalog(t *testing.T) {
 	}
 }
 
+// TestModelsDevRefreshAppendsCatalogFromAnotherNamespace covers a gateway whose
+// live /models catalog (and therefore the saved pool) uses different IDs than
+// its curated models.dev entry: the refresh keeps the working pool and the
+// slots mapped into it verbatim, and appends the catalog's IDs — with their
+// wire protocols and display metadata — so they show up in the slot picker.
+func TestModelsDevRefreshAppendsCatalogFromAnotherNamespace(t *testing.T) {
+	p := provider.Provider{
+		Type: "modelsdev", Name: "test-gw", Endpoint: "https://example.test/v1", APIKey: "key",
+		Model:      "anthropic/claude-sonnet-5.5,typesafe/jev-router",
+		OpusModel:  "anthropic/claude-sonnet-5.5",
+		FableModel: "typesafe/jev-router",
+		ModelProtocols: map[string]string{
+			"test-model": "openai", // catalog-side entry, absent from the pool
+		},
+	}
+	m := NewAdvancedConfigModel(&p)
+	m.live().modelsDevRefreshPending = false
+
+	catalog := testModelsDevProvider() // id "test-gw", advertises "test-model"
+	catalog.Models["other-model"] = modelsdev.Model{ID: "other-model", Name: "Other"}
+	m.handleModelsDevRefreshDone(modelsDevFetchDoneMsg{
+		providers:  []modelsdev.Provider{catalog},
+		refreshFor: "test-gw",
+	})
+
+	if got := strings.Join(m.live().modelPool, ","); got != "anthropic/claude-sonnet-5.5,typesafe/jev-router,other-model,test-model" {
+		t.Fatalf("different-namespace pool was not appended verbatim: %q", got)
+	}
+	if p.OpusModel != "anthropic/claude-sonnet-5.5" || p.FableModel != "typesafe/jev-router" {
+		t.Fatalf("slots were cleared: opus=%q fable=%q", p.OpusModel, p.FableModel)
+	}
+	if p.ModelProtocols["other-model"] != "openai" || p.ModelProtocols["test-model"] != "openai" {
+		t.Fatalf("appended catalog models lack wire protocols: %v", p.ModelProtocols)
+	}
+	for _, want := range []string{"other-model", "test-model"} {
+		if _, ok := m.live().modelDisplayMetadata[want]; !ok {
+			t.Fatalf("appended catalog model %q has no display metadata", want)
+		}
+	}
+}
+
 // TestModelsDevRefreshIgnoredForOtherProvider verifies a refresh result for a
 // different provider id does not touch the current pool.
 func TestModelsDevRefreshIgnoredForOtherProvider(t *testing.T) {

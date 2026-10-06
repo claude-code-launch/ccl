@@ -16,6 +16,8 @@ func mustFind(t *testing.T, rec AutoRecommendation, slot string) string {
 		return rec.Sonnet
 	case "haiku":
 		return rec.Haiku
+	case "fable":
+		return rec.Fable
 	case "custom":
 		return rec.Custom
 	case "subagent":
@@ -40,6 +42,10 @@ func TestRecommendDistinguishesProAndFlashByName(t *testing.T) {
 	if rec.Custom != rec.Sonnet {
 		t.Fatalf("custom = %q, want sonnet %q", rec.Custom, rec.Sonnet)
 	}
+	// Fable ranks above Opus, so it follows the strongest pick.
+	if rec.Fable != rec.Opus {
+		t.Fatalf("fable = %q, want opus %q", rec.Fable, rec.Opus)
+	}
 	if rec.Subagent != "" {
 		t.Fatalf("subagent should stay Auto when no lighter model exists, got %q", rec.Subagent)
 	}
@@ -50,7 +56,7 @@ func TestRecommendOrderIndependent(t *testing.T) {
 	poolB := []string{"deepseek-v4-flash", "deepseek-chat", "deepseek-v4-pro"}
 	a := RecommendModels(provider.Provider{}, poolA, nil)
 	b := RecommendModels(provider.Provider{}, poolB, nil)
-	for _, slot := range []string{"opus", "sonnet", "haiku", "custom", "subagent"} {
+	for _, slot := range modelSlotKeys {
 		va, vb := mustFind(t, a, slot), mustFind(t, b, slot)
 		if va != vb {
 			t.Fatalf("slot %s differs by input order: %q vs %q", slot, va, vb)
@@ -61,7 +67,7 @@ func TestRecommendOrderIndependent(t *testing.T) {
 func TestRecommendFallsBackWithFewModels(t *testing.T) {
 	// One model: every slot uses it.
 	rec := RecommendModels(provider.Provider{}, []string{"only-model"}, nil)
-	for _, slot := range []string{"opus", "sonnet", "haiku", "custom"} {
+	for _, slot := range []string{"opus", "sonnet", "haiku", "fable", "custom"} {
 		if mustFind(t, rec, slot) != "only-model" {
 			t.Fatalf("slot %s = %q, want only-model", slot, mustFind(t, rec, slot))
 		}
@@ -75,6 +81,9 @@ func TestRecommendFallsBackWithFewModels(t *testing.T) {
 	if two.Custom != two.Opus {
 		t.Fatalf("custom=%q, want opus %q", two.Custom, two.Opus)
 	}
+	if two.Fable != two.Opus {
+		t.Fatalf("fable=%q, want opus %q", two.Fable, two.Opus)
+	}
 
 	// Three models: strong/main + light + one spare. Opus/Sonnet/Custom share the
 	// strongest model, Haiku takes the lightest, and the spare goes to Subagent.
@@ -84,6 +93,9 @@ func TestRecommendFallsBackWithFewModels(t *testing.T) {
 	}
 	if three.Custom != three.Opus {
 		t.Fatalf("custom=%q, want opus %q", three.Custom, three.Opus)
+	}
+	if three.Fable != three.Opus {
+		t.Fatalf("fable=%q, want opus %q", three.Fable, three.Opus)
 	}
 	if three.Subagent != "grok-4.3" {
 		t.Fatalf("subagent should take the spare model, got %q", three.Subagent)

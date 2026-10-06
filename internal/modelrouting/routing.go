@@ -6,6 +6,10 @@ const (
 	TierOpus   = "opus"
 	TierSonnet = "sonnet"
 	TierHaiku  = "haiku"
+	// TierFable is Claude Code's top tier. It ranks above Opus, so a fable
+	// request that reaches the pool without a mapped slot lands on the
+	// strongest model rather than falling through to the Sonnet default.
+	TierFable = "fable"
 )
 
 func SplitCSV(models string) []string {
@@ -64,6 +68,8 @@ func MapModel(requestedModel string, configuredModel string, availableModels []s
 func requestedTier(model string) string {
 	model = strings.ToLower(model)
 	switch {
+	case strings.Contains(model, "fable"):
+		return TierFable
 	case strings.Contains(model, "opus"):
 		return TierOpus
 	case strings.Contains(model, "haiku"):
@@ -93,6 +99,17 @@ func scoreModelForTier(model string, tier string) int {
 	}
 
 	switch tier {
+	case TierFable:
+		switch {
+		case strings.Contains(m, "fable"):
+			return 100
+		case strings.Contains(m, "opus"):
+			return 90
+		case strings.Contains(m, "reasoner") || strings.Contains(m, "reasoning") || strings.Contains(m, "thinking"):
+			return 85
+		case strings.Contains(m, "pro") || strings.Contains(m, "max") || strings.Contains(m, "ultra"):
+			return 60
+		}
 	case TierOpus:
 		switch {
 		case strings.Contains(m, "opus"):

@@ -41,6 +41,13 @@ type settingsJSON struct {
 	// FastMode is always serialized (no omitempty) so turning it off in ccl set
 	// (or Claude Code /fast) can clear a previously enabled pin.
 	FastMode bool `json:"fastMode"`
+	// DisableClaudeAiConnectors is always serialized. A ccl session always runs
+	// against the loopback runtime, so Claude Code's first-party check fails and
+	// the connector fetch can never succeed — without this, every session opens
+	// with "claude.ai connectors are disabled because ANTHROPIC_API_KEY or
+	// another auth source is set" on stderr. Pinning it stops the warning at the
+	// source: the eligibility check returns before it is queued.
+	DisableClaudeAiConnectors bool `json:"disableClaudeAiConnectors"`
 	// StatusLine installs ccl's own status line for the session. It is omitted
 	// when the provider opts out, which lets Claude Code fall back to the user's
 	// statusLine from ~/.claude/settings.json.
@@ -165,6 +172,10 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = catalogModelRequestName(p.HaikuModel, names)
 		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = catalogModelDisplayName(p.HaikuModel, names)
 	}
+	if p.FableModel != "" {
+		env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = catalogModelRequestName(p.FableModel, names)
+		env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"] = catalogModelDisplayName(p.FableModel, names)
+	}
 
 	// 3. Effort level; empty means ccl leaves Claude's own setting in control.
 	if p.EffortLevel != "" {
@@ -173,7 +184,7 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 
 	// 4. Model pool routing (auto-assign tiers from comma-separated list)
 	// Only used as fallback when explicit tier models aren't set
-	if p.Model != "" && (p.OpusModel == "" || p.SonnetModel == "" || p.HaikuModel == "") {
+	if p.Model != "" && (p.OpusModel == "" || p.SonnetModel == "" || p.HaikuModel == "" || p.FableModel == "") {
 		applyModelEnvWithNames(env, p.Model, names)
 	}
 
@@ -331,6 +342,8 @@ func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[s
 		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", catalogModelDisplayName(model, names))
 		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL", requestModel)
 		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", catalogModelDisplayName(model, names))
+		setIfEmpty("ANTHROPIC_DEFAULT_FABLE_MODEL", requestModel)
+		setIfEmpty("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", catalogModelDisplayName(model, names))
 		setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 		return
 	}
@@ -339,6 +352,7 @@ func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[s
 	opus := modelrouting.MapModel("claude-3-opus", "", models)
 	sonnet := modelrouting.MapModel("claude-3-5-sonnet", "", models)
 	haiku := modelrouting.MapModel("claude-3-5-haiku", "", models)
+	fable := modelrouting.MapModel("claude-fable-5-1", "", models)
 
 	setIfEmpty("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "0")
 	setIfEmpty("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
@@ -350,6 +364,8 @@ func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[s
 		{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", catalogModelDisplayName(sonnet, names)},
 		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", catalogModelRequestName(haiku, names)},
 		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", catalogModelDisplayName(haiku, names)},
+		{"ANTHROPIC_DEFAULT_FABLE_MODEL", catalogModelRequestName(fable, names)},
+		{"ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", catalogModelDisplayName(fable, names)},
 	} {
 		setIfEmpty(kv.k, kv.v)
 	}
@@ -479,6 +495,10 @@ func (c *providerContext) settings() settingsJSON {
 		OutputStyle:            DefaultOutputStyle,
 		Language:               responseLanguage(),
 		FastMode:               c.provider.FastMode,
+		// claude.ai connectors reach claude.ai over the network, which a ccl
+		// session's loopback base URL can never satisfy; pin the opt-out so the
+		// startup warning is not printed every session.
+		DisableClaudeAiConnectors: true,
 	}
 	// ccl's status line wins over the user's, because --settings outranks
 	// ~/.claude/settings.json. Providers that opt out leave the field unset.
@@ -703,11 +723,12 @@ func logSessionContextBudget(p provider.Provider, settings settingsJSON, dropped
 	}
 	// The [1m] suffix is what decides the session sizing, so log the raw slot
 	// values rather than the stripped model ids.
-	mapped := make([]string, 0, 5)
+	mapped := make([]string, 0, 6)
 	for _, slot := range []struct{ name, model string }{
 		{"opus", p.OpusModel},
 		{"sonnet", p.SonnetModel},
 		{"haiku", p.HaikuModel},
+		{"fable", p.FableModel},
 		{"custom", p.CustomModelID},
 		{"subagent", p.SubagentModel},
 	} {

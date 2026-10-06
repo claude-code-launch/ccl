@@ -6,8 +6,8 @@
 // models), Grok (cli-chat-proxy Responses with Grok Build identity), the
 // native-Anthropic Messages passthrough (models.dev @ai-sdk/anthropic models
 // and Copilot native-Messages models), and Gemini (Antigravity conversion).
-// Copilot's mixed catalog, Kiro, and Qoder run entirely on CCL-owned
-// runtimes too. Direct Anthropic API-key gateways bypass
+// Copilot's mixed catalog, Zed's mixed catalog, Kiro, and Qoder run entirely
+// on CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
 // this package altogether. AutoClaw uses a CCL-owned Anthropic-to-OpenAI Chat
 // runtime with its desktop OAuth refresh session and managed-proxy headers.
 //
@@ -20,12 +20,14 @@
 // Kimi refresh once after a 401; WorkBuddy refreshes once after a 401/403;
 // Gemini also falls back from the daily to the prod Antigravity base on
 // network errors, 429s and 5xx responses (so one attempt is up to 2 upstream
-// calls); Qoder rotates credentials and re-signs COSY per attempt. Three layers
-// are deliberately outside the loop: Kiro keeps its own longer 1/2/4s budget
-// with per-round credential rotation (stacking would double the backoff), and
-// the WorkBuddy and Copilot loopback gateways are the INNER hop of a two-hop
-// path — the outer chat/responses service owns the fast retry, so wrapping
-// the gateway too would retry 3×3 = 9 times per request.
+// calls); Qoder rotates credentials and re-signs COSY per attempt; the Zed
+// gateway mints one fresh LLM token and resends once when the service reports
+// the cached one expired. Four layers are deliberately outside the loop: Kiro
+// keeps its own longer 1/2/4s budget with per-round credential rotation
+// (stacking would double the backoff), and the WorkBuddy, Copilot, and Zed
+// loopback gateways are the INNER hop of a two-hop path — the outer
+// chat/responses/messages service owns the fast retry, so wrapping the gateway
+// too would retry 3×3 = 9 times per request.
 //
 // # Direct data planes
 //
@@ -76,7 +78,21 @@
 //     X-Authorization/X-Request-Model/X-Harness-Type headers, and never starts
 //     or modifies AutoClaw at runtime.
 //
-//  8. Session credentials
+//  8. Zed direct runtime (zed_*.go)
+//     `ccl oauth zed` runs zed.dev's native-app sign-in: an RSA-2048 key is
+//     generated per login, zed.dev redirects the OAEP-SHA256-encrypted access
+//     token to a loopback port, and CCL stores the decrypted long-lived token
+//     under ~/.ccl/auth (0600). At runtime CCL exchanges it for a short-lived
+//     LLM token, reads the account's model catalog, and routes each model by
+//     its provider: Anthropic models on the native Messages passthrough, OpenAI
+//     on the Codex Responses adapter, xAI on the Chat adapter, and Google on
+//     zedGeminiService (the Gemini converter plus stream decoder). Every service
+//     talks its provider's native protocol to the inner zedGateway, which wraps
+//     requests in Zed's {provider, model, provider_request} envelope and
+//     unwraps its NDJSON {event}/{status} stream. Zed's cloud only streams, so
+//     non-streaming Claude Code requests are folded back from the Anthropic SSE.
+//
+//  9. Session credentials
 //     All runtimes bind 127.0.0.1 only and use a random per-session API key
 //     that is never written back to ~/.ccl/config.yaml. OAuth credentials live
 //     under ~/.ccl/auth and are filtered per backend so multi-login providers do

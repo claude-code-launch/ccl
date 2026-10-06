@@ -20,6 +20,7 @@ type mapOptions struct {
 	opus     string
 	sonnet   string
 	haiku    string
+	fable    string
 	custom   string
 	subagent string
 }
@@ -46,12 +47,13 @@ Examples:
   ccl map auto my-provider
   ccl map --opus gpt-5.1 --sonnet gpt-5.1-codex-max
   ccl map --custom gpt-5.1 my-provider
+  ccl map --fable gpt-5.6-sol my-provider
   ccl map --subagent gpt-5.4-mini my-provider
   ccl provider map --custom gpt-5.1 my-provider`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hasFlag := cmd.Flags().Changed("opus") || cmd.Flags().Changed("sonnet") ||
-				cmd.Flags().Changed("haiku") || cmd.Flags().Changed("custom") ||
-				cmd.Flags().Changed("subagent")
+				cmd.Flags().Changed("haiku") || cmd.Flags().Changed("fable") ||
+				cmd.Flags().Changed("custom") || cmd.Flags().Changed("subagent")
 
 			if hasFlag {
 				return runMapDirect(cmd, args, opts)
@@ -65,6 +67,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.opus, "opus", "", "Model ID for Opus slot")
 	cmd.Flags().StringVar(&opts.sonnet, "sonnet", "", "Model ID for Sonnet slot")
 	cmd.Flags().StringVar(&opts.haiku, "haiku", "", "Model ID for Haiku slot")
+	cmd.Flags().StringVar(&opts.fable, "fable", "", "Model ID for Fable slot")
 	cmd.Flags().StringVar(&opts.custom, "custom", "", "Model ID for Custom slot")
 	cmd.Flags().StringVar(&opts.subagent, "subagent", "", "Model ID for Claude Code subagents (empty uses automatic selection)")
 	return cmd
@@ -96,6 +99,9 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	if cmd.Flags().Changed("haiku") {
 		p.HaikuModel = opts.haiku
 	}
+	if cmd.Flags().Changed("fable") {
+		p.FableModel = opts.fable
+	}
 	if cmd.Flags().Changed("custom") {
 		p.CustomModelID = opts.custom
 	}
@@ -122,6 +128,9 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	}
 	if cmd.Flags().Changed("haiku") {
 		fmt.Printf("  Haiku ID    -> %s\n", p.HaikuModel)
+	}
+	if cmd.Flags().Changed("fable") {
+		fmt.Printf("  Fable ID    -> %s\n", p.FableModel)
 	}
 	if cmd.Flags().Changed("custom") {
 		fmt.Printf("  Custom ID   -> %s\n", p.CustomModelID)
@@ -158,7 +167,7 @@ func runMapAuto(ctx context.Context, args []string) error {
 	}
 	defer cleanup()
 
-	availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, runtimeProvider.Type, runtimeProvider.AnthropicAuth, runtimeProvider.ModelProtocols)
+	availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, probeWireType(runtimeProvider), runtimeProvider.AnthropicAuth, runtimeProvider.ModelProtocols)
 	available, unavailable := classifyModels(models, availableSet)
 
 	if len(available) == 0 {
@@ -172,6 +181,14 @@ func runMapAuto(ctx context.Context, args []string) error {
 	oneMSlots := oneMSlotsFromProvider(p)
 	slots := sequentialSlotPointers(&p)
 	assigned := applySequentialSlotMapping(slots, available)
+	// Fable is Claude Code's tier above Opus and follows the strongest pick, the
+	// same rule RecommendModels applies on the TUI page: no subscription or
+	// gateway catalog seen so far offers a Fable-family model, so spending one of
+	// the sequential picks on it would strip a real model from Custom. Mirroring
+	// Opus keeps /model fable on a working model instead of the bare
+	// claude-fable-5-1 ID that would fail discovery, and an exhausted sequential
+	// walk clears it along with the other trailing slots.
+	p.FableModel = p.OpusModel
 	// Drop [1m] only for slots that no longer map to a recommended model.
 	// Compact stays independent from per-slot [1m] cleanup.
 	for _, slot := range advancedSlotRefs(&p) {
@@ -204,7 +221,7 @@ func runMapAuto(ctx context.Context, args []string) error {
 	}
 
 	fmt.Printf("\n✓ Auto-mapped slots for provider %q:\n", providerName)
-	for _, s := range slots {
+	for _, s := range mappedSlotReport(&p) {
 		if *s.ptr != "" {
 			fmt.Printf("  %-6s -> %s\n", s.name, mappedModelOutputLabel(*s.ptr, metadata))
 		} else {
@@ -220,11 +237,26 @@ type modelSlot struct {
 	ptr  *string
 }
 
+// sequentialSlotPointers lists the slots `ccl map auto` fills in order. Fable is
+// deliberately absent: it has no model of its own to walk to (see runMapAuto).
 func sequentialSlotPointers(p *provider.Provider) []modelSlot {
 	return []modelSlot{
 		{"Opus", &p.OpusModel},
 		{"Sonnet", &p.SonnetModel},
 		{"Haiku", &p.HaikuModel},
+		{"Custom", &p.CustomModelID},
+	}
+}
+
+// mappedSlotReport lists every slot the auto-mapping summary prints, in menu
+// order: the four sequential slots plus Fable, which is reported even though it
+// is not walked.
+func mappedSlotReport(p *provider.Provider) []modelSlot {
+	return []modelSlot{
+		{"Opus", &p.OpusModel},
+		{"Sonnet", &p.SonnetModel},
+		{"Haiku", &p.HaikuModel},
+		{"Fable", &p.FableModel},
 		{"Custom", &p.CustomModelID},
 	}
 }
@@ -296,6 +328,7 @@ func runMapTUI(args []string) error {
 	printSlot("Opus", p.OpusModel)
 	printSlot("Sonnet", p.SonnetModel)
 	printSlot("Haiku", p.HaikuModel)
+	printSlot("Fable", p.FableModel)
 	printSlot("Custom", p.CustomModelID)
 	if strings.TrimSpace(p.SubagentModel) != "" {
 		printSlot("Subagent", p.SubagentModel)

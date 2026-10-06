@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,6 +211,117 @@ func TestModelProbeTargetUsesConfiguredUpstreamForKeyProviders(t *testing.T) {
 	target = modelProbeTarget(configured, runtime)
 	if target.Endpoint != runtime.Endpoint || target.APIKey != runtime.APIKey {
 		t.Fatalf("OAuth probe target = %q, want loopback runtime %q", target.Endpoint, runtime.Endpoint)
+	}
+}
+
+// TestProbeWireTypeFollowsTheRuntimeSurface pins the second half of the probe
+// selection: WHICH route to use once the target is the loopback runtime. A
+// subscription persists only a compatibility type — "openai" for
+// Kimi/Gemini/WorkBuddy, "openai_responses" for GPT/Grok/Copilot/Zed — while
+// every embedded runtime serves the Anthropic Messages surface and nothing
+// else. Probing the compatibility wire 404s every model of a healthy
+// subscription, which is how doctor reported 0/N on a working Zed or Kimi
+// account. AutoClaw keeps its own type: its probe branch crosses the adapter
+// with bearer auth.
+func TestProbeWireTypeFollowsTheRuntimeSurface(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider provider.Provider
+		want     string
+	}{
+		{
+			name:     "kimi chat compatibility type",
+			provider: provider.Provider{Type: "openai", OAuthProvider: "kimi"},
+			want:     "anthropic",
+		},
+		{
+			name:     "zed responses compatibility type",
+			provider: provider.Provider{Type: "openai_responses", OAuthProvider: "zed"},
+			want:     "anthropic",
+		},
+		{
+			name:     "copilot responses compatibility type",
+			provider: provider.Provider{Type: "openai_responses", OAuthProvider: "copilot"},
+			want:     "anthropic",
+		},
+		{
+			name:     "qoder already anthropic",
+			provider: provider.Provider{Type: "anthropic", OAuthProvider: "qoder"},
+			want:     "anthropic",
+		},
+		{
+			name:     "autoclaw keeps its adapter probe",
+			provider: provider.Provider{Type: "autoclaw", OAuthProvider: "autoclaw"},
+			want:     "autoclaw",
+		},
+		{
+			name:     "api-key gateway is unchanged",
+			provider: provider.Provider{Type: "openai_responses"},
+			want:     "openai_responses",
+		},
+		{
+			name:     "models.dev keeps its per-model table",
+			provider: provider.Provider{Type: "modelsdev"},
+			want:     "modelsdev",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := probeWireType(tc.provider); got != tc.want {
+				t.Fatalf("probeWireType(%+v) = %q, want %q", tc.provider, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestModelVerificationProbesOAuthRuntimeMessagesSurface is the subscription
+// shape of the doctor 0/N failure: the loopback runtime serves only
+// /v1/messages, and the provider's persisted Type is the openai_responses
+// compatibility value. Verification must reach the runtime on its Messages
+// surface and report the account's models available.
+func TestModelVerificationProbesOAuthRuntimeMessagesSurface(t *testing.T) {
+	var chatProbes, anthropicProbes int32
+	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/messages":
+			atomic.AddInt32(&anthropicProbes, 1)
+			if r.Header.Get("x-api-key") != "ccl-local-key" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		case "/v1/responses", "/v1/chat/completions":
+			atomic.AddInt32(&chatProbes, 1)
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer loopback.Close()
+
+	configured := provider.Provider{
+		Name: "work", Type: "openai_responses", Endpoint: "oauth://zed",
+		OAuthProvider: "zed", OAuthAccountCredential: "zed-user.json",
+	}
+	// The runtime provider is a copy of the configured one with only Endpoint and
+	// APIKey rewritten, so it still carries OAuthProvider.
+	runtime := provider.Provider{
+		Name: "work", Type: "openai_responses", Endpoint: loopback.URL + "/v1",
+		APIKey: "ccl-local-key", OAuthProvider: "zed", OAuthAccountCredential: "zed-user.json",
+	}
+	models := []string{"claude-sonnet-test", "gpt-test"}
+
+	target := modelProbeTarget(configured, runtime)
+	available := testModelsConcurrently(context.Background(), models, target.Endpoint, target.APIKey, probeWireType(target), target.AnthropicAuth, target.ModelProtocols)
+	if len(available) != len(models) {
+		t.Fatalf("OAuth runtime verification available = %d/%d, want %d", len(available), len(models), len(models))
+	}
+	if got := atomic.LoadInt32(&chatProbes); got != 0 {
+		t.Fatalf("probes hit OpenAI-shaped routes %d times; the runtime serves none", got)
+	}
+	if got := atomic.LoadInt32(&anthropicProbes); got != int32(len(models)) {
+		t.Fatalf("Messages-surface probes = %d, want %d", got, len(models))
 	}
 }
 

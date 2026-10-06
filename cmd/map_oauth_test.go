@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,9 +13,30 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
+// newMockOAuthMessagesServer stands in for a subscription's loopback runtime:
+// it answers the Anthropic Messages surface with the ccl session key and 404s
+// every OpenAI-shaped route. An
+// availability probe that follows the persisted compatibility type (openai /
+// openai_responses) rather than the surface 404s all of its models.
+func newMockOAuthMessagesServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "ccl-local-key" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
 func TestMapAutoUsesDiscoveredOAuthRuntimeCatalog(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
+	server := newMockOAuthMessagesServer(t)
 	cfg := &provider.Config{
 		ActiveProvider: "oauth-test",
 		Providers: map[string]provider.Provider{
@@ -33,9 +56,12 @@ func TestMapAutoUsesDiscoveredOAuthRuntimeCatalog(t *testing.T) {
 		if p.OAuthProvider != "qoder" || p.Endpoint != "oauth://qoder" {
 			t.Fatalf("mapping catalog input = %+v", p)
 		}
+		// A subscription's compatibility type is only a local-dispatch value; the
+		// surface it serves is Anthropic Messages, exactly as the loopback runtime
+		// does. Kimi/Gemini/WorkBuddy persist "openai" here.
 		p.Type = "openai"
 		p.Endpoint = server.URL + "/v1"
-		p.APIKey = "test-key"
+		p.APIKey = "ccl-local-key"
 		return p, []string{"model-a", "model-b", "model-c", "model-d"}, nil, func() {
 			cleanupCalls.Add(1)
 		}, nil

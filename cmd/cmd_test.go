@@ -407,6 +407,50 @@ func testProviderWithOldMappings() provider.Provider {
 		SonnetModel:   "old-sonnet",
 		HaikuModel:    "old-haiku",
 		CustomModelID: "old-custom",
+		FableModel:    "old-fable",
+	}
+}
+
+// TestMapAutoMirrorsOpusIntoFable pins the Fable slot's auto-mapping: the
+// sequential walk owns only Opus/Sonnet/Haiku/Custom, so Fable must follow Opus
+// rather than stay on a stale value or consume one of the four picks.
+func TestMapAutoMirrorsOpusIntoFable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
+
+	cfg := &provider.Config{
+		ActiveProvider: "mock",
+		Providers: map[string]provider.Provider{
+			"mock": {
+				Name:       "mock",
+				Type:       "openai",
+				Endpoint:   server.URL + "/v1",
+				APIKey:     "test-key",
+				FableModel: "stale-fable",
+			},
+		},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+		t.Fatalf("runMapAuto failed: %v", err)
+	}
+
+	updated, err := config.Load()
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	p := updated.Providers["mock"]
+	if p.OpusModel != "model-a" {
+		t.Fatalf("opus = %q, want model-a", p.OpusModel)
+	}
+	if p.FableModel != "model-a" {
+		t.Fatalf("fable = %q, want the opus pick model-a", p.FableModel)
+	}
+	if p.CustomModelID != "model-d" {
+		t.Fatalf("custom = %q, want model-d (fable must not consume a sequential pick)", p.CustomModelID)
 	}
 }
 

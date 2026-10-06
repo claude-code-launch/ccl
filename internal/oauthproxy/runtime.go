@@ -198,6 +198,9 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if backend == ProviderAutoClaw {
 		return startAutoClawOAuth(parent, AutoClawOpenAIBaseURL(), modelSpec, credentialFile)
 	}
+	if backend == ProviderZed {
+		return startZedOAuth(parent, modelSpec, credentialFile)
+	}
 	return nil, fmt.Errorf("unsupported subscription provider %q", providerName)
 }
 

@@ -27,6 +27,7 @@ func TestOAuthRuntimeTypeDefaults(t *testing.T) {
 		{oauthproxy.ProviderKiro, "anthropic"},
 		{oauthproxy.ProviderQoder, "anthropic"},
 		{oauthproxy.ProviderCopilot, "openai_responses"},
+		{oauthproxy.ProviderZed, "openai_responses"},
 		{oauthproxy.ProviderWorkBuddy, "openai"},
 	}
 	for _, test := range tests {
@@ -338,6 +339,68 @@ func TestRunAuthCopilotUsesIndependentBackend(t *testing.T) {
 	}
 	if p.Type != "openai_responses" || p.Endpoint != "oauth://copilot" || p.OAuthProvider != "copilot" {
 		t.Fatalf("Copilot provider = %+v", p)
+	}
+}
+
+func TestRunAuthZedCreatesMixedProtocolProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	originalLogin := oauthLogin
+	oauthLogin = func(_ context.Context, target string, opts oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		if target != oauthproxy.ProviderZed {
+			t.Fatalf("login target = %q, want zed", target)
+		}
+		if opts.CallbackPort != 4567 || !opts.NoBrowser {
+			t.Fatalf("login options = %+v, want --callback-port and --no-browser forwarded", opts)
+		}
+		return oauthproxy.LoginResult{Provider: target, Backend: "zed", Path: "zed-octo-cat.json"}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+
+	var out bytes.Buffer
+	if err := runAuth(context.Background(), &out, []string{"zed"}, authOptions{noBrowser: true, callbackPort: 4567}); err != nil {
+		t.Fatalf("runAuth() error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	p, ok := cfg.Providers["zed-octo-cat"]
+	if !ok || cfg.ActiveProvider != "zed-octo-cat" {
+		t.Fatalf("no derived zed provider (active=%q): %+v", cfg.ActiveProvider, cfg.Providers)
+	}
+	if p.Type != "openai_responses" || p.Endpoint != "oauth://zed" || p.OAuthProvider != "zed" || p.OAuthAccountCredential != "zed-octo-cat.json" {
+		t.Fatalf("Zed provider = %+v", p)
+	}
+	if p.APIKey != "" || p.FastMode {
+		t.Fatalf("Zed provider kept key/fast state: %+v", p)
+	}
+	// Zed's catalog is per account and changes, so no model slot is pre-filled.
+	if p.OpusModel != "" || p.SonnetModel != "" || p.HaikuModel != "" || p.CustomModelID != "" {
+		t.Fatalf("Zed provider got static model defaults: %+v", p)
+	}
+	if !strings.Contains(out.String(), "Protocol: automatic") || !strings.Contains(out.String(), "Gemini") {
+		t.Fatalf("login output does not describe per-model protocols:\n%s", out.String())
+	}
+
+	// An explicit alias is honoured and re-login reuses the same provider.
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"zed", "work"}, authOptions{noBrowser: true, callbackPort: 4567}); err != nil {
+		t.Fatalf("runAuth(zed work) error: %v", err)
+	}
+	cfg, _ = config.Load()
+	if cfg.Providers["work"].OAuthProvider != "zed" {
+		t.Fatalf("aliased Zed provider = %+v", cfg.Providers["work"])
+	}
+}
+
+func TestRunAuthRejectsZedAsAlias(t *testing.T) {
+	originalLogin := oauthLogin
+	oauthLogin = func(context.Context, string, oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
+		t.Fatal("login ran for a reserved alias")
+		return oauthproxy.LoginResult{}, nil
+	}
+	t.Cleanup(func() { oauthLogin = originalLogin })
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gpt", "zed"}, authOptions{}); err == nil {
+		t.Fatal("runAuth(gpt zed) should reject the reserved provider name as an alias")
 	}
 }
 

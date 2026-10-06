@@ -129,6 +129,7 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				OpusModel:   "claude-opus-4-20250514",
 				SonnetModel: "claude-sonnet-4-20250514",
 				HaikuModel:  "claude-haiku-3.5-20241022",
+				FableModel:  "claude-fable-5-1",
 			},
 			check: func(t *testing.T, s settingsJSON) {
 				if s.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-20250514" {
@@ -139,6 +140,12 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				}
 				if s.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "claude-haiku-3.5-20241022" {
 					t.Errorf("Haiku model mismatch: %s", s.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+				}
+				if s.Env["ANTHROPIC_DEFAULT_FABLE_MODEL"] != "claude-fable-5-1" {
+					t.Errorf("Fable model mismatch: %s", s.Env["ANTHROPIC_DEFAULT_FABLE_MODEL"])
+				}
+				if s.Env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"] != "claude-fable-5-1" {
+					t.Errorf("Fable display name mismatch: %s", s.Env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"])
 				}
 			},
 		},
@@ -656,6 +663,7 @@ func TestPreviewSettingsSingleModelPoolFillsDefaultSlots(t *testing.T) {
 		"ANTHROPIC_DEFAULT_OPUS_MODEL",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_FABLE_MODEL",
 		"ANTHROPIC_MODEL",
 	} {
 		if settings.Env[key] != "sensenova-u1-fast" {

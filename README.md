@@ -101,7 +101,7 @@ ccl set deepseek
 
 1. **Endpoint URL**（例如 `https://api.deepseek.com`）
 2. **API Key**
-3. 选择 **Auto**（自动映射模型）或 **Manual**（自己指定 Opus / Sonnet / Haiku）
+3. 选择 **Auto**（自动映射模型）或 **Manual**（自己指定 Opus / Sonnet / Haiku / Fable）
 4. 在最后一页核对并保存
 
 然后启动：
@@ -134,7 +134,7 @@ ccl bypass off      # 关闭
 | 现象 | 建议 |
 |------|------|
 | 不知道从哪开始 | 有订阅就 `ccl oauth ...`；有 API Key 就 `ccl set` |
-| 启动后模型不对 | `ccl map` 或 `ccl set` 重新映射 Opus / Sonnet / Haiku |
+| 启动后模型不对 | `ccl map` 或 `ccl set` 重新映射 Opus / Sonnet / Haiku / Fable |
 | 连不上 / 鉴权失败 | `ccl doctor`，再 `ccl preview` 看注入了什么环境变量 |
 | 多个账号互相覆盖 | 登录时加别名：`ccl oauth gpt work` |
 | 想换中英文界面 | `ccl lang zh` / `ccl lang en` |
@@ -147,6 +147,7 @@ ccl bypass off      # 关闭
 
 1. **智能多档模型映射**  
    未手动配置时，自动拉取上游模型列表，按关键词分配到：
+   - 🏔 Fable 顶配档（Claude Code 的第四档，跟随最强模型）
    - 💎 Opus 强推理档
    - 🚀 Sonnet 黄金档
    - ⚡ Haiku 极速档  
@@ -165,7 +166,7 @@ ccl bypass off      # 关闭
    配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
 
 6. **订阅 OAuth 一键接入**  
-   `gpt` / `gemini` / `grok` / `copilot` / `qoder` / `kimi` / `kiro` / `workbuddy` / `autoclaw`，支持多账号别名；token 会在运行时刷新。
+   `gpt` / `gemini` / `grok` / `copilot` / `qoder` / `kimi` / `kiro` / `workbuddy` / `autoclaw` / `zed`，支持多账号别名；token 会在运行时刷新。
 
 ### 协议与运行时边界
 
@@ -182,12 +183,13 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 | Grok 订阅 | CCL 自研 OAuth、刷新并绑定凭据 | CCL 直查 cli-chat-proxy `/models`，失败时使用 `grok-4.6` / `grok-4.5` 兼容目录 | CCL 复用 Responses 转换，并注入 Grok Build 身份头（含 `x-grok-model-override`） | CCL 全部拥有 |
 | WorkBuddy 订阅 | CCL 自研网页登录轮询、凭据绑定与刷新 | CCL 使用认证账号直查 WorkBuddy `/v3/config` | CCL gateway 注入 WorkBuddy 账号/客户端/会话头，并由 `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
 | GitHub Copilot 订阅 | CCL 自研 GitHub device flow、Copilot 换票与凭据状态 | CCL 直查 Copilot 模型目录并读取每个模型声明的 endpoint | CCL 按模型路由；Responses 使用 CCL Codex 转换，Chat / 原生 Messages 使用 CCL 对应 adapter | CCL 全部拥有 |
+| Zed 订阅 | CCL 自研 zed.dev 原生应用登录（RSA 加密回调），换取并刷新短期 LLM token | CCL 直查 `cloud.zed.dev/models`，只发布账号可用且 CCL 有数据面的模型 | CCL 按模型的 provider 路由：Anthropic 走原生 Messages passthrough，OpenAI 走 Responses，xAI 走 Chat Completions，Google 走 Gemini 转换；统一封装为 Zed 的 `{provider, model, provider_request}` 信封并解封 NDJSON 事件 | CCL 全部拥有；不需要安装 Zed 编辑器 |
 | Kiro 订阅 | CCL 自研 Portal PKCE / Builder ID、刷新和单凭据运行时 | CCL 调 Kiro Portal / Amazon Q 模型接口并缓存 | CCL 完成 Messages → Amazon Q、重试、AWS EventStream → Messages | CCL 全部拥有 |
 | Qoder 订阅 | CCL 自研浏览器 OAuth、刷新和单凭据运行时 | CCL 直查 Qoder 模型目录，失败时使用最小兼容目录 | CCL 完成 COSY 签名、WAF 编码、Messages → Qoder、Qoder SSE → Messages | CCL 全部拥有 |
 
 CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上下文元数据、日志、usage 汇总和 runtime 生命周期。所有需要代理的协议都由 CCL 在本机 loopback runtime 中处理，不启动外部 provider 进程。
 
-错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；Gemini 网络错误、429、5xx 时回退控制面 base；Grok/Kimi 401 后刷新一次；WorkBuddy 只在 401/403 后尝试刷新一次，刷新失败保留原始响应，429/5xx 不重试；Copilot gateway 自己负责换票与切换凭据；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
+错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；Gemini 网络错误、429、5xx 时回退控制面 base；Grok/Kimi 401 后刷新一次；WorkBuddy 只在 401/403 后尝试刷新一次，刷新失败保留原始响应，429/5xx 不重试；Copilot gateway 自己负责换票与切换凭据；Zed gateway 只在 LLM token 过期（`x-zed-expired-token` / 401）时重新换票并重发一次，429/5xx 的快速重试由外层服务负责，且 Zed 的 `upstream_http_*` 错误会还原为上游真实状态码与 `Retry-After`；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
 
 所有 `openai_responses` 网关都按 **Codex Responses** 处理，不再区分 `codex-api-key` / `generic-api-key` executor：CCL 统一注入自己维护的 `Originator: codex_cli_rs`、Codex User-Agent、`Version`、`session-id` / `thread-id` / request ID，以及当前 Codex `client_metadata`，并固定 `stream=true`、`store=false`。这些值由 CCL 明确维护，不随外部实现版本间接改变。协议仍由 provider `type` 明确选择，不根据 endpoint 的 `/codex` 路径猜测。GPT 订阅与 API Key 网关共享同一套转换和 SSE 实现，区别只在鉴权：GPT 使用 OAuth token 与 `Chatgpt-Account-Id`，网关使用用户 API Key。
 
@@ -209,7 +211,7 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 ├─ rm <name> [-y]                     删除 provider
 ├─ map [provider]
 │  ├─ map auto [provider]             自动填充模型槽位
-│  └─ --opus/--sonnet/--haiku/--custom/--subagent
+│  └─ --opus/--sonnet/--haiku/--fable/--custom/--subagent
 ├─ models [-a|--all]                  列出并检测模型
 ├─ env <KEY> <VALUE>                  设置 provider 环境变量
 │  ├─ env ls                          列出环境变量
@@ -225,7 +227,7 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 │  └─ env <KEY> <VALUE> | ls | rm | mv
 │
 ├─ oauth <provider> [alias]           登录订阅；别名：auth
-│  └─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | workbuddy | autoclaw
+│  └─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | workbuddy | autoclaw | zed
 │
 ├─ import <provider> [alias]          导入官方 CLI / 桌面端已保存的凭据
 │  └─ provider: autoclaw（读取 AutoClaw auth.json）
@@ -356,6 +358,7 @@ ccl oauth kimi
 ccl oauth kiro
 ccl oauth workbuddy
 ccl oauth autoclaw
+ccl oauth zed
 
 # 多账号别名
 ccl oauth gpt work
@@ -378,6 +381,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 | `kiro` | kiro | `anthropic` | Kiro Portal PKCE（默认，Google / GitHub）或 AWS Builder ID device-code |
 | `workbuddy` | workbuddy | `openai-chat` | WorkBuddy 网页登录 + token/account 轮询 |
 | `autoclaw` | autoclaw | `openai-chat / autoclaw`（CCL 本地代理） | CCL 浏览器 Google OAuth；也可导入桌面 `auth.json` |
+| `zed` | zed | 自动选择 `anthropic` / `responses` / `chat` / `gemini`（`zed / auto`） | zed.dev 原生应用登录（loopback 回调 + RSA 加密 token） |
 
 说明：
 
@@ -386,31 +390,32 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 - 不再提供 `--protocol` 覆盖；各 OAuth backend 协议固定。
 - 旧版 `ccl oauth chatgpt` 仍可用，会规范为 `gpt`。
 - **GPT 默认槽位**（空槽位时写入；已有手动映射会保留；`chatgpt` 为兼容别名）：
-  - Opus / Custom → `gpt-5.6-sol`
+  - Opus / Fable / Custom → `gpt-5.6-sol`
   - Sonnet → `gpt-5.6-terra`
   - Haiku → `gpt-5.6-luna`
 - **Grok 默认槽位**（空槽位时写入；已有手动映射会保留；旧版生成的 `grok-4.5` / `grok-4.3` / `grok-3-mini` 会在新默认模型可用时迁移）：
-  - Opus / Custom → `grok-4.6`
+  - Opus / Fable / Custom → `grok-4.6`
   - Sonnet → `grok-4.5`
   - Haiku → `grok-4.5`
 - **Gemini 默认槽位**（空槽位时写入；已有手动映射会保留）：
-  - Opus / Custom → `claude-opus-4-6-thinking`
+  - Opus / Fable / Custom → `claude-opus-4-6-thinking`
   - Sonnet → `claude-sonnet-4-6`
   - Haiku → `gemini-3.1-pro-low`
 - **Kiro 默认槽位**（空槽位时写入；已有手动映射会保留）：
-  - Opus / Custom → `claude-opus-4-6`
+  - Opus / Fable / Custom → `claude-opus-4-6`
   - Sonnet → `claude-sonnet-4-6`
   - Haiku → `claude-haiku-4-5`
 - **AutoClaw 默认槽位**（空槽位时写入；已有手动映射会保留）：
-  - Opus / Custom → `zai_auto`
+  - Opus / Fable / Custom → `zai_auto`
   - Sonnet → `zaicoding_glm-5.3`
   - Haiku → `zai_glm-5.3-flash`
   - 模型池包含 `zai_auto`、`zai_auto-fast`、`zaicoding_glm-5.3`、`tdpsk_deepseek-v4-flash-202605`、`tdpsk_deepseek-v4-pro-202606`、`zai_glm-5.3-flash`；旧的 `GLM-5.3` 等名称仍作为兼容别名接受。
-- 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。
+- 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。**Fable 槽**沿用对应后端的最强档模型（订阅目录里目前没有 Fable 系模型，写死独立 ID 会直接探测失败）；需要单独绑定 `ANTHROPIC_DEFAULT_FABLE_MODEL` 时用 `ccl map --fable <model>` 或 TUI 的 Fable 行。
 - **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：可在 `ccl set` 单页的 Runtime 区用 `←→` 调整，也可在 Claude Code 内用 `/fast` 开关。
 - **Copilot** 使用独立的 GitHub OAuth 凭据和 `api.githubcopilot.com`；登录写盘前会验证账号确实拥有可用的 Copilot 模型。启动时读取账号实际模型目录，并根据每个模型声明的端点选择 Responses、Chat Completions 或 Anthropic Messages；该目录是 `ccl models --all` 的权威来源，不会混入本地兼容层的内建模型。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `copilot / auto`。
 - **Qoder** 完全由 ccl 直接接入：`ccl oauth qoder` 打开 Qoder 授权页并轮询 OAuth token；运行时直接刷新 token、读取账号模型目录、生成 COSY 签名、编码请求并把 Qoder SSE 转换为 Anthropic Messages。不会调用、探测或读取 `qodercli`，系统无需安装 Qoder CLI。模型目录由账号实时返回；`ccl models` 会显示 Qoder 展示名、内部模型 ID、Credit 倍率以及 New / 错峰优惠标记。暂时无法读取目录时使用最小兼容目录启动。
 - **AutoClaw**（AutoClaw Code / ZCode coding plan）通过 **CCL 本地 Anthropic-to-OpenAI Chat 代理**接入：`ccl oauth autoclaw` 启动 CCL 自己的 loopback 页面，完成人机校验和 Google OAuth 回调，并直接换取 access/refresh token；全程不需要启动 AutoClaw 主进程。若要复用桌面端已有账号，可改用 `ccl import autoclaw`，它从 `~/Library/Application Support/autoclaw/auth.json` 读取凭据，macOS 下通过 Chromium Safe Storage Keychain 解密且不修改桌面文件。两条路径都会将 `type: autoclaw` provider 绑定到 `~/.ccl/auth/` 的 0600 凭据，在会话内自动刷新 token，并把 Claude Messages 转为 OpenAI Chat Completions，发送到 `https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions`。上游使用 `X-Authorization`、`X-Request-Model`、`X-Harness-Type: zcode` 等桌面兼容 headers；Claude Code 只看到 CCL 的随机 loopback key。
+- **Zed**（Zed Pro / Trial / Student / Business 套餐里包含的托管模型）完全由 ccl 接入，**无需安装 Zed 编辑器**。`ccl oauth zed` 在本机 `127.0.0.1` 起一个回调端口，生成一次性 RSA-2048 密钥，打开 `https://zed.dev/native_app_signin`；zed.dev 登录后把用 CCL 公钥加密的 access token 重定向回该端口，CCL 用私钥解密（OAEP-SHA256，兼容旧的 PKCS#1 v1.5），再调用 `cloud.zed.dev/client/users/me` 验证账号并把长期凭据以 0600 写入 `~/.ccl/auth/zed-<github 用户名>.json`。运行时用该凭据向 `/client/llm_tokens` 换取短期 LLM token（过期时自动重换一次），读取 `/models` 得到账号实际可用的模型，并按每个模型的 provider 选择数据面：Anthropic → 原生 Messages passthrough，OpenAI → Responses，xAI → Chat Completions，Google → Gemini 转换。所有请求都经过本机 loopback gateway 封装为 Zed 的 `{provider, model, provider_request}` 信封；CCL 以当前 Zed 稳定版本（`x-zed-version`）标识自己。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `zed / auto`。Zed 的模型目录因账号而异且变化频繁，所以**不写入静态默认槽位**，而是由模型发现补全。仅在上游保留数据（data retention）时才提供的模型（如 `claude-fable-5*`）默认隐藏，与 Zed 编辑器要求用户明确同意一致；需要时设置 `CCL_ZED_ALLOW_DATA_RETENTION=1`。免费（Free）套餐不含托管模型，需订阅或开通试用。限制：Zed 云端自行决定 Anthropic beta 能力，因此 Claude Code 的 `metadata`、`context_management`、`service_tier` 等字段不会转发；Google 模型不支持上游 token 计数，使用本地估算。
 - **WorkBuddy** 使用公网 `www.workbuddy.ai` 的官方网页登录轮询流程。登录时由 CCL 获取新的 state 并轮询 token/account；运行时 CCL 刷新凭据、读取 `/v3/config` 模型目录，并把请求发送到 `/v2/chat/completions`。Claude Code Messages 与 OpenAI Chat Completions 的转换由 CCL `chatCompletionsService` 完成；WorkBuddy 的鉴权头、用户/租户头、客户端身份和会话追踪头由 CCL 注入。
 
 `ccl oauth kiro` 默认打开 Kiro Portal，通过 PKCE 登录 Google / GitHub 账号；这样运行时和
@@ -531,11 +536,11 @@ ccl set                 # 交互选择已有或新建
 ccl set my-provider     # 指定名称
 ```
 
-TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Auto Configure** 后自动识别协议、鉴权方式与模型池（只访问 `/models` 元数据端点，不消耗额度），并推荐 Opus / Sonnet / Haiku / Custom / Subagent 槽位；OAuth 订阅没有可探测的连接，页面不提供 Auto Configure，模型目录由 ccl 为本次会话启动的 loopback runtime 直接提供。随后可在同一页逐项修改：
+TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Auto Configure** 后自动识别协议、鉴权方式与模型池（只访问 `/models` 元数据端点，不消耗额度），并推荐 Opus / Sonnet / Haiku / Fable / Custom / Subagent 槽位；OAuth 订阅没有可探测的连接，页面不提供 Auto Configure，模型目录由 ccl 为本次会话启动的 loopback runtime 直接提供。随后可在同一页逐项修改：
 
-- **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。**Test Model Availability** 行为可选项——会为每个模型发送一次最小请求（消耗额度），测试后槽位旁显示 `✓`/`✗` 状态。
+- **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。**检查**行为可选项——会为每个模型发送一次最小请求（消耗额度），测试后槽位旁显示 `✓`/`✗` 状态。
 - **Context & Compact**：`←→` 在 Default / Balanced 500K / Balanced 800K 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
-- **Runtime**：Protocol / Fast / Tools / Tool Search / **Status Line** 均可 `←→` 调整。Custom provider 的 Protocol 可在 Chat / Responses / Anthropic 三种协议间切换。**Status Line** 是 ccl 内置状态栏（`模型 · effort · NN%`）的开关：ccl 通过 `--settings` 注入 `statusLine`，其优先级高于 `~/.claude/settings.json`，关掉它即可保留你自己的状态栏。
+- **Runtime**：Protocol / Fast / **Status Line** 均可 `←→` 调整。Custom provider 的 Protocol 可在 Chat / Responses / Anthropic 三种协议间切换。**Status Line** 是 ccl 内置状态栏（`模型 · effort · NN%`）的开关：ccl 通过 `--settings` 注入 `statusLine`，其优先级高于 `~/.claude/settings.json`，关掉它即可保留你自己的状态栏。工具并发与 `ENABLE_TOOL_SEARCH` 跟随 Claude Code 默认，需要覆盖时用 `ccl env`。
 - 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。新配置未填写连接时，Model Mapping / Runtime 区置灰不可编辑。
 
 Context & Compact：
@@ -583,11 +588,14 @@ ccl map                                          # 交互式 TUI
 ccl map auto                                     # 自动填充前几个槽位
 ccl map --opus gpt-5.1 --sonnet gpt-5.1-mini
 ccl map --haiku gpt-4o-mini
+ccl map --fable gpt-5.6-sol
 ccl map --custom gpt-5.1 my-provider
 ccl map --subagent gpt-5.4-mini
 ```
 
 OAuth provider 不需要先运行 `ccl set`：`ccl map` / `ccl map auto` 会临时启动对应 OAuth runtime，并直接使用账号的实时模型目录。选择器显示上游展示名、内部 ID、倍率与活动标记，但槽位中只保存请求所需的内部 ID；临时 endpoint 和会话 key 不会写入配置。
+
+`ccl map auto` 按可用模型顺序填充 Opus / Sonnet / Haiku / Custom，Fable 不占用独立名额，而是跟随 Opus 的取值（与 TUI 的 Auto 规则一致）。
 
 ### `ccl models` / `ccl doctor` / `ccl preview`
 
@@ -667,7 +675,7 @@ providers:
 - `oauthAccountCredential`：该订阅 provider 精确绑定的 `~/.ccl/auth/` 凭据文件名。
 - `bypass_mode`：全局是否自动附加 `--dangerously-skip-permissions`。
 - Anthropic 直连时 `endpoint` 建议裸域名（如 `https://token.sensenova.cn`），避免拼出 `/v1/v1/messages`。
-- 运行时默认：子代理模型优先 Custom/Sonnet；工具并发默认 `3`；`ENABLE_TOOL_SEARCH=false`。可在配置页或 `ccl env` 覆盖。输出上限由 Claude Code、协议转换层和上游模型管理，CCL 不设置默认值。
+- 运行时默认：子代理模型优先 Custom/Sonnet；工具并发与 `ENABLE_TOOL_SEARCH` 跟随 Claude Code 自身默认（CCL 不再注入），可在配置页或 `ccl env` 覆盖。输出上限由 Claude Code、协议转换层和上游模型管理，CCL 不设置默认值。
 
 OAuth 凭据目录：`~/.ccl/auth/`（每个账号一个 JSON）。
 

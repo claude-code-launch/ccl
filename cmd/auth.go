@@ -28,7 +28,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw> [alias]",
+		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw|zed> [alias]",
 		Aliases: []string{"auth"},
 		Short:   "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
@@ -37,7 +37,7 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw
+  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw|zed
 
 Notes:
   - Alias "auth" still works: ccl auth gpt
@@ -48,6 +48,10 @@ Notes:
     verification step, then stores and refreshes the resulting session without
     starting AutoClaw. To reuse the desktop login instead, run:
     ccl import autoclaw
+  - Zed signs in through zed.dev's native-app flow and uses the models included
+    in your Zed plan (Anthropic, OpenAI, Google, xAI); the Zed editor is not
+    needed. Models Zed only offers with upstream data retention stay hidden
+    unless CCL_ZED_ALLOW_DATA_RETENTION=1
   - Flags: --no-browser, --callback-port, --kiro-auth
 `,
 		Args: cobra.RangeArgs(1, 2),
@@ -56,7 +60,7 @@ Notes:
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw/Zed)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	return cmd
 }
@@ -108,6 +112,8 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
 	if target == oauthproxy.ProviderCopilot {
 		fmt.Fprintln(out, "Protocol: automatic (Responses / Chat Completions / Anthropic Messages per model)")
+	} else if target == oauthproxy.ProviderZed {
+		fmt.Fprintln(out, "Protocol: automatic (Anthropic Messages / Responses / Chat Completions / Gemini per model)")
 	} else {
 		fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
 	}
@@ -213,7 +219,8 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderKimi,
 		oauthproxy.ProviderKiro,
 		oauthproxy.ProviderWorkBuddy,
-		oauthproxy.ProviderAutoClaw:
+		oauthproxy.ProviderAutoClaw,
+		oauthproxy.ProviderZed:
 		return true
 	default:
 		return false

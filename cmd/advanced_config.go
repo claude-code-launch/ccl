@@ -97,6 +97,7 @@ const (
 	rowOpus
 	rowSonnet
 	rowHaiku
+	rowFable
 	rowCustom
 	rowSubagent
 	rowTestModels // Test model availability (optional, costs quota)
@@ -417,16 +418,35 @@ func verifyProviderAPIKey(parent context.Context, model, endpoint, apiKey, proto
 	return fmt.Errorf(locale.T("验证请求失败（HTTP %d）", "verification request failed (HTTP %d)"), status)
 }
 
-// firstRoutableModel returns the first model in the pool that has a known
-// protocol in the provider's per-model table, used to send a real key-verification
-// request. ok is false when the pool is empty or no model has a protocol.
+// firstRoutableModel returns the model used to send a real key-verification
+// request: the first pool entry with a protocol in the provider's per-model
+// table, or, when no entry covers the pool, the first pool entry over the
+// runtime's default wire protocol. ok is false only for an empty pool.
+//
+// The fallback matters for a gateway whose models.dev catalog entry is a
+// curated subset under different IDs than its live /models list (ClinePass
+// serves a large meta-router catalog, models.dev lists 18 branded models).
+// Such a pool is fully routable — the mixed runtime sends an unlisted model
+// over Chat Completions — so refusing to verify it would report a working
+// provider as unusable and block saving it.
 func (m *AdvancedConfigModel) firstRoutableModel() (model, proto string, ok bool) {
+	var fallback string
 	for _, name := range m.live().modelPool {
-		if proto := m.p.ModelProtocols[strings.ToLower(strings.TrimSpace(name))]; proto != "" {
-			return name, proto, true
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = trimmed
+		}
+		if proto := m.p.ModelProtocols[strings.ToLower(trimmed)]; proto != "" {
+			return trimmed, proto, true
 		}
 	}
-	return "", "", false
+	if fallback == "" {
+		return "", "", false
+	}
+	return fallback, probeProtocolForModel(m.p.ModelProtocols, fallback), true
 }
 
 // modelsDevFetchDoneMsg carries the models.dev catalog (or its fetch error) back
@@ -651,6 +671,7 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 			configRow{kind: rowOpus, editable: ready},
 			configRow{kind: rowSonnet, editable: ready},
 			configRow{kind: rowHaiku, editable: ready},
+			configRow{kind: rowFable, editable: ready},
 			configRow{kind: rowCustom, editable: ready},
 			configRow{kind: rowSubagent, editable: ready},
 			configRow{kind: rowTestModels, editable: ready},
@@ -696,6 +717,7 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		configRow{kind: rowOpus, editable: ready},
 		configRow{kind: rowSonnet, editable: ready},
 		configRow{kind: rowHaiku, editable: ready},
+		configRow{kind: rowFable, editable: ready},
 		configRow{kind: rowCustom, editable: ready},
 		configRow{kind: rowSubagent, editable: ready},
 		configRow{kind: rowTestModels, editable: modelTestReady},
@@ -826,10 +848,10 @@ func (m *AdvancedConfigModel) cursorBodyLine(rows []*tui.Element) int {
 	return 0
 }
 
-// isModelRow reports whether a row kind is one of the five model slots.
+// isModelRow reports whether a row kind is one of the model slots.
 func (m *AdvancedConfigModel) isModelRow(kind configRowKind) bool {
 	switch kind {
-	case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
+	case rowOpus, rowSonnet, rowHaiku, rowFable, rowCustom, rowSubagent:
 		return true
 	}
 	return false
@@ -842,7 +864,7 @@ func (m *AdvancedConfigModel) toggleOneMAtRow(row configRowKind) bool {
 	if !m.isModelRow(row) {
 		return false
 	}
-	slot := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[slotForRow(row)]
+	slot := modelSlotKeys[slotForRow(row)]
 	model := m.slotModelForRow(row)
 	if !m.live().oneMSlots[slot] && m.oneMSlotBlocked(model) {
 		setDebugf("1M blocked slot=%s model=%q", slot, model)
@@ -857,6 +879,11 @@ func (m *AdvancedConfigModel) toggleOneMAtRow(row configRowKind) bool {
 	return true
 }
 
+// modelSlotKeys names the model slots in advancedSlotRefs order, so row kinds,
+// the [1m] state map and the slot picker all index the same list. Keep it in
+// step with advancedSlotRefs.
+var modelSlotKeys = []string{"opus", "sonnet", "haiku", "fable", "custom", "subagent"}
+
 // slotForRow maps a model row kind back to its advancedSlotRefs index.
 func slotForRow(kind configRowKind) int {
 	switch kind {
@@ -866,10 +893,12 @@ func slotForRow(kind configRowKind) int {
 		return 1
 	case rowHaiku:
 		return 2
-	case rowCustom:
+	case rowFable:
 		return 3
-	case rowSubagent:
+	case rowCustom:
 		return 4
+	case rowSubagent:
+		return 5
 	}
 	return 0
 }
@@ -883,6 +912,8 @@ func (m *AdvancedConfigModel) slotModelForRow(kind configRowKind) string {
 		return m.p.SonnetModel
 	case rowHaiku:
 		return m.p.HaikuModel
+	case rowFable:
+		return m.p.FableModel
 	case rowCustom:
 		return m.p.CustomModelID
 	case rowSubagent:
@@ -1076,6 +1107,7 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 	cleanAndPopulate(&m.p.OpusModel, "opus")
 	cleanAndPopulate(&m.p.SonnetModel, "sonnet")
 	cleanAndPopulate(&m.p.HaikuModel, "haiku")
+	cleanAndPopulate(&m.p.FableModel, "fable")
 	cleanAndPopulate(&m.p.CustomModelID, "custom")
 	cleanAndPopulate(&m.p.SubagentModel, "subagent")
 
@@ -1724,8 +1756,11 @@ func (m *AdvancedConfigModel) updateInputWidths() {
 	m.filterInputWidth = inputWidth
 }
 
-// doAutoConfig auto-fills the four Claude model slots, leaves subagents on
+// doAutoConfig auto-fills the Claude model slots, leaves subagents on
 // automatic model selection, and clears explicit effort and 1M settings.
+//
+// The key order here is the slot order used by modelSlotKeys, slotForRow and
+// the slot picker; all of them index the same list.
 type advancedSlotRef struct {
 	key string
 	ptr *string
@@ -1736,6 +1771,7 @@ func advancedSlotRefs(p *provider.Provider) []advancedSlotRef {
 		{key: "opus", ptr: &p.OpusModel},
 		{key: "sonnet", ptr: &p.SonnetModel},
 		{key: "haiku", ptr: &p.HaikuModel},
+		{key: "fable", ptr: &p.FableModel},
 		{key: "custom", ptr: &p.CustomModelID},
 		{key: "subagent", ptr: &p.SubagentModel},
 	}
@@ -2072,7 +2108,7 @@ func (m *AdvancedConfigModel) compactSummary() string {
 
 func reviewOneMSummary(oneMSlots map[string]bool) string {
 	var slots []string
-	for _, slot := range []string{"opus", "sonnet", "haiku", "custom", "subagent"} {
+	for _, slot := range modelSlotKeys {
 		if oneMSlots[slot] {
 			slots = append(slots, slot)
 		}
@@ -2202,6 +2238,9 @@ func (m *AdvancedConfigModel) applyRecommendation() {
 	if strings.TrimSpace(m.p.HaikuModel) == "" {
 		m.p.HaikuModel = rec.Haiku
 	}
+	if strings.TrimSpace(m.p.FableModel) == "" {
+		m.p.FableModel = rec.Fable
+	}
 	if strings.TrimSpace(m.p.CustomModelID) == "" {
 		m.p.CustomModelID = rec.Custom
 	}
@@ -2237,7 +2276,7 @@ func (m *AdvancedConfigModel) currentWithOneMMarkers() provider.Provider {
 }
 
 // activateRow fires the action for a button row on click or Enter: Auto
-// Configure starts the connection check, Test Model Availability starts the
+// Configure starts the connection check, Check starts the
 // per-model probes. Async work is delivered through the model's channels and
 // consumed on the main loop by the Watchers below.
 func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
@@ -2311,7 +2350,7 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 		m.modelTestFrame = 0
 		m.modelTestCanceled = false
 		setDebugf("model availability test started model_count=%d", len(m.live().modelPool))
-		testModelsAsync(m.availDone, ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel(), m.usesModelsDev() && m.live().keyVerified)
+		testModelsAsync(m.availDone, ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, probeWireType(*m.p), m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel(), m.usesModelsDev() && m.live().keyVerified)
 	}
 }
 
@@ -2518,6 +2557,9 @@ func (m *AdvancedConfigModel) handleModelsDevDone(msg modelsDevFetchDoneMsg) {
 // model pinned there survives even when absent from the catalog (the chat
 // fallback still routes it) and stays in the pool. Slot mappings and [1M]
 // markers survive: a model present in both lists keeps its slot untouched.
+// When the saved pool shares no ID with the catalog at all — a different ID
+// namespace rather than a stale list — the merge is purely additive: every
+// saved entry is kept and the catalog IDs are appended.
 func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneMsg) {
 	if !m.usesModelsDev() || m.modelsDevPicker {
 		return
@@ -2551,10 +2593,36 @@ func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneM
 		setDebugf("models.dev refresh: catalog for %q advertises no routable models; keeping the saved model pool", msg.refreshFor)
 		return
 	}
-	_, metadata := modelsDevProviderToDraft(catalog)
+	draft, metadata := modelsDevProviderToDraft(catalog)
 	catalogSet := make(map[string]bool, len(catalogIDs))
 	for _, id := range catalogIDs {
 		catalogSet[strings.ToLower(id)] = true
+	}
+	// A saved pool that shares no ID with the catalog is a different namespace,
+	// not a stale list: some gateways serve a broad live /models catalog under
+	// their own IDs while models.dev carries a curated subset (ClinePass serves
+	// 460 meta-router models, models.dev lists 18 branded ones). Deleting the
+	// saved pool there would wipe a working configuration, so the merge turns
+	// purely additive: every saved entry is kept and the catalog IDs are
+	// appended so they show up in the slot picker.
+	additive := false
+	savedSet := make(map[string]bool, len(m.live().modelPool))
+	for _, id := range m.live().modelPool {
+		savedSet[strings.ToLower(strings.TrimSpace(id))] = true
+	}
+	if len(m.live().modelPool) > 0 {
+		overlap := false
+		for id := range savedSet {
+			if catalogSet[id] {
+				overlap = true
+				break
+			}
+		}
+		if !overlap {
+			additive = true
+			setDebugf("models.dev refresh: catalog for %q shares no ID with the saved pool (%d saved, %d catalog); appending catalog IDs",
+				msg.refreshFor, len(m.live().modelPool), len(catalogIDs))
+		}
 	}
 	merged := make([]string, 0, len(catalogIDs)+len(m.live().modelPool))
 	seen := make(map[string]bool, len(catalogIDs)+len(m.live().modelPool))
@@ -2573,21 +2641,30 @@ func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneM
 	if custom := strings.ToLower(strings.TrimSpace(m.p.CustomModelID)); custom != "" {
 		pinned[custom] = true
 	}
-	// Saved pool first so user ordering survives the merge.
-	for _, id := range m.live().modelPool {
-		key := strings.ToLower(strings.TrimSpace(id))
-		if catalogSet[key] || pinned[key] {
+	// Saved pool first so user ordering survives the merge. In the additive
+	// (different-namespace) case every saved entry is kept verbatim.
+	if additive {
+		for _, id := range m.live().modelPool {
 			add(id)
+		}
+	} else {
+		for _, id := range m.live().modelPool {
+			key := strings.ToLower(strings.TrimSpace(id))
+			if catalogSet[key] || pinned[key] {
+				add(id)
+			}
 		}
 	}
 	for _, id := range catalogIDs {
 		add(id)
 	}
 	removed := make([]string, 0, 4)
-	for _, id := range m.live().modelPool {
-		key := strings.ToLower(strings.TrimSpace(id))
-		if !catalogSet[key] && !pinned[key] {
-			removed = append(removed, id)
+	if !additive {
+		for _, id := range m.live().modelPool {
+			key := strings.ToLower(strings.TrimSpace(id))
+			if !catalogSet[key] && !pinned[key] {
+				removed = append(removed, id)
+			}
 		}
 	}
 	if len(removed) == 0 && len(merged) == len(m.live().modelPool) {
@@ -2599,6 +2676,20 @@ func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneM
 	mergedSet := make(map[string]bool, len(merged))
 	for _, id := range merged {
 		mergedSet[strings.ToLower(strings.TrimSpace(id))] = true
+	}
+	// The pool gained catalog IDs the saved protocol table may not know (the
+	// additive case always does); copy their wire protocols so verification,
+	// availability probes, and routing use the catalog's protocol, not the
+	// chat fallback.
+	if len(draft.ModelProtocols) > 0 {
+		if m.p.ModelProtocols == nil {
+			m.p.ModelProtocols = make(map[string]string, len(draft.ModelProtocols))
+		}
+		for id, proto := range draft.ModelProtocols {
+			if mergedSet[id] {
+				m.p.ModelProtocols[id] = proto
+			}
+		}
 	}
 	// Display metadata tracks the catalog: add fresh entries, drop entries for
 	// models that left the pool (including the Custom-pinned exception, whose
@@ -2633,6 +2724,11 @@ func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneM
 	for _, slot := range advancedSlotRefs(m.p) {
 		model := strings.TrimSpace(*slot.ptr)
 		if model == "" || catalogSet[strings.ToLower(model)] {
+			continue
+		}
+		// Additive (different-namespace) merges keep the saved pool verbatim,
+		// so slots pointing into it stay routable and must not be cleared.
+		if additive && savedSet[strings.ToLower(model)] {
 			continue
 		}
 		if slot.key == "custom" && strings.ToLower(model) == customPinned {
@@ -3061,16 +3157,15 @@ func (m *AdvancedConfigModel) handleEnter() {
 		if selectedModel == locale.T("(设置为未设置/清空)", "(clear/unset)") || selectedModel == locale.T("(无匹配模型)", "(no match)") {
 			selectedModel = ""
 		}
-		ptr := []*string{&m.p.OpusModel, &m.p.SonnetModel, &m.p.HaikuModel, &m.p.CustomModelID, &m.p.SubagentModel}[m.activeSlot]
-		*ptr = selectedModel
-		if m.activeSlot == 4 && m.p.Env != nil {
+		*advancedSlotRefs(m.p)[m.activeSlot].ptr = selectedModel
+		slotKey := modelSlotKeys[m.activeSlot]
+		if slotKey == "subagent" && m.p.Env != nil {
 			delete(m.p.Env, claude.SubagentModelEnv)
 		}
 		// A slot whose model was just changed must not keep a [1m] marker
 		// the backend rules out for the new model — toggleOneMAtRow refuses
 		// to enable one there, so leaving an enabled marker would be
 		// inconsistent and would send a non-1M model with the [1m] suffix.
-		slotKey := []string{"opus", "sonnet", "haiku", "custom", "subagent"}[m.activeSlot]
 		if m.live().oneMSlots[slotKey] && m.oneMSlotBlocked(selectedModel) {
 			m.live().oneMSlots[slotKey] = false
 			setDebugf("slot model changed to a non-1M model; cleared 1M marker slot=%s model=%q", slotKey, selectedModel)
@@ -3105,7 +3200,7 @@ func (m *AdvancedConfigModel) handleEnter() {
 		m.activateRow(rowTest)
 	case rowProtocol, rowAuth, rowFast, rowStatusline:
 		m.adjustReviewField(1)
-	case rowOpus, rowSonnet, rowHaiku, rowCustom, rowSubagent:
+	case rowOpus, rowSonnet, rowHaiku, rowFable, rowCustom, rowSubagent:
 		if !m.connectionReady() {
 			return
 		}
@@ -3496,7 +3591,7 @@ func (m *AdvancedConfigModel) viewDetectionSection() []*tui.Element {
 }
 
 // actionButtonRow renders the left-aligned Auto Configure action row with the
-// same plain-text affordance as Test Model Availability:
+// same plain-text affordance as Check:
 // purple when idle, "> " + accent when selected. No background button box —
 // the two action rows must read as one visual family.
 func (m *AdvancedConfigModel) actionButtonRow(label string, kind configRowKind) *tui.Element {
@@ -3570,16 +3665,17 @@ func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
 	renderMappingRow(rowOpus, "Opus", m.modelDisplayLabel(m.p.OpusModel), m.p.OpusModel, m.live().oneMSlots["opus"])
 	renderMappingRow(rowSonnet, "Sonnet", m.modelDisplayLabel(m.p.SonnetModel), m.p.SonnetModel, m.live().oneMSlots["sonnet"])
 	renderMappingRow(rowHaiku, "Haiku", m.modelDisplayLabel(m.p.HaikuModel), m.p.HaikuModel, m.live().oneMSlots["haiku"])
+	renderMappingRow(rowFable, "Fable", m.modelDisplayLabel(m.p.FableModel), m.p.FableModel, m.live().oneMSlots["fable"])
 	renderMappingRow(rowCustom, "Custom", m.modelDisplayLabel(m.p.CustomModelID), m.p.CustomModelID, m.live().oneMSlots["custom"])
 	renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.p.SubagentModel, m.live().oneMSlots["subagent"])
 
-	// Test Model Availability — optional; each probe consumes quota, so the
+	// Check — optional; each probe consumes quota, so the
 	// user opts in explicitly. Results are shown next to the model rows above.
 	// A blank line separates it from the model slots, matching the action rows.
 	rows = append(rows, plainLine(""))
 	testPrefix := "  "
 	testPrefixStyle := tui.NewStyle()
-	testLabel := locale.T("Test Model Availability", "Test Model Availability")
+	testLabel := locale.T("检查", "Check")
 	testStyle := stPurple
 	testReady := ready && (!m.usesModelsDev() || m.live().keyVerified)
 	if !testReady {
@@ -3830,7 +3926,9 @@ func stepperRow(label, value string, selected bool) *tui.Element {
 // stepperLabelPad returns the label column width shared by stepperRow and the
 // other field rows: wide enough for the longest label ("Tool Search") at 12
 // cells, or the label itself plus two cells of breathing room when it is
-// longer. Measured with tui.StringWidth so wide runes count correctly.
+// longer. Measured with tui.StringWidth so wide runes count correctly. The
+// longest labels today are the model rows ("Sonnet"/"Subagent") at 8 cells,
+// so 12 keeps every current label from pushing the value column out.
 func stepperLabelPad(label string) int {
 	const base = 12
 	if w := tui.StringWidth(label); w+2 > base {
@@ -4025,9 +4123,10 @@ var rowClickLabels = map[configRowKind]rowClickLabel{
 	rowOpus:       {en: "Opus"},
 	rowSonnet:     {en: "Sonnet"},
 	rowHaiku:      {en: "Haiku"},
+	rowFable:      {en: "Fable"},
 	rowCustom:     {en: "Custom"},
 	rowSubagent:   {en: "Subagent"},
-	rowTestModels: {en: "Test Model Availability"},
+	rowTestModels: {en: "Check", zh: "检查"},
 	rowContext:    {en: "Context & Compact", zh: "上下文与压缩"},
 	rowStatusline: {en: "Status Line", zh: "状态栏"},
 	rowActive:     {en: "Set as active provider", zh: "设为当前激活 Provider"},
@@ -4062,7 +4161,7 @@ func rowClickLabelPrefixes(kind configRowKind) []string {
 // whenever the filter input owns the keyboard; selecting a model (enter) or
 // pressing esc returns to the main configuration page.
 func (m *AdvancedConfigModel) viewModelPicker() *tui.Element {
-	slotName := []string{"Opus", "Sonnet", "Haiku", "Custom", "Subagent"}[m.activeSlot]
+	slotName := []string{"Opus", "Sonnet", "Haiku", "Fable", "Custom", "Subagent"}[m.activeSlot]
 	root := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Column), tui.WithWrap(false), tui.WithPadding(1))
 	root.AddChild(tui.New(
 		tui.WithRichText(span(fmt.Sprintf(locale.T("配置槽位 [%s] 模型筛选", "Select Model for Slot [%s]"), slotName), stTitle)),

@@ -22,7 +22,7 @@ Subcommands:
   use [--acp] [name]
                  Switch the provider selected by normal or ACP mode
   cp/mv/rm       Copy, rename, delete
-  map            Slot → model mapping (Opus/Sonnet/Haiku/Custom)
+  map            Slot → model mapping (Opus/Sonnet/Haiku/Fable/Custom)
   models         Availability check for the model pool
   env            Provider-scoped environment variables
   preview        Show settings JSON injected into Claude Code

@@ -225,3 +225,72 @@ func TestChatProbeRetriesWithMaxCompletionTokens(t *testing.T) {
 		t.Fatal("chat probe did not retry with max_completion_tokens after a 400 on max_tokens")
 	}
 }
+
+// TestChatProbeRetriesWithoutTokenLimitOnEmptyContent covers meta-router
+// gateways whose backends answer 500 "empty response content" when the token
+// limit leaves no room for output (ClinePass does this for several models). A
+// one-token probe must not mark such a model — or, during key verification, the
+// whole provider — unusable while the same request without a limit succeeds.
+func TestChatProbeRetriesWithoutTokenLimitOnEmptyContent(t *testing.T) {
+	var attempts atomic.Int32
+	var lastBody atomic.Value
+	stub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempts.Add(1)
+		buf := make([]byte, 4096)
+		n, _ := request.Body.Read(buf)
+		body := string(buf[:n])
+		lastBody.Store(body)
+		if strings.Contains(body, `"max_tokens"`) {
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, _ = writer.Write([]byte(`{"error":"empty response content","success":false}`))
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer stub.Close()
+
+	if !testSingleOpenAIModelContext(context.Background(), "router/some-model", stub.URL+"/api/v1", "key", 5*time.Second) {
+		t.Fatal("chat probe did not retry without a token limit after an empty-content failure")
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("probe attempts = %d, want 2 (max_tokens then unlimited)", got)
+	}
+	if body := lastBody.Load().(string); strings.Contains(body, "max_tokens") || strings.Contains(body, "max_completion_tokens") {
+		t.Fatalf("final retry still sent a token limit: %s", body)
+	}
+}
+
+// TestChatProbeRejectsAuthFailureWithoutRetrying proves the extra retries never
+// turn a bad key into a "connected" verdict: a 401/403 is final and is sent once.
+func TestChatProbeRejectsAuthFailureWithoutRetrying(t *testing.T) {
+	var attempts atomic.Int32
+	stub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"error":"Unauthorized"}`))
+	}))
+	defer stub.Close()
+
+	status, err := probeSingleOpenAIModelStatusContext(context.Background(), "some-model", stub.URL+"/v1", "bad-key", 5*time.Second)
+	if err != nil || status != http.StatusUnauthorized {
+		t.Fatalf("auth failure probe = (%d, %v), want (401, nil)", status, err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("auth failure probe attempts = %d, want 1", got)
+	}
+}
+
+// TestChatProbeKeepsRealServerErrors proves the unlimited retry does not turn a
+// broken gateway into a "connected" one: a persistent 5xx still fails the probe.
+func TestChatProbeKeepsRealServerErrors(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(`{"error":"upstream exploded"}`))
+	}))
+	defer stub.Close()
+
+	status, err := probeSingleOpenAIModelStatusContext(context.Background(), "some-model", stub.URL+"/v1", "key", 5*time.Second)
+	if err != nil || status != http.StatusInternalServerError {
+		t.Fatalf("persistent 5xx probe = (%d, %v), want (500, nil)", status, err)
+	}
+}

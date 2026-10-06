@@ -42,6 +42,11 @@ func TestMapModelConfiguredPool(t *testing.T) {
 	if got := MapModel("claude-3-5-haiku", pool, nil); got != "gpt-4o-mini" {
 		t.Fatalf("configured pool haiku = %q, want gpt-4o-mini", got)
 	}
+	// Fable ranks above Opus: with no fable-family model in the pool it takes
+	// the strongest reasoning model, never the Sonnet default.
+	if got := MapModel("claude-fable-5-1", pool, nil); got != "deepseek-reasoner" {
+		t.Fatalf("configured pool fable = %q, want deepseek-reasoner", got)
+	}
 }
 
 func TestMapModelAvailablePoolAndExactMatch(t *testing.T) {
@@ -59,6 +64,20 @@ func TestMapModelAvailablePoolAndExactMatch(t *testing.T) {
 	}
 	if got := MapModel("claude-3-5-haiku", "", models); got != "gpt-4o-mini" {
 		t.Fatalf("haiku tier = %q, want gpt-4o-mini", got)
+	}
+	if got := MapModel("claude-fable-5-1", "", models); got != "deepseek-reasoner" {
+		t.Fatalf("fable tier = %q, want deepseek-reasoner", got)
+	}
+}
+
+func TestMapModelFablePrefersFableFamily(t *testing.T) {
+	t.Parallel()
+
+	// A pool that does offer a Fable-family model must prefer it over the
+	// reasoning models that would otherwise win the tier.
+	models := []string{"claude-opus-5", "claude-fable-5-1", "deepseek-reasoner"}
+	if got := MapModel("claude-fable-5-1", "", models); got != "claude-fable-5-1" {
+		t.Fatalf("fable family = %q, want claude-fable-5-1", got)
 	}
 }
 

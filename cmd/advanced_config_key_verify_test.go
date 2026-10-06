@@ -186,6 +186,49 @@ func TestModelsDevExistingProviderVerifiesAutomaticallyOnOpen(t *testing.T) {
 	}
 }
 
+// TestModelsDevPoolWithoutProtocolEntriesStillVerifies reproduces the ClinePass
+// case: the saved pool comes from the live /models list, which shares no IDs
+// with the (curated) models.dev entry that supplied ModelProtocols. The page
+// used to abort with "no usable models" and stay unsavable forever; the pool is
+// routable over Chat Completions, so the key must be verified against it.
+func TestModelsDevPoolWithoutProtocolEntriesStillVerifies(t *testing.T) {
+	var gotPath, gotAuth, gotModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		gotModel, _ = body["model"].(string)
+		if _, ok := body["max_tokens"]; ok {
+			t.Error("ClinePass-shaped model must not be probed with max_tokens")
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	p := provider.Provider{Type: "modelsdev", Endpoint: server.URL + "/api/v1", APIKey: "saved-key",
+		Model: "cline-pass/mimo-v2.6-pro,cline-pass/qwen3.8-max",
+		ModelProtocols: map[string]string{
+			"cline-pass/deepseek-v4.1-flash": "openai", // catalog entry, absent from the pool
+		}}
+	m := NewAdvancedConfigModel(&p)
+	m.startAutoDetect()
+	select {
+	case result := <-m.verifyDone:
+		m.handleVerifyDone(result)
+	case <-time.After(3 * time.Second):
+		t.Fatal("automatic verification did not finish")
+	}
+	if !m.live().keyVerified || !m.canSave() {
+		t.Fatalf("pool with no protocol entries must still verify: verified=%t canSave=%t err=%v",
+			m.live().keyVerified, m.canSave(), m.live().detectionError)
+	}
+	if gotPath != "/api/v1/chat/completions" || gotAuth != "Bearer saved-key" || gotModel != "cline-pass/mimo-v2.6-pro" {
+		t.Fatalf("verification request path=%q auth=%q model=%q", gotPath, gotAuth, gotModel)
+	}
+}
+
 func TestModelsDevNewKeyVerifiesAfterEditingSettles(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer new-key" {
@@ -249,10 +292,12 @@ func TestModelsDevOldVerificationCannotApproveRestoredKey(t *testing.T) {
 	}
 }
 
-// TestFirstRoutableModel guards the empty-model-pool / unknown-protocol case:
-// when no model in the pool has an entry in the per-model protocol table (e.g.
-// an unrecognized AI SDK npm package), firstRoutableModel must return ok=false
-// so the UI reports "no usable model" instead of fabricating a connection.
+// TestFirstRoutableModel guards the model chosen for the key-verification
+// request: a pool entry with a table protocol wins, and a pool the table does
+// not cover at all (e.g. a gateway whose models.dev catalog is a curated subset
+// under different IDs than its live /models list) still verifies over the
+// runtime's default Chat Completions protocol instead of being declared
+// unusable. Only an empty pool has nothing to verify against.
 func TestFirstRoutableModel(t *testing.T) {
 	newModel := func(pool []string, protocols map[string]string) *AdvancedConfigModel {
 		p := &provider.Provider{ModelProtocols: protocols}
@@ -283,10 +328,18 @@ func TestFirstRoutableModel(t *testing.T) {
 		}
 	})
 
-	t.Run("no model has a protocol", func(t *testing.T) {
-		m := newModel([]string{"gpt-x"}, map[string]string{})
+	t.Run("pool with no protocol entries falls back to the first model", func(t *testing.T) {
+		m := newModel([]string{"cline-pass/mimo-v2.6-pro", "cline-pass/qwen3.8-max"}, map[string]string{})
+		model, proto, ok := m.firstRoutableModel()
+		if !ok || model != "cline-pass/mimo-v2.6-pro" || proto != "openai" {
+			t.Fatalf("firstRoutableModel = (%q, %q, %t), want (cline-pass/mimo-v2.6-pro, openai, true)", model, proto, ok)
+		}
+	})
+
+	t.Run("blank pool entries are skipped", func(t *testing.T) {
+		m := newModel([]string{"  ", ""}, map[string]string{})
 		if _, _, ok := m.firstRoutableModel(); ok {
-			t.Fatal("pool with no protocol entries should return ok=false")
+			t.Fatal("a pool of blank entries should return ok=false")
 		}
 	})
 }

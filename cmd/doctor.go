@@ -42,7 +42,7 @@ also summarizes credential health, including invalid and quota markers.
 
 Model pool (provider.Model) is an optional candidate list used by ccl set/map
 for discovery and bulk checks. Claude Code actually uses the slot mappings
-(Opus/Sonnet/Haiku/Custom/Subagent). An empty pool with filled slots is normal.
+(Opus/Sonnet/Haiku/Fable/Custom/Subagent). An empty pool with filled slots is normal.
 
 Note: root "ccl status" is cloud sync status (see "ccl cloud status"), not this command.
 For live request failures enable "ccl log on" and check the session log file
@@ -201,7 +201,7 @@ func runDoctor(ctx context.Context) error {
 		if len(configuredModels) > 0 {
 			doctorSection("Model verification")
 			probeTarget := modelProbeTarget(configuredProvider, p)
-			availableSet := testModelsConcurrently(ctx, configuredModels, probeTarget.Endpoint, probeTarget.APIKey, probeTarget.Type, probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
+			availableSet := testModelsConcurrently(ctx, configuredModels, probeTarget.Endpoint, probeTarget.APIKey, probeWireType(probeTarget), probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
 			available, unavailable := classifyModels(configuredModels, availableSet)
 			doctorKV("Summary", modelVerificationSummary(available, unavailable))
 			if len(unavailable) > 0 {
@@ -783,38 +783,47 @@ func testSingleOpenAIModelContext(parent context.Context, model, endpoint, apiKe
 
 func probeSingleOpenAIModelStatusContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) (int, error) {
 	headers := map[string]string{"Authorization": "Bearer " + apiKey}
+	// The token limit exists only to keep the probe cheap; an empty tokenField
+	// omits it entirely.
 	payload := func(tokenField string) map[string]any {
-		return map[string]any{
+		body := map[string]any{
 			"model":    model,
 			"messages": []map[string]string{{"role": "user", "content": "Reply OK."}},
 			"stream":   false,
-			tokenField: 1,
 		}
+		if tokenField != "" {
+			body[tokenField] = 1
+		}
+		return body
 	}
 	// ClinePass documents a Chat Completions request with the full model slug,
 	// messages, and stream:false, without a token-limit field. Sending
 	// max_tokens:1 can reject otherwise usable models on this gateway.
 	if strings.HasPrefix(strings.ToLower(model), "cline-pass/") {
-		return probeModelStatus(parent, buildChatURL(endpoint), map[string]any{
-			"model":    model,
-			"messages": []map[string]string{{"role": "user", "content": "Reply OK."}},
-			"stream":   false,
-		}, headers, timeout)
+		return probeModelStatus(parent, buildChatURL(endpoint), payload(""), headers, timeout)
 	}
 	status, err := probeModelStatus(parent, buildChatURL(endpoint), payload("max_tokens"), headers, timeout)
-	if err != nil {
-		return 0, err
-	}
-	if status >= 200 && status < 300 {
-		return status, nil
+	if err != nil || status == http.StatusUnauthorized || status == http.StatusForbidden || status >= 200 && status < 300 {
+		return status, err
 	}
 	// Reasoning-model families renamed max_tokens to max_completion_tokens and
 	// reject the old parameter with a 400; retry once before declaring the
 	// model unavailable.
 	if status == http.StatusBadRequest {
 		status, err = probeModelStatus(parent, buildChatURL(endpoint), payload("max_completion_tokens"), headers, timeout)
+		if err != nil || status == http.StatusUnauthorized || status == http.StatusForbidden || status >= 200 && status < 300 {
+			return status, err
+		}
 	}
-	return status, err
+	if status != http.StatusBadRequest && status < 500 {
+		return status, nil
+	}
+	// A gateway that fans each model out to a different backend can fail a
+	// one-token probe on a backend that produces no content within the limit
+	// (ClinePass answers 500 "empty response content" for several of them).
+	// Ask once more with no token limit before reporting the model — and, for
+	// key verification, the whole provider — as unusable.
+	return probeModelStatus(parent, buildChatURL(endpoint), payload(""), headers, timeout)
 }
 
 func probeSingleAnthropicModelStatusContext(parent context.Context, model, endpoint, apiKey, authStyle string, timeout time.Duration) (int, error) {
@@ -1128,7 +1137,7 @@ func printDoctorProviderDetails(p provider.Provider) {
 			doctorHint("Slot mappings below are what Claude Code uses; pool is only a candidate list for `ccl map`/`ccl set`")
 		} else {
 			doctorWarn("Model pool: 0 configured and no slot mappings")
-			doctorHint("Run `ccl set` or `ccl map` to detect models and fill Opus/Sonnet/Haiku slots")
+			doctorHint("Run `ccl set` or `ccl map` to detect models and fill the model slots")
 		}
 	} else {
 		doctorKV("Model pool", fmt.Sprintf("%d configured", len(pool)))
@@ -1142,7 +1151,7 @@ func printDoctorProviderDetails(p provider.Provider) {
 
 func doctorConfiguredSlotCount(p provider.Provider) int {
 	n := 0
-	for _, model := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.CustomModelID, p.SubagentModel} {
+	for _, model := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.FableModel, p.CustomModelID, p.SubagentModel} {
 		if strings.TrimSpace(model) != "" {
 			n++
 		}
@@ -1205,6 +1214,7 @@ func printProviderModelMappings(p provider.Provider, modelNames map[string]strin
 		{"Opus", providerCatalogModelLabel(p.OpusModel, modelNames)},
 		{"Sonnet", providerCatalogModelLabel(p.SonnetModel, modelNames)},
 		{"Haiku", providerCatalogModelLabel(p.HaikuModel, modelNames)},
+		{"Fable", providerCatalogModelLabel(p.FableModel, modelNames)},
 		{"Custom", providerCatalogModelLabel(p.CustomModelID, modelNames)},
 		{"Subagent", subagentMappingDisplayWithNames(p, modelNames)},
 	}

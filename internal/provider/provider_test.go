@@ -102,6 +102,13 @@ func TestProtocolLabelForCopilotShowsAutomaticRouting(t *testing.T) {
 	}
 }
 
+func TestProtocolLabelForZedShowsAutomaticRouting(t *testing.T) {
+	p := provider.Provider{Type: "openai_responses", OAuthProvider: "Zed"}
+	if got := provider.ProtocolLabelForProvider(p); got != "zed / auto" {
+		t.Fatalf("ProtocolLabelForProvider() = %q", got)
+	}
+}
+
 func TestProtocolForAISdkNPM(t *testing.T) {
 	tests := []struct {
 		npm    string
@@ -151,6 +158,7 @@ func TestInferOAuthProvider(t *testing.T) {
 		{name: "Grok xAI backend", providerName: "grok", endpoint: "oauth://xai", want: "grok"},
 		{name: "Grok renamed provider", providerName: "my-account", endpoint: "oauth://xai", want: "grok"},
 		{name: "Copilot backend", providerName: "copilot", endpoint: "oauth://copilot", want: "copilot"},
+		{name: "Zed backend", providerName: "zed-work", endpoint: "oauth://zed", want: "zed"},
 		{name: "Qoder backend", providerName: "qoder-work", endpoint: "oauth://qoder", want: "qoder"},
 		{name: "Kimi backend", providerName: "kimi", endpoint: "oauth://kimi", want: "kimi"},
 		{name: "Kiro backend", providerName: "kiro-work", endpoint: "oauth://kiro", want: "kiro"},
@@ -199,6 +207,7 @@ func TestRuntimeModelSpecIncludesSlotsSubagentAndOverrides(t *testing.T) {
 		OpusModel:     "gpt-5.6-sol[1m]",
 		SonnetModel:   "gpt-5.6-terra",
 		HaikuModel:    "gpt-5.6-luna",
+		FableModel:    "gpt-5.6-sol[1m]",
 		SubagentModel: "gpt-5.6-terra[1m]",
 		ModelOverrides: map[string]string{
 			"claude-haiku": "gpt-5.4-mini",
@@ -225,6 +234,9 @@ func TestIsAnthropicType(t *testing.T) {
 }
 
 func TestOAuthRuntimeType(t *testing.T) {
+	if got, ok := provider.OAuthRuntimeType("zed"); !ok || got != "openai_responses" {
+		t.Fatalf("zed = %q %v", got, ok)
+	}
 	got, ok := provider.OAuthRuntimeType("gpt")
 	if !ok || got != "openai_responses" {
 		t.Fatalf("gpt = %q %v", got, ok)
@@ -293,16 +305,19 @@ func TestAutoClawProviderType(t *testing.T) {
 }
 
 func TestPreferredAutoClawSlotDefaults(t *testing.T) {
-	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("autoclaw")
+	custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults("autoclaw")
 	if !ok {
 		t.Fatal("AutoClaw must ship preferred slot defaults")
 	}
 	if custom != "zai_auto" || opus != "zai_auto" || sonnet != "zaicoding_glm-5.3" || haiku != "zai_glm-5.3-flash" {
 		t.Fatalf("defaults = %q/%q/%q/%q", custom, opus, sonnet, haiku)
 	}
+	if fable != opus {
+		t.Fatalf("fable = %q, want the opus default %q", fable, opus)
+	}
 	p := provider.Provider{OAuthProvider: "autoclaw"}
 	provider.ApplyOAuthSlotDefaults(&p)
-	if p.CustomModelID != "zai_auto" || p.OpusModel != "zai_auto" || p.SonnetModel != "zaicoding_glm-5.3" || p.HaikuModel != "zai_glm-5.3-flash" {
+	if p.CustomModelID != "zai_auto" || p.OpusModel != "zai_auto" || p.SonnetModel != "zaicoding_glm-5.3" || p.HaikuModel != "zai_glm-5.3-flash" || p.FableModel != "zai_auto" {
 		t.Fatalf("applied defaults = %+v", p)
 	}
 }

@@ -8,31 +8,37 @@ import (
 
 func TestPreferredOAuthSlotDefaultsGPT(t *testing.T) {
 	for _, name := range []string{"gpt", "chatgpt"} {
-		custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults(name)
+		custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults(name)
 		if !ok {
 			t.Fatalf("expected %s defaults", name)
 		}
 		if custom != "gpt-5.6-sol" || opus != "gpt-5.6-sol" || sonnet != "gpt-5.6-terra" || haiku != "gpt-5.6-luna" {
 			t.Fatalf("%s defaults = %q %q %q %q", name, custom, opus, sonnet, haiku)
 		}
+		if fable != opus {
+			t.Fatalf("%s fable = %q, want the opus default %q", name, fable, opus)
+		}
 	}
 }
 
 func TestPreferredOAuthSlotDefaultsGrok(t *testing.T) {
-	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("grok")
+	custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults("grok")
 	if !ok {
 		t.Fatal("expected grok defaults")
 	}
 	if custom != "grok-4.6" || opus != "grok-4.6" || sonnet != "grok-4.5" || haiku != "grok-4.5" {
 		t.Fatalf("grok defaults = %q %q %q %q", custom, opus, sonnet, haiku)
 	}
-	if _, _, _, _, ok := provider.PreferredOAuthSlotDefaults("copilot"); ok {
+	if fable != opus {
+		t.Fatalf("grok fable = %q, want the opus default %q", fable, opus)
+	}
+	if _, _, _, _, _, ok := provider.PreferredOAuthSlotDefaults("copilot"); ok {
 		t.Fatal("copilot should not have preferred defaults")
 	}
 }
 
 func TestPreferredOAuthSlotDefaultsGemini(t *testing.T) {
-	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("gemini")
+	custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults("gemini")
 	if !ok {
 		t.Fatal("expected gemini defaults")
 	}
@@ -40,10 +46,13 @@ func TestPreferredOAuthSlotDefaultsGemini(t *testing.T) {
 		sonnet != "claude-sonnet-4-6" || haiku != "gemini-3.1-pro-low" {
 		t.Fatalf("gemini defaults = %q %q %q %q", custom, opus, sonnet, haiku)
 	}
+	if fable != opus {
+		t.Fatalf("gemini fable = %q, want the opus default %q", fable, opus)
+	}
 }
 
 func TestPreferredOAuthSlotDefaultsKiro(t *testing.T) {
-	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("kiro")
+	custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults("kiro")
 	if !ok {
 		t.Fatal("expected kiro defaults")
 	}
@@ -51,16 +60,22 @@ func TestPreferredOAuthSlotDefaultsKiro(t *testing.T) {
 		sonnet != "claude-sonnet-4-6" || haiku != "claude-haiku-4-5" {
 		t.Fatalf("kiro defaults = %q %q %q %q", custom, opus, sonnet, haiku)
 	}
+	if fable != opus {
+		t.Fatalf("kiro fable = %q, want the opus default %q", fable, opus)
+	}
 }
 
 func TestPreferredOAuthSlotDefaultsKimi(t *testing.T) {
-	custom, opus, sonnet, haiku, ok := provider.PreferredOAuthSlotDefaults("kimi")
+	custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults("kimi")
 	if !ok {
 		t.Fatal("expected kimi defaults")
 	}
 	if custom != "kimi-for-coding" || opus != "kimi-for-coding" ||
 		sonnet != "kimi-for-coding" || haiku != "kimi-for-coding-highspeed" {
 		t.Fatalf("kimi defaults = %q %q %q %q", custom, opus, sonnet, haiku)
+	}
+	if fable != opus {
+		t.Fatalf("kimi fable = %q, want the opus default %q", fable, opus)
 	}
 }
 
