@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
@@ -60,6 +61,12 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	}
 
 	fmt.Fprintln(out, heading)
+	if cfg.ProviderOff {
+		defer fmt.Fprintln(out, locale.T(
+			"\nProvider 加载为 off：ccl 以 Claude Code 自身配置启动（claude.ai 订阅）；ccl provider on 可恢复",
+			"\nProvider loading is off: ccl starts Claude Code with its own configuration (claude.ai subscription); ccl provider on restores it",
+		))
+	}
 	if showAll {
 		return printProviderDetails(out, cfg, names)
 	}
@@ -110,7 +117,11 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 func providerUsageSummary(cfg *provider.Config, name string) string {
 	usedBy := make([]string, 0, 2)
 	if name == cfg.ActiveProvider {
-		usedBy = append(usedBy, "normal")
+		if cfg.ProviderOff {
+			usedBy = append(usedBy, "normal(off)")
+		} else {
+			usedBy = append(usedBy, "normal")
+		}
 	}
 	if name == cfg.ACPProvider {
 		usedBy = append(usedBy, "ACP")

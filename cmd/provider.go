@@ -26,6 +26,8 @@ Subcommands:
   models         Availability check for the model pool
   env            Provider-scoped environment variables
   preview        Show settings JSON injected into Claude Code
+  on/off         Load the active provider, or run Claude Code with its own
+                 configuration (claude.ai subscription)
 
 Most of these are also available as root shortcuts:
   ccl set / ccl ls / ccl use / ccl map / ccl models / ccl env / ccl preview
@@ -176,10 +178,14 @@ func runProviderUse(name string, forACP bool) error {
 		return fmt.Errorf(locale.T("未找到 Provider %q。请先用 'ccl set' 添加，或用 'ccl ls' 检查拼写", "provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'"), target)
 	}
 
+	reenabled := false
 	if forACP {
 		cfg.ACPProvider = target
 	} else {
 		cfg.ActiveProvider = target
+		// Choosing a provider means wanting it: turn provider loading back on.
+		reenabled = cfg.ProviderOff
+		cfg.ProviderOff = false
 	}
 	err = config.Save(cfg)
 	if err != nil {
@@ -190,6 +196,9 @@ func runProviderUse(name string, forACP bool) error {
 		fmt.Printf(locale.T("ACP 已切换为使用 Provider 配置：%s\n", "ACP now uses provider configuration: %s\n"), target)
 	} else {
 		fmt.Printf(locale.T("已切换到激活 Provider：%s\n", "Switched to active provider: %s\n"), target)
+		if reenabled {
+			fmt.Println(locale.T("Provider 加载已重新打开（之前为 off）", "Provider loading is back on (it was off)"))
+		}
 	}
 	return nil
 }
@@ -426,6 +435,8 @@ func init() {
 		newMapCommand("map [provider-name]"),
 		newModelsCommand("models"),
 		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
+		newProviderToggleCommand("on"),
+		newProviderToggleCommand("off"),
 	)
 	rootCmd.AddCommand(providerCmd, cpCmd, mvCmd, rmCmd)
 }

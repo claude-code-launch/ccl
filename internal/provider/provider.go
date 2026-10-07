@@ -34,6 +34,10 @@ const (
 	Balanced800KMaxContextTokens  = "800000"
 	Balanced800KAutoCompactWindow = "800000"
 	Balanced800KAutoCompactPct    = "85"
+	// LegacyBalancedAutoCompactPct is the threshold both Balanced tiers wrote
+	// before 2026-09-15. Configs saved then still carry it; they read as the
+	// same tier and launch with the current values instead of being dropped.
+	LegacyBalancedAutoCompactPct = "80"
 
 	// BalancedMaxContextTokens and companions retain the original 500K names for
 	// callers that do not need to distinguish the two supported Balanced tiers.
@@ -69,11 +73,11 @@ func ContextPresetFromEnv(env map[string]string) ContextPreset {
 	switch {
 	case maxContext == Balanced500KMaxContextTokens &&
 		compactWindow == Balanced500KAutoCompactWindow &&
-		compactPct == Balanced500KAutoCompactPct:
+		(compactPct == Balanced500KAutoCompactPct || compactPct == LegacyBalancedAutoCompactPct):
 		return ContextPresetBalanced500K
 	case maxContext == Balanced800KMaxContextTokens &&
 		compactWindow == Balanced800KAutoCompactWindow &&
-		compactPct == Balanced800KAutoCompactPct:
+		(compactPct == Balanced800KAutoCompactPct || compactPct == LegacyBalancedAutoCompactPct):
 		return ContextPresetBalanced800K
 	default:
 		return ContextPresetDefault
@@ -188,6 +192,10 @@ type Config struct {
 	// BypassMode automatically passes --dangerously-skip-permissions to Claude
 	// Code for every ccl-launched session. It is a global launcher setting.
 	BypassMode bool `yaml:"bypass_mode,omitempty" mapstructure:"bypass_mode,omitempty"`
+	// ProviderOff makes plain `ccl` launches skip provider loading and run
+	// Claude Code with its own configuration (the user's claude.ai login). The
+	// process environment is passed through untouched. ACP keeps acp_provider.
+	ProviderOff bool `yaml:"provider_off,omitempty" mapstructure:"provider_off,omitempty"`
 	// LogLevel is the threshold for ccl's per-session slog files: debug, info,
 	// warn, error, or off. Config loading normalizes an omitted value to off.
 	LogLevel string `yaml:"log_level,omitempty" mapstructure:"log_level,omitempty"`

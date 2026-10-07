@@ -24,6 +24,8 @@ Common commands:
   ccl ls                      List providers and normal/ACP selections
   ccl use [name]              Switch the normal-mode provider
   ccl use --acp [name]        Select a shared provider configuration for ACP
+  ccl provider on|off         Load the active provider, or run Claude Code with
+                              its own configuration (claude.ai subscription)
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
   ccl oauth <gpt|grok|workbuddy|...>
                               Log in with a subscription account
@@ -140,13 +142,16 @@ func runClaude(args []string) error {
 		}
 	}
 
-	p, err := resolveProvider()
-	if err != nil {
-		return err
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load ccl config for launcher options: %w", err)
+	}
+	if cfg.ProviderOff {
+		return runClaudeWithoutProvider(applyBypassMode(args, cfg.BypassMode))
+	}
+	p, err := resolveProvider()
+	if err != nil {
+		return err
 	}
 
 	// Record the configured threshold; claude.Run opens the uniquely named file
