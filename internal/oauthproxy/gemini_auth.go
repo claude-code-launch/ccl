@@ -67,13 +67,8 @@ func loginGemini(ctx context.Context, authDir string, opts LoginOptions) (LoginR
 		return LoginResult{}, fmt.Errorf("listen for Gemini OAuth callback on port %d: %w", callbackPort, err)
 	}
 	resultCh := make(chan geminiOAuthCallback, 1)
-	server := &http.Server{Handler: geminiCallbackHandler(resultCh)}
-	go func() { _ = server.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+	_, stopServer := serveLoopbackCallback(ctx, listener, geminiCallbackHandler(resultCh))
+	defer stopServer()
 
 	// Keep the redirect pinned to the exact loopback address this process owns.
 	// Using localhost would let the browser select an independently bound IPv6

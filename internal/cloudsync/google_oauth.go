@@ -12,13 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/browser"
 	"golang.org/x/oauth2"
 )
 
@@ -55,7 +54,7 @@ var (
 		AuthURL:  "https://accounts.google.com/o/oauth2/v2/auth",
 		TokenURL: "https://oauth2.googleapis.com/token",
 	}
-	openBrowserURL = openSystemBrowser
+	openBrowserURL = browser.Open
 )
 
 func decodeGoogleOAuthMaterial(material []byte) string {
@@ -319,20 +318,4 @@ func randomURLToken(size int) (string, error) {
 		return "", fmt.Errorf("generate OAuth state: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
-}
-
-func openSystemBrowser(url string) error {
-	var command *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		command = exec.Command("open", url)
-	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		command = exec.Command("xdg-open", url)
-	}
-	if err := command.Start(); err != nil {
-		return err
-	}
-	return command.Process.Release()
 }

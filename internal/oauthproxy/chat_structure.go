@@ -2,6 +2,7 @@ package oauthproxy
 
 import (
 	"encoding/json"
+
 	"github.com/tidwall/gjson"
 )
 

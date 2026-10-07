@@ -118,7 +118,7 @@ type Provider struct {
 	// Type selects the upstream protocol for a manual gateway. For OAuth
 	// subscriptions it is only the local adapter compatibility type; the real
 	// backend and authentication flow are selected by OAuthProvider.
-	Type string `yaml:"type"`
+	Type string `yaml:"type,omitempty"`
 	// Endpoint is an HTTP API base for manual gateways and an oauth:// descriptor
 	// for persisted subscriptions. Provider Session replaces the latter with a
 	// loopback address only in its runtime copy.

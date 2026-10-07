@@ -148,16 +148,9 @@ func loginZed(ctx context.Context, authDir string, opts LoginOptions) (LoginResu
 
 	systemID := uuidString()
 	results := make(chan zedLoginCallback, 1)
-	server := &http.Server{
-		Handler:           zedCallbackHandler(results, strings.TrimRight(zedServerBaseURL, "/")+zedSignInSucceededPath),
-		ReadHeaderTimeout: 15 * time.Second,
-	}
-	go func() { _ = server.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+	_, stopServer := serveLoopbackCallback(ctx, listener,
+		zedCallbackHandler(results, strings.TrimRight(zedServerBaseURL, "/")+zedSignInSucceededPath))
+	defer stopServer()
 
 	loginURL := strings.TrimRight(zedServerBaseURL, "/") + zedSignInPath + "?" + url.Values{
 		"native_app_port":       {strconv.Itoa(port)},

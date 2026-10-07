@@ -224,11 +224,12 @@ func TestSessionStorePruneDropsOnlyStaleMappings(t *testing.T) {
 	}
 	stale := write("old.json", 40*24*time.Hour)
 	tempLeft := write(".session-123.tmp", 40*24*time.Hour)
+	tempNew := write(".acp-1.json.tmp-999", 40*24*time.Hour)
 	fresh := write("new.json", time.Hour)
 	foreign := write("README", 40*24*time.Hour)
 
 	store.prune(sessionStoreMaxAge, now)
-	for path, survive := range map[string]bool{stale: false, tempLeft: false, fresh: true, foreign: true} {
+	for path, survive := range map[string]bool{stale: false, tempLeft: false, tempNew: false, fresh: true, foreign: true} {
 		_, err := os.Stat(path)
 		if exists := err == nil; exists != survive {
 			t.Errorf("%s: exists=%t, want %t", filepath.Base(path), exists, survive)

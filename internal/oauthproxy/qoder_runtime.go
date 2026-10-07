@@ -175,31 +175,16 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 }
 
 func (service *qoderService) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"status":"ok"}`)
-	})
-	mux.HandleFunc("/v1/models", service.handleModels)
-	mux.HandleFunc("/v1/messages", service.handleMessages)
-	mux.HandleFunc("/v1/messages/count_tokens", service.handleCountTokens)
+	mux := anthropicFrontMux(service.handleModels, service.handleMessages, service.handleCountTokens)
 	return mux
 }
 
 func (service *qoderService) authorized(request *http.Request) bool {
-	if request.Header.Get("x-api-key") == service.apiKey {
-		return true
-	}
-	return strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) == service.apiKey
+	return loopbackAuthorized(request, service.apiKey)
 }
 
 func (service *qoderService) handleModels(writer http.ResponseWriter, request *http.Request) {
-	if !service.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodGet {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+	if !modelsRequestAllowed(writer, request, service.apiKey) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)

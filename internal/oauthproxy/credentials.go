@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/claude-code-launch/ccl/internal/fsutil"
 )
 
 // CredentialInfo is the non-secret state doctor reads from ~/.ccl/auth.
@@ -262,35 +264,6 @@ func sanitizeCredentialIdentity(value string) string {
 	return strings.Trim(strings.ToLower(b.String()), ".-_")
 }
 
-func writeCredentialAtomic(path string, data []byte) (err error) {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".auth-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temporary credential: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err = tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("secure temporary credential: %w", err)
-	}
-	if _, err = tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temporary credential: %w", err)
-	}
-	if err = tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync temporary credential: %w", err)
-	}
-	if err = tmp.Close(); err != nil {
-		return fmt.Errorf("close temporary credential: %w", err)
-	}
-	if err = os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace credential %q: %w", filepath.Base(path), err)
-	}
-	return os.Chmod(path, 0o600)
+func writeCredentialAtomic(path string, data []byte) error {
+	return fsutil.WriteFileAtomic(path, data, 0o600)
 }

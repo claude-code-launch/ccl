@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/fsutil"
 )
 
 type persistedSession struct {
@@ -50,24 +52,7 @@ func (s *sessionStore) save(entry persistedSession) error {
 	if err != nil {
 		return fmt.Errorf("marshal ACP session: %w", err)
 	}
-	tmp, err := os.CreateTemp(s.dir, ".session-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create ACP session temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("secure ACP session temp file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write ACP session: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close ACP session temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path(entry.SessionID)); err != nil {
+	if err := fsutil.WriteFileAtomic(s.path(entry.SessionID), data, 0o600); err != nil {
 		return fmt.Errorf("store ACP session: %w", err)
 	}
 	return nil
@@ -89,7 +74,10 @@ func (s *sessionStore) prune(maxAge time.Duration, now time.Time) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !(strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".session-")) {
+		// Mappings, plus temporary files a crashed save left behind (current
+		// ".<id>.json.tmp-*" and the older ".session-*" names).
+		leftover := strings.HasPrefix(name, ".") && (strings.Contains(name, ".tmp-") || strings.HasPrefix(name, ".session-"))
+		if entry.IsDir() || !(strings.HasSuffix(name, ".json") || leftover) {
 			continue
 		}
 		info, err := entry.Info()

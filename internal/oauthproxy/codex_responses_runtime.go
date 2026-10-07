@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
+	"github.com/claude-code-launch/ccl/internal/fsutil"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/tidwall/sjson"
 )
@@ -268,47 +269,18 @@ func newResponsesService(apiKey, endpoint string, routes []runtimeModelRoute, au
 }
 
 func (s *codexResponsesService) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"status":"ok"}`)
-	})
-	mux.HandleFunc("/v1/models", s.handleModels)
-	mux.HandleFunc("/models", s.handleModels)
-	mux.HandleFunc("/v1/messages", s.handleMessages)
-	mux.HandleFunc("/messages", s.handleMessages)
-	mux.HandleFunc("/v1/messages/count_tokens", s.handleCountTokens)
-	mux.HandleFunc("/messages/count_tokens", s.handleCountTokens)
+	mux := anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
 	mux.HandleFunc("/v1/responses", s.handleRawResponses)
 	mux.HandleFunc("/responses", s.handleRawResponses)
 	return mux
 }
 
 func (s *codexResponsesService) authorized(request *http.Request) bool {
-	if request.Header.Get("x-api-key") == s.apiKey {
-		return true
-	}
-	return strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) == s.apiKey
+	return loopbackAuthorized(request, s.apiKey)
 }
 
 func (s *codexResponsesService) handleModels(writer http.ResponseWriter, request *http.Request) {
-	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodGet {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	data := make([]map[string]any, 0, len(s.models))
-	for _, model := range s.models {
-		data = append(data, map[string]any{"id": model, "object": "model", "type": "model"})
-	}
-	first, last := modelPageBounds(s.models)
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"object": "list", "data": data, "has_more": false, "first_id": first, "last_id": last,
-	})
+	serveModelList(writer, request, s.apiKey, s.models)
 }
 
 func (s *codexResponsesService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
@@ -1022,34 +994,11 @@ func (a *codexOAuthAuthorizer) listAuths() []*AuthInfo {
 }
 
 func writeCodexCredentialAtomic(path string, metadata map[string]any) error {
-	directory := filepath.Dir(path)
-	file, err := os.CreateTemp(directory, ".codex-credential-*")
+	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return fmt.Errorf("create Codex credential update: %w", err)
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(metadata); err != nil {
-		_ = file.Close()
 		return fmt.Errorf("encode Codex credential update: %w", err)
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("replace Codex credential %s: %w", filepath.Base(path), err)
-	}
-	return nil
+	return fsutil.WriteFileAtomic(path, append(data, '\n'), 0o600)
 }
 
 func parseCodexExpiry(value string) time.Time {

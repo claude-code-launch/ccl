@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -153,5 +154,43 @@ func TestLoadNormalizesTypesAndContextPreset(t *testing.T) {
 	}
 	if got := provider.ContextPresetEnv(gw)[provider.EnvAutoCompactPct]; got != provider.Balanced500KAutoCompactPct {
 		t.Fatalf("preset launches with pct %q", got)
+	}
+}
+
+// TestOAuthTypeIsDerivedNotPersisted pins S3: a subscription's type is not
+// stored, Load fills it from the backend, and a clean file is not rewritten
+// on every startup.
+func TestOAuthTypeIsDerivedNotPersisted(t *testing.T) {
+	path := writeRawConfig(t, "providers: {}\n")
+	if err := Update(func(cfg *provider.Config) error {
+		cfg.Providers["g"] = provider.Provider{Name: "g", OAuthProvider: "grok", Type: "openai_responses"}
+		cfg.Providers["h"] = provider.Provider{Name: "h", Type: "openai"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	raw := string(data)
+	if strings.Count(raw, "type:") != 1 || !strings.Contains(raw, "type: openai\n") {
+		t.Fatalf("only the manual gateway should persist its type:\n%s", raw)
+	}
+	cfg, _ := Load()
+	if cfg.Providers["g"].Type != "openai_responses" {
+		t.Fatalf("loaded OAuth type = %q", cfg.Providers["g"].Type)
+	}
+
+	info, _ := os.Stat(path)
+	if err := Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(path)
+	if !after.ModTime().Equal(info.ModTime()) {
+		t.Fatal("Migrate rewrote an already-current file")
+	}
+
+	// A stale persisted type (from an older ccl) is a real change.
+	writeRawConfig(t, "config_version: 2\nproviders:\n  g:\n    name: g\n    oauthProvider: grok\n    type: openai\n")
+	if _, changed, err := read(); err != nil || !changed {
+		t.Fatalf("stale OAuth type not reported as a change: %t, %v", changed, err)
 	}
 }

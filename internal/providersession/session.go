@@ -31,14 +31,7 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 		ctx = context.Background()
 	}
 	resolved := configured
-	if strings.TrimSpace(resolved.OAuthProvider) != "" {
-		// Normalize legacy persisted compatibility types to the protocol exposed by
-		// the current embedded runtime. Grok moved from the old Chat classification
-		// to the Responses data plane; probes must therefore use /v1/responses.
-		if runtimeType, ok := provider.OAuthRuntimeType(resolved.OAuthProvider); ok {
-			resolved.Type = runtimeType
-		}
-	}
+	resolved.Type = provider.EffectiveType(resolved)
 	session := &Session{
 		Provider: resolved,
 		BaseURL:  resolved.Endpoint,

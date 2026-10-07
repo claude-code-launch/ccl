@@ -184,7 +184,7 @@ func TestLoginZedReportsAnUnwritableCredentialDirectory(t *testing.T) {
 	})
 	// The auth directory does not exist, so the atomic write cannot start.
 	if _, err := loginZed(t.Context(), filepath.Join(t.TempDir(), "missing"), LoginOptions{}); err == nil ||
-		!strings.Contains(err.Error(), "temporary credential") {
+		!strings.Contains(err.Error(), "create temporary file") {
 		t.Fatalf("loginZed() into a missing directory = %v", err)
 	}
 }

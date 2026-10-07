@@ -12,13 +12,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/browser"
 )
 
 const (
@@ -305,21 +305,8 @@ func loginKiroSocial(ctx context.Context, authDir string, opts LoginOptions) (Lo
 	}
 	mux.HandleFunc("/oauth/callback", handler)
 	mux.HandleFunc("/signin/callback", handler)
-	server := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	serveErrors := make(chan error, 1)
-	go func() {
-		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
-			serveErrors <- serveErr
-		}
-	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+	serveErrors, stopServer := serveLoopbackCallback(ctx, listener, mux)
+	defer stopServer()
 
 	fmt.Printf("Open %s to sign in with your Kiro Google or GitHub account\n", signInURL.String())
 	if !opts.NoBrowser {
@@ -566,14 +553,5 @@ func kiroPostJSONRaw(ctx context.Context, client *http.Client, endpoint string, 
 }
 
 func openBrowser(target string) error {
-	var command *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		command = exec.Command("open", target)
-	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
-	default:
-		command = exec.Command("xdg-open", target)
-	}
-	return command.Start()
+	return browser.Open(target)
 }

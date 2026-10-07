@@ -62,6 +62,15 @@ func HasUnsupportedContextEnv(p Provider) bool {
 	return HasManagedContextEnv(p.Env) && ContextPresetFromEnv(p.Env) == ContextPresetDefault
 }
 
+// EffectiveType is the protocol type ccl dispatches p with. For an OAuth
+// subscription it follows from the backend, never from what a file says.
+func EffectiveType(p Provider) string {
+	if runtimeType, ok := OAuthRuntimeType(p.OAuthProvider); ok {
+		return runtimeType
+	}
+	return p.Type
+}
+
 var canonicalTypes = map[string]string{
 	"openai-responses":  "openai_responses",
 	"responses":         "openai_responses",
@@ -100,10 +109,14 @@ func NormalizeProvider(p *Provider, name string, legacySlots bool) bool {
 		set(&p.OAuthProvider, "gpt")
 	}
 
-	// type: OAuth backends have a fixed local dispatch type; manual gateways
-	// use one canonical spelling per protocol.
+	// type: an OAuth backend's is derived (EffectiveType) and not persisted,
+	// so filling it in is not a change; a stale persisted value is. Manual
+	// gateways use one canonical spelling per protocol.
 	if fixed, ok := OAuthRuntimeType(p.OAuthProvider); ok {
-		set(&p.Type, fixed)
+		if p.Type != "" && p.Type != fixed {
+			changed = true
+		}
+		p.Type = fixed
 	} else if canonical, ok := canonicalTypes[strings.ToLower(strings.TrimSpace(p.Type))]; ok {
 		set(&p.Type, canonical)
 	}

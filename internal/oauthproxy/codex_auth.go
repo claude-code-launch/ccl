@@ -55,13 +55,8 @@ func loginCodex(ctx context.Context, authDir string, opts LoginOptions) (LoginRe
 		return LoginResult{}, fmt.Errorf("listen for Codex OAuth callback on port %d: %w", callbackPort, err)
 	}
 	resultCh := make(chan codexLoginCallback, 1)
-	server := &http.Server{Handler: codexCallbackHandler(resultCh)}
-	go func() { _ = server.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+	_, stopServer := serveLoopbackCallback(ctx, listener, codexCallbackHandler(resultCh))
+	defer stopServer()
 
 	redirectURI := "http://" + listener.Addr().String() + codexOAuthCallbackPath
 	authURL := codexOAuthAuthorizeURL + "?" + url.Values{

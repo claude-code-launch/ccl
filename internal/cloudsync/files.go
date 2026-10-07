@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/claude-code-launch/ccl/internal/fsutil"
 )
 
 var ErrNoLocalData = errors.New("no ccl configuration or OAuth credentials found to sync")
@@ -179,7 +181,7 @@ func writeJSONAtomic(path string, value any, mode os.FileMode) error {
 	return writeAtomic(path, data, mode)
 }
 
-func writeAtomic(path string, data []byte, mode os.FileMode) (err error) {
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -193,33 +195,5 @@ func writeAtomic(path string, data []byte, mode os.FileMode) (err error) {
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err = tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err = tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	return os.Chmod(path, mode)
+	return fsutil.WriteFileAtomic(path, data, mode)
 }

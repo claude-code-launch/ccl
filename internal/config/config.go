@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/claude-code-launch/ccl/internal/fsutil"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"gopkg.in/yaml.v3"
 )
@@ -126,7 +127,17 @@ func write(path string, cfg *provider.Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(cfg)
+	// An OAuth subscription's type is derived from its backend on load, so it
+	// is not persisted; the in-memory config keeps it.
+	onDisk := *cfg
+	onDisk.Providers = make(map[string]provider.Provider, len(cfg.Providers))
+	for name, p := range cfg.Providers {
+		if _, ok := provider.OAuthRuntimeType(p.OAuthProvider); ok {
+			p.Type = ""
+		}
+		onDisk.Providers[name] = p
+	}
+	data, err := yaml.Marshal(&onDisk)
 	if err != nil {
 		return err
 	}
@@ -212,35 +223,6 @@ func normalize(cfg *provider.Config) bool {
 	return changed
 }
 
-func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temporary config: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("set temporary config permissions: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temporary config: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync temporary config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temporary config: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace config atomically: %w", err)
-	}
-	return nil
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	return fsutil.WriteFileAtomic(path, data, mode)
 }

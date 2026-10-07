@@ -132,29 +132,12 @@ func loginAutoClaw(ctx context.Context, authDir string, opts LoginOptions) (Logi
 	navigateURI := fmt.Sprintf("http://localhost:%d%s", port, autoclawOAuthCallbackPath)
 	callbackCh := make(chan autoClawOAuthCallback, 1)
 	oauthState := &autoClawOAuthState{}
-	serverErrors := make(chan error, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc(autoclawOAuthLoginPagePath, autoClawOAuthPageHandler(captchaConfig, localNonce))
 	mux.HandleFunc(autoclawOAuthURLPath, autoClawOAuthURLHandler(client, version, deviceID, navigateURI, localNonce, captchaConfig, oauthState))
 	mux.HandleFunc(autoclawOAuthCallbackPath, autoClawOAuthCallbackHandler(callbackCh, oauthState))
-	server := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
-	}
-	go func() {
-		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			select {
-			case serverErrors <- serveErr:
-			default:
-			}
-		}
-	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+	serverErrors, stopServer := serveLoopbackCallback(ctx, listener, mux)
+	defer stopServer()
 
 	loginPageURL := fmt.Sprintf("http://127.0.0.1:%d%s?nonce=%s", port, autoclawOAuthLoginPagePath, url.QueryEscape(localNonce))
 	fmt.Printf("Open %s to authorize AutoClaw\n", loginPageURL)

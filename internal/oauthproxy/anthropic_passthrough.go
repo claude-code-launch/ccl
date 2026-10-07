@@ -43,45 +43,16 @@ func newAnthropicPassthroughService(apiKey, baseURL string, models []string, aut
 }
 
 func (s *anthropicPassthroughService) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"status":"ok"}`)
-	})
-	mux.HandleFunc("/v1/models", s.handleModels)
-	mux.HandleFunc("/models", s.handleModels)
-	mux.HandleFunc("/v1/messages", s.handleMessages)
-	mux.HandleFunc("/messages", s.handleMessages)
-	mux.HandleFunc("/v1/messages/count_tokens", s.handleCountTokens)
-	mux.HandleFunc("/messages/count_tokens", s.handleCountTokens)
+	mux := anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
 	return mux
 }
 
 func (s *anthropicPassthroughService) authorized(request *http.Request) bool {
-	if request.Header.Get("x-api-key") == s.apiKey {
-		return true
-	}
-	return strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) == s.apiKey
+	return loopbackAuthorized(request, s.apiKey)
 }
 
 func (s *anthropicPassthroughService) handleModels(writer http.ResponseWriter, request *http.Request) {
-	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodGet {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	data := make([]map[string]any, 0, len(s.models))
-	for _, model := range s.models {
-		data = append(data, map[string]any{"id": model, "object": "model", "type": "model"})
-	}
-	first, last := modelPageBounds(s.models)
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"object": "list", "data": data, "has_more": false, "first_id": first, "last_id": last,
-	})
+	serveModelList(writer, request, s.apiKey, s.models)
 }
 
 func (s *anthropicPassthroughService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {

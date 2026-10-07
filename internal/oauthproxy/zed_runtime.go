@@ -229,42 +229,16 @@ func startZedProtocolRouter(parent context.Context, gateway *zedGateway, routes 
 }
 
 func (r *zedProtocolRouter) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"status":"ok"}`)
-	})
-	mux.HandleFunc("/v1/models", r.handleModels)
-	mux.HandleFunc("/models", r.handleModels)
-	mux.HandleFunc("/v1/messages", r.handleMessages)
-	mux.HandleFunc("/messages", r.handleMessages)
-	mux.HandleFunc("/v1/messages/count_tokens", r.handleCountTokens)
-	mux.HandleFunc("/messages/count_tokens", r.handleCountTokens)
+	mux := anthropicFrontMux(r.handleModels, r.handleMessages, r.handleCountTokens)
 	return mux
 }
 
 func (r *zedProtocolRouter) authorized(request *http.Request) bool {
-	if request.Header.Get("x-api-key") == r.apiKey {
-		return true
-	}
-	return strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) == r.apiKey
+	return loopbackAuthorized(request, r.apiKey)
 }
 
 func (r *zedProtocolRouter) handleModels(writer http.ResponseWriter, request *http.Request) {
-	if !r.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodGet {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	data := make([]map[string]any, 0, len(r.models))
-	for _, model := range r.models {
-		data = append(data, map[string]any{"id": model, "object": "model", "type": "model"})
-	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"object": "list", "data": data})
+	serveModelList(writer, request, r.apiKey, r.models)
 }
 
 // readBody reads a request body once so the router can inspect the model and
@@ -559,10 +533,7 @@ func newZedGeminiService(apiKey string, gateway *zedGateway, usage *UsageTracker
 }
 
 func (s *zedGeminiService) authorized(request *http.Request) bool {
-	if request.Header.Get("x-api-key") == s.apiKey {
-		return true
-	}
-	return strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")) == s.apiKey
+	return loopbackAuthorized(request, s.apiKey)
 }
 
 func (s *zedGeminiService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
