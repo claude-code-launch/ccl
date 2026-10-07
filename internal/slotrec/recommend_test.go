@@ -1,4 +1,4 @@
-package cmd
+package slotrec
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func mustFind(t *testing.T, rec AutoRecommendation, slot string) string {
+func mustFind(t *testing.T, rec Recommendation, slot string) string {
 	t.Helper()
 	switch slot {
 	case "opus":
@@ -29,7 +29,7 @@ func mustFind(t *testing.T, rec AutoRecommendation, slot string) string {
 
 func TestRecommendDistinguishesProAndFlashByName(t *testing.T) {
 	pool := []string{"gpt-5.6-pro-max", "gpt-5.6-flash", "gpt-5.6-pro"}
-	rec := RecommendModels(provider.Provider{}, pool, nil)
+	rec := Recommend(provider.Provider{}, pool, nil)
 	if rec.Opus != "gpt-5.6-pro-max" {
 		t.Fatalf("opus = %q, want gpt-5.6-pro-max", rec.Opus)
 	}
@@ -54,9 +54,9 @@ func TestRecommendDistinguishesProAndFlashByName(t *testing.T) {
 func TestRecommendOrderIndependent(t *testing.T) {
 	poolA := []string{"deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"}
 	poolB := []string{"deepseek-v4-flash", "deepseek-chat", "deepseek-v4-pro"}
-	a := RecommendModels(provider.Provider{}, poolA, nil)
-	b := RecommendModels(provider.Provider{}, poolB, nil)
-	for _, slot := range modelSlotKeys {
+	a := Recommend(provider.Provider{}, poolA, nil)
+	b := Recommend(provider.Provider{}, poolB, nil)
+	for _, slot := range []string{"opus", "sonnet", "haiku", "fable", "custom", "subagent"} {
 		va, vb := mustFind(t, a, slot), mustFind(t, b, slot)
 		if va != vb {
 			t.Fatalf("slot %s differs by input order: %q vs %q", slot, va, vb)
@@ -66,7 +66,7 @@ func TestRecommendOrderIndependent(t *testing.T) {
 
 func TestRecommendFallsBackWithFewModels(t *testing.T) {
 	// One model: every slot uses it.
-	rec := RecommendModels(provider.Provider{}, []string{"only-model"}, nil)
+	rec := Recommend(provider.Provider{}, []string{"only-model"}, nil)
 	for _, slot := range []string{"opus", "sonnet", "haiku", "fable", "custom"} {
 		if mustFind(t, rec, slot) != "only-model" {
 			t.Fatalf("slot %s = %q, want only-model", slot, mustFind(t, rec, slot))
@@ -74,7 +74,7 @@ func TestRecommendFallsBackWithFewModels(t *testing.T) {
 	}
 
 	// Two models: strong -> Opus/Sonnet/Custom, light -> Haiku.
-	two := RecommendModels(provider.Provider{}, []string{"qwen-coder-max", "qwen-coder-lite"}, nil)
+	two := Recommend(provider.Provider{}, []string{"qwen-coder-max", "qwen-coder-lite"}, nil)
 	if two.Opus != "qwen-coder-max" || two.Sonnet != "qwen-coder-max" || two.Haiku != "qwen-coder-lite" {
 		t.Fatalf("two-model fallback wrong: opus=%q sonnet=%q haiku=%q", two.Opus, two.Sonnet, two.Haiku)
 	}
@@ -87,7 +87,7 @@ func TestRecommendFallsBackWithFewModels(t *testing.T) {
 
 	// Three models: strong/main + light + one spare. Opus/Sonnet/Custom share the
 	// strongest model, Haiku takes the lightest, and the spare goes to Subagent.
-	three := RecommendModels(provider.Provider{}, []string{"grok-4.5", "grok-4.3", "grok-3-mini"}, nil)
+	three := Recommend(provider.Provider{}, []string{"grok-4.5", "grok-4.3", "grok-3-mini"}, nil)
 	if three.Opus != "grok-4.5" || three.Sonnet != "grok-4.5" || three.Haiku != "grok-3-mini" {
 		t.Fatalf("three-model wrong: %+v", three)
 	}
@@ -109,7 +109,7 @@ func TestRecommendPreservesStillValidSlots(t *testing.T) {
 		HaikuModel:  "grok-3-mini", // not in the new pool
 		// Custom deliberately left unset: it should follow the Sonnet pick.
 	}
-	rec := RecommendModels(current, []string{"deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"}, nil)
+	rec := Recommend(current, []string{"deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"}, nil)
 	if rec.Opus != "deepseek-v4-pro" {
 		t.Fatalf("opus should be preserved, got %q", rec.Opus)
 	}
@@ -127,7 +127,7 @@ func TestRecommendPreservesStillValidSlots(t *testing.T) {
 
 func TestRecommendSubagentUsesLighterModelWhenPresent(t *testing.T) {
 	pool := []string{"kimi-k2", "kimi-k2-thinking", "kimi-lite", "kimi-flash-mini"}
-	rec := RecommendModels(provider.Provider{}, pool, nil)
+	rec := Recommend(provider.Provider{}, pool, nil)
 	if rec.Subagent != "kimi-lite" {
 		t.Fatalf("subagent = %q, want kimi-lite", rec.Subagent)
 	}
@@ -135,7 +135,7 @@ func TestRecommendSubagentUsesLighterModelWhenPresent(t *testing.T) {
 
 func TestRecommendExcludesNonChatModels(t *testing.T) {
 	pool := []string{"embedding-v3", "dall-e-3", "whisper-1", "deepseek-chat", "deepseek-v4-flash"}
-	rec := RecommendModels(provider.Provider{}, pool, nil)
+	rec := Recommend(provider.Provider{}, pool, nil)
 	if rec.Opus != "deepseek-chat" && rec.Opus != "deepseek-v4-flash" {
 		t.Fatalf("opus picked a non-chat model: %q", rec.Opus)
 	}
@@ -147,7 +147,7 @@ func TestRecommendExcludesNonChatModels(t *testing.T) {
 }
 
 func TestRecommendOneMAutomaticallyForAllowlist(t *testing.T) {
-	rec := RecommendModels(provider.Provider{}, []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, nil)
+	rec := Recommend(provider.Provider{}, []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, nil)
 	if !rec.OneMSlots["opus"] || !rec.OneMSlots["sonnet"] || !rec.OneMSlots["haiku"] {
 		t.Fatalf("allowlist models should auto-enable 1M: %+v", rec.OneMSlots)
 	}
@@ -158,7 +158,7 @@ func TestRecommendOneMNotAutoForReportedOnly(t *testing.T) {
 		"deepseek-v4-pro":   {ID: "deepseek-v4-pro", ContextWindow: 1000000},
 		"deepseek-v4-flash": {ID: "deepseek-v4-flash", ContextWindow: 900000},
 	}
-	rec := RecommendModels(provider.Provider{}, []string{"deepseek-v4-pro", "deepseek-v4-flash"}, meta)
+	rec := Recommend(provider.Provider{}, []string{"deepseek-v4-pro", "deepseek-v4-flash"}, meta)
 	if rec.OneMSlots["opus"] || rec.OneMSlots["sonnet"] || rec.OneMSlots["haiku"] {
 		t.Fatalf("reported 1M window must not auto-enable the marker: %+v", rec.OneMSlots)
 	}
@@ -167,7 +167,7 @@ func TestRecommendOneMNotAutoForReportedOnly(t *testing.T) {
 func TestRecommendPreservesExistingOneMMarker(t *testing.T) {
 	// gpt-5.6-terra is NOT in the allowlist, so a user marker on it must survive.
 	current := provider.Provider{SonnetModel: "gpt-5.6-terra[1m]"}
-	rec := RecommendModels(current, []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, nil)
+	rec := Recommend(current, []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, nil)
 	if !rec.OneMSlots["sonnet"] {
 		t.Fatalf("existing [1m] on a preserved non-allowlist model should be kept: %+v", rec.OneMSlots)
 	}
@@ -183,7 +183,7 @@ func TestRecommendPreservesExistingOneMMarker(t *testing.T) {
 func TestRecommendKeepsOneMOptOutOnAllowlistModel(t *testing.T) {
 	pool := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 	current := provider.Provider{OpusModel: "gpt-5.6-sol"}
-	rec := RecommendModels(current, pool, nil)
+	rec := Recommend(current, pool, nil)
 	if rec.Opus != "gpt-5.6-sol" {
 		t.Fatalf("slot was not preserved: %q", rec.Opus)
 	}
@@ -198,7 +198,7 @@ func TestRecommendMetadataBreaksTies(t *testing.T) {
 		"gpt-pro":   {ID: "gpt-pro", ContextWindow: 1000000},
 		"gpt-pro-b": {ID: "gpt-pro-b", ContextWindow: 128000},
 	}
-	rec := RecommendModels(provider.Provider{}, []string{"gpt-pro", "gpt-pro-b"}, meta)
+	rec := Recommend(provider.Provider{}, []string{"gpt-pro", "gpt-pro-b"}, meta)
 	if rec.Opus != "gpt-pro" {
 		t.Fatalf("opus should prefer the larger-window tie, got %q", rec.Opus)
 	}

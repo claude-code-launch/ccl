@@ -32,6 +32,7 @@ var doctorCmd = newDoctorCommand()
 
 func newDoctorCommand() *cobra.Command {
 	probe := false
+	target := &providerTarget{}
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Show provider status and check connectivity",
@@ -54,9 +55,10 @@ For live request failures enable "ccl log on" and check the session log file
 when the Claude session ends (default ~/.ccl/logs/ccl-debug-claude_<id>.log).
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDoctor(cmd.Context(), probe)
+			return runDoctor(cmd.Context(), probe, *target)
 		},
 	}
+	addProviderTargetFlags(cmd, target)
 	cmd.Flags().BoolVar(&probe, "probe", false, "Also send a 1-token request to every model in the pool (billed)")
 	return cmd
 }
@@ -115,7 +117,7 @@ func doctorHint(msg string) {
 	fmt.Println(ansiDim + "  ↳ " + msg + ansiReset)
 }
 
-func runDoctor(ctx context.Context, probe bool) error {
+func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -146,19 +148,15 @@ func runDoctor(ctx context.Context, probe bool) error {
 	doctorOK("Config: " + config.ConfigPath())
 	printCloudSyncDiagnostics()
 
-	// 3. Check Active Provider
-	if cfg.ActiveProvider == "" {
+	// 3. Check the provider (active, or --provider / --acp)
+	name, err := target.resolve(cfg)
+	if err != nil {
 		doctorSection("Provider")
-		doctorErr("No active provider. Use `ccl set` or `ccl use`.")
+		doctorErr(err.Error())
 		return nil
 	}
-	doctorSection("Provider · " + cfg.ActiveProvider)
-
-	p, ok := cfg.Providers[cfg.ActiveProvider]
-	if !ok {
-		doctorErr(fmt.Sprintf("Selected provider %q does not exist in config", cfg.ActiveProvider))
-		return nil
-	}
+	doctorSection("Provider · " + name)
+	p := cfg.Providers[name]
 
 	printDoctorProviderIdentity(p)
 	printDoctorProviderDetails(p)

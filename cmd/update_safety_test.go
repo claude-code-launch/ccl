@@ -90,7 +90,7 @@ func TestPreviewReturnsSetupError(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPreview(); err == nil {
+	if err := runPreview(providerTarget{}); err == nil {
 		t.Fatal("preview reported success after setup failure")
 	}
 }

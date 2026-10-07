@@ -601,7 +601,7 @@ ccl provider preview
 
 ```bash
 ccl map                                          # 交互式 TUI
-ccl map auto                                     # 自动填充前几个槽位
+ccl map auto                                     # 按 ccl set 的规则自动填充槽位（--probe 先测试，计费）
 ccl map --opus gpt-5.1 --sonnet gpt-5.1-mini
 ccl map --haiku gpt-4o-mini
 ccl map --fable gpt-5.6-sol
@@ -611,7 +611,7 @@ ccl map --subagent gpt-5.4-mini
 
 OAuth provider 不需要先运行 `ccl set`：`ccl map` / `ccl map auto` 会临时启动对应 OAuth runtime，并直接使用账号的实时模型目录。选择器显示上游展示名、内部 ID、倍率与活动标记，但槽位中只保存请求所需的内部 ID；临时 endpoint 和会话 key 不会写入配置。
 
-`ccl map auto` 按可用模型顺序填充 Opus / Sonnet / Haiku / Custom，Fable 不占用独立名额，而是跟随 Opus 的取值（与 TUI 的 Auto 规则一致）。
+`ccl map auto` 用与 `ccl set` 页面相同的推荐规则，按模型名语义和目录元数据为 Opus / Sonnet / Haiku / Fable / Custom / Subagent 选模型（目录里有 Fable 系列模型时给 Fable，否则 Fable 跟随 Opus），不发任何推理请求；`ccl map auto --probe` 会先逐个测试模型（计费），只在能用的模型里推荐。启动时空着的槽位也按同一规则兜底。
 
 ### `ccl provider models` / `ccl doctor` / `ccl provider preview`
 
@@ -635,7 +635,11 @@ ccl provider env ls
 ccl provider env KEY VALUE
 ccl provider env mv OLD_KEY NEW_KEY
 ccl provider env rm KEY
+ccl provider env --provider tm1 KEY VALUE   # 改指定 provider，而不是当前激活的
+ccl provider env --acp ls                   # 看 ACP 正在用的 provider
 ```
+
+槽位模型、子代理模型、上下文大小和连接（`ANTHROPIC_DEFAULT_*_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL`、上下文三个变量、`ANTHROPIC_BASE_URL`/`*_KEY`/`*_TOKEN`）由 ccl 管理，`env` 会拒绝并提示对应命令（`ccl map` / `ccl set`），避免两处设置互相覆盖。写入已安装的 Claude Code 不读取的变量时会提示"不会生效"（通过检查 Claude Code 可执行文件判断，不运行它）。`ccl provider models`、`ccl provider preview`、`ccl doctor` 同样支持 `--provider <name>` / `--acp`。
 
 ### 其它
 

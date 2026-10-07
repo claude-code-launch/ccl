@@ -9,6 +9,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/slotrec"
 	"github.com/spf13/cobra"
 
 	tui "github.com/grindlemire/go-tui"
@@ -23,6 +24,7 @@ type mapOptions struct {
 	fable    string
 	custom   string
 	subagent string
+	probe    bool
 }
 
 var fetchMappingCatalog = fetchMappingCatalogFromProvider
@@ -36,7 +38,8 @@ func newMapCommand(use string) *cobra.Command {
 
 Modes:
   ccl map                        Interactive TUI - enter slot mapping page directly
-  ccl map auto                   Auto-fill slots with best available models
+  ccl map auto                   Auto-fill slots from the catalog (same rules as ccl set)
+  ccl map auto --probe           Test each model first (a billed request each)
   ccl map --opus <m> --sonnet <m>  Direct CLI mapping
 
 Examples:
@@ -59,7 +62,7 @@ Examples:
 				return runMapDirect(cmd, args, opts)
 			}
 			if len(args) > 0 && args[0] == "auto" {
-				return runMapAuto(cmd.Context(), args[1:])
+				return runMapAuto(cmd.Context(), args[1:], opts.probe)
 			}
 			return runMapTUI(args)
 		},
@@ -70,6 +73,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.fable, "fable", "", "Model ID for Fable slot")
 	cmd.Flags().StringVar(&opts.custom, "custom", "", "Model ID for Custom slot")
 	cmd.Flags().StringVar(&opts.subagent, "subagent", "", "Model ID for Claude Code subagents (empty uses automatic selection)")
+	cmd.Flags().BoolVar(&opts.probe, "probe", false, "With auto: test each model with a 1-token request first (billed)")
 	return cmd
 }
 
@@ -142,7 +146,7 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 }
 
 // runMapAuto fetches available models and maps usable models to slots in order.
-func runMapAuto(ctx context.Context, args []string) error {
+func runMapAuto(ctx context.Context, args []string, probe bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -158,7 +162,7 @@ func runMapAuto(ctx context.Context, args []string) error {
 		return fmt.Errorf("provider %q not found", providerName)
 	}
 
-	fmt.Printf("Fetching available models for %q...\n", providerName)
+	fmt.Printf("Fetching the model catalog for %q...\n", providerName)
 
 	runtimeProvider, models, metadata, cleanup, err := fetchMappingCatalog(ctx, p)
 	if err != nil {
@@ -166,52 +170,37 @@ func runMapAuto(ctx context.Context, args []string) error {
 	}
 	defer cleanup()
 
-	availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, probeWireType(runtimeProvider), runtimeProvider.AnthropicAuth, runtimeProvider.ModelProtocols)
-	available, unavailable := classifyModels(models, availableSet)
-
-	if len(available) == 0 {
-		return fmt.Errorf("no available models found - check endpoint and API key")
-	}
-
-	p.Model = strings.Join(append(available, unavailable...), ",")
-
-	fmt.Printf("Found %d available model(s) out of %d total.\n", len(available), len(models))
-
-	oneMSlots := oneMSlotsFromProvider(p)
-	slots := sequentialSlotPointers(&p)
-	assigned := applySequentialSlotMapping(slots, available)
-	// Fable is Claude Code's tier above Opus and follows the strongest pick, the
-	// same rule RecommendModels applies on the TUI page: no subscription or
-	// gateway catalog seen so far offers a Fable-family model, so spending one of
-	// the sequential picks on it would strip a real model from Custom. Mirroring
-	// Opus keeps /model fable on a working model instead of the bare
-	// claude-fable-5-1 ID that would fail discovery, and an exhausted sequential
-	// walk clears it along with the other trailing slots.
-	p.FableModel = p.OpusModel
-	// Drop [1m] only for slots that no longer map to a recommended model.
-	// Compact stays independent from per-slot [1m] cleanup.
-	for _, slot := range advancedSlotRefs(&p) {
-		if oneMSlots[slot.key] && !recommendedOneMModel(*slot.ptr) {
-			delete(oneMSlots, slot.key)
+	// Recommend from the catalog as is. Probing every model is a billed request
+	// each (Copilot premium requests, Qoder credits), so it is opt-in: --probe
+	// narrows the pool to the models that actually answered.
+	pool := models
+	if probe {
+		fmt.Printf("Probing %d model(s) with a 1-token request each...\n", len(models))
+		availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, probeWireType(runtimeProvider), runtimeProvider.AnthropicAuth, runtimeProvider.ModelProtocols)
+		available, unavailable := classifyModels(models, availableSet)
+		if len(available) == 0 {
+			return fmt.Errorf("no available models found - check endpoint and API key")
 		}
+		fmt.Printf("Found %d available model(s) out of %d total.\n", len(available), len(models))
+		pool = available
+		models = append(append([]string(nil), available...), unavailable...)
 	}
-	if allConfiguredModelsRecommendOneM(p) {
-		for _, slot := range advancedSlotRefs(&p) {
-			if strings.TrimSpace(*slot.ptr) != "" {
-				oneMSlots[slot.key] = true
-			}
-		}
+	if len(pool) == 0 {
+		return fmt.Errorf("the provider's catalog is empty")
 	}
+	p.Model = strings.Join(models, ",")
+
+	// The same recommender as the ccl set page. Mapping starts from scratch, so
+	// the current slots are not preserved; a slot keeps its [1m] marker only
+	// when the recommender confirms the model serves 1M.
+	rec := slotrec.Recommend(provider.Provider{}, pool, metadata)
+	p.OpusModel, p.SonnetModel, p.HaikuModel = rec.Opus, rec.Sonnet, rec.Haiku
+	p.FableModel, p.CustomModelID, p.SubagentModel = rec.Fable, rec.Custom, rec.Subagent
+	applyOneMSuffixes(&p, rec.OneMSlots)
 	// Mapping does not change Default/Balanced, but retires unsupported old or
 	// hand-written context combinations when encountered.
-	applyOneMSuffixes(&p, oneMSlots)
 	if hasUnsupportedContextConfig(p) {
 		applyCompactPreset(&p, compactPresetDefault)
-	}
-
-	if assigned < 4 {
-		fmt.Printf("⚠ Only %d model(s) available, assigned in order to first %d slot(s).\n", assigned, assigned)
-		fmt.Println("   Use 'ccl map' to manually configure remaining slots.")
 	}
 
 	if err := replaceProvider(providerName, p); err != nil {
@@ -226,24 +215,15 @@ func runMapAuto(ctx context.Context, args []string) error {
 			fmt.Printf("  %-6s -> (unset)\n", s.name)
 		}
 	}
-
+	if !probe {
+		fmt.Println("\nNot probed; `ccl map auto --probe` first tests each model (billed).")
+	}
 	return nil
 }
 
 type modelSlot struct {
 	name string
 	ptr  *string
-}
-
-// sequentialSlotPointers lists the slots `ccl map auto` fills in order. Fable is
-// deliberately absent: it has no model of its own to walk to (see runMapAuto).
-func sequentialSlotPointers(p *provider.Provider) []modelSlot {
-	return []modelSlot{
-		{"Opus", &p.OpusModel},
-		{"Sonnet", &p.SonnetModel},
-		{"Haiku", &p.HaikuModel},
-		{"Custom", &p.CustomModelID},
-	}
 }
 
 // mappedSlotReport lists every slot the auto-mapping summary prints, in menu
@@ -257,19 +237,6 @@ func mappedSlotReport(p *provider.Provider) []modelSlot {
 		{"Fable", &p.FableModel},
 		{"Custom", &p.CustomModelID},
 	}
-}
-
-func applySequentialSlotMapping(slots []modelSlot, available []string) int {
-	assigned := 0
-	for i, slot := range slots {
-		if i < len(available) {
-			*slot.ptr = available[i]
-			assigned++
-		} else {
-			*slot.ptr = ""
-		}
-	}
-	return assigned
 }
 
 // runMapTUI launches the interactive TUI at page 1 (slot mapping).

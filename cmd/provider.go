@@ -113,16 +113,6 @@ func parseProviderUseArgs(args []string) (name string, forACP, follow, showHelp 
 	return name, forACP, follow, showHelp, nil
 }
 
-func newProviderPreviewCommand(use string) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: "Preview the settings JSON for the active provider",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPreview()
-		},
-	}
-}
-
 func newProviderCopyCommand(use string) *cobra.Command {
 	// Declared per command because each constructor is called twice: once for
 	// the root shortcut and once under `ccl provider`.

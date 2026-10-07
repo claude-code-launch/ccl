@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -52,14 +53,14 @@ func TestDoctorOnlyProbesModelsOnRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runDoctor(context.Background(), false); err != nil {
+	if err := runDoctor(context.Background(), false, providerTarget{}); err != nil {
 		t.Fatalf("runDoctor() = %v", err)
 	}
 	if got := inference.Load(); got != 0 {
 		t.Fatalf("doctor without --probe sent %d inference request(s)", got)
 	}
 
-	if err := runDoctor(context.Background(), true); err != nil {
+	if err := runDoctor(context.Background(), true, providerTarget{}); err != nil {
 		t.Fatalf("runDoctor(--probe) = %v", err)
 	}
 	if got := inference.Load(); got != 2 {
@@ -72,5 +73,58 @@ func TestDoctorOnlyProbesModelsOnRequest(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("doctor rewrote the config:\n--- before\n%s\n--- after\n%s", before, after)
+	}
+}
+
+// TestMapAutoOnlyProbesOnRequest: map auto recommends from the catalog without
+// billed requests; --probe tests each model and drops the ones that fail.
+func TestMapAutoOnlyProbesOnRequest(t *testing.T) {
+	var inference atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"gw-pro"},{"id":"gw-flash"},{"id":"gw-broken-pro-max"}]}`)
+			return
+		}
+		inference.Add(1)
+		if strings.Contains(string(body), "gw-broken") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"message":"no such model"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+	t.Setenv("HOME", t.TempDir())
+	if err := config.Save(&provider.Config{ActiveProvider: "gw", Providers: map[string]provider.Provider{
+		"gw": {Name: "gw", Type: "openai", Endpoint: server.URL + "/v1", APIKey: "k"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runMapAuto(context.Background(), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := inference.Load(); got != 0 {
+		t.Fatalf("map auto sent %d inference request(s) without --probe", got)
+	}
+	cfg, _ := config.Load()
+	if got := cfg.Providers["gw"].OpusModel; got != "gw-broken-pro-max" {
+		t.Fatalf("unprobed opus = %q, want the catalog's strongest name", got)
+	}
+
+	if err := runMapAuto(context.Background(), nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := inference.Load(); got != 3 {
+		t.Fatalf("map auto --probe sent %d request(s), want one per model", got)
+	}
+	cfg, _ = config.Load()
+	p := cfg.Providers["gw"]
+	for _, slot := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.FableModel, p.CustomModelID} {
+		if strings.Contains(slot, "gw-broken") {
+			t.Fatalf("--probe mapped a model that failed: %+v", p)
+		}
 	}
 }

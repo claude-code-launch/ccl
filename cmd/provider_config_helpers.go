@@ -43,15 +43,6 @@ func compactPresetLabel(preset compactPreset) string {
 	}
 }
 
-func recommendedOneMModel(model string) bool {
-	switch strings.ToLower(stripOneMSuffix(model)) {
-	case "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna":
-		return true
-	default:
-		return false
-	}
-}
-
 func allConfiguredModelsRecommendOneM(p provider.Provider) bool {
 	found := false
 	for _, slot := range advancedSlotRefs(&p) {
@@ -91,12 +82,6 @@ func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset 
 
 func applyCompactPreset(p *provider.Provider, preset compactPreset) {
 	provider.SetProviderContextPreset(p, preset)
-}
-
-func ensureProviderEnv(p *provider.Provider) {
-	if p.Env == nil {
-		p.Env = make(map[string]string)
-	}
 }
 
 func oneMSlotsFromProvider(p provider.Provider) map[string]bool {

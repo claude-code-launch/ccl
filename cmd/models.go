@@ -13,6 +13,7 @@ var modelsCmd = newModelsCommand("models")
 
 func newModelsCommand(use string) *cobra.Command {
 	var showAll, probe bool
+	target := &providerTarget{}
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: "List the active provider's models, optionally probing each",
@@ -31,16 +32,17 @@ Examples:
   ccl provider models --probe
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runModels(cmd.Context(), showAll, probe)
+			return runModels(cmd.Context(), showAll, probe, *target)
 		},
 	}
+	addProviderTargetFlags(cmd, target)
 	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Show all provider models (not just configured ones)")
 	cmd.Flags().BoolVar(&probe, "probe", false, "Send a 1-token request to each model to test availability (billed)")
 	return cmd
 }
 
-func runModels(ctx context.Context, showAll, probe bool) error {
-	p, err := resolveProvider()
+func runModels(ctx context.Context, showAll, probe bool, target providerTarget) error {
+	_, p, err := target.load()
 	if err != nil {
 		return err
 	}

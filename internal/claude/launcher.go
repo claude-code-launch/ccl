@@ -21,6 +21,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/providersession"
+	"github.com/claude-code-launch/ccl/internal/slotrec"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +119,7 @@ func defaultSubagentModel(p provider.Provider) string {
 	if len(models) == 0 {
 		return ""
 	}
-	return modelrouting.MapModel("claude-3-5-sonnet", "", models)
+	return slotrec.Recommend(provider.Provider{}, models, nil).Sonnet
 }
 
 // buildEnv constructs the env-var overrides for a settings file.
@@ -348,48 +349,23 @@ func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[s
 			env[key] = value
 		}
 	}
-
-	if !strings.Contains(modelSpec, ",") {
-		model := strings.TrimSpace(modelSpec)
-		requestModel := catalogModelRequestName(model, names)
-		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL", requestModel)
-		setIfEmpty("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", catalogModelDisplayName(model, names))
-		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL", requestModel)
-		setIfEmpty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", catalogModelDisplayName(model, names))
-		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL", requestModel)
-		setIfEmpty("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", catalogModelDisplayName(model, names))
-		setIfEmpty("ANTHROPIC_DEFAULT_FABLE_MODEL", requestModel)
-		setIfEmpty("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", catalogModelDisplayName(model, names))
-		setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
+	models := modelrouting.SplitCSV(modelSpec)
+	if len(models) == 0 {
 		return
 	}
-
-	models := modelrouting.SplitCSV(modelSpec)
-	opus := modelrouting.MapModel("claude-3-opus", "", models)
-	sonnet := modelrouting.MapModel("claude-3-5-sonnet", "", models)
-	haiku := modelrouting.MapModel("claude-3-5-haiku", "", models)
-	fable := opus
-	for _, model := range models {
-		if strings.Contains(strings.ToLower(model), "fable") {
-			fable = modelrouting.MapModel("claude-fable-5-1", "", models)
-			break
-		}
-	}
-
+	// The same recommender ccl set and ccl map auto use, so an empty slot gets
+	// what the TUI would have offered.
+	rec := slotrec.Recommend(provider.Provider{}, models, nil)
 	setIfEmpty("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "0")
 	setIfEmpty("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-
-	for _, kv := range []struct{ k, v string }{
-		{"ANTHROPIC_DEFAULT_OPUS_MODEL", catalogModelRequestName(opus, names)},
-		{"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", catalogModelDisplayName(opus, names)},
-		{"ANTHROPIC_DEFAULT_SONNET_MODEL", catalogModelRequestName(sonnet, names)},
-		{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", catalogModelDisplayName(sonnet, names)},
-		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", catalogModelRequestName(haiku, names)},
-		{"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", catalogModelDisplayName(haiku, names)},
-		{"ANTHROPIC_DEFAULT_FABLE_MODEL", catalogModelRequestName(fable, names)},
-		{"ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", catalogModelDisplayName(fable, names)},
+	for _, slot := range []struct{ key, model string }{
+		{"OPUS", rec.Opus},
+		{"SONNET", rec.Sonnet},
+		{"HAIKU", rec.Haiku},
+		{"FABLE", rec.Fable},
 	} {
-		setIfEmpty(kv.k, kv.v)
+		setIfEmpty("ANTHROPIC_DEFAULT_"+slot.key+"_MODEL", catalogModelRequestName(slot.model, names))
+		setIfEmpty("ANTHROPIC_DEFAULT_"+slot.key+"_MODEL_NAME", catalogModelDisplayName(slot.model, names))
 	}
 	setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 }

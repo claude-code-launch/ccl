@@ -190,7 +190,7 @@ func seedActiveProviderEnv(t *testing.T, env map[string]string) {
 func TestEnvRemoveHonorsYesAndDeclinesWithout(t *testing.T) {
 	t.Run("--yes deletes", func(t *testing.T) {
 		seedActiveProviderEnv(t, map[string]string{"KEEP": "1", "DROP": "2"})
-		if err := runEnvRemove("DROP", true); err != nil {
+		if err := runEnvRemove("DROP", true, providerTarget{}); err != nil {
 			t.Fatalf("runEnvRemove: %v", err)
 		}
 		env := loadProviders(t).Providers["gw"].Env
@@ -205,7 +205,7 @@ func TestEnvRemoveHonorsYesAndDeclinesWithout(t *testing.T) {
 	t.Run("an unanswered prompt keeps the key", func(t *testing.T) {
 		// Under `go test` stdin is not a terminal, the same as a scripted run.
 		seedActiveProviderEnv(t, map[string]string{"DROP": "2"})
-		if err := runEnvRemove("DROP", false); err != nil {
+		if err := runEnvRemove("DROP", false, providerTarget{}); err != nil {
 			t.Fatalf("runEnvRemove: %v", err)
 		}
 		if _, still := loadProviders(t).Providers["gw"].Env["DROP"]; !still {
@@ -217,7 +217,7 @@ func TestEnvRemoveHonorsYesAndDeclinesWithout(t *testing.T) {
 func TestEnvMoveOverwritesOnlyWithYes(t *testing.T) {
 	t.Run("declined overwrite leaves both keys", func(t *testing.T) {
 		seedActiveProviderEnv(t, map[string]string{"OLD": "a", "NEW": "b"})
-		if err := runEnvMove("OLD", "NEW", false); err != nil {
+		if err := runEnvMove("OLD", "NEW", false, providerTarget{}); err != nil {
 			t.Fatalf("runEnvMove: %v", err)
 		}
 		env := loadProviders(t).Providers["gw"].Env
@@ -228,7 +228,7 @@ func TestEnvMoveOverwritesOnlyWithYes(t *testing.T) {
 
 	t.Run("--yes overwrites", func(t *testing.T) {
 		seedActiveProviderEnv(t, map[string]string{"OLD": "a", "NEW": "b"})
-		if err := runEnvMove("OLD", "NEW", true); err != nil {
+		if err := runEnvMove("OLD", "NEW", true, providerTarget{}); err != nil {
 			t.Fatalf("runEnvMove: %v", err)
 		}
 		env := loadProviders(t).Providers["gw"].Env

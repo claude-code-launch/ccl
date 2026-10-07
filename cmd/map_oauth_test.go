@@ -11,6 +11,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/slotrec"
 )
 
 // newMockOAuthMessagesServer stands in for a subscription's loopback runtime:
@@ -68,7 +69,7 @@ func TestMapAutoUsesDiscoveredOAuthRuntimeCatalog(t *testing.T) {
 	}
 	t.Cleanup(func() { fetchMappingCatalog = original })
 
-	if err := runMapAuto(context.Background(), nil); err != nil {
+	if err := runMapAuto(context.Background(), nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if cleanupCalls.Load() != 1 {
@@ -82,8 +83,9 @@ func TestMapAutoUsesDiscoveredOAuthRuntimeCatalog(t *testing.T) {
 	if p.Model != "model-a,model-b,model-c,model-d" {
 		t.Fatalf("saved model pool = %q", p.Model)
 	}
-	if strings.Join([]string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.CustomModelID}, ",") != "model-a,model-b,model-c,model-d" {
-		t.Fatalf("slot mapping = %+v", p)
+	want := slotrec.Recommend(provider.Provider{}, []string{"model-a", "model-b", "model-c", "model-d"}, nil)
+	if p.OpusModel != want.Opus || p.SonnetModel != want.Sonnet || p.HaikuModel != want.Haiku || p.CustomModelID != want.Custom {
+		t.Fatalf("slot mapping = %+v, want the recommender's %+v", p, want)
 	}
 	if p.Endpoint != "oauth://qoder" || p.APIKey != "" {
 		t.Fatalf("ephemeral runtime leaked into config: %+v", p)

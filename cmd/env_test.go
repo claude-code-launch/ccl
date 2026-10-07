@@ -20,7 +20,7 @@ func TestRunEnvSetPreservesEnvironmentVariableValue(t *testing.T) {
 	}
 
 	const key = "CUSTOM_GATEWAY_FLAG"
-	if err := runEnvSet([]string{key, "1050000"}); err != nil {
+	if err := runEnvSet([]string{key, "1050000"}, providerTarget{}); err != nil {
 		t.Fatalf("set ordinary environment variable: %v", err)
 	}
 	loaded, err := config.Load()

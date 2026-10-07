@@ -9,6 +9,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/slotrec"
 	"github.com/spf13/cobra"
 )
 
@@ -318,39 +319,6 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	}
 }
 
-func TestMapAutoAssignsAvailableModelsInOrder(t *testing.T) {
-	p := testProviderWithOldMappings()
-	assigned := applySequentialSlotMapping(sequentialSlotPointers(&p), []string{
-		"model-a",
-		"model-b",
-		"model-c",
-		"model-d",
-		"model-e",
-	})
-
-	if assigned != 4 {
-		t.Fatalf("expected 4 assigned slots, got %d", assigned)
-	}
-	if p.OpusModel != "model-a" || p.SonnetModel != "model-b" || p.HaikuModel != "model-c" || p.CustomModelID != "model-d" {
-		t.Fatalf("models were not assigned sequentially: %+v", p)
-	}
-}
-
-func TestMapAutoClearsUnassignedTrailingSlots(t *testing.T) {
-	p := testProviderWithOldMappings()
-	assigned := applySequentialSlotMapping(sequentialSlotPointers(&p), []string{"model-a", "model-b"})
-
-	if assigned != 2 {
-		t.Fatalf("expected 2 assigned slots, got %d", assigned)
-	}
-	if p.OpusModel != "model-a" || p.SonnetModel != "model-b" {
-		t.Fatalf("first slots not assigned sequentially: %+v", p)
-	}
-	if p.HaikuModel != "" || p.CustomModelID != "" {
-		t.Fatalf("unassigned trailing slots should be cleared: %+v", p)
-	}
-}
-
 func TestMapAutoRefreshesModelPoolWithoutTransferringOneMToUnknownModels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
@@ -375,7 +343,7 @@ func TestMapAutoRefreshesModelPoolWithoutTransferringOneMToUnknownModels(t *test
 		t.Fatalf("failed to save config: %v", err)
 	}
 
-	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
 		t.Fatalf("runMapAuto failed: %v", err)
 	}
 
@@ -388,30 +356,21 @@ func TestMapAutoRefreshesModelPoolWithoutTransferringOneMToUnknownModels(t *test
 	if p.Model != "model-a,model-b,model-c,model-d" {
 		t.Fatalf("expected refreshed model pool, got %q", p.Model)
 	}
-	if p.OpusModel != "model-a" {
-		t.Fatalf("expected unknown replacement model to lose 1M marker, got %q", p.OpusModel)
+	want := slotrec.Recommend(provider.Provider{}, []string{"model-a", "model-b", "model-c", "model-d"}, nil)
+	if p.OpusModel != want.Opus || strings.Contains(p.OpusModel, "[1m]") {
+		t.Fatalf("expected the recommended Opus without the old 1M marker, got %q", p.OpusModel)
 	}
-	if p.SonnetModel != "model-b" || p.HaikuModel != "model-c" || p.CustomModelID != "model-d" {
-		t.Fatalf("unexpected slot mapping: %+v", p)
+	if p.SonnetModel != want.Sonnet || p.HaikuModel != want.Haiku || p.CustomModelID != want.Custom {
+		t.Fatalf("map auto disagrees with the ccl set recommender: %+v vs %+v", p, want)
 	}
 	if _, ok := p.Env[autoCompactWindowEnv]; ok {
 		t.Fatalf("expected stale 1M compact window removed for unknown models, got %+v", p.Env)
 	}
 }
 
-func testProviderWithOldMappings() provider.Provider {
-	return provider.Provider{
-		OpusModel:     "old-opus",
-		SonnetModel:   "old-sonnet",
-		HaikuModel:    "old-haiku",
-		CustomModelID: "old-custom",
-		FableModel:    "old-fable",
-	}
-}
-
-// TestMapAutoMirrorsOpusIntoFable pins the Fable slot's auto-mapping: the
-// sequential walk owns only Opus/Sonnet/Haiku/Custom, so Fable must follow Opus
-// rather than stay on a stale value or consume one of the four picks.
+// TestMapAutoMirrorsOpusIntoFable pins the Fable slot's auto-mapping: with no
+// Fable-family model in the catalog it follows Opus rather than keep a stale
+// value.
 func TestMapAutoMirrorsOpusIntoFable(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
@@ -432,7 +391,7 @@ func TestMapAutoMirrorsOpusIntoFable(t *testing.T) {
 		t.Fatalf("failed to save config: %v", err)
 	}
 
-	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
 		t.Fatalf("runMapAuto failed: %v", err)
 	}
 
@@ -441,14 +400,8 @@ func TestMapAutoMirrorsOpusIntoFable(t *testing.T) {
 		t.Fatalf("failed to load config: %v", err)
 	}
 	p := updated.Providers["mock"]
-	if p.OpusModel != "model-a" {
-		t.Fatalf("opus = %q, want model-a", p.OpusModel)
-	}
-	if p.FableModel != "model-a" {
-		t.Fatalf("fable = %q, want the opus pick model-a", p.FableModel)
-	}
-	if p.CustomModelID != "model-d" {
-		t.Fatalf("custom = %q, want model-d (fable must not consume a sequential pick)", p.CustomModelID)
+	if p.OpusModel == "" || p.FableModel != p.OpusModel {
+		t.Fatalf("fable = %q, want it to follow the opus pick %q", p.FableModel, p.OpusModel)
 	}
 }
 
@@ -475,7 +428,7 @@ func TestMapAutoClearsStaleContextPreset(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := config.Load()
@@ -516,7 +469,7 @@ func TestMapAutoPreservesBalancedContextPreset(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := config.Load()
@@ -552,7 +505,7 @@ func TestMapAutoPreservesBalanced800KContextPreset(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := runMapAuto(context.Background(), []string{"mock"}); err != nil {
+	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := config.Load()
