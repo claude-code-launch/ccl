@@ -80,7 +80,7 @@ func defaultAutoClawDesktopAuthPath() (string, error) {
 
 func readAutoClawSafeStoragePassword(ctx context.Context) (string, error) {
 	if runtime.GOOS != "darwin" {
-		return "", errors.New("AutoClaw safeStorage import is currently supported on macOS; sign in on macOS and run `ccl import autoclaw`")
+		return "", errors.New("AutoClaw safeStorage import is currently supported on macOS; sign in on macOS and run `ccl oauth autoclaw --from-desktop`")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -112,7 +112,7 @@ func loadAutoClawDesktopAuth(ctx context.Context) (autoclawDesktopAuth, string, 
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return autoclawDesktopAuth{}, path, fmt.Errorf("AutoClaw login state was not found at %s; sign in to AutoClaw once, then rerun `ccl import autoclaw`", path)
+			return autoclawDesktopAuth{}, path, fmt.Errorf("AutoClaw login state was not found at %s; sign in to AutoClaw once, then rerun `ccl oauth autoclaw --from-desktop`", path)
 		}
 		return autoclawDesktopAuth{}, path, fmt.Errorf("read AutoClaw login state %s: %w", path, err)
 	}

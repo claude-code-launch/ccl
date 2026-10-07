@@ -22,19 +22,15 @@ func resolveACPProvider() (acpProviderSnapshot, error) {
 	if err != nil {
 		return acpProviderSnapshot{}, fmt.Errorf("failed to load config: %w", err)
 	}
-	if cfg.ACPProvider != "" {
-		p, ok := cfg.Providers[cfg.ACPProvider]
-		if !ok {
-			return acpProviderSnapshot{}, fmt.Errorf("provider %q selected for ACP was not found in configuration", cfg.ACPProvider)
-		}
-		return acpProviderSnapshot{name: cfg.ACPProvider, provider: cloneACPProvider(p)}, nil
+	name := cfg.EffectiveACPProvider()
+	if name == "" {
+		return acpProviderSnapshot{}, fmt.Errorf("no provider selected for ACP. Use 'ccl use --acp <name>', or 'ccl use <name>' (ACP follows it unless pinned)")
 	}
-
-	p, err := resolveProviderFromEnvironment()
-	if err != nil {
-		return acpProviderSnapshot{}, fmt.Errorf("no provider selected for ACP. Use 'ccl use --acp <name>', or set OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in environment")
+	p, ok := cfg.Providers[name]
+	if !ok {
+		return acpProviderSnapshot{}, fmt.Errorf("provider %q selected for ACP was not found in configuration", name)
 	}
-	return acpProviderSnapshot{name: p.Name, provider: cloneACPProvider(p)}, nil
+	return acpProviderSnapshot{name: name, provider: cloneACPProvider(p)}, nil
 }
 
 func cloneACPProvider(p provider.Provider) provider.Provider {

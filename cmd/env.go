@@ -21,22 +21,18 @@ func newEnvCommand(use string) *cobra.Command {
 		Long: `Manage environment variables for the active provider.
 
 Set or modify a variable:
-  ccl env KEY VALUE
   ccl provider env KEY VALUE
 
 List all variables:
-  ccl env ls
   ccl provider env ls
 
 Delete a variable:
-  ccl env rm KEY
-  ccl env rm KEY -y        # skip the confirmation
   ccl provider env rm KEY
+  ccl provider env rm KEY -y        # skip the confirmation
 
 Rename a variable:
-  ccl env mv OLD_KEY NEW_KEY
-  ccl env mv OLD_KEY NEW_KEY -y   # overwrite an existing key
   ccl provider env mv OLD_KEY NEW_KEY
+  ccl provider env mv OLD_KEY NEW_KEY -y   # overwrite an existing key
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runEnvSet(args)
@@ -48,7 +44,7 @@ Rename a variable:
 
 func runEnvSet(args []string) error {
 	if len(args) != 2 {
-		return errors.New(locale.T("期望 KEY 和 VALUE 参数，或子命令（ls、rm、mv）。见 `ccl env --help`", "expected KEY and VALUE arguments, or a subcommand (ls, rm, mv). See ccl env --help"))
+		return errors.New(locale.T("期望 KEY 和 VALUE 参数，或子命令（ls、rm、mv）。见 `ccl provider env --help`", "expected KEY and VALUE arguments, or a subcommand (ls, rm, mv). See ccl provider env --help"))
 	}
 
 	cfg, err := config.Load()
@@ -127,7 +123,7 @@ func runEnvList() error {
 // newEnvRemoveCommand deletes an environment variable.
 func newEnvRemoveCommand() *cobra.Command {
 	// Per command, not package level: newEnvCommand is built twice, once for
-	// `ccl env` and once for `ccl provider env`.
+	// `ccl provider env` and once for `ccl provider env`.
 	yes := false
 	cmd := &cobra.Command{
 		Use:   "rm KEY",
@@ -244,5 +240,5 @@ func runEnvMove(oldArg, newArg string, force bool) error {
 }
 
 func init() {
-	rootCmd.AddCommand(envCmd)
+	rootCmd.AddCommand(deprecatedRootAlias(envCmd, "ccl provider env"))
 }

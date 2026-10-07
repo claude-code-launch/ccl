@@ -123,7 +123,7 @@ func providerUsageSummary(cfg *provider.Config, name string) string {
 			usedBy = append(usedBy, "normal")
 		}
 	}
-	if name == cfg.ACPProvider {
+	if name == cfg.EffectiveACPProvider() {
 		usedBy = append(usedBy, "ACP")
 	}
 	if len(usedBy) == 0 {

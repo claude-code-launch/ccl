@@ -74,7 +74,7 @@ func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if got.ActiveProvider != "legacy" || got.ACPProvider != "legacy" || got.Providers["legacy"].Endpoint != "https://example.test/v1" {
+	if got.ActiveProvider != "legacy" || got.EffectiveACPProvider() != "legacy" || got.Providers["legacy"].Endpoint != "https://example.test/v1" {
 		t.Fatalf("legacy config was not loaded: %+v", got)
 	}
 
@@ -91,7 +91,9 @@ func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
 	}
 }
 
-func TestLoadPinsActiveProviderForACPOnce(t *testing.T) {
+// TestLoadLeavesACPFollowingTheActiveProvider pins S9: an empty acp_provider
+// means "follow normal mode" and Load no longer pins (and rewrites) it.
+func TestLoadLeavesACPFollowingTheActiveProvider(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	configDir := filepath.Join(home, ".ccl")
@@ -108,15 +110,15 @@ func TestLoadPinsActiveProviderForACPOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ACPProvider != "alpha" {
-		t.Fatalf("migrated ACP provider = %q, want alpha", cfg.ACPProvider)
+	if cfg.ACPProvider != "" || cfg.EffectiveACPProvider() != "alpha" {
+		t.Fatalf("ACP selection = %q (effective %q), want unpinned following alpha", cfg.ACPProvider, cfg.EffectiveACPProvider())
 	}
 	persisted, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(persisted), "acp_provider: alpha") {
-		t.Fatalf("ACP provider migration was not persisted: %s", persisted)
+	if strings.Contains(string(persisted), "acp_provider") {
+		t.Fatalf("Load pinned the ACP provider into the file: %s", persisted)
 	}
 }
 

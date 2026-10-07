@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultSessionStorePathLivesUnderTheUserHome(t *testing.T) {
@@ -203,4 +204,36 @@ func TestPersistedSessionSerializesItsThreeFields(t *testing.T) {
 			t.Fatalf("field %s = %v, want %q", key, fields[key], value)
 		}
 	}
+}
+
+func TestSessionStorePruneDropsOnlyStaleMappings(t *testing.T) {
+	dir := t.TempDir()
+	store := newSessionStore(dir)
+	now := time.Now()
+	write := func(name string, age time.Duration) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := now.Add(-age)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	stale := write("old.json", 40*24*time.Hour)
+	tempLeft := write(".session-123.tmp", 40*24*time.Hour)
+	fresh := write("new.json", time.Hour)
+	foreign := write("README", 40*24*time.Hour)
+
+	store.prune(sessionStoreMaxAge, now)
+	for path, survive := range map[string]bool{stale: false, tempLeft: false, fresh: true, foreign: true} {
+		_, err := os.Stat(path)
+		if exists := err == nil; exists != survive {
+			t.Errorf("%s: exists=%t, want %t", filepath.Base(path), exists, survive)
+		}
+	}
+	var nilStore *sessionStore
+	nilStore.prune(time.Hour, now) // must not panic
 }

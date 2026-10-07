@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -66,6 +67,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, cfg Config) error {
 		session: map[string]*claudeSession{},
 		store:   newSessionStore(cfg.SessionStorePath),
 	}
+	s.store.prune(sessionStoreMaxAge, time.Now())
 	defer func() {
 		s.shutdown()
 		s.wg.Wait()

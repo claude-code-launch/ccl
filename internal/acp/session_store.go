@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type persistedSession struct {
@@ -70,6 +71,33 @@ func (s *sessionStore) save(entry persistedSession) error {
 		return fmt.Errorf("store ACP session: %w", err)
 	}
 	return nil
+}
+
+// sessionStoreMaxAge matches Claude Code's default transcript retention: a
+// mapping older than that points at a transcript that is likely gone.
+const sessionStoreMaxAge = 30 * 24 * time.Hour
+
+// prune removes mappings not written for maxAge, plus temp files a crashed
+// save left behind. Best effort.
+func (s *sessionStore) prune(maxAge time.Duration, now time.Time) {
+	if s == nil {
+		return
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !(strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".session-")) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) <= maxAge {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.dir, name))
+	}
 }
 
 func (s *sessionStore) load(id string) (persistedSession, error) {

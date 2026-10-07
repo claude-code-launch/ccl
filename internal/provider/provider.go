@@ -183,10 +183,23 @@ func ModelsDevCatalogID(p Provider) string {
 	return strings.TrimSpace(p.Name)
 }
 
+// EffectiveACPProvider is the provider name ACP sessions use: the explicit
+// `ccl use --acp` choice, or the normal-mode provider when none is pinned.
+func (c *Config) EffectiveACPProvider() string {
+	if c == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(c.ACPProvider); name != "" {
+		return name
+	}
+	return strings.TrimSpace(c.ActiveProvider)
+}
+
 type Config struct {
 	ActiveProvider string `yaml:"active_provider"`
 	// ACPProvider is only the name selected by `ccl use --acp`. Its settings stay
 	// in the shared Providers map; ACP never owns a duplicate provider config.
+	// Empty means ACP follows ActiveProvider (see EffectiveACPProvider).
 	ACPProvider string `yaml:"acp_provider,omitempty"`
 	Lang        string `yaml:"lang,omitempty"`
 	// BypassMode automatically passes --dangerously-skip-permissions to Claude

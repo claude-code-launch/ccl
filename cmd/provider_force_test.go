@@ -35,7 +35,7 @@ func loadProviders(t *testing.T) *provider.Config {
 func TestProviderRemoveWithYesSkipsTheConfirmation(t *testing.T) {
 	seedProviders(t, "keep", "keep", "drop")
 
-	if err := runProviderRemove("drop", true); err != nil {
+	if err := runProviderRemove("drop", true, false); err != nil {
 		t.Fatalf("runProviderRemove: %v", err)
 	}
 	cfg := loadProviders(t)
@@ -52,7 +52,7 @@ func TestProviderRemoveWithoutYesDeclinesOnUnansweredPrompt(t *testing.T) {
 	// same thing a scripted `ccl rm` sees. That must cancel, never delete.
 	seedProviders(t, "drop", "drop")
 
-	if err := runProviderRemove("drop", false); err != nil {
+	if err := runProviderRemove("drop", false, false); err != nil {
 		t.Fatalf("runProviderRemove: %v", err)
 	}
 	if _, still := loadProviders(t).Providers["drop"]; !still {
@@ -105,12 +105,25 @@ func TestProviderRemoveRepairsACPSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runProviderRemove("drop", true); err != nil {
+	if err := runProviderRemove("drop", true, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg = loadProviders(t)
-	if cfg.ActiveProvider != "keep" || cfg.ACPProvider != "keep" {
+	if cfg.ActiveProvider != "keep" || cfg.ACPProvider == "drop" {
 		t.Fatalf("provider selections = active:%q ACP:%q", cfg.ActiveProvider, cfg.ACPProvider)
+	}
+}
+
+// TestProviderRemoveNeverSwitchesToAnotherProvider pins S8: deleting the
+// active provider clears the selection instead of quietly moving the next
+// session onto whichever provider sorts first.
+func TestProviderRemoveNeverSwitchesToAnotherProvider(t *testing.T) {
+	seedProviders(t, "drop", "aaa-billed", "drop")
+	if err := runProviderRemove("drop", true, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := loadProviders(t); cfg.ActiveProvider != "" {
+		t.Fatalf("active provider switched to %q", cfg.ActiveProvider)
 	}
 }
 

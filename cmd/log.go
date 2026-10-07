@@ -15,9 +15,8 @@ var logCmd = newLogCommand()
 
 func newLogCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "log [on|off]",
-		Aliases: []string{"debug"}, // compatibility for scripts written before ccl log
-		Short:   "Configure ccl's per-session runtime logs",
+		Use:   "log [on|off]",
+		Short: "Configure ccl's per-session runtime logs",
 		Long: `Configure the threshold for ccl's per-session runtime logs.
 
 The filename template is ~/.ccl/logs/ccl-debug.log by default (override with

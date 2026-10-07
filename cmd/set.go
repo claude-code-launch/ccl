@@ -219,6 +219,16 @@ func RunProviderSet(args []string) error {
 		updatedModel.IsActiveChosen,
 	)
 
+	// The page can rename the draft (a generated placeholder takes the
+	// models.dev catalog ID). A name that now belongs to a different provider
+	// must not be overwritten — that would silently replace its key and setup.
+	if name, collided := providerSaveName(cfg.Providers, targetName, p.Name); collided {
+		fmt.Fprintf(os.Stderr, locale.T(
+			"ℹ️ 已有名为 %q 的 Provider，本次保存为 %q（可用 ccl mv 改名）\n",
+			"ℹ️ A provider named %q already exists; saved this one as %q (rename with ccl mv)\n",
+		), p.Name, name)
+		p.Name = name
+	}
 	cfg.Providers[p.Name] = p
 	if updatedModel.IsActiveChosen {
 		cfg.ActiveProvider = p.Name
@@ -282,6 +292,33 @@ func randomProviderName(existing map[string]provider.Provider) string {
 	// 64 collisions is astronomically unlikely; fall back to a timestamp so the
 	// name remains unique even if the entropy source somehow keeps repeating.
 	return fmt.Sprintf("provider-%d", time.Now().UnixNano())
+}
+
+// providerSaveName decides the key a provider edited as openedAs is saved
+// under. Keeping its own name is always fine; a name the page assigned that now
+// belongs to another provider gets a free suffix instead (collided=true).
+func providerSaveName(existing map[string]provider.Provider, openedAs, name string) (string, bool) {
+	if name == openedAs {
+		return name, false
+	}
+	if _, taken := existing[name]; !taken {
+		return name, false
+	}
+	return uniqueProviderName(existing, name), true
+}
+
+// uniqueProviderName returns base, or base-2, base-3, ... — the first name not
+// already configured.
+func uniqueProviderName(existing map[string]provider.Provider, base string) string {
+	if _, taken := existing[base]; !taken {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if _, taken := existing[candidate]; !taken {
+			return candidate
+		}
+	}
 }
 
 func countCSV(csv string) int {

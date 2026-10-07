@@ -186,7 +186,7 @@ func startMixedProtocolRouter(parent context.Context, endpoint, upstreamAPIKey s
 		endpoint: "http://" + listener.Addr().String() + "/v1", apiKey: apiKey,
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, usage: usage,
-		// Surface the catalog so callers like `ccl map` and `ccl models --all`
+		// Surface the catalog so callers like `ccl map` and `ccl provider models --all`
 		// see the routed models instead of falling through to heuristics.
 		models: append([]string(nil), routes.models...),
 	}

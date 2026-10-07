@@ -31,7 +31,8 @@ const doctorProbeTimeout = 5 * time.Second
 var doctorCmd = newDoctorCommand()
 
 func newDoctorCommand() *cobra.Command {
-	return &cobra.Command{
+	probe := false
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Show provider status and check connectivity",
 		Long: `Show environment prerequisites, active provider status, and connectivity.
@@ -44,14 +45,20 @@ Model pool (provider.Model) is an optional candidate list used by ccl set/map
 for discovery and bulk checks. Claude Code actually uses the slot mappings
 (Opus/Sonnet/Haiku/Fable/Custom/Subagent). An empty pool with filled slots is normal.
 
+Doctor only reads: it lists models and checks the endpoint with a catalog
+request, and never changes ~/.ccl/config.yaml. --probe additionally sends a
+1-token request to every model in the pool, which counts against your plan.
+
 Note: root "ccl status" is cloud sync status (see "ccl cloud status"), not this command.
 For live request failures enable "ccl log on" and check the session log file
 when the Claude session ends (default ~/.ccl/logs/ccl-debug-claude_<id>.log).
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDoctor(cmd.Context())
+			return runDoctor(cmd.Context(), probe)
 		},
 	}
+	cmd.Flags().BoolVar(&probe, "probe", false, "Also send a 1-token request to every model in the pool (billed)")
+	return cmd
 }
 
 // ANSI 24-bit color helpers. doctor prints plain terminal output (no TUI), so
@@ -108,7 +115,7 @@ func doctorHint(msg string) {
 	fmt.Println(ansiDim + "  ↳ " + msg + ansiReset)
 }
 
-func runDoctor(ctx context.Context) error {
+func runDoctor(ctx context.Context, probe bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -188,30 +195,24 @@ func runDoctor(ctx context.Context) error {
 		endpointReachable = checkDoctorConnectivity(ctx, p)
 	}
 
-	// 5. Validate configured models with concurrent API calls and reorder (available first)
+	// 5. Optionally send a 1-token request to each pooled model. It costs real
+	// requests (Copilot premium requests, Qoder credits), so it only runs on
+	// --probe, and doctor never rewrites the config with what it finds.
 	if endpointReachable && p.Model != "" {
 		configuredModels := parseModelList(p.Model)
 		if len(configuredModels) > 0 {
 			doctorSection("Model verification")
+			if !probe {
+				doctorInfo(fmt.Sprintf("Skipped: %d model(s) in the pool.", len(configuredModels)))
+				doctorHint("Run `ccl doctor --probe` or `ccl models --probe` to send a 1-token test to each (billed).")
+				return nil
+			}
 			probeTarget := modelProbeTarget(configuredProvider, p)
 			availableSet := testModelsConcurrently(ctx, configuredModels, probeTarget.Endpoint, probeTarget.APIKey, probeWireType(probeTarget), probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
 			available, unavailable := classifyModels(configuredModels, availableSet)
 			doctorKV("Summary", modelVerificationSummary(available, unavailable))
 			if len(unavailable) > 0 {
-				doctorHint("Run `ccl models` to inspect individual model results.")
-			}
-
-			// Reorder and save: available first, unavailable last
-			reordered := append(available, unavailable...)
-			newModel := strings.Join(reordered, ",")
-			if newModel != p.Model {
-				configuredProvider.Model = newModel
-				cfg.Providers[cfg.ActiveProvider] = configuredProvider
-				if err := config.Save(cfg); err != nil {
-					doctorErr(fmt.Sprintf("Failed to save reordered models: %v", err))
-				} else {
-					doctorOK("Config updated: available models prioritized.")
-				}
+				doctorHint("Run `ccl models --probe` to inspect individual model results.")
 			}
 		}
 	}

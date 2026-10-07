@@ -30,5 +30,5 @@ func runPreview() error {
 }
 
 func init() {
-	rootCmd.AddCommand(previewCmd)
+	rootCmd.AddCommand(deprecatedRootAlias(previewCmd, "ccl provider preview"))
 }

@@ -40,7 +40,7 @@ var (
 
 // ImportAutoClawCredential copies the completed AutoClaw desktop login into
 // ~/.ccl/auth. This is the non-browser compatibility path used by
-// `ccl import autoclaw`; `ccl oauth autoclaw` performs a fresh browser login.
+// `ccl oauth autoclaw --from-desktop`; `ccl oauth autoclaw` performs a fresh browser login.
 func ImportAutoClawCredential(ctx context.Context, authDir string) (LoginResult, error) {
 	state, sourcePath, err := loadAutoClawDesktopAuth(ctx)
 	if err != nil {

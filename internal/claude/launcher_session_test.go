@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ func TestWriteSettingsFileNamesFileAfterSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Remove(path)
-	if want := session + "_settings.json"; filepath.Base(path) != want {
+	if want := fmt.Sprintf("%s-%d_settings.json", session, os.Getpid()); filepath.Base(path) != want {
 		t.Fatalf("settings file = %q, want base %q", path, want)
 	}
 

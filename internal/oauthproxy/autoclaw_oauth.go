@@ -113,7 +113,7 @@ func loginAutoClaw(ctx context.Context, authDir string, opts LoginOptions) (Logi
 			supplier = "aliyun"
 		}
 		if supplier != "aliyun" {
-			return LoginResult{}, fmt.Errorf("AutoClaw OAuth requires unsupported %s captcha; use `ccl import autoclaw` after signing in with the desktop app", supplier)
+			return LoginResult{}, fmt.Errorf("AutoClaw OAuth requires unsupported %s captcha; use `ccl oauth autoclaw --from-desktop` after signing in with the desktop app", supplier)
 		}
 		if strings.TrimSpace(captchaConfig.Region) == "" || strings.TrimSpace(captchaConfig.Prefix) == "" || strings.TrimSpace(captchaConfig.SceneID) == "" {
 			return LoginResult{}, errors.New("AutoClaw OAuth returned an incomplete Aliyun captcha configuration")

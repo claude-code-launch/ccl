@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/config"
@@ -51,12 +52,16 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  acp", "  oauth", "  bypass", "  log", "  ls", "  cp", "  mv", "  rm", "  preview", "  provider", "  login", "  push", "  pull", "  tag", "  status"} {
+	for _, want := range []string{"  acp", "  oauth", "  bypass", "  log", "  ls", "  use", "  set", "  map", "  provider", "  cloud"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
 	}
-	for _, unwanted := range []string{"\n  conf", "\n  list", "\n  run", "\n  settings", "acp-permission"} {
+	// Deprecated root shortcuts still run but are not advertised; removed ones
+	// are gone entirely.
+	for _, unwanted := range []string{"\n  conf", "\n  list", "\n  run", "\n  settings", "acp-permission",
+		"\n  cp ", "\n  mv ", "\n  rm ", "\n  preview", "\n  login", "\n  push", "\n  pull", "\n  tag ", "\n  status",
+		"\n  import", "\n  auth", "\n  debug"} {
 		if contains(out, unwanted) {
 			t.Fatalf("root help should not contain old command %q, got:\n%s", unwanted, out)
 		}
@@ -94,29 +99,22 @@ func TestProviderSubcommandAliasesExist(t *testing.T) {
 	}
 }
 
-func TestResolveProviderUsesAnthropicAuthTokenEnv(t *testing.T) {
+// TestResolveProviderIgnoresShellCredentials pins S11: with no provider
+// selected, keys exported in the shell for other tools must not become an
+// implicit, billed Claude Code provider.
+func TestResolveProviderIgnoresShellCredentials(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "bearer-token")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://token.sensenova.cn/v1")
-	t.Setenv("ANTHROPIC_MODEL", "sensenova-u1-fast")
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-other-tool")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-other-tool")
 
 	p, err := resolveProvider()
-	if err != nil {
-		t.Fatalf("resolveProvider failed: %v", err)
+	if err == nil {
+		t.Fatalf("resolveProvider() built a provider from the shell: %+v", p)
 	}
-	if p.Type != "anthropic" {
-		t.Fatalf("expected anthropic provider, got %q", p.Type)
-	}
-	if p.APIKey != "bearer-token" {
-		t.Fatalf("expected auth token as API key, got %q", p.APIKey)
-	}
-	if p.AnthropicAuth != "bearer" {
-		t.Fatalf("expected bearer auth, got %q", p.AnthropicAuth)
-	}
-	if p.Model != "sensenova-u1-fast" {
-		t.Fatalf("expected ANTHROPIC_MODEL fallback, got %q", p.Model)
+	if !strings.Contains(err.Error(), "ccl provider off") {
+		t.Fatalf("error does not offer the subscription path: %v", err)
 	}
 }
 

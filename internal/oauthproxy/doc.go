@@ -71,7 +71,7 @@
 //  7. AutoClaw runtime (autoclaw_*.go)
 //     `ccl oauth autoclaw` owns the Google browser callback and Aliyun human
 //     verification page, then stores the returned refreshable session under
-//     ~/.ccl/auth (0600). `ccl import autoclaw` remains the optional path for
+//     ~/.ccl/auth (0600). `ccl oauth autoclaw --from-desktop` remains the optional path for
 //     copying AutoClaw's encrypted desktop auth.json. The loopback adapter
 //     converts Claude Messages to the managed OpenAI Chat endpoint, refreshes
 //     access_token with refresh_token, sends the desktop-compatible

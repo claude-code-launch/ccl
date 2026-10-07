@@ -9,6 +9,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/acp"
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
@@ -34,12 +35,14 @@ Common commands:
   ccl cloud login|push|pull   Encrypted multi-remote config sync
   ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)
 
-Compatibility aliases still work for older scripts:
-  ccl auth ...        → ccl oauth ...
-  ccl login/push/...  → ccl cloud login/push/...
+Deprecated root shortcuts (removed in the next minor release):
+  ccl login/push/pull/status/...  → ccl cloud login/push/pull/status/...
+  ccl cp/mv/env/preview/models    → ccl provider cp/mv/env/preview/models
 
 Run "ccl <command> --help" for details. Extra args after ccl are passed through
-to Claude Code (for example: ccl resume, ccl -p "hello").
+to Claude Code (for example: ccl resume, ccl -p "hello"). ccl doctor and
+ccl update are ccl's own; reach Claude Code's with ccl claude doctor and
+ccl claude update.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runClaude(args)
@@ -167,71 +170,25 @@ func runClaude(args []string) error {
 	return err
 }
 
-// resolveProvider determines the active provider.
-// Config takes priority over environment variables — once a user has an active_provider
-// in config.yaml, stale env vars (like leftover ANTHROPIC_API_KEY or
-// ANTHROPIC_AUTH_TOKEN from a previous session) should not override it. Env vars
-// are only used as a fallback when there is no config.
+// resolveProvider returns the active provider. ccl no longer builds an
+// implicit provider from OPENAI_API_KEY / ANTHROPIC_API_KEY in the shell: a key
+// exported for another tool would quietly bill a Claude Code session. Without
+// a selection, the user picks one, or runs Claude Code on its own login with
+// `ccl provider off`.
 func resolveProvider() (provider.Provider, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return provider.Provider{}, fmt.Errorf("failed to load config: %w", err)
 	}
-
-	// Config takes priority: if active_provider is set, use it
-	if cfg.ActiveProvider != "" {
-		p, ok := cfg.Providers[cfg.ActiveProvider]
-		if !ok {
-			return provider.Provider{}, fmt.Errorf("active provider %q not found in configuration", cfg.ActiveProvider)
-		}
-		return p, nil
+	if cfg.ActiveProvider == "" {
+		return provider.Provider{}, errors.New(locale.T(
+			"未选择 Provider。用 ccl set 添加、ccl use <name> 选择，或用 ccl provider off 直接以 Claude Code 自身登录启动",
+			"no provider selected. Add one with ccl set, choose one with ccl use <name>, or run Claude Code on its own login with ccl provider off",
+		))
 	}
-
-	return resolveProviderFromEnvironment()
-}
-
-func resolveProviderFromEnvironment() (provider.Provider, error) {
-	envAnthropicKey := os.Getenv("ANTHROPIC_API_KEY")
-	envAnthropicAuthToken := os.Getenv("ANTHROPIC_AUTH_TOKEN")
-	envAnthropicBase := os.Getenv("ANTHROPIC_BASE_URL")
-
-	if envAnthropicAuthToken != "" || envAnthropicKey != "" {
-		apiKey := envAnthropicKey
-		anthropicAuth := ""
-		if envAnthropicAuthToken != "" {
-			apiKey = envAnthropicAuthToken
-			anthropicAuth = "bearer"
-		}
-		p := provider.Provider{
-			Name:          "environment-anthropic",
-			Type:          "anthropic",
-			Endpoint:      envAnthropicBase,
-			APIKey:        apiKey,
-			Model:         os.Getenv("ANTHROPIC_MODEL"),
-			AnthropicAuth: anthropicAuth,
-		}
-		if p.Endpoint == "" {
-			p.Endpoint = "https://api.anthropic.com"
-		}
-		return p, nil
+	p, ok := cfg.Providers[cfg.ActiveProvider]
+	if !ok {
+		return provider.Provider{}, fmt.Errorf("active provider %q not found in configuration", cfg.ActiveProvider)
 	}
-
-	envAPIKey := os.Getenv("OPENAI_API_KEY")
-	envBaseURL := os.Getenv("OPENAI_BASE_URL")
-
-	if envAPIKey != "" {
-		p := provider.Provider{
-			Name:     "environment",
-			Type:     "openai",
-			Endpoint: envBaseURL,
-			APIKey:   envAPIKey,
-			Model:    os.Getenv("OPENAI_MODEL"),
-		}
-		if p.Endpoint == "" {
-			p.Endpoint = "https://api.openai.com/v1"
-		}
-		return p, nil
-	}
-
-	return provider.Provider{}, fmt.Errorf("no active provider selected. Use 'ccl set' or 'ccl use', or set OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in environment")
+	return p, nil
 }

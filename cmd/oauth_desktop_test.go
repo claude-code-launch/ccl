@@ -75,18 +75,19 @@ func readAuthCredential(t *testing.T, home, name string) map[string]any {
 	return metadata
 }
 
-func TestRunImportAutoClawCreatesProvider(t *testing.T) {
+func TestOAuthFromDesktopCreatesAutoClawProvider(t *testing.T) {
 	home := isolateAutoClawDesktopAuth(t)
 	writeAutoClawDesktopAuth(t, home, "imported-access-token")
 
 	var out bytes.Buffer
-	if err := runImport(context.Background(), &out, []string{"autoclaw"}); err != nil {
-		t.Fatalf("runImport() error: %v", err)
+	if err := runAuth(context.Background(), &out, []string{"autoclaw"}, authOptions{fromDesktop: true}); err != nil {
+		t.Fatalf("runAuth(--from-desktop) error: %v", err)
 	}
-	if !strings.Contains(out.String(), `Imported autoclaw credential as provider "autoclaw-`) {
+	if !strings.Contains(out.String(), "Importing the autoclaw desktop login") ||
+		!strings.Contains(out.String(), `as provider "autoclaw-`) {
 		t.Fatalf("output = %q", out.String())
 	}
-	if !strings.Contains(out.String(), "Protocol: openai-chat / autoclaw (fixed for this backend)") {
+	if !strings.Contains(out.String(), "Protocol: openai-chat / autoclaw (fixed for this OAuth backend)") {
 		t.Fatalf("output = %q", out.String())
 	}
 
@@ -136,12 +137,12 @@ func TestRunImportAutoClawCreatesProvider(t *testing.T) {
 	}
 }
 
-func TestRunImportAliasBecomesProviderName(t *testing.T) {
+func TestOAuthFromDesktopAliasBecomesProviderName(t *testing.T) {
 	home := isolateAutoClawDesktopAuth(t)
 	writeAutoClawDesktopAuth(t, home, "imported-access-token")
 
-	if err := runImport(context.Background(), &bytes.Buffer{}, []string{"autoclaw", "work"}); err != nil {
-		t.Fatalf("runImport() error: %v", err)
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"autoclaw", "work"}, authOptions{fromDesktop: true}); err != nil {
+		t.Fatalf("runAuth(--from-desktop) error: %v", err)
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -156,16 +157,17 @@ func TestRunImportAliasBecomesProviderName(t *testing.T) {
 	}
 }
 
-func TestRunImportRejectsUnsupportedSourceAndReservedAlias(t *testing.T) {
+func TestOAuthFromDesktopRejectsOtherBackendsAndReservedAlias(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	// The real ImportCredential dispatch rejects non-autoclaw sources before
-	// touching HOME or the network.
-	if err := runImport(context.Background(), &bytes.Buffer{}, []string{"gpt"}); err == nil {
-		t.Fatal("runImport(gpt) should fail")
+	// --from-desktop only exists for AutoClaw; it is rejected before any login
+	// or import work.
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"gpt"}, authOptions{fromDesktop: true}); err == nil ||
+		!strings.Contains(err.Error(), "only supported for autoclaw") {
+		t.Fatalf("runAuth(gpt --from-desktop) = %v", err)
 	}
 	// A reserved alias fails before any import work runs.
-	if err := runImport(context.Background(), &bytes.Buffer{}, []string{"autoclaw", "gpt"}); err == nil {
-		t.Fatal("runImport(autoclaw gpt) should fail on the reserved alias")
+	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"autoclaw", "gpt"}, authOptions{fromDesktop: true}); err == nil {
+		t.Fatal("runAuth(autoclaw gpt --from-desktop) should fail on the reserved alias")
 	}
 }
 

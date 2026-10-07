@@ -12,28 +12,34 @@ import (
 var modelsCmd = newModelsCommand("models")
 
 func newModelsCommand(use string) *cobra.Command {
-	var showAll bool
+	var showAll, probe bool
 	cmd := &cobra.Command{
 		Use:   use,
-		Short: "List available models with availability status",
-		Long: `List and probe models for the active provider.
+		Short: "List the active provider's models, optionally probing each",
+		Long: `List models for the active provider.
 
-Without --all, tests the configured model pool (provider.Model). With --all,
-fetches the upstream catalog (or OAuth runtime models) and tests those instead.
+Without --all, lists the configured model pool (provider.Model). With --all,
+lists the upstream catalog (or OAuth runtime models) instead.
+
+--probe sends a 1-token request to every listed model and reports which
+answer. That is a real request per model and counts against your plan
+(Copilot premium requests, Qoder credits, API usage).
 
 Examples:
-  ccl models
-  ccl models --all
+  ccl provider models
+  ccl provider models --all
+  ccl provider models --probe
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runModels(cmd.Context(), showAll)
+			return runModels(cmd.Context(), showAll, probe)
 		},
 	}
 	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Show all provider models (not just configured ones)")
+	cmd.Flags().BoolVar(&probe, "probe", false, "Send a 1-token request to each model to test availability (billed)")
 	return cmd
 }
 
-func runModels(ctx context.Context, showAll bool) error {
+func runModels(ctx context.Context, showAll, probe bool) error {
 	p, err := resolveProvider()
 	if err != nil {
 		return err
@@ -51,8 +57,8 @@ func runModels(ctx context.Context, showAll bool) error {
 	if showAll || modelsStr == "" {
 		fetched := modelIDs(catalog)
 		if len(fetched) == 0 && runtime != nil {
-			// Only proxy-backed providers (OpenAI-compatible, models.dev, Command
-			// Code, or OAuth) start a runtime; a direct Anthropic API-key provider
+			// Only proxy-backed providers (OpenAI-compatible, models.dev, or
+			// OAuth) start a runtime; a direct Anthropic API-key provider
 			// runs without one, so runtime is nil and must not be dereferenced.
 			fetched = runtime.Models()
 		}
@@ -89,10 +95,20 @@ func runModels(ctx context.Context, showAll bool) error {
 	fmt.Printf("Models · %s\n", p.Name)
 	fmt.Printf("Source: %s · %d model(s)\n\n", source, len(modelList))
 
+	metadata := indexModelInfos(catalog)
+	if !probe {
+		for _, model := range modelList {
+			fmt.Printf("  · %s\n", modelReportLabel(model, metadata))
+		}
+		fmt.Printf("\nNot probed. `ccl provider models --probe` sends a 1-token request to each of the %d model(s) (billed).\n", len(modelList))
+		return nil
+	}
+	fmt.Printf("Probing %d model(s) with a 1-token request each...\n\n", len(modelList))
+
 	availableSet := testModelsConcurrently(ctx, modelList, probeTarget.Endpoint, probeTarget.APIKey, probeWireType(probeTarget), probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
 	available, unavailable := classifyModels(modelList, availableSet)
 	fmt.Println()
-	printModelReportWithMetadata(available, unavailable, indexModelInfos(catalog))
+	printModelReportWithMetadata(available, unavailable, metadata)
 
 	return nil
 }
@@ -118,5 +134,5 @@ func indexModelInfos(infos []protocol.ModelInfo) map[string]protocol.ModelInfo {
 }
 
 func init() {
-	rootCmd.AddCommand(modelsCmd)
+	rootCmd.AddCommand(deprecatedRootAlias(modelsCmd, "ccl provider models"))
 }

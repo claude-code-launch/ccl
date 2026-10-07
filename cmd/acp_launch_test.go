@@ -213,3 +213,59 @@ func TestACPLaunchManagerConcurrentAcquirePreparesOnce(t *testing.T) {
 		leases[i].Release()
 	}
 }
+
+// TestACPFollowsTheActiveProviderUntilPinned pins S9 end to end: unpinned ACP
+// tracks ccl use, a pin holds, and --follow releases it.
+func TestACPFollowsTheActiveProviderUntilPinned(t *testing.T) {
+	seedProviders(t, "a", "a", "b")
+	resolve := func() string {
+		t.Helper()
+		snapshot, err := resolveACPProvider()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot.name
+	}
+	if got := resolve(); got != "a" {
+		t.Fatalf("unpinned ACP = %q, want the active provider", got)
+	}
+	if err := runProviderUse("b", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolve(); got != "b" {
+		t.Fatalf("unpinned ACP did not follow ccl use: %q", got)
+	}
+	if err := runProviderUse("a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProviderUse("b", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolve(); got != "a" {
+		t.Fatalf("pinned ACP moved with ccl use: %q", got)
+	}
+	if err := runACPFollow(); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolve(); got != "b" {
+		t.Fatalf("--follow did not release the pin: %q", got)
+	}
+
+	// Nothing selected anywhere: a clear error, never a shell-derived provider.
+	seedProviders(t, "", "a")
+	t.Setenv("OPENAI_API_KEY", "sk-other-tool")
+	if _, err := resolveACPProvider(); err == nil {
+		t.Fatal("ACP resolved a provider with nothing selected")
+	}
+}
+
+func TestParseUseFollowRequiresACP(t *testing.T) {
+	if _, _, follow, _, err := parseProviderUseArgs([]string{"--acp", "--follow"}); err != nil || !follow {
+		t.Fatalf("--acp --follow = %t, %v", follow, err)
+	}
+	for _, args := range [][]string{{"--follow"}, {"--acp", "--follow", "x"}} {
+		if _, _, _, _, err := parseProviderUseArgs(args); err == nil {
+			t.Fatalf("%v was accepted", args)
+		}
+	}
+}

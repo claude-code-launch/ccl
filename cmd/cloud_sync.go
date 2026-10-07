@@ -931,8 +931,10 @@ func init() {
 	// Canonical tree.
 	rootCmd.AddCommand(newCloudCommand())
 	// Root compatibility aliases (same command objects would double-register;
-	// construct fresh instances so cobra parent pointers stay unique).
-	rootCmd.AddCommand(
+	// construct fresh instances so cobra parent pointers stay unique). They are
+	// deprecated: `ccl status` and `ccl login` read as provider status and
+	// provider login, and every root name can hide a Claude Code subcommand.
+	for _, alias := range []*cobra.Command{
 		newCloudLoginCommand(),
 		newCloudLogoutCommand(),
 		newCloudPushCommand(),
@@ -941,5 +943,7 @@ func init() {
 		newCloudStatusCommand(),
 		newCloudKeyCommand(),
 		newCloudDeviceCommand(),
-	)
+	} {
+		rootCmd.AddCommand(deprecatedRootAlias(alias, "ccl cloud "+alias.Name()))
+	}
 }

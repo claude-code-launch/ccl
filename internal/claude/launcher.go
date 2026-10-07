@@ -9,7 +9,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"os/signal"
 	"runtime"
 	"strconv"
 	"strings"
@@ -390,6 +390,33 @@ func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[s
 	setIfEmpty("ANTHROPIC_MODEL", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 }
 
+// runForwardingSignals runs cmd while catching the signals that would
+// otherwise kill ccl before its deferred cleanup (settings file, embedded
+// runtime) can run, forwarding the ones Claude Code would not receive itself.
+func runForwardingSignals(cmd *exec.Cmd) error {
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, launchSignals...)
+	defer signal.Stop(signals)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case sig := <-signals:
+				if forwardLaunchSignal(sig) && cmd.Process != nil {
+					_ = cmd.Process.Signal(sig)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return cmd.Wait()
+}
+
 // newSessionName returns the identifier shared by this session's settings file
 // and its debug log. It is generated before anything else runs so the very first
 // log line already lands in the per-session file.
@@ -409,7 +436,7 @@ func writeSettingsFile(content settingsJSON, session string) (string, error) {
 		return "", fmt.Errorf("marshal settings: %w", err)
 	}
 
-	path := filepath.Join(os.TempDir(), session+"_settings.json")
+	path := sessionSettingsPath(session)
 	// O_EXCL: never reuse or overwrite another session's settings file.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -625,10 +652,13 @@ func PrepareContext(ctx context.Context, p provider.Provider) (*Launch, error) {
 		return nil, fmt.Errorf("claude CLI not found in PATH (install with: npm install -g @anthropic-ai/claude-code): %w", err)
 	}
 
+	sweepStaleSessionFiles()
+
 	// Give this temporary Claude session one slog file before the embedded runtime
 	// begins. All INFO/WARN/ERROR/DEBUG records for this session share that file.
 	session := newSessionName()
 	if oauthproxy.LogConfigured() {
+		oauthproxy.PruneSessionLogs(oauthproxy.DefaultLogMaxAge, oauthproxy.DefaultLogMaxFiles)
 		if err := oauthproxy.SetLogLevel(oauthproxy.CurrentLogLevel(), oauthproxy.SessionLogPath(session)); err != nil {
 			return nil, fmt.Errorf("open session log: %w", err)
 		}
@@ -692,7 +722,7 @@ func Run(p provider.Provider, args []string) error {
 	cmd.Stderr = os.Stderr
 
 	start := time.Now()
-	runErr := cmd.Run()
+	runErr := runForwardingSignals(cmd)
 
 	// Token usage, unlike the debug log, is printed unconditionally: it is
 	// information about what the session cost, not a diagnostic. Runtime is nil

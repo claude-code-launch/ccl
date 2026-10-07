@@ -19,18 +19,21 @@ type authOptions struct {
 	noBrowser    bool
 	callbackPort int
 	kiroAuthMode string
+	fromDesktop  bool
 }
 
 var oauthLogin = oauthproxy.Login
+
+// oauthImport is stubbed in tests, mirroring oauthLogin.
+var oauthImport = oauthproxy.ImportCredential
 
 var authCmd = newAuthCommand()
 
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:     "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw|zed> [alias]",
-		Aliases: []string{"auth"},
-		Short:   "Authenticate a subscription-backed provider",
+		Use:   "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw|zed> [alias]",
+		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
 
 Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
@@ -40,19 +43,21 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
   ccl oauth gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw|zed
 
 Notes:
-  - Alias "auth" still works: ccl auth gpt
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
   - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
   - AutoClaw opens a CCL-owned browser login, including the provider's human
     verification step, then stores and refreshes the resulting session without
-    starting AutoClaw. To reuse the desktop login instead, run:
-    ccl import autoclaw
+    starting AutoClaw. To reuse the desktop app's existing login instead, run:
+    ccl oauth autoclaw --from-desktop
+    (auth.json is read through the Chromium Safe Storage Keychain item on
+    macOS; desktop files are never modified)
   - Zed signs in through zed.dev's native-app flow and uses the models included
     in your Zed plan (Anthropic, OpenAI, Google, xAI); the Zed editor is not
     needed. Models Zed only offers with upstream data retention stay hidden
     unless CCL_ZED_ALLOW_DATA_RETENTION=1
-  - Flags: --no-browser, --callback-port, --kiro-auth
+  - Flags: --no-browser, --callback-port, --kiro-auth, --from-desktop
+  - ccl oauth prune deletes credentials no provider uses
 `,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -62,6 +67,8 @@ Notes:
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
 	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw/Zed)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
+	cmd.Flags().BoolVar(&opts.fromDesktop, "from-desktop", false, "AutoClaw only: reuse the desktop app's login instead of a browser flow")
+	cmd.AddCommand(newOAuthPruneCommand())
 	return cmd
 }
 
@@ -93,14 +100,26 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 		}
 	}
 
-	fmt.Fprintf(out, "Authenticating %s...\n", target)
-	result, err := oauthLogin(ctx, target, oauthproxy.LoginOptions{
-		NoBrowser:    opts.noBrowser,
-		CallbackPort: opts.callbackPort,
-		KiroAuthMode: opts.kiroAuthMode,
-	})
-	if err != nil {
-		return fmt.Errorf("authenticate %s: %w", target, err)
+	var result oauthproxy.LoginResult
+	if opts.fromDesktop {
+		if target != oauthproxy.ProviderAutoClaw {
+			return fmt.Errorf("--from-desktop is only supported for autoclaw")
+		}
+		fmt.Fprintf(out, "Importing the %s desktop login...\n", target)
+		result, err = oauthImport(ctx, target)
+		if err != nil {
+			return fmt.Errorf("import %s credential: %w", target, err)
+		}
+	} else {
+		fmt.Fprintf(out, "Authenticating %s...\n", target)
+		result, err = oauthLogin(ctx, target, oauthproxy.LoginOptions{
+			NoBrowser:    opts.noBrowser,
+			CallbackPort: opts.callbackPort,
+			KiroAuthMode: opts.kiroAuthMode,
+		})
+		if err != nil {
+			return fmt.Errorf("authenticate %s: %w", target, err)
+		}
 	}
 
 	providerName, p, err := activateProvider(target, alias, result)
