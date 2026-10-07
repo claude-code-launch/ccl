@@ -218,6 +218,12 @@ type AdvancedConfigModel struct {
 	// switchSource so every m.p.XXX access below resolves to the active source
 	// without per-site edits.
 	p *provider.Provider
+	// providerName is the name the page was opened for. NameGenerated marks a
+	// placeholder from randomProviderName; only then does picking a models.dev
+	// provider rename the draft to the catalog ID. A name the user typed, or an
+	// existing provider being edited, is kept.
+	providerName  string
+	NameGenerated bool
 
 	cursor int
 	width  int
@@ -1083,6 +1089,7 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		customDraft:       customDraft,
 		modelsDevDraft:    modelsDevDraft,
 		p:                 active.p,
+		providerName:      p.Name,
 		cursor:            0,
 		urlText:           tui.NewState(p.Endpoint),
 		keyText:           tui.NewState(p.APIKey),
@@ -1376,6 +1383,9 @@ func (m *AdvancedConfigModel) switchSource(target connectionSource) {
 // The Custom draft is left untouched so the user can switch back.
 func (m *AdvancedConfigModel) applyModelsDevProvider(p modelsdev.Provider) {
 	draft, metadata := modelsDevProviderToDraft(p)
+	if name := strings.TrimSpace(m.providerName); name != "" && !m.NameGenerated {
+		draft.Name = name
+	}
 	d := m.modelsDevDraft
 	*d.p = draft
 	d.modelPool = uniqueModels(parseModelList(draft.Model))
@@ -2518,8 +2528,9 @@ func (m *AdvancedConfigModel) handleVerifyDone(msg keyVerifyDoneMsg) {
 	// against the current catalog exactly once per verification round.
 	if m.live().keyVerified && m.live().modelsDevRefreshPending {
 		m.live().modelsDevRefreshPending = false
-		setDebugf("models.dev refresh start provider=%q", m.p.Name)
-		fetchModelsDevRefreshAsync(m.mdDone, m.p.Name)
+		catalogID := provider.ModelsDevCatalogID(*m.p)
+		setDebugf("models.dev refresh start provider=%q catalog=%q", m.p.Name, catalogID)
+		fetchModelsDevRefreshAsync(m.mdDone, catalogID)
 	}
 	if index := m.mainRowIndex(selectedRow); index >= 0 {
 		m.cursor = index
@@ -2568,8 +2579,8 @@ func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneM
 		setDebugf("models.dev refresh failed provider=%q err=%v; keeping the saved model pool", m.p.Name, msg.err)
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(msg.refreshFor), strings.TrimSpace(m.p.Name)) {
-		setDebugf("models.dev refresh ignored: refreshed=%q current=%q", msg.refreshFor, m.p.Name)
+	if !strings.EqualFold(strings.TrimSpace(msg.refreshFor), provider.ModelsDevCatalogID(*m.p)) {
+		setDebugf("models.dev refresh ignored: refreshed=%q current=%q", msg.refreshFor, provider.ModelsDevCatalogID(*m.p))
 		return
 	}
 	var catalogIDs []string
@@ -2587,6 +2598,11 @@ func (m *AdvancedConfigModel) handleModelsDevRefreshDone(msg modelsDevFetchDoneM
 		// rather than wiping a working configuration off the page.
 		setDebugf("models.dev refresh: provider %q no longer in catalog; keeping the saved model pool", msg.refreshFor)
 		return
+	}
+	if strings.TrimSpace(m.p.ModelsDevProvider) == "" {
+		// Saved before ModelsDevProvider existed: the name was the catalog ID.
+		// Record it so a later rename cannot detach the provider from its catalog.
+		m.p.ModelsDevProvider = catalog.ID
 	}
 	catalogIDs = modelsDevCatalogModelIDs(catalog)
 	if len(catalogIDs) == 0 {
@@ -3451,7 +3467,11 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 	if m.usesModelsDev() {
 		// models.dev: endpoint/protocol come from metadata (read-only). The
 		// Provider row opens the catalog picker; only the API key is editable.
-		name := truncateMiddle(m.p.Name, idleWidth)
+		label := strings.TrimSpace(m.p.Name)
+		if catalogID := provider.ModelsDevCatalogID(*m.p); label != "" && !strings.EqualFold(catalogID, label) {
+			label += "  (" + catalogID + ")"
+		}
+		name := truncateMiddle(label, idleWidth)
 		if name == "" {
 			name = locale.T("选择 Provider", "Select provider")
 		}
@@ -3758,6 +3778,24 @@ func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
 	))
 }
 
+// saveBlockedReason explains a greyed-out Save button. Without it a blocked
+// press does nothing visible, and the only way out the page leaves is Esc, which
+// reads as "configuration canceled".
+func (m *AdvancedConfigModel) saveBlockedReason() string {
+	switch {
+	case m.usesOAuth():
+		return locale.T("本地代理就绪后才能保存", "Saving is available once the local proxy is ready")
+	case m.usesModelsDev() && m.live().detecting:
+		return locale.T("正在验证 API Key，通过后才能保存", "Verifying the API key; saving is available once it passes")
+	case m.usesModelsDev() && m.live().detectionError != nil:
+		return locale.T("API Key 验证未通过，暂不能保存（在 API Key 行按 Enter 重试）", "API key verification failed; cannot save yet (press Enter on API Key to retry)")
+	case m.usesModelsDev():
+		return locale.T("API Key 尚未验证，暂不能保存", "API key not verified yet; cannot save")
+	default:
+		return locale.T("尚未检测连接，请先运行 Auto Configure", "Connection not detected yet; run Auto Configure first")
+	}
+}
+
 // viewActionSection renders the Save/Cancel action bar, the save-gating
 // warnings, and the key hint footer.
 func (m *AdvancedConfigModel) viewActionSection() []*tui.Element {
@@ -3799,6 +3837,8 @@ func (m *AdvancedConfigModel) viewActionSection() []*tui.Element {
 	}
 	if m.live().connectionDirty && !m.usesOAuth() {
 		rows = append(rows, spanLine(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving"), stGray))
+	} else if applyDisabled {
+		rows = append(rows, spanLine(m.saveBlockedReason(), stGray))
 	}
 	if m.customDraft != nil && m.customDraft.saveGuardPending {
 		rows = append(rows, spanLine(locale.T(

@@ -39,10 +39,11 @@ func modelsDevProviders(ctx context.Context) ([]modelsdev.Provider, error) {
 // per-model protocol table the runtime needs to route each request.
 func modelsDevProviderToDraft(p modelsdev.Provider) (provider.Provider, map[string]protocol.ModelInfo) {
 	draft := provider.Provider{
-		Name:           p.ID,
-		Type:           "modelsdev",
-		Endpoint:       p.API,
-		ModelProtocols: make(map[string]string),
+		Name:              p.ID,
+		ModelsDevProvider: p.ID,
+		Type:              "modelsdev",
+		Endpoint:          p.API,
+		ModelProtocols:    make(map[string]string),
 	}
 	metadata := make(map[string]protocol.ModelInfo)
 	var pool []string

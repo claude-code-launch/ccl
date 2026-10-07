@@ -110,13 +110,16 @@ func RunProviderSet(args []string) error {
 			p.Name = targetName
 		}
 	}
+	nameGenerated := false
 	if targetName == "" {
 		targetName = randomProviderName(cfg.Providers)
 		p.Name = targetName
+		nameGenerated = true
 	}
 
 	// 🚀 运行基于特定域 v2 架构的超级大面板
 	m := NewAdvancedConfigModel(&p)
+	m.NameGenerated = nameGenerated
 	if p.OAuthProvider != "" {
 		// The runtime refreshes a credential and fetches its catalog on the way
 		// up, which can take tens of seconds. Starting it here would leave the

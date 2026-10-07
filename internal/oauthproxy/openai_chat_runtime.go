@@ -265,6 +265,7 @@ func (s *chatCompletionsService) handleCountTokens(writer http.ResponseWriter, r
 
 func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
+	requestCtx = withClientSession(requestCtx, request)
 	started := time.Now()
 	LogDebugEvent("request_received", "component", "openai_chat", "request_id", requestID,
 		"path", request.URL.Path, "method", request.Method)
@@ -439,6 +440,7 @@ func (s *chatCompletionsService) callOnce(ctx context.Context, converted *chatCo
 	if s.decorateHeader != nil {
 		s.decorateHeader(request.Header, converted)
 	}
+	applyOpenCodeSession(ctx, request)
 	LogDebugEvent("upstream_request", "component", "openai_chat", "request_id", requestLogID(ctx),
 		"method", http.MethodPost, "endpoint", SafeLogEndpoint(target),
 		"body_bytes", len(converted.body), "stream", converted.stream, "model", converted.model)

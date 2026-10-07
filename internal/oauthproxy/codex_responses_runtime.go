@@ -359,6 +359,7 @@ func (s *codexResponsesService) handleCountTokens(writer http.ResponseWriter, re
 
 func (s *codexResponsesService) handleMessages(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
+	requestCtx = withClientSession(requestCtx, request)
 	started := time.Now()
 	LogDebugEvent("request_received", "component", "codex_responses", "request_id", requestID,
 		"path", request.URL.Path, "method", request.Method)
@@ -725,6 +726,7 @@ func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessi
 	if auth.accountID != "" {
 		request.Header.Set("Chatgpt-Account-Id", auth.accountID)
 	}
+	applyOpenCodeSession(ctx, request)
 	LogDebugEvent("upstream_request", "component", "codex_responses", "request_id", requestLogID(ctx),
 		"method", http.MethodPost, "endpoint", SafeLogEndpoint(target), "credential", auth.credential,
 		"body_bytes", len(body), "payload_logged", dumpPayload,

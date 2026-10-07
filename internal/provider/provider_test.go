@@ -321,3 +321,16 @@ func TestPreferredAutoClawSlotDefaults(t *testing.T) {
 		t.Fatalf("applied defaults = %+v", p)
 	}
 }
+
+func TestModelsDevCatalogIDFallsBackToTheName(t *testing.T) {
+	if got := provider.ModelsDevCatalogID(provider.Provider{Name: "oc", ModelsDevProvider: "opencode-go"}); got != "opencode-go" {
+		t.Fatalf("ModelsDevCatalogID() = %q, want the recorded catalog ID", got)
+	}
+	// Saved before the field existed: the name was the catalog ID.
+	if got := provider.ModelsDevCatalogID(provider.Provider{Name: " opencode-go "}); got != "opencode-go" {
+		t.Fatalf("ModelsDevCatalogID() = %q, want the trimmed name", got)
+	}
+	if got := provider.ModelsDevCatalogID(provider.Provider{Name: "oc", ModelsDevProvider: "  "}); got != "oc" {
+		t.Fatalf("blank catalog ID did not fall back: %q", got)
+	}
+}

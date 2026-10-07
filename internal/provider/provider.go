@@ -164,6 +164,19 @@ type Provider struct {
 	// models over different wire protocols. Empty means provider-level single
 	// protocol, selected by Type as before.
 	ModelProtocols map[string]string `yaml:"modelProtocols,omitempty" mapstructure:"modelProtocols,omitempty"`
+	// ModelsDevProvider is the models.dev catalog ID a "modelsdev" provider was
+	// created from. It is separate from Name so the user can call the provider
+	// whatever they like; empty (configs saved before this field) falls back to
+	// Name, which used to be forced to the catalog ID.
+	ModelsDevProvider string `yaml:"modelsDevProvider,omitempty" mapstructure:"modelsDevProvider,omitempty"`
+}
+
+// ModelsDevCatalogID returns the models.dev catalog ID behind p.
+func ModelsDevCatalogID(p Provider) string {
+	if id := strings.TrimSpace(p.ModelsDevProvider); id != "" {
+		return id
+	}
+	return strings.TrimSpace(p.Name)
 }
 
 type Config struct {
