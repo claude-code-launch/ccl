@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	stdlog "log"
 	"log/slog"
 	"net/url"
 	"os"
@@ -44,31 +43,6 @@ var (
 )
 
 type requestLogIDKey struct{}
-
-// sensitiveMarkers identifies log lines that likely carry credentials. The
-// whole line is dropped from third-party logger output to avoid leaking refresh
-// tokens, access tokens, API keys, or Authorization headers into ccl's log.
-var sensitiveMarkers = []string{
-	"refresh_token",
-	"refresh token",
-	"access_token",
-	"access token",
-	"id_token",
-	"id token",
-	"client_secret",
-	"client secret",
-	"authorization:",
-	"authorization =",
-	"proxy-authorization:",
-	"cookie:",
-	"set-cookie:",
-	"api_key",
-	"apikey",
-	"api-key",
-	"bearer ",
-	"\"token\":",
-	"token=",
-}
 
 // ParseLogLevel accepts ccl's standard logging levels.
 func ParseLogLevel(raw string) (LogLevel, bool) {
@@ -361,20 +335,6 @@ func LogInfoEvent(event string, attrs ...any)  { logEvent(slog.LevelInfo, event,
 func LogWarnEvent(event string, attrs ...any)  { logEvent(slog.LevelWarn, event, attrs...) }
 func LogErrorEvent(event string, attrs ...any) { logEvent(slog.LevelError, event, attrs...) }
 
-// LogUpstreamStatusf classifies HTTP status records consistently. Successful
-// per-request records are DEBUG; client failures are WARN; server failures are
-// ERROR.
-func LogUpstreamStatusf(status int, format string, args ...any) {
-	switch {
-	case status >= 500:
-		LogErrorf(format, args...)
-	case status >= 400:
-		LogWarnf(format, args...)
-	default:
-		LogDebugf(format, args...)
-	}
-}
-
 func LogUpstreamEvent(status int, event string, attrs ...any) {
 	switch {
 	case status >= 500:
@@ -395,28 +355,4 @@ func DebugHTTPBody(label string, body []byte) {
 	LogDebugf("http payload begin label=%q bytes=%d", label, len(body))
 	LogDebugf("http payload data label=%q data=%s", label, body)
 	LogDebugf("http payload end label=%q", label)
-}
-
-// debugPrefixWriter funnels a component's low-volume output into ccl's slog
-// file. ReverseProxy requires a standard-library *log.Logger, so this adapter
-// is intentionally kept at the boundary.
-type debugPrefixWriter struct{ prefix string }
-
-func (w debugPrefixWriter) Write(p []byte) (int, error) {
-	line := strings.TrimSpace(string(p))
-	if line == "" {
-		return len(p), nil
-	}
-	lower := strings.ToLower(line)
-	for _, marker := range sensitiveMarkers {
-		if strings.Contains(lower, marker) {
-			return len(p), nil
-		}
-	}
-	LogErrorf("[%s] %s", w.prefix, line)
-	return len(p), nil
-}
-
-func newComponentLogger(prefix string) *stdlog.Logger {
-	return stdlog.New(debugPrefixWriter{prefix: prefix}, "", 0)
 }

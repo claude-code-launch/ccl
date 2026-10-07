@@ -1,5 +1,10 @@
 # CCL Cloud Sync v2 设计
 
+> **历史设计文档。** 本文记录 v2 设计时的方案，命令写法已与现状不同：
+> 云同步命令统一在 `ccl cloud` 下（如 `ccl cloud login/push/pull/status`），
+> 远端管理是 `ccl cloud remote ls|use|rename|set`，没有 `ccl key purge`。
+> 以 `ccl cloud --help` 和 README 为准。
+
 状态：Phase 1–4 已实现，Phase 5 密钥轮换待实现  
 范围：多网盘连接、远端别名、同步生命周期、设备配对  
 兼容目标：现有单 Google Drive / iCloud 配置必须无损迁移

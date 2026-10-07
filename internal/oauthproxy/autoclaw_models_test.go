@@ -44,17 +44,17 @@ func TestAutoClawModelCatalogMatchesManagedProvider(t *testing.T) {
 func TestAutoClawSupportsManagedModelIDsCaseInsensitive(t *testing.T) {
 	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
 	for _, model := range []string{"zai_auto", "ZAI_AUTO-FAST", "zaicoding_GLM-5.3", "tdpsk_deepseek-v4-pro-202606"} {
-		if !AutoClawSupportsModel(model) {
-			t.Fatalf("AutoClawSupportsModel(%q) = false", model)
+		if !autoClawSupportsModelForTest(model) {
+			t.Fatalf("autoClawSupportsModelForTest(%q) = false", model)
 		}
 	}
 	for _, model := range []string{"", "gpt-5", "zai_glm-5.4"} {
-		if AutoClawSupportsModel(model) {
-			t.Fatalf("AutoClawSupportsModel(%q) = true", model)
+		if autoClawSupportsModelForTest(model) {
+			t.Fatalf("autoClawSupportsModelForTest(%q) = true", model)
 		}
 	}
 	for _, model := range []string{"GLM-5.3", "glm-5.3-flash", "GLM-5-Turbo"} {
-		if !AutoClawSupportsModel(model) {
+		if !autoClawSupportsModelForTest(model) {
 			t.Fatalf("legacy AutoClaw model alias %q was not accepted", model)
 		}
 	}
@@ -81,9 +81,9 @@ func TestAutoClawBodyModelRemovesProviderPrefix(t *testing.T) {
 func TestNormalizeAutoClawBodyMatchesManagedZAIShape(t *testing.T) {
 	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
 	raw := []byte(`{"model":"zai_auto","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}]}`)
-	normalized, err := normalizeAutoClawBody(raw)
+	normalized, err := normalizeAutoClawBodyForTest(raw)
 	if err != nil {
-		t.Fatalf("normalizeAutoClawBody() error: %v", err)
+		t.Fatalf("normalizeAutoClawBodyForTest() error: %v", err)
 	}
 	var body map[string]any
 	if err := json.Unmarshal(normalized, &body); err != nil {
@@ -146,7 +146,7 @@ func TestAutoClawLoadsGeneratedOpenClawContract(t *testing.T) {
 	if AutoClawOpenAIBaseURL() != "https://future.autoglm.ai/autoclaw-proxy/proxy/autoclaw" || autoClawInstalledVersion() != "2.0.0" {
 		t.Fatalf("dynamic endpoint/version = %q / %q", AutoClawOpenAIBaseURL(), autoClawInstalledVersion())
 	}
-	if !AutoClawSupportsModel("zai_future") || AutoClawSupportsModel("zai_auto") {
+	if !autoClawSupportsModelForTest("zai_future") || autoClawSupportsModelForTest("zai_auto") {
 		t.Fatalf("dynamic catalog IDs = %v", AutoClawModelIDs())
 	}
 	if !autoClawModelSupportsImage(contract.models, autoClawPreferredImageModel(contract)) {

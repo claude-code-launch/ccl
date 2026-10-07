@@ -92,9 +92,9 @@ func TestImportCredentialOnlyAcceptsAutoClaw(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("credential mode = %v, want 0600", info.Mode().Perm())
 	}
-	apiKey, err := AutoClawAPIKey(filepath.Base(result.Path))
+	apiKey, err := autoClawAccessTokenForTest(result.Path)
 	if err != nil {
-		t.Fatalf("AutoClawAPIKey() error: %v", err)
+		t.Fatalf("autoClawAccessTokenForTest() error: %v", err)
 	}
 	if apiKey != "imported_access_token" {
 		t.Fatalf("resolved API key = %q", apiKey)

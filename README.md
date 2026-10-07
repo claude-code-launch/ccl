@@ -283,7 +283,7 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 └─ help [command]                     命令帮助
 ```
 
-`ccl oauth` 只负责登录并创建绑定单个凭据的 provider，不提供凭据导入或目录对账命令。`ccl status` 是云同步状态；provider 体检使用 `ccl doctor`。根命令支持 `--help` 和 `--version`，每个子命令都支持 `-h/--help`。
+`ccl oauth` 通过浏览器登录并创建绑定单个凭据的 provider。`ccl status` 是云同步状态；provider 体检使用 `ccl doctor`。根命令支持 `--help` 和 `--version`，每个子命令都支持 `-h/--help`。
 
 ### 在 Xcode 27 里用 CCL
 
@@ -326,7 +326,7 @@ ccl bypass off      # 关闭
 
 全局开关，写入 `~/.ccl/config.yaml` 的 `bypass_mode`。开启后，由 `ccl` 拉起的交互式 Claude Code 会话会自动带上 `--dangerously-skip-permissions`。`ccl acp` 不走这条路径，权限由 Xcode 的 `session/request_permission` 处理。
 
-> 旧版命令 `ccl auto` / 字段 `auto_mode` 已更名为 `ccl bypass` / `bypass_mode`。
+> 旧版命令 `ccl auto` 和字段 `auto_mode` 已移除，配置里残留的 `auto_mode: true` 不再生效；请改用 `ccl bypass on`。
 
 ### `ccl log` — 会话级运行时日志
 
@@ -400,8 +400,8 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 - 不带别名时，会从凭据文件名派生 provider 名（如 `gpt-alice@example.com`），避免多账号互相覆盖。
 - 每条 provider 通过 `oauthAccountCredential` 绑定具体账号文件。
 - 不再提供 `--protocol` 覆盖；各 OAuth backend 协议固定。
-- 旧版 `ccl oauth chatgpt` 仍可用，会规范为 `gpt`。
-- **GPT 默认槽位**（空槽位时写入；已有手动映射会保留；`chatgpt` 为兼容别名）：
+- 登录名统一为 `gpt`，`ccl oauth chatgpt` 已移除；旧配置里的 `oauthProvider: chatgpt` / `codex` 仍按 `gpt` 处理。
+- **GPT 默认槽位**（空槽位时写入；已有手动映射会保留）：
   - Opus / Fable / Custom → `gpt-5.6-sol`
   - Sonnet → `gpt-5.6-terra`
   - Haiku → `gpt-5.6-luna`

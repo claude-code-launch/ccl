@@ -71,10 +71,6 @@ type googleAuthFile struct {
 	Token   *oauth2.Token `json:"token"`
 }
 
-func authorizeGoogleDrive(ctx context.Context) (*googleDriveRemote, error) {
-	return authorizeGoogleDriveWithNotice(ctx, nil)
-}
-
 func authorizeGoogleDriveWithNotice(ctx context.Context, notice io.Writer) (*googleDriveRemote, error) {
 	localDir, err := cclDirectory()
 	if err != nil {

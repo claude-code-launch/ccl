@@ -71,12 +71,6 @@ type ModelResponse struct {
 	Object string `json:"object"`
 }
 
-// GetOpenAIModels fetches the comma-separated model IDs from an OpenAI-compatible
-// /models endpoint.
-func GetOpenAIModels(baseURL, apiKey string) (string, error) {
-	return GetOpenAIModelsContext(context.Background(), baseURL, apiKey)
-}
-
 // GetOpenAIModelsContext is GetOpenAIModels with caller-controlled cancellation.
 func GetOpenAIModelsContext(ctx context.Context, baseURL, apiKey string) (string, error) {
 	infos, err := GetOpenAIModelInfosContext(ctx, baseURL, apiKey)

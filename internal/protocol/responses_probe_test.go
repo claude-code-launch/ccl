@@ -11,7 +11,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
-func TestProbeOpenAIResponsesSupportSucceedsOn2xx(t *testing.T) {
+func TestProbeOpenAIResponsesStatusSucceedsOn2xx(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
@@ -28,9 +28,9 @@ func TestProbeOpenAIResponsesSupportSucceedsOn2xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ok := protocol.ProbeOpenAIResponsesSupport(server.URL+"/v1", "test-key", "gpt-5", 2*time.Second)
+	ok := probeOK(protocol.ProbeOpenAIResponsesStatusContext(context.Background(), server.URL+"/v1", "test-key", "gpt-5", 2*time.Second))
 	if !ok {
-		t.Fatalf("expected ProbeOpenAIResponsesSupport to succeed")
+		t.Fatalf("expected the Responses probe to succeed")
 	}
 	if gotBody["model"] != "gpt-5" {
 		t.Errorf("expected model 'gpt-5' in request body, got %v", gotBody["model"])
@@ -40,18 +40,18 @@ func TestProbeOpenAIResponsesSupportSucceedsOn2xx(t *testing.T) {
 	}
 }
 
-func TestProbeOpenAIResponsesSupportFailsOnNotFound(t *testing.T) {
+func TestProbeOpenAIResponsesStatusFailsOnNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
 	defer server.Close()
 
-	if protocol.ProbeOpenAIResponsesSupport(server.URL+"/v1", "test-key", "gpt-5", 2*time.Second) {
-		t.Fatalf("expected ProbeOpenAIResponsesSupport to fail on 404")
+	if probeOK(protocol.ProbeOpenAIResponsesStatusContext(context.Background(), server.URL+"/v1", "test-key", "gpt-5", 2*time.Second)) {
+		t.Fatalf("expected the Responses probe to fail on 404")
 	}
 }
 
-func TestProbeOpenAIResponsesSupportDrainsResponseBody(t *testing.T) {
+func TestProbeOpenAIResponsesStatusDrainsResponseBody(t *testing.T) {
 	headersSent := make(chan struct{})
 	finishBody := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +67,7 @@ func TestProbeOpenAIResponsesSupportDrainsResponseBody(t *testing.T) {
 
 	result := make(chan bool, 1)
 	go func() {
-		result <- protocol.ProbeOpenAIResponsesSupport(server.URL+"/v1", "test-key", "gpt-5", 2*time.Second)
+		result <- probeOK(protocol.ProbeOpenAIResponsesStatusContext(context.Background(), server.URL+"/v1", "test-key", "gpt-5", 2*time.Second))
 	}()
 
 	<-headersSent
@@ -87,13 +87,13 @@ func TestProbeOpenAIResponsesSupportDrainsResponseBody(t *testing.T) {
 	}
 }
 
-func TestProbeOpenAIResponsesSupportFailsOnUnreachable(t *testing.T) {
-	if protocol.ProbeOpenAIResponsesSupport("http://127.0.0.1:1", "test-key", "gpt-5", 500*time.Millisecond) {
-		t.Fatalf("expected ProbeOpenAIResponsesSupport to fail when endpoint is unreachable")
+func TestProbeOpenAIResponsesStatusFailsOnUnreachable(t *testing.T) {
+	if probeOK(protocol.ProbeOpenAIResponsesStatusContext(context.Background(), "http://127.0.0.1:1", "test-key", "gpt-5", 500*time.Millisecond)) {
+		t.Fatalf("expected the Responses probe to fail when endpoint is unreachable")
 	}
 }
 
-func TestProbeOpenAIResponsesSupportContextCanBeCanceled(t *testing.T) {
+func TestProbeOpenAIResponsesStatusContextCanBeCanceled(t *testing.T) {
 	started := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
@@ -108,7 +108,7 @@ func TestProbeOpenAIResponsesSupportContextCanBeCanceled(t *testing.T) {
 	defer cancel()
 	result := make(chan bool, 1)
 	go func() {
-		result <- protocol.ProbeOpenAIResponsesSupportContext(ctx, server.URL+"/v1", "test-key", "gpt-5", 10*time.Second)
+		result <- probeOK(protocol.ProbeOpenAIResponsesStatusContext(ctx, server.URL+"/v1", "test-key", "gpt-5", 10*time.Second))
 	}()
 
 	<-started
@@ -121,4 +121,10 @@ func TestProbeOpenAIResponsesSupportContextCanBeCanceled(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("canceled probe did not return promptly")
 	}
+}
+
+// probeOK mirrors how the key verifier reads the status probe: a 2xx response
+// that was fully received.
+func probeOK(status int, err error) bool {
+	return err == nil && status >= 200 && status < 300
 }

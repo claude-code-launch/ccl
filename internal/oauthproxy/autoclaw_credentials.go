@@ -562,37 +562,3 @@ func persistAutoClawCredential(path string, metadata map[string]any) error {
 	}
 	return writeCredentialAtomic(path, append(raw, '\n'))
 }
-
-// loadAutoClawCredential is kept as a small compatibility helper for doctor,
-// tests, and older callers that only need the current access token.
-func loadAutoClawCredential(authDir, credentialFile string) (string, map[string]any, error) {
-	path := filepath.Join(authDir, filepath.Base(strings.TrimSpace(credentialFile)))
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", nil, fmt.Errorf("read AutoClaw credential %s: %w (run `ccl oauth autoclaw`)", filepath.Base(path), err)
-	}
-	metadata := make(map[string]any)
-	if err := json.Unmarshal(raw, &metadata); err != nil {
-		return "", nil, fmt.Errorf("parse AutoClaw credential %s: %w", filepath.Base(path), err)
-	}
-	if !strings.EqualFold(firstMetadataString(metadata, "type"), ProviderAutoClaw) {
-		return "", nil, fmt.Errorf("credential %s is not an AutoClaw credential", filepath.Base(path))
-	}
-	access := stripBearerPrefix(firstMetadataString(metadata, "access_token", "token", "zcode_token", "api_key"))
-	if access == "" {
-		return "", nil, fmt.Errorf("AutoClaw credential %s has no access token; run `ccl oauth autoclaw`", filepath.Base(path))
-	}
-	return access, metadata, nil
-}
-
-// AutoClawAPIKey returns the current access token for compatibility with the
-// generic credential inspection API. Model requests use X-Authorization and
-// never expose this value to Claude Code.
-func AutoClawAPIKey(credentialFile string) (string, error) {
-	authDir, err := ensureAuthDir()
-	if err != nil {
-		return "", err
-	}
-	access, _, err := loadAutoClawCredential(authDir, credentialFile)
-	return access, err
-}

@@ -352,15 +352,6 @@ func mappedModelOutputLabel(model string, metadata map[string]protocol.ModelInfo
 	return label
 }
 
-// modelPoolForMapping prefers an explicitly configured pool. OAuth providers
-// with an empty pool discover their live account catalog through the same
-// embedded runtime used for normal Claude sessions, so `ccl map` never
-// requires a preceding `ccl set`.
-func modelPoolForMapping(ctx context.Context, p provider.Provider) ([]string, error) {
-	models, _, err := modelCatalogForMapping(ctx, p)
-	return models, err
-}
-
 func modelCatalogForMapping(ctx context.Context, p provider.Provider) ([]string, map[string]protocol.ModelInfo, error) {
 	if configured := parseModelList(p.Model); len(configured) > 0 {
 		if strings.TrimSpace(p.OAuthProvider) == "" {

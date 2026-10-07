@@ -12,8 +12,8 @@ func TestDynamicSessionLoadFailureKeepsClosedSessionClosed(t *testing.T) {
 		t.Fatalf("session/close: %v", closed)
 	}
 	leases, starts := source.snapshot()
-	if len(leases) != 1 || leases[0].releases.Load() != 1 {
-		t.Fatalf("closed session lease state: leases=%d releases=%d", len(leases), leases[0].releases.Load())
+	if len(leases) != 1 || len(starts) != 1 || leases[0].releases.Load() != 1 {
+		t.Fatalf("closed session lease state: leases=%d starts=%d releases=%d", len(leases), len(starts), leases[0].releases.Load())
 	}
 
 	source.setStartFailure(2)

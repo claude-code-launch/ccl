@@ -30,15 +30,3 @@ func readyOAuthPage(m *AdvancedConfigModel) *AdvancedConfigModel {
 func keyPress(r rune) tui.KeyEvent {
 	return tui.KeyEvent{Key: tui.KeyRune, Rune: r}
 }
-
-// specialKey builds the KeyEvent for a non-printable key (arrows, enter, esc).
-func specialKey(key tui.Key) tui.KeyEvent {
-	return tui.KeyEvent{Key: key}
-}
-
-// pressKey routes one key through the component's key handler (as the app
-// would) and reports whether the session was asked to quit. The quit signal
-// itself is carried by the model's saveConfirmed/canceled state in tests.
-func pressKey(m *AdvancedConfigModel, ke tui.KeyEvent) {
-	m.handleKey(ke)
-}

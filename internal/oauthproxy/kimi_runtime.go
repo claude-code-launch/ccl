@@ -28,14 +28,12 @@ const (
 var (
 	// kimiAPIBaseURL is the Kimi Code data plane base; callOnce appends
 	// /chat/completions, yielding https://api.kimi.com/coding/v1/chat/completions
-	// /chat/completions, yielding https://api.kimi.com/coding/v1/chat/completions
 	// for the Kimi Code API. A var (not const) so tests can point it at a stub.
 	kimiAPIBaseURL = "https://api.kimi.com/coding/v1"
 	// kimiTokenURL is the OAuth refresh endpoint. A var so tests can stub it.
 	kimiTokenURL = "https://auth.kimi.com/api/oauth/token"
 )
 
-// kimiOAuthAuthorizer resolves and refreshes a Kimi OAuth credential written by
 // kimiOAuthAuthorizer resolves and refreshes a Kimi OAuth credential written by
 // CCL during `ccl oauth kimi`. It reads the persisted access_token,
 // refresh_token, and device_id fields and refreshes against Kimi's token endpoint.

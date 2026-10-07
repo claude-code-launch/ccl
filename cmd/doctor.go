@@ -116,20 +116,13 @@ func runDoctor(ctx context.Context) error {
 
 	doctorSection("Environment")
 
-	// 1. Check Node.js
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		doctorInfo("Node.js: not installed (not required by newer native Claude Code binaries)")
-	} else {
-		doctorOK("Node.js: " + nodePath)
-	}
-
-	// 2. Check Claude CLI
+	// 1. Check Claude CLI. Claude Code ships as a native binary, so Node.js is
+	// no longer a prerequisite and is not checked.
 	claudeInstalled := IsInstalled()
 	if !claudeInstalled {
 		// Report it, do not fix it: doctor is a diagnostic, so it must not
 		// download and run an installer as a side effect of being asked for a
-		// health report. `ccl install` and launching a session both offer that.
+		// health report. Launching a session offers that.
 		doctorErr("Claude Code CLI: not installed or not in PATH")
 		doctorHint("Run `ccl` to be offered the installer, or install manually: https://code.claude.com/")
 	} else {
@@ -137,7 +130,7 @@ func runDoctor(ctx context.Context) error {
 		doctorOK("Claude Code CLI: " + claudePath)
 	}
 
-	// 3. Check Configuration File
+	// 2. Check Configuration File
 	cfg, err := config.Load()
 	if err != nil {
 		doctorErr(fmt.Sprintf("Config: %v", err))
@@ -146,7 +139,7 @@ func runDoctor(ctx context.Context) error {
 	doctorOK("Config: " + config.ConfigPath())
 	printCloudSyncDiagnostics()
 
-	// 4. Check Active Provider
+	// 3. Check Active Provider
 	if cfg.ActiveProvider == "" {
 		doctorSection("Provider")
 		doctorErr("No active provider. Use `ccl set` or `ccl use`.")
@@ -183,7 +176,7 @@ func runDoctor(ctx context.Context) error {
 	printProviderModelMappings(configuredProvider, modelNames)
 	printDoctorContextBudget(p, configuredProvider, modelNames)
 
-	// 5. Test Endpoint reachability and API Authentication key
+	// 4. Test Endpoint reachability and API Authentication key
 	endpointReachable := false
 	switch {
 	case provider.IsAutoClawType(configuredProvider.Type) || provider.IsAutoClawType(p.Type):
@@ -195,7 +188,7 @@ func runDoctor(ctx context.Context) error {
 		endpointReachable = checkDoctorConnectivity(ctx, p)
 	}
 
-	// 6. Validate configured models with concurrent API calls and reorder (available first)
+	// 5. Validate configured models with concurrent API calls and reorder (available first)
 	if endpointReachable && p.Model != "" {
 		configuredModels := parseModelList(p.Model)
 		if len(configuredModels) > 0 {
@@ -719,15 +712,6 @@ func probeProtocolForModel(protocols map[string]string, model string) string {
 	return "openai"
 }
 
-// testSingleModelForProtocolContext probes one model over an explicit wire
-// protocol: "anthropic", "openai_responses", or Chat Completions for anything
-// else. A trailing [1m] context marker is stripped first — it is a ccl slot
-// directive, not part of the upstream model name.
-func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, apiKey, wireProtocol, anthropicAuth string, timeout time.Duration) bool {
-	status, err := probeSingleModelForProtocolStatusContext(ctx, model, endpoint, apiKey, wireProtocol, anthropicAuth, timeout)
-	return err == nil && status >= 200 && status < 300
-}
-
 func probeSingleModelForProtocolStatusContext(ctx context.Context, model, endpoint, apiKey, wireProtocol, anthropicAuth string, timeout time.Duration) (int, error) {
 	model = stripOneMSuffix(model)
 	switch wireProtocol {
@@ -774,11 +758,6 @@ func probeModelStatus(parent context.Context, url string, payload map[string]any
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode, nil
-}
-
-func testSingleOpenAIModelContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) bool {
-	status, err := probeSingleOpenAIModelStatusContext(parent, model, endpoint, apiKey, timeout)
-	return err == nil && status >= 200 && status < 300
 }
 
 func probeSingleOpenAIModelStatusContext(parent context.Context, model, endpoint, apiKey string, timeout time.Duration) (int, error) {

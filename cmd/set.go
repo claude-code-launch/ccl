@@ -309,22 +309,6 @@ func stringInSlice(s string, slice []string) bool {
 	return false
 }
 
-// detectProtocolAndModels probes only the /models endpoint derived from the
-// exact user-supplied base URL. Paths ending in /vN or /codex prefer OpenAI
-// Bearer auth; unversioned paths ending in /claude or /anthropic prefer native
-// Anthropic x-api-key auth. The returned model-list shape takes precedence over
-// those path hints.
-//
-// OpenAI Chat and Responses share the same model-list shape, so automatic
-// detection intentionally stops at the OpenAI family. The user chooses the
-// concrete OpenAI protocol on the Review page without an extra paid request.
-// Returns (protocol, comma-separated-models, error).
-// error is non-nil when protocol detection fails.
-func detectProtocolAndModels(endpoint, apiKey string) (string, string, error) {
-	result := detectProtocolAndModelsDetailed(endpoint, apiKey)
-	return result.protocol, result.models, result.err
-}
-
 type protocolDetectionResult struct {
 	protocol      string
 	models        string

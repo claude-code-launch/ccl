@@ -110,10 +110,6 @@ func newACPLaunchManagerWithContext(
 	}
 }
 
-func (m *acpLaunchManager) prime() error {
-	return m.primeContext(context.Background())
-}
-
 func (m *acpLaunchManager) primeContext(ctx context.Context) error {
 	lease, err := m.acquireContext(ctx)
 	if err != nil {

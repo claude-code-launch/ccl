@@ -5,19 +5,6 @@ import (
 	"testing"
 )
 
-func TestJoinTextPromptIgnoresNonText(t *testing.T) {
-	got := joinTextPrompt([]contentBlock{
-		{Type: "image", Text: "nope"},
-		{Type: "text", Text: "hello "},
-		{Type: "", Text: "world"},
-		{Type: "resource", Resource: &resourceBlock{Text: " src"}},
-		{Type: "resource_link", URI: "file:///tmp/x.go"},
-	})
-	if got != "hello world src/tmp/x.go" {
-		t.Fatalf("joinTextPrompt = %q", got)
-	}
-}
-
 func TestMapStopReason(t *testing.T) {
 	tests := []struct {
 		subtype string

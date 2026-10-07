@@ -953,13 +953,6 @@ func TestApplyModelDetectionResultUsesDiscoveredModelsOnly(t *testing.T) {
 	if m.staleSlotCount() != 2 {
 		t.Fatalf("expected two stale slot mappings, got %d", m.staleSlotCount())
 	}
-	m.applyStaleSlotPolicy()
-	if p.OpusModel != "" || p.HaikuModel != "" {
-		t.Fatalf("expected stale slot mappings to be cleared, got %+v", p)
-	}
-	if p.SonnetModel != "new-b" || p.CustomModelID != "new-a" {
-		t.Fatalf("expected slot mappings present in API list to be kept, got %+v", p)
-	}
 }
 
 func TestDetectProtocolAndModelsStopsAtOpenAIFamily(t *testing.T) {

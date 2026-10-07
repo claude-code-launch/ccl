@@ -60,11 +60,6 @@ func startAutoClawOAuth(parent context.Context, _ string, modelSpec, credentialF
 	return proxyRuntime, nil
 }
 
-func autoClawModelRoutes(modelSpec string) []runtimeModelRoute {
-	contract, _ := autoClawEffectiveContract()
-	return autoClawModelRoutesWithCatalog(modelSpec, contract.models)
-}
-
 func autoClawModelRoutesWithCatalog(modelSpec string, catalog []autoclawModelDefinition) []runtimeModelRoute {
 	configured := runtimeModelRoutes(modelSpec)
 	routes := make([]runtimeModelRoute, 0, len(configured)+len(catalog))
@@ -97,15 +92,6 @@ func autoClawCatalogIDs(catalog []autoclawModelDefinition) []string {
 	return ids
 }
 
-// addAutoClawDisplayAliases keeps Claude Code's readable catalog labels usable
-// as request aliases. The launcher intentionally exposes names such as
-// "Auto" and "GLM-5.3-Flash" in its model UI, while AutoClaw's managed API
-// routes by IDs such as zai_auto and zai_glm-5.3-flash.
-func addAutoClawDisplayAliases(service *chatCompletionsService, routes []runtimeModelRoute) {
-	contract, _ := autoClawEffectiveContract()
-	addAutoClawDisplayAliasesWithCatalog(service, routes, contract.models)
-}
-
 func addAutoClawDisplayAliasesWithCatalog(service *chatCompletionsService, routes []runtimeModelRoute, catalog []autoclawModelDefinition) {
 	if service == nil {
 		return
@@ -122,11 +108,6 @@ func addAutoClawDisplayAliasesWithCatalog(service *chatCompletionsService, route
 			}
 		}
 	}
-}
-
-func autoClawCanonicalModel(model string) string {
-	contract, _ := autoClawEffectiveContract()
-	return autoClawCanonicalModelWithCatalog(model, contract.models)
 }
 
 func autoClawCanonicalModelWithCatalog(model string, catalog []autoclawModelDefinition) string {
@@ -147,11 +128,6 @@ func autoClawCanonicalModelWithCatalog(model string, catalog []autoclawModelDefi
 	return normalized
 }
 
-func autoClawModelDisplayNames(routes []runtimeModelRoute) map[string]string {
-	contract, _ := autoClawEffectiveContract()
-	return autoClawModelDisplayNamesWithCatalog(routes, contract.models)
-}
-
 func autoClawModelDisplayNamesWithCatalog(routes []runtimeModelRoute, catalog []autoclawModelDefinition) map[string]string {
 	result := make(map[string]string, len(routes))
 	for _, route := range routes {
@@ -163,27 +139,6 @@ func autoClawModelDisplayNamesWithCatalog(routes []runtimeModelRoute, catalog []
 		}
 	}
 	return result
-}
-
-// normalizeAutoClawBody maps the desktop route ID to the body model accepted
-// by the managed proxy. AutoClaw removes a leading lowercase provider prefix:
-// zai_auto -> auto, zaicoding_glm-5.3 -> glm-5.3.
-func normalizeAutoClawBody(raw []byte) ([]byte, error) {
-	contract, _ := autoClawEffectiveContract()
-	var initial map[string]any
-	if err := json.Unmarshal(raw, &initial); err != nil {
-		return nil, fmt.Errorf("decode AutoClaw Chat body: %w", err)
-	}
-	route, _ := initial["model"].(string)
-	converted := &chatCompletionsConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{upstreamModel: route},
-		body:                    raw,
-		model:                   route,
-	}
-	if err := normalizeAutoClawRequest(converted, contract); err != nil {
-		return nil, err
-	}
-	return converted.body, nil
 }
 
 // normalizeAutoClawRequest applies the compatibility metadata emitted by

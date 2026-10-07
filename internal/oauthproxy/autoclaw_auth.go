@@ -57,15 +57,6 @@ type autoclawDesktopUserInfo struct {
 	Email    string      `json:"email"`
 }
 
-// AutoClawDesktopAuthPath reports where AutoClaw's desktop login state lives on
-// this platform. Callers that need to place or inspect that file — a test
-// seeding a fixture, most of all — must ask here rather than re-deriving the
-// per-platform rules: an XDG_CONFIG_HOME or APPDATA in the environment moves the
-// real path, and a second copy of these rules silently drifts out of step.
-func AutoClawDesktopAuthPath() (string, error) {
-	return autoclawDesktopAuthPath()
-}
-
 func defaultAutoClawDesktopAuthPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -222,10 +213,6 @@ func AutoClawOpenAIBaseURL() string {
 	return strings.TrimRight(autoclawAPIOrigin, "/") + "/autoclaw-proxy/proxy/autoclaw"
 }
 
-// AutoClawAnthropicBaseURL remains for config migration and old callers. The
-// AutoClaw runtime is now OpenAI Chat based; new providers use OpenAIBaseURL.
-func AutoClawAnthropicBaseURL() string { return AutoClawOpenAIBaseURL() }
-
 func autoClawMetadataFromDesktop(state autoclawDesktopAuth, sourcePath string) map[string]any {
 	metadata := map[string]any{
 		"type":             ProviderAutoClaw,
@@ -340,4 +327,11 @@ func saveAutoClawCredential(authDir string, metadata map[string]any) (LoginResul
 		return LoginResult{}, err
 	}
 	return LoginResult{Provider: ProviderAutoClaw, Backend: ProviderAutoClaw, Path: path}, nil
+}
+
+// AutoClawDesktopAuthPath reports where the AutoClaw desktop client keeps its
+// auth.json. Tests outside this package seed that file through it, so they and
+// the import always agree on the location.
+func AutoClawDesktopAuthPath() (string, error) {
+	return autoclawDesktopAuthPath()
 }

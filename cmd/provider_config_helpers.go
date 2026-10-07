@@ -144,16 +144,3 @@ func stripOneMSuffix(model string) string {
 func hasOneMSuffix(model string) bool {
 	return strings.HasSuffix(strings.TrimSpace(model), "[1m]")
 }
-
-// modelDisplayName is the human-facing label for Claude Code *_NAME env vars.
-// The technical model ID may keep the [1m] suffix; the display name uses (1M).
-func modelDisplayName(model string) string {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return ""
-	}
-	if hasOneMSuffix(model) {
-		return stripOneMSuffix(model) + " (1M)"
-	}
-	return model
-}

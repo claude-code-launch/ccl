@@ -135,3 +135,15 @@ func TestUnsupportedContextOverrideIsDroppedAndReported(t *testing.T) {
 		}
 	}
 }
+
+func TestModelDisplayNameMarksOneMillionContext(t *testing.T) {
+	for model, want := range map[string]string{
+		"grok-4.5[1m]": "grok-4.5 (1M)",
+		"grok-4.5":     "grok-4.5",
+		"x[1m][1m]":    "x (1M)",
+	} {
+		if got := modelDisplayName(model); got != want {
+			t.Fatalf("modelDisplayName(%q) = %q, want %q", model, got, want)
+		}
+	}
+}

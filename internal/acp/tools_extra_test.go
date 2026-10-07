@@ -386,20 +386,3 @@ func TestReplayTranscriptRefusesAnOversizedFile(t *testing.T) {
 		t.Fatalf("oversized transcript error = %v", err)
 	}
 }
-
-// TestJoinTextPromptFlattensBlocks pins the plain-text form used when a prompt
-// is forwarded to surfaces that cannot carry blocks.
-func TestJoinTextPromptFlattensBlocks(t *testing.T) {
-	got := joinTextPrompt([]contentBlock{
-		{Type: "text", Text: "a"},
-		{Type: "", Text: "b"},
-		{Type: "resource", Resource: &resourceBlock{Text: "c"}},
-		{Type: "resource_link", URI: "file:///tmp/d"},
-		{Type: "resource_link", Name: "e"},
-		{Type: "resource_link"},
-		{Type: "image", Data: "ignored"},
-	})
-	if got != "abc/tmp/de" {
-		t.Fatalf("joinTextPrompt() = %q", got)
-	}
-}

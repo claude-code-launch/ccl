@@ -165,7 +165,6 @@ type connDraft struct {
 	inputAPIKey   string
 
 	modelPoolFromDiscovery bool
-	clearStaleSlots        bool
 	hadLocalModelPool      bool
 	// connectionDirty reports that the current Endpoint/API Key inputs differ
 	// from the last successful detection. A dirty connection must be re-tested
@@ -1068,7 +1067,6 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		probeAPIKey:          customP.APIKey,
 		inputEndpoint:        customP.Endpoint,
 		inputAPIKey:          customP.APIKey,
-		clearStaleSlots:      true,
 	}
 	modelsDevDraft := &connDraft{
 		p:                    modelsDevP,
@@ -1823,26 +1821,6 @@ func (m *AdvancedConfigModel) staleSlotCount() int {
 	return count
 }
 
-func (m *AdvancedConfigModel) applyStaleSlotPolicy() {
-	if !m.live().clearStaleSlots || !m.live().modelPoolFromDiscovery {
-		return
-	}
-
-	cleared := 0
-	for _, slot := range advancedSlotRefs(m.p) {
-		model := strings.TrimSpace(*slot.ptr)
-		if model == "" || stringInSlice(model, m.live().modelPool) {
-			continue
-		}
-		*slot.ptr = ""
-		delete(m.live().oneMSlots, slot.key)
-		cleared++
-	}
-	if cleared > 0 {
-		setDebugf("applyStaleSlotPolicy cleared=%d slots=%s one_m=%s", cleared, slotDebugSummary(*m.p), reviewOneMSummary(m.live().oneMSlots))
-	}
-}
-
 // 实时获取/检测协议名称
 func (m *AdvancedConfigModel) getProtocol() string {
 	if m.p.Type != "" {
@@ -2221,13 +2199,12 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 	m.applyRecommendation()
 	m.cursor = m.mainRowIndex(rowOpus)
 	setDebugf(
-		"applyModelDetectionResult success provider_type=%q endpoint=%q anthropic_auth=%q model_count=%d stale_slot_count=%d clear_stale_slots=%t cursor=%d",
+		"applyModelDetectionResult success provider_type=%q endpoint=%q anthropic_auth=%q model_count=%d stale_slot_count=%d cursor=%d",
 		m.p.Type,
 		m.p.Endpoint,
 		m.p.AnthropicAuth,
 		len(m.live().modelPool),
 		m.staleSlotCount(),
-		m.live().clearStaleSlots,
 		m.cursor,
 	)
 }
@@ -3985,14 +3962,6 @@ func spanLine(text string, st tui.Style) *tui.Element {
 
 // styleOf is a tiny helper keeping mapping-row construction readable.
 func styleOf(s tui.TextSpan) tui.Style { return s.Style }
-
-// rowAtLine resolves a clicked screen row to a configuration row kind by
-// matching the rendered labels. A click on the value row directly below a
-// label (Endpoint/API Key inputs) resolves to the same row as clicking the
-// label. Rows that are not focusable return ok=false.
-func rowAtLine(lines []string, y int) (configRowKind, bool) {
-	return rowAtLineAt(lines, y, -1)
-}
 
 // rowAtLineAt resolves a clicked screen row to a configuration row kind. x is
 // the column offset (-1 to ignore). The X column disambiguates multiple labels

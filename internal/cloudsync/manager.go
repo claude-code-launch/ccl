@@ -34,12 +34,6 @@ type Manager struct {
 
 var errRemoteVerifierMissing = errors.New("cloud sync profile has no encrypted verifier")
 
-// LoginICloud retains the original passphrase API for callers that explicitly
-// select the legacy-compatible passphrase mode.
-func LoginICloud(passphrase string) (LoginResult, error) {
-	return LoginICloudWithPassphrase(passphrase)
-}
-
 func LoginICloudWithPassphrase(passphrase string) (LoginResult, error) {
 	remoteDir, err := defaultICloudDirectory()
 	if err != nil {
@@ -85,73 +79,6 @@ func loginPassphraseAtProvider(remoteDir, passphrase, provider, remoteLabel stri
 		remoteDir, profile, key, existing, keyModePassphrase, false,
 		provider, remoteLabel,
 	)
-}
-
-func LoginICloudKeychain() (LoginResult, error) {
-	remoteDir, err := defaultICloudDirectory()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if err := os.MkdirAll(filepath.Join(remoteDir, snapshotsDirectory), 0o700); err != nil {
-		return LoginResult{}, fmt.Errorf("create iCloud sync directory: %w", err)
-	}
-
-	profilePath := filepath.Join(remoteDir, profileFileName)
-	var profile remoteProfile
-	if err := readJSONFile(profilePath, &profile); err != nil {
-		if !os.IsNotExist(err) {
-			return LoginResult{}, err
-		}
-		var key []byte
-		profile, key, err = newMasterKeyProfile()
-		if err != nil {
-			return LoginResult{}, err
-		}
-		if err := platformKeyStore(profile.ID, key); err != nil {
-			return LoginResult{}, keychainLoginError(err)
-		}
-		if err := writeJSONAtomic(profilePath, profile, 0o600); err != nil {
-			return LoginResult{}, fmt.Errorf("write iCloud sync profile: %w", err)
-		}
-		return finishLogin(remoteDir, profile, key, false, keyModeKeychain, false)
-	}
-	if err := validateRemoteProfile(profile); err != nil {
-		return LoginResult{}, err
-	}
-
-	key, keychainErr := platformKeyLoad(profile.ID)
-	migrated := false
-	if keychainErr != nil {
-		localKey, localErr := existingLocalProfileKey(profile.ID)
-		if localErr != nil {
-			if errors.Is(localErr, os.ErrNotExist) {
-				uninitialized, checkErr := isUninitializedRemoteProfile(remoteDir)
-				if checkErr != nil {
-					return LoginResult{}, checkErr
-				}
-				if uninitialized && errors.Is(keychainErr, ErrKeychainItemMissing) {
-					return replaceUninitializedProfile(remoteDir)
-				}
-				return LoginResult{}, keychainLoginError(keychainErr)
-			}
-			return LoginResult{}, localErr
-		}
-		// Authenticate the old file key before replacing any Keychain item.
-		localDir, dirErr := cclDirectory()
-		if dirErr != nil {
-			return LoginResult{}, dirErr
-		}
-		probe := &Manager{localDir: localDir, remoteDir: remoteDir, profileID: profile.ID, key: localKey}
-		if err := probe.verifyOrCreateProfileKey(profile.ID, false); err != nil {
-			return LoginResult{}, fmt.Errorf("verify existing local sync key: %w", err)
-		}
-		if err := platformKeyStore(profile.ID, localKey); err != nil {
-			return LoginResult{}, keychainLoginError(err)
-		}
-		key = localKey
-		migrated = true
-	}
-	return finishLogin(remoteDir, profile, key, true, keyModeKeychain, migrated)
 }
 
 // LoginICloudLocalKey is the default macOS mode. It uses a random 256-bit
@@ -258,20 +185,6 @@ func isUninitializedRemoteProfile(remoteDir string) (bool, error) {
 	return len(entries) == 0, nil
 }
 
-func replaceUninitializedProfile(remoteDir string) (LoginResult, error) {
-	profile, key, err := newMasterKeyProfile()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if err := platformKeyStore(profile.ID, key); err != nil {
-		return LoginResult{}, keychainLoginError(err)
-	}
-	if err := writeJSONAtomic(filepath.Join(remoteDir, profileFileName), profile, 0o600); err != nil {
-		return LoginResult{}, fmt.Errorf("replace uninitialized iCloud sync profile: %w", err)
-	}
-	return finishLogin(remoteDir, profile, key, false, keyModeKeychain, false)
-}
-
 func replaceUninitializedProfileLocalForProvider(remoteDir, provider, remoteLabel string) (LoginResult, error) {
 	profile, key, err := newMasterKeyProfile()
 	if err != nil {
@@ -283,20 +196,6 @@ func replaceUninitializedProfileLocalForProvider(remoteDir, provider, remoteLabe
 	return finishLoginForProvider(
 		remoteDir, profile, key, false, keyModeLocal, false,
 		provider, remoteLabel,
-	)
-}
-
-func finishLogin(
-	remoteDir string,
-	profile remoteProfile,
-	key []byte,
-	existing bool,
-	keyMode string,
-	migrated bool,
-) (LoginResult, error) {
-	return finishLoginForProvider(
-		remoteDir, profile, key, existing, keyMode, migrated,
-		providerICloud, remoteDir,
 	)
 }
 
@@ -674,10 +573,6 @@ func ExportRecoveryKey() (KeyExportResult, error) {
 		ProfileID:   registry.ActiveProfileID,
 		RecoveryKey: recoveryKey, KeyMode: profile.KeyMode,
 	}, nil
-}
-
-func ImportRecoveryKey(value string) (KeyImportResult, error) {
-	return ImportRecoveryKeyForProvider(value, "")
 }
 
 // ImportRecoveryKeyForProvider restores a profile after its cloud provider has

@@ -97,8 +97,8 @@ func TestExplicitLogSeverity(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = SetLogLevel(LogLevelOff, "") })
 	LogInfof("failed wording stays explicitly info")
-	LogUpstreamStatusf(403, "status=%d", 403)
-	LogUpstreamStatusf(503, "status=%d", 503)
+	LogUpstreamEvent(403, "status=403")
+	LogUpstreamEvent(503, "status=503")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

@@ -32,22 +32,6 @@ type pushPlan struct {
 	indexChanged  bool
 }
 
-func (m *Manager) Push(force bool) (PushResult, error) {
-	prepared, err := m.preparePush()
-	if err != nil {
-		return PushResult{}, err
-	}
-	plan, err := m.planPush(prepared, force)
-	if err != nil {
-		return PushResult{}, err
-	}
-	result, err := plan.commit(prepared, true)
-	if err != nil {
-		return PushResult{}, err
-	}
-	return result, nil
-}
-
 func (m *Manager) preparePush() (preparedPush, error) {
 	files, hash, err := collectLocalFiles()
 	if err != nil {

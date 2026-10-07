@@ -317,11 +317,6 @@ func autoClawOAuthURLHandler(client *http.Client, version, deviceID, navigateURI
 	}
 }
 
-func validAutoClawGoogleOAuthURL(value string) bool {
-	_, valid := autoClawGoogleOAuthState(value)
-	return valid
-}
-
 func autoClawGoogleOAuthState(value string) (string, bool) {
 	parsed, err := url.Parse(strings.TrimSpace(value))
 	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "accounts.google.com") {

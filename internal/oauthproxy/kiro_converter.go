@@ -274,7 +274,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	droppedToolUses, droppedToolRuns := normalizeKiroToolPairing(conversationState)
 	textStats := limitKiroTextFields(conversationState, kiroMaxTextFieldBytes)
 	dedupedMedia := deduplicateKiroInlineMedia(conversationState)
-	inlineMedia, droppedMedia := limitKiroInlineMedia(conversationState, kiroMaxInlineMediaSegments)
+	_, droppedMedia := limitKiroInlineMedia(conversationState, kiroMaxInlineMediaSegments)
 	resizedMedia, correctedMedia := processKiroInlineMedia(conversationState)
 	body := map[string]any{"conversationState": conversationState}
 	if additional := kiroReasoningFields(&request, model); additional != nil {
@@ -288,7 +288,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	if err := validateKiroConversationState(conversationState); err != nil {
 		return nil, err
 	}
-	inlineMedia = countKiroInlineMedia(conversationState)
+	inlineMedia := countKiroInlineMedia(conversationState)
 	return &kiroConvertedRequest{
 		anthropicAdapterRequest: anthropicAdapterRequest{
 			upstreamModel:     model,

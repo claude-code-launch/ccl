@@ -63,7 +63,7 @@ Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external pr
 | Kiro | `kiro_*.go` | Portal PKCE (default) or `--kiro-auth builder`; Amazon Q + EventStream |
 | Qoder | `qoder_*.go` | Browser OAuth, COSY, WAF; `session_type=qodercli` is a wire field only |
 | models.dev mixed | `mixed_runtime.go` + `anthropic_passthrough.go` | `ModelProtocols` map per model |
-| AutoClaw / ZCode | `autoclaw_*.go` | CCL-owned Anthropic-to-OpenAI Chat adapter to `{origin}/autoclaw-proxy/proxy/autoclaw`; imports encrypted desktop `auth.json`, refreshes the session, and sends desktop-compatible managed-proxy headers without starting AutoClaw |
+| AutoClaw / ZCode | `autoclaw_*.go` | CCL-owned Anthropic-to-OpenAI Chat adapter to `{origin}/autoclaw-proxy/proxy/autoclaw`; `ccl oauth autoclaw` runs the Google browser login (importing the encrypted desktop `auth.json` is optional), refreshes the session, and sends desktop-compatible managed-proxy headers without starting AutoClaw |
 
 Shared 429/5xx fast retry is `retry.go` (500ms + 1s, then relay status/body/`Retry-After` untouched). Per-backend 401 refresh happens **inside** one attempt. Kiro has its own 1/2/4s loop; WorkBuddy/Copilot/Zed inner gateways must not wrap the outer retry (would 3×3).
 

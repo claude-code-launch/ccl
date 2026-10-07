@@ -2,7 +2,6 @@ package acp
 
 import (
 	"encoding/json"
-	"strings"
 )
 
 const protocolVersion = 1
@@ -176,28 +175,6 @@ type resourceBlock struct {
 	URI      string `json:"uri,omitempty"`
 	MimeType string `json:"mimeType,omitempty"`
 	Text     string `json:"text,omitempty"`
-}
-
-func joinTextPrompt(blocks []contentBlock) string {
-	var b strings.Builder
-	for _, block := range blocks {
-		switch block.Type {
-		case "text", "":
-			b.WriteString(block.Text)
-		case "resource":
-			if block.Resource != nil {
-				b.WriteString(block.Resource.Text)
-			}
-		case "resource_link":
-			switch {
-			case block.URI != "":
-				b.WriteString(strings.TrimPrefix(block.URI, "file://"))
-			case block.Name != "":
-				b.WriteString(block.Name)
-			}
-		}
-	}
-	return b.String()
 }
 
 func agentMessageChunk(text string) sessionUpdate {

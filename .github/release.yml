@@ -8,26 +8,14 @@ changelog:
         - feature
         - feat
         - enhancement
-      regex:
-        - "^feat"
-        - "^enhancement"
     - title: "🐛 Bug Fixes"
       labels:
         - fix
         - bug
         - hotfix
-      regex:
-        - "^fix"
-        - "^bug"
-        - "^hotfix"
     - title: "🧰 Maintenance & Chore"
       labels:
         - chore
         - docs
         - ci
         - refactor
-      regex:
-        - "^ci"
-        - "^chore"
-        - "^docs"
-        - "^refactor"

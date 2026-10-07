@@ -9,26 +9,6 @@ import (
 	"time"
 )
 
-// ProbeOpenAIResponsesSupport sends a minimal, real generation request to the
-// /v1/responses endpoint to determine whether an OpenAI-compatible gateway
-// implements the newer Responses API ("openai(responses)") as
-// opposed to only the legacy Chat Completions API ("openai(chat)"). Listing
-// models alone (/v1/models) cannot distinguish these two, since both protocols
-// commonly share the same model catalog — an actual call to /v1/responses is
-// required. Returns true only when the upstream responds with a 2xx status.
-func ProbeOpenAIResponsesSupport(endpoint, apiKey, model string, timeout time.Duration) bool {
-	return ProbeOpenAIResponsesSupportContext(context.Background(), endpoint, apiKey, model, timeout)
-}
-
-// ProbeOpenAIResponsesSupportContext is ProbeOpenAIResponsesSupport with caller-controlled cancellation.
-func ProbeOpenAIResponsesSupportContext(parent context.Context, endpoint, apiKey, model string, timeout time.Duration) bool {
-	status, err := ProbeOpenAIResponsesStatusContext(parent, endpoint, apiKey, model, timeout)
-	if err != nil {
-		return false
-	}
-	return status >= 200 && status < 300
-}
-
 // ProbeOpenAIResponsesStatusContext is ProbeOpenAIResponsesSupportContext but
 // reports the upstream HTTP status code (0 on transport error) instead of a
 // boolean. Callers that need to distinguish an auth rejection (401/403) from a

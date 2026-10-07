@@ -31,24 +31,6 @@ type AnthropicModel struct {
 	PromotionAvailable bool      `json:"promotion_available,omitempty"`
 }
 
-func GetAnthropicModels(baseURL, key string) (string, error) {
-	return GetAnthropicModelsWithAuth(baseURL, key, "x-api-key")
-}
-
-// GetAnthropicModelsWithAuth fetches Anthropic-compatible models using either
-// the official x-api-key header or a Bearer token used by some routers.
-func GetAnthropicModelsWithAuth(baseURL, key, authStyle string) (string, error) {
-	infos, err := GetAnthropicModelInfosWithAuth(baseURL, key, authStyle)
-	if err != nil {
-		return "", err
-	}
-	models := make([]string, 0, len(infos))
-	for _, info := range infos {
-		models = append(models, info.ID)
-	}
-	return strings.Join(models, ","), nil
-}
-
 // GetAnthropicModelInfosWithAuth fetches model IDs and optional display,
 // token-limit, rate, and catalog badge metadata from an Anthropic-compatible
 // /v1/models endpoint. Unknown extension fields remain safely ignored.

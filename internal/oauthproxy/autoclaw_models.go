@@ -249,12 +249,3 @@ func AutoClawModelIDs() []string {
 	}
 	return ids
 }
-
-// AutoClawSupportsModel reports whether the effective catalog admits a model
-// ID, case-insensitively.
-func AutoClawSupportsModel(model string) bool {
-	contract, _ := autoClawEffectiveContract()
-	model = autoClawCanonicalModelWithCatalog(model, contract.models)
-	_, ok := autoClawModelDefinition(contract.models, model)
-	return ok
-}

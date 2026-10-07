@@ -1,6 +1,7 @@
 package protocol_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,7 +11,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
-func TestGetOpenAIModelsAppendsModelsToRootEndpoint(t *testing.T) {
+func TestGetOpenAIModelsContextAppendsModelsToRootEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -23,16 +24,16 @@ func TestGetOpenAIModelsAppendsModelsToRootEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	models, err := protocol.GetOpenAIModels(server.URL, "test-key")
+	models, err := protocol.GetOpenAIModelsContext(context.Background(), server.URL, "test-key")
 	if err != nil {
-		t.Fatalf("GetOpenAIModels failed: %v", err)
+		t.Fatalf("GetOpenAIModelsContext failed: %v", err)
 	}
 	if models != "gpt-4o" {
 		t.Fatalf("unexpected models: %s", models)
 	}
 }
 
-func TestGetOpenAIModelsPreservesVersionedEndpoint(t *testing.T) {
+func TestGetOpenAIModelsContextPreservesVersionedEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v3/models" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -42,9 +43,9 @@ func TestGetOpenAIModelsPreservesVersionedEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	models, err := protocol.GetOpenAIModels(server.URL+"/v3", "test-key")
+	models, err := protocol.GetOpenAIModelsContext(context.Background(), server.URL+"/v3", "test-key")
 	if err != nil {
-		t.Fatalf("GetOpenAIModels failed: %v", err)
+		t.Fatalf("GetOpenAIModelsContext failed: %v", err)
 	}
 	if models != "v3-model" {
 		t.Fatalf("unexpected models: %s", models)
@@ -64,12 +65,12 @@ func TestGetAnthropicModelsNormalizesV1Endpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	models, err := protocol.GetAnthropicModels(server.URL+"/v1", "test-key")
+	infos, err := protocol.GetAnthropicModelInfosWithAuth(server.URL+"/v1", "test-key", "")
 	if err != nil {
-		t.Fatalf("GetAnthropicModels failed: %v", err)
+		t.Fatalf("GetAnthropicModelInfosWithAuth failed: %v", err)
 	}
-	if models != "claude-sonnet-4" {
-		t.Fatalf("unexpected models: %s", models)
+	if len(infos) != 1 || infos[0].ID != "claude-sonnet-4" {
+		t.Fatalf("unexpected models: %+v", infos)
 	}
 }
 

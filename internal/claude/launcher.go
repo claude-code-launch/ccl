@@ -41,9 +41,10 @@ type settingsJSON struct {
 	// FastMode is always serialized (no omitempty) so turning it off in ccl set
 	// (or Claude Code /fast) can clear a previously enabled pin.
 	FastMode bool `json:"fastMode"`
-	// DisableClaudeAiConnectors is always serialized. A ccl session always runs
-	// against the loopback runtime, so Claude Code's first-party check fails and
-	// the connector fetch can never succeed — without this, every session opens
+	// DisableClaudeAiConnectors is always serialized. A ccl session always uses a
+	// non-claude.ai auth source (a loopback runtime or a gateway's own key), so
+	// Claude Code's first-party check fails and the connector fetch can never
+	// succeed — without this, every session opens
 	// with "claude.ai connectors are disabled because ANTHROPIC_API_KEY or
 	// another auth source is set" on stderr. Pinning it stops the warning at the
 	// source: the eligibility check returns before it is queued.

@@ -204,15 +204,3 @@ func TestOneMSlotsFromProviderDetectsOnlySuffixMarkers(t *testing.T) {
 		t.Fatalf("detected slots = %+v", slots)
 	}
 }
-
-func TestModelDisplayName(t *testing.T) {
-	if got := modelDisplayName("grok-4.5[1m]"); got != "grok-4.5 (1M)" {
-		t.Fatalf("display name = %q", got)
-	}
-	if got := modelDisplayName("grok-4.5"); got != "grok-4.5" {
-		t.Fatalf("plain display name = %q", got)
-	}
-	if got := modelDisplayName("x[1m][1m]"); got != "x (1M)" {
-		t.Fatalf("collapsed display name = %q", got)
-	}
-}

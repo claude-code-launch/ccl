@@ -278,18 +278,3 @@ func diagnosePendingPairing(report *DiagnosticReport, localDir string) {
 		}
 	}
 }
-
-func HasDiagnosticErrors(report DiagnosticReport) bool {
-	for _, check := range report.Checks {
-		if strings.EqualFold(check.Level, "error") {
-			return true
-		}
-	}
-	return false
-}
-
-func IsNotConfiguredDiagnostic(report DiagnosticReport) bool {
-	return !report.Configured && len(report.Checks) == 1 &&
-		report.Checks[0].Level == "info" &&
-		strings.Contains(report.Checks[0].Message, "not configured")
-}
