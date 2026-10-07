@@ -8,6 +8,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -46,11 +47,14 @@ func runProviderToggle(out io.Writer, action string) error {
 		return fmt.Errorf("expected on or off, got %q", action)
 	}
 
-	cfg.ProviderOff = action == "off"
-	if err := config.Save(cfg); err != nil {
+	off := action == "off"
+	if err := config.Update(func(c *provider.Config) error {
+		c.ProviderOff = off
+		return nil
+	}); err != nil {
 		return fmt.Errorf("save ccl config: %w", err)
 	}
-	printProviderLoadingState(out, cfg.ProviderOff, cfg.ActiveProvider)
+	printProviderLoadingState(out, off, cfg.ActiveProvider)
 	return nil
 }
 

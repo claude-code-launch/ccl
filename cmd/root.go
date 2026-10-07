@@ -65,6 +65,12 @@ func Execute() {
 		return
 	}
 
+	// Persist config migrations once, under the config lock, before any command
+	// reads it. Load itself never writes. A failure (read-only home, say) is not
+	// fatal: every Load still applies the migrations in memory.
+	if err := config.Migrate(); err != nil {
+		fmt.Fprintf(os.Stderr, "ccl: could not migrate ~/.ccl/config.yaml: %v\n", err)
+	}
 	configureLogging()
 
 	if len(os.Args) > 1 {

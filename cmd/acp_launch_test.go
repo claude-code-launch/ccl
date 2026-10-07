@@ -66,7 +66,7 @@ func TestACPLaunchManagerGenerationsAndLeases(t *testing.T) {
 	manager := newACPLaunchManagerWith(func() (acpProviderSnapshot, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		return acpProviderSnapshot{name: snapshot.name, provider: cloneACPProvider(snapshot.provider)}, nil
+		return acpProviderSnapshot{name: snapshot.name, provider: snapshot.provider.Clone()}, nil
 	}, func(provider.Provider) (acpPreparedLaunch, error) {
 		launch := &fakeACPPreparedLaunch{}
 		launches = append(launches, launch)

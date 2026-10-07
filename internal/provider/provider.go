@@ -135,7 +135,7 @@ type Provider struct {
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
 	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy,
-	// autoclaw, and zed. The legacy chatgpt and codex values remain readable.
+	// autoclaw, and zed. Load folds the retired chatgpt and codex values into gpt.
 	OAuthProvider string `yaml:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
 	// (basename of the JSON under ~/.ccl/auth). Subscription runtimes require
@@ -173,6 +173,11 @@ type Provider struct {
 	// whatever they like; empty (configs saved before this field) falls back to
 	// Name, which used to be forced to the catalog ID.
 	ModelsDevProvider string `yaml:"modelsDevProvider,omitempty"`
+	// ContextPreset selects a provider-wide context tier ("balanced-500k" or
+	// "balanced-800k"); empty is Claude Code's default sizing. ccl derives the
+	// three Claude Code context variables from it at launch. Older configs
+	// encoded the tier as an exact env triplet, which Load converts.
+	ContextPreset string `yaml:"contextPreset,omitempty"`
 }
 
 // ModelsDevCatalogID returns the models.dev catalog ID behind p.
@@ -205,6 +210,9 @@ type Config struct {
 	// BypassMode automatically passes --dangerously-skip-permissions to Claude
 	// Code for every ccl-launched session. It is a global launcher setting.
 	BypassMode bool `yaml:"bypass_mode,omitempty"`
+	// ConfigVersion is the schema the file was last written with; see
+	// config.CurrentVersion. Absent means a file from before versioning.
+	ConfigVersion int `yaml:"config_version,omitempty"`
 	// ProviderOff makes plain `ccl` launches skip provider loading and run
 	// Claude Code with its own configuration (the user's claude.ai login). The
 	// process environment is passed through untouched. ACP keeps acp_provider.
@@ -250,13 +258,6 @@ func InferOAuthProvider(providerName, endpoint string) string {
 	backend := strings.ToLower(strings.TrimSpace(u.Host))
 	switch backend {
 	case "codex", "chatgpt", "gpt":
-		if strings.EqualFold(strings.TrimSpace(providerName), "codex") {
-			return "codex"
-		}
-		// Prefer public name "gpt"; keep "chatgpt" only when the provider key itself is legacy.
-		if strings.EqualFold(strings.TrimSpace(providerName), "chatgpt") {
-			return "chatgpt"
-		}
 		return "gpt"
 	case "antigravity", "gemini":
 		return "gemini"

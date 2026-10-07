@@ -8,6 +8,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -95,12 +96,10 @@ func runLog(out io.Writer, args []string, levelFlag string) error {
 			return fmt.Errorf("expected on or off, got %q", args[0])
 		}
 	}
-	cfg.LogLevel = string(level)
-	// Clear the pre-log-command settings when a user explicitly changes the
-	// level, so config.yaml does not retain two competing representations.
-	cfg.DebugMode = false
-	cfg.DebugVerbose = false
-	if err := config.Save(cfg); err != nil {
+	if err := config.Update(func(c *provider.Config) error {
+		c.LogLevel = string(level)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("save ccl config: %w", err)
 	}
 

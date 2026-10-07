@@ -76,7 +76,7 @@ Notes:
 // Claude Code fastMode toggle.
 func supportsFastMode(providerName string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy:
+	case oauthproxy.ProviderChatGPT:
 		return true
 	default:
 		return false
@@ -165,25 +165,17 @@ func activateProvider(target, alias string, result oauthproxy.LoginResult) (stri
 	}
 	credentialFile := filepath.Base(result.Path)
 
-	cfg, err := config.Load()
+	// The login can take minutes; the update re-reads the config under its lock
+	// so changes made meanwhile by another ccl survive.
+	var p provider.Provider
+	err := config.Update(func(cfg *provider.Config) error {
+		p = configureOAuthProvider(cfg.Providers[providerName], providerName, target, credentialFile)
+		cfg.Providers[providerName] = p
+		cfg.ActiveProvider = providerName
+		cfg.ProviderOff = false
+		return nil
+	})
 	if err != nil {
-		return "", provider.Provider{}, fmt.Errorf("load ccl config: %w", err)
-	}
-	p, targetExists := cfg.Providers[providerName]
-	// GPT migrates the legacy "codex" OAuth provider alias when no explicit
-	// alias is used. Copilot is a separate GitHub backend.
-	if target == oauthproxy.ProviderChatGPT && alias == "" {
-		if legacy, exists := cfg.Providers[oauthproxy.ProviderCodex]; exists && strings.EqualFold(strings.TrimSpace(legacy.OAuthProvider), oauthproxy.ProviderCodex) {
-			if !targetExists {
-				p = legacy
-			}
-			delete(cfg.Providers, oauthproxy.ProviderCodex)
-		}
-	}
-	p = configureOAuthProvider(p, providerName, target, credentialFile)
-	cfg.Providers[providerName] = p
-	cfg.ActiveProvider = providerName
-	if err := config.Save(cfg); err != nil {
 		return "", provider.Provider{}, fmt.Errorf("save OAuth provider: %w", err)
 	}
 	return providerName, p, nil

@@ -51,7 +51,7 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 	if got.ActiveProvider != want.ActiveProvider ||
 		got.ACPProvider != want.ACPProvider ||
 		got.Providers["gateway"].APIKey != "secret" ||
-		got.Providers["gateway"].OAuthProvider != "codex" ||
+		got.Providers["gateway"].OAuthProvider != "gpt" ||
 		got.Providers["gateway"].SubagentModel != "model-subagent" {
 		t.Fatalf("loaded config = %+v, want %+v", got, want)
 	}
@@ -76,6 +76,13 @@ func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
 	}
 	if got.ActiveProvider != "legacy" || got.EffectiveACPProvider() != "legacy" || got.Providers["legacy"].Endpoint != "https://example.test/v1" {
 		t.Fatalf("legacy config was not loaded: %+v", got)
+	}
+	// Load is read-only: the legacy file stays where it is until Migrate.
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("Load moved the legacy config: %v", err)
+	}
+	if err := Migrate(); err != nil {
+		t.Fatalf("Migrate() error: %v", err)
 	}
 
 	path := filepath.Join(home, ".ccl", "config.yaml")
@@ -141,6 +148,12 @@ func TestLoadMigratesLegacyDebugConfigToLogLevel(t *testing.T) {
 	if cfg.LogLevel != "debug" || cfg.DebugMode || cfg.DebugVerbose {
 		t.Fatalf("migrated config = level:%q mode:%t verbose:%t", cfg.LogLevel, cfg.DebugMode, cfg.DebugVerbose)
 	}
+	if untouched, _ := os.ReadFile(path); !strings.Contains(string(untouched), "debug_mode") {
+		t.Fatalf("Load rewrote the file:\n%s", untouched)
+	}
+	if err := Migrate(); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -199,10 +212,11 @@ func TestLoadInfersOAuthProviderForLegacyAuthEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if got := cfg.Providers["chatgpt"].OAuthProvider; got != "chatgpt" {
+	// The retired chatgpt / codex names fold into gpt.
+	if got := cfg.Providers["chatgpt"].OAuthProvider; got != "gpt" {
 		t.Fatalf("chatgpt OAuth provider = %q", got)
 	}
-	if got := cfg.Providers["codex"].OAuthProvider; got != "codex" {
+	if got := cfg.Providers["codex"].OAuthProvider; got != "gpt" {
 		t.Fatalf("legacy Codex OAuth provider = %q", got)
 	}
 	if got := cfg.Providers["gemini"].OAuthProvider; got != "gemini" {
@@ -239,6 +253,9 @@ func TestLoadInfersAutoClawProviderFromDedicatedType(t *testing.T) {
 	p := cfg.Providers["autoclaw"]
 	if p.OAuthProvider != "autoclaw" || p.Type != "autoclaw" {
 		t.Fatalf("AutoClaw provider migration = %+v", p)
+	}
+	if err := Migrate(); err != nil {
+		t.Fatal(err)
 	}
 	rewritten, err := os.ReadFile(path)
 	if err != nil {

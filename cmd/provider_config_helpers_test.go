@@ -80,18 +80,19 @@ func TestApplyCompactConfigBalancedWritesExactTriplet(t *testing.T) {
 	}}
 	applyCompactConfig(&p, nil, compactPresetBalanced)
 
-	want := map[string]string{
-		maxContextTokensEnv:  "500000",
-		autoCompactWindowEnv: "500000",
-		autoCompactPctEnv:    "85",
+	// The tier is stored as the typed field; the hand-written triplet it
+	// replaces is removed, unrelated env is kept, and launch expands the field.
+	if p.ContextPreset != provider.ContextPresetNameBalanced500K {
+		t.Fatalf("Balanced field = %q", p.ContextPreset)
 	}
-	for key, value := range want {
-		if p.Env[key] != value {
-			t.Errorf("Balanced %s=%q, want %q", key, p.Env[key], value)
-		}
-	}
-	if p.Env["KEEP_ME"] != "1" || !provider.IsBalancedContextPreset(p.Env) {
+	if _, ok := p.Env[maxContextTokensEnv]; ok || p.Env["KEEP_ME"] != "1" {
 		t.Fatalf("Balanced env = %+v", p.Env)
+	}
+	want := map[string]string{maxContextTokensEnv: "500000", autoCompactWindowEnv: "500000", autoCompactPctEnv: "85"}
+	for key, value := range want {
+		if got := provider.ContextPresetEnv(p)[key]; got != value {
+			t.Errorf("Balanced %s=%q, want %q", key, got, value)
+		}
 	}
 }
 
@@ -104,18 +105,17 @@ func TestApplyCompactConfigBalanced800KWritesExactTriplet(t *testing.T) {
 	}}
 	applyCompactConfig(&p, nil, compactPresetBalanced800K)
 
-	want := map[string]string{
-		maxContextTokensEnv:  "800000",
-		autoCompactWindowEnv: "800000",
-		autoCompactPctEnv:    "85",
+	if p.ContextPreset != provider.ContextPresetNameBalanced800K {
+		t.Fatalf("Balanced 800K field = %q", p.ContextPreset)
 	}
-	for key, value := range want {
-		if p.Env[key] != value {
-			t.Errorf("Balanced 800K %s=%q, want %q", key, p.Env[key], value)
-		}
-	}
-	if p.Env["KEEP_ME"] != "1" || provider.ContextPresetFromEnv(p.Env) != provider.ContextPresetBalanced800K {
+	if _, ok := p.Env[autoCompactPctEnv]; ok || p.Env["KEEP_ME"] != "1" {
 		t.Fatalf("Balanced 800K env = %+v", p.Env)
+	}
+	want := map[string]string{maxContextTokensEnv: "800000", autoCompactWindowEnv: "800000", autoCompactPctEnv: "85"}
+	for key, value := range want {
+		if got := provider.ContextPresetEnv(p)[key]; got != value {
+			t.Errorf("Balanced 800K %s=%q, want %q", key, got, value)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -126,8 +127,10 @@ func applyLang(out io.Writer, code string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	if cfg.Lang != code {
-		cfg.Lang = code
-		if err := config.Save(cfg); err != nil {
+		if err := config.Update(func(c *provider.Config) error {
+			c.Lang = code
+			return nil
+		}); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
 		}
 	}

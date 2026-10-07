@@ -221,12 +221,16 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 	// Provider-level overrides take final precedence except for embedded-proxy
 	// transport values, which must match the runtime started for this session.
 	maps.Copy(env, p.Env)
+	// The typed context preset expands to Claude Code's variables and outranks
+	// any stale copy in Env.
+	maps.Copy(env, provider.ContextPresetEnv(p))
+	// A retired ccl directive is not a Claude Code variable. Load already drops
+	// it; this guards providers that did not come through Load.
+	removeEnvKey(env, provider.EnvContextBudgetMode)
 	// Advanced provider env can contain legacy technical model IDs. Normalize
 	// every request-bearing model variable after applying those overrides so a
 	// Qoder ID cannot leak back into Claude's title or /model UI.
 	rewriteCatalogModelEnvAliases(env, names)
-	// ccl directives are not Claude Code variables.
-	removeEnvKey(env, provider.EnvContextBudgetMode)
 	if useProxy {
 		removeEnvKey(env, "ANTHROPIC_API_KEY")
 		removeEnvKey(env, "ANTHROPIC_BASE_URL")

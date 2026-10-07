@@ -523,8 +523,8 @@ func TestMapAutoPreservesBalancedContextPreset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := updated.Providers["mock"]; !provider.IsBalancedContextPreset(got.Env) {
-		t.Fatalf("map auto changed Balanced context preset: %+v", got.Env)
+	if got := updated.Providers["mock"]; provider.ProviderContextPreset(got) != provider.ContextPresetBalanced500K {
+		t.Fatalf("map auto changed Balanced context preset: %+v / %q", got.Env, got.ContextPreset)
 	}
 }
 
@@ -560,8 +560,8 @@ func TestMapAutoPreservesBalanced800KContextPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := updated.Providers["mock"]
-	if preset := provider.ContextPresetFromEnv(got.Env); preset != provider.ContextPresetBalanced800K {
-		t.Fatalf("map auto changed Balanced 800K context preset: %+v", got.Env)
+	if preset := provider.ProviderContextPreset(got); preset != provider.ContextPresetBalanced800K {
+		t.Fatalf("map auto changed Balanced 800K context preset: %+v / %q", got.Env, got.ContextPreset)
 	}
 }
 

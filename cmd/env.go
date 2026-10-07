@@ -8,6 +8,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -56,19 +57,18 @@ func runEnvSet(args []string) error {
 		return errors.New(locale.T("未设置激活 Provider。请先用 'ccl set' 或 'ccl use'", "no active provider set. Use 'ccl set' or 'ccl use' first"))
 	}
 
-	p := cfg.Providers[cfg.ActiveProvider]
-	if p.Env == nil {
-		p.Env = make(map[string]string)
-	}
-
 	key := strings.TrimSpace(args[0])
 	val := strings.TrimSpace(args[1])
 	if key == "" {
 		return errors.New(locale.T("键不能为空", "key cannot be empty"))
 	}
-	p.Env[key] = val
-	cfg.Providers[cfg.ActiveProvider] = p
-	if err := config.Save(cfg); err != nil {
+	if err := updateProvider(cfg.ActiveProvider, func(p *provider.Provider) error {
+		if p.Env == nil {
+			p.Env = make(map[string]string)
+		}
+		p.Env[key] = val
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -166,9 +166,13 @@ func runEnvRemove(arg string, force bool) error {
 		return nil
 	}
 
-	delete(p.Env, key)
-	cfg.Providers[cfg.ActiveProvider] = p
-	if err := config.Save(cfg); err != nil {
+	if err := updateProvider(cfg.ActiveProvider, func(p *provider.Provider) error {
+		delete(p.Env, key)
+		if len(p.Env) == 0 {
+			p.Env = nil
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -228,10 +232,14 @@ func runEnvMove(oldArg, newArg string, force bool) error {
 		}
 	}
 
-	delete(p.Env, oldKey)
-	p.Env[newKey] = val
-	cfg.Providers[cfg.ActiveProvider] = p
-	if err := config.Save(cfg); err != nil {
+	if err := updateProvider(cfg.ActiveProvider, func(p *provider.Provider) error {
+		if p.Env == nil {
+			p.Env = make(map[string]string)
+		}
+		delete(p.Env, oldKey)
+		p.Env[newKey] = val
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 

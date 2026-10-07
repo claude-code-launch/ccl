@@ -25,11 +25,11 @@ const (
 )
 
 func compactPresetFromProvider(p provider.Provider) compactPreset {
-	return provider.ContextPresetFromEnv(p.Env)
+	return provider.ProviderContextPreset(p)
 }
 
 func hasUnsupportedContextConfig(p provider.Provider) bool {
-	return provider.HasManagedContextEnv(p.Env) && provider.ContextPresetFromEnv(p.Env) == provider.ContextPresetDefault
+	return p.ContextPreset == "" && provider.HasUnsupportedContextEnv(p)
 }
 
 func compactPresetLabel(preset compactPreset) string {
@@ -90,21 +90,7 @@ func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset 
 }
 
 func applyCompactPreset(p *provider.Provider, preset compactPreset) {
-	if p.Env != nil {
-		delete(p.Env, maxContextTokensEnv)
-		delete(p.Env, autoCompactWindowEnv)
-		delete(p.Env, autoCompactPctEnv)
-		delete(p.Env, provider.EnvContextBudgetMode)
-	}
-	if maxContext, compactWindow, compactPct, ok := provider.ContextPresetValues(preset); ok {
-		ensureProviderEnv(p)
-		p.Env[maxContextTokensEnv] = maxContext
-		p.Env[autoCompactWindowEnv] = compactWindow
-		p.Env[autoCompactPctEnv] = compactPct
-	}
-	if len(p.Env) == 0 {
-		p.Env = nil
-	}
+	provider.SetProviderContextPreset(p, preset)
 }
 
 func ensureProviderEnv(p *provider.Provider) {

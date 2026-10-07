@@ -124,3 +124,29 @@ func runOAuthPrune(out io.Writer, yes bool) error {
 	fmt.Fprintf(out, locale.T("✅ 已删除 %d 个凭据\n", "✅ Deleted %d credential(s)\n"), removed)
 	return nil
 }
+
+// updateProvider applies fn to one provider under the config lock, against the
+// latest file, so a concurrent change to another field or provider survives.
+func updateProvider(name string, fn func(*provider.Provider) error) error {
+	return config.Update(func(cfg *provider.Config) error {
+		p, ok := cfg.Providers[name]
+		if !ok {
+			return fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found in configuration"), name)
+		}
+		if err := fn(&p); err != nil {
+			return err
+		}
+		cfg.Providers[name] = p
+		return nil
+	})
+}
+
+// replaceProvider stores p as the whole entry for name under the config lock.
+// Commands that edit one provider as a unit (map, set) use it: the rest of the
+// config — other providers, selections, settings — is re-read, not replayed.
+func replaceProvider(name string, p provider.Provider) error {
+	return config.Update(func(cfg *provider.Config) error {
+		cfg.Providers[name] = p
+		return nil
+	})
+}

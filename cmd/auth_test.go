@@ -91,7 +91,7 @@ func TestRunAuthIgnoresLegacyProtocolOverrideInConfigMigration(t *testing.T) {
 	}
 }
 
-func TestRunAuthCreatesChatGPTProviderAndMigratesLegacyCodex(t *testing.T) {
+func TestRunAuthCreatesGPTProviderAlongsideLegacyCodexEntry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	originalLogin := oauthLogin
@@ -125,17 +125,16 @@ func TestRunAuthCreatesChatGPTProviderAndMigratesLegacyCodex(t *testing.T) {
 	if cfg.ActiveProvider != "gpt-test" {
 		t.Fatalf("active provider = %q", cfg.ActiveProvider)
 	}
-	if _, exists := cfg.Providers["codex"]; exists {
-		t.Fatal("legacy Codex OAuth provider was not removed")
+	// A provider keyed "codex" is just another provider now: Load has already
+	// folded its oauthProvider into gpt, and a new login does not consume it.
+	if legacy, exists := cfg.Providers["codex"]; !exists || legacy.OAuthProvider != "gpt" {
+		t.Fatalf("codex-keyed provider = %+v (exists=%t)", legacy, exists)
 	}
 	if p.Type != "openai_responses" || p.Endpoint != "oauth://codex" || p.OAuthProvider != "gpt" {
 		t.Fatalf("OAuth provider = %+v", p)
 	}
 	if p.OAuthAccountCredential != "codex-test.json" {
 		t.Fatalf("credential binding = %q, want codex-test.json", p.OAuthAccountCredential)
-	}
-	if p.EffortLevel != "high" || p.CustomModelID != "gpt-test" {
-		t.Fatalf("existing provider settings were not preserved: %+v", p)
 	}
 }
 

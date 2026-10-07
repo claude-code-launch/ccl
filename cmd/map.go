@@ -114,8 +114,7 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 
 	applyOneMSuffixes(&p, oneMSlotsFromProvider(p))
 
-	cfg.Providers[providerName] = p
-	if err := config.Save(cfg); err != nil {
+	if err := replaceProvider(providerName, p); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -215,8 +214,7 @@ func runMapAuto(ctx context.Context, args []string) error {
 		fmt.Println("   Use 'ccl map' to manually configure remaining slots.")
 	}
 
-	cfg.Providers[providerName] = p
-	if err := config.Save(cfg); err != nil {
+	if err := replaceProvider(providerName, p); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -312,8 +310,7 @@ func runMapTUI(args []string) error {
 
 	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)
 
-	cfg.Providers[providerName] = p
-	if err := config.Save(cfg); err != nil {
+	if err := replaceProvider(providerName, p); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 

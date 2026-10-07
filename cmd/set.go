@@ -222,18 +222,26 @@ func RunProviderSet(args []string) error {
 	// The page can rename the draft (a generated placeholder takes the
 	// models.dev catalog ID). A name that now belongs to a different provider
 	// must not be overwritten — that would silently replace its key and setup.
-	if name, collided := providerSaveName(cfg.Providers, targetName, p.Name); collided {
+	// The page may have been open for minutes: decide the name and write against
+	// the latest file, under its lock.
+	requestedName := p.Name
+	collided := false
+	err = config.Update(func(latest *provider.Config) error {
+		p.Name, collided = providerSaveName(latest.Providers, targetName, requestedName)
+		latest.Providers[p.Name] = p
+		if updatedModel.IsActiveChosen {
+			latest.ActiveProvider = p.Name
+			latest.ProviderOff = false
+		}
+		return nil
+	})
+	if collided {
 		fmt.Fprintf(os.Stderr, locale.T(
-			"ℹ️ 已有名为 %q 的 Provider，本次保存为 %q（可用 ccl mv 改名）\n",
-			"ℹ️ A provider named %q already exists; saved this one as %q (rename with ccl mv)\n",
-		), p.Name, name)
-		p.Name = name
+			"ℹ️ 已有名为 %q 的 Provider，本次保存为 %q（可用 ccl provider mv 改名）\n",
+			"ℹ️ A provider named %q already exists; saved this one as %q (rename with ccl provider mv)\n",
+		), requestedName, p.Name)
 	}
-	cfg.Providers[p.Name] = p
-	if updatedModel.IsActiveChosen {
-		cfg.ActiveProvider = p.Name
-	}
-	if err := config.Save(cfg); err != nil {
+	if err != nil {
 		setDebugf("config save failed err=%v", err)
 		return fmt.Errorf("failed to save config: %w", err)
 	}

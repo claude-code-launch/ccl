@@ -197,15 +197,20 @@ func runProviderUse(name string, forACP bool) error {
 	}
 
 	reenabled := false
-	if forACP {
-		cfg.ACPProvider = target
-	} else {
-		cfg.ActiveProvider = target
+	err = config.Update(func(c *provider.Config) error {
+		if _, exists := c.Providers[target]; !exists {
+			return fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found in configuration"), target)
+		}
+		if forACP {
+			c.ACPProvider = target
+			return nil
+		}
+		c.ActiveProvider = target
 		// Choosing a provider means wanting it: turn provider loading back on.
-		reenabled = cfg.ProviderOff
-		cfg.ProviderOff = false
-	}
-	err = config.Save(cfg)
+		reenabled = c.ProviderOff
+		c.ProviderOff = false
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -223,15 +228,15 @@ func runProviderUse(name string, forACP bool) error {
 
 // runACPFollow removes the ACP pin so ACP follows the normal-mode provider.
 func runACPFollow() error {
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-	cfg.ACPProvider = ""
-	if err := config.Save(cfg); err != nil {
+	var active string
+	if err := config.Update(func(c *provider.Config) error {
+		c.ACPProvider = ""
+		active = c.ActiveProvider
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
-	if active := cfg.ActiveProvider; active != "" {
+	if active != "" {
 		fmt.Printf(locale.T("ACP 现在跟随普通模式的 Provider（当前：%s）\n", "ACP now follows the normal-mode provider (currently %s)\n"), active)
 	} else {
 		fmt.Println(locale.T("ACP 现在跟随普通模式的 Provider。", "ACP now follows the normal-mode provider."))
@@ -326,9 +331,9 @@ func runProviderCopy(sourceName, targetName string, force bool) error {
 		}
 	}
 
-	newP := cloneProvider(srcProvider, target)
-	cfg.Providers[target] = newP
-	if err := config.Save(cfg); err != nil {
+	copied := srcProvider.Clone()
+	copied.Name = target
+	if err := replaceProvider(target, copied); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -357,23 +362,33 @@ func runProviderRemove(name string, force, purge bool) error {
 		return nil
 	}
 
-	removed := cfg.Providers[targetName]
-	delete(cfg.Providers, targetName)
-
+	var removed provider.Provider
+	clearedActive, clearedACP := false, false
 	// Never switch to another provider on the user's behalf: that could quietly
 	// move the next session onto a different (billed) source. Clear the
 	// selection and say how to pick one.
-	if cfg.ActiveProvider == targetName {
-		cfg.ActiveProvider = ""
+	err = config.Update(func(c *provider.Config) error {
+		removed = c.Providers[targetName]
+		delete(c.Providers, targetName)
+		if c.ActiveProvider == targetName {
+			c.ActiveProvider = ""
+			clearedActive = true
+		}
+		if c.ACPProvider == targetName {
+			c.ACPProvider = ""
+			clearedACP = true
+		}
+		cfg = c
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	if clearedActive {
 		fmt.Println(locale.T("当前 Provider 已清空，用 ccl use <name> 选择新的。", "Active provider cleared; choose one with ccl use <name>."))
 	}
-	if cfg.ACPProvider == targetName {
-		cfg.ACPProvider = ""
+	if clearedACP {
 		fmt.Println(locale.T("ACP 的固定选择已清除，现在跟随普通模式的 Provider。", "ACP's pinned provider was cleared; ACP now follows the normal-mode provider."))
-	}
-
-	if err := config.Save(cfg); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	fmt.Printf("✅ %s %q\n", locale.T("已删除 Provider", "Successfully deleted provider"), targetName)
@@ -439,43 +454,31 @@ func runProviderMove(sourceName, targetName string, force bool) error {
 			fmt.Println(locale.T("已取消重命名。", "Rename cancelled."))
 			return nil
 		}
-		delete(cfg.Providers, target)
 	}
 
-	cfg.Providers[target] = cloneProvider(cfg.Providers[source], target)
-	delete(cfg.Providers, source)
-
-	if cfg.ActiveProvider == source {
-		cfg.ActiveProvider = target
-	}
-	if cfg.ACPProvider == source {
-		cfg.ACPProvider = target
-	}
-
-	if err := config.Save(cfg); err != nil {
+	err = config.Update(func(c *provider.Config) error {
+		src, ok := c.Providers[source]
+		if !ok {
+			return fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found"), source)
+		}
+		moved := src.Clone()
+		moved.Name = target
+		c.Providers[target] = moved
+		delete(c.Providers, source)
+		if c.ActiveProvider == source {
+			c.ActiveProvider = target
+		}
+		if c.ACPProvider == source {
+			c.ACPProvider = target
+		}
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	fmt.Printf("✅ %s %q → %q\n", locale.T("已重命名 Provider", "Successfully renamed provider"), source, target)
 	return nil
-}
-
-func cloneProvider(p provider.Provider, name string) provider.Provider {
-	cloned := p
-	cloned.Name = name
-	if p.Env != nil {
-		cloned.Env = make(map[string]string, len(p.Env))
-		for k, v := range p.Env {
-			cloned.Env[k] = v
-		}
-	}
-	if p.ModelOverrides != nil {
-		cloned.ModelOverrides = make(map[string]string, len(p.ModelOverrides))
-		for k, v := range p.ModelOverrides {
-			cloned.ModelOverrides[k] = v
-		}
-	}
-	return cloned
 }
 
 func init() {

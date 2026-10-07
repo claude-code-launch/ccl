@@ -37,7 +37,7 @@ func providerEffortSummary(p provider.Provider) string {
 // Responses OAuth backends (gpt) honour it; other providers show
 // "off" regardless of the stored flag.
 func providerFastSummary(p provider.Provider) string {
-	if p.FastMode && (strings.EqualFold(p.OAuthProvider, "gpt") || strings.EqualFold(p.OAuthProvider, "chatgpt")) {
+	if p.FastMode && strings.EqualFold(p.OAuthProvider, "gpt") {
 		return "on"
 	}
 	return "off"
@@ -86,7 +86,7 @@ func providerCatalogModelLabel(model string, names map[string]string) string {
 
 func providerOneMSummary(p provider.Provider) string {
 	contextPart := reviewOneMSummary(oneMSlotsFromProvider(p))
-	switch provider.ContextPresetFromEnv(p.Env) {
+	switch provider.ProviderContextPreset(p) {
 	case provider.ContextPresetBalanced500K:
 		return "500K/425K · " + contextPart
 	case provider.ContextPresetBalanced800K:

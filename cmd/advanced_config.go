@@ -1557,7 +1557,7 @@ func (m *AdvancedConfigModel) availabilitySmokeTestModel() string {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(m.p.OAuthProvider)) {
-	case "gpt", "chatgpt", "codex":
+	case "gpt":
 		return lowCostProbeModel
 	default:
 		return ""

@@ -150,9 +150,9 @@ func TestInferOAuthProvider(t *testing.T) {
 		endpoint     string
 		want         string
 	}{
-		{name: "ChatGPT Codex backend", providerName: "chatgpt", endpoint: "oauth://codex", want: "chatgpt"},
+		{name: "ChatGPT Codex backend", providerName: "chatgpt", endpoint: "oauth://codex", want: "gpt"},
 		{name: "renamed GPT provider", providerName: "my-account", endpoint: "oauth://codex", want: "gpt"},
-		{name: "legacy Codex provider", providerName: "codex", endpoint: "oauth://codex", want: "codex"},
+		{name: "legacy Codex provider", providerName: "codex", endpoint: "oauth://codex", want: "gpt"},
 		{name: "Gemini Antigravity backend", providerName: "gemini", endpoint: "oauth://antigravity", want: "gemini"},
 		{name: "Gemini public backend", providerName: "google-account", endpoint: "oauth://gemini", want: "gemini"},
 		{name: "Grok xAI backend", providerName: "grok", endpoint: "oauth://xai", want: "grok"},
@@ -332,5 +332,23 @@ func TestModelsDevCatalogIDFallsBackToTheName(t *testing.T) {
 	}
 	if got := provider.ModelsDevCatalogID(provider.Provider{Name: "oc", ModelsDevProvider: "  "}); got != "oc" {
 		t.Fatalf("blank catalog ID did not fall back: %q", got)
+	}
+}
+
+func TestCloneDoesNotShareMaps(t *testing.T) {
+	original := provider.Provider{
+		Env:            map[string]string{"A": "1"},
+		ModelOverrides: map[string]string{"x": "y"},
+		ModelProtocols: map[string]string{"m": "openai"},
+	}
+	cloned := original.Clone()
+	cloned.Env["A"] = "2"
+	cloned.ModelOverrides["x"] = "z"
+	cloned.ModelProtocols["m"] = "anthropic"
+	if original.Env["A"] != "1" || original.ModelOverrides["x"] != "y" || original.ModelProtocols["m"] != "openai" {
+		t.Fatalf("clone shares maps with the original: %+v", original)
+	}
+	if (provider.Provider{}).Clone().Env != nil {
+		t.Fatal("cloning nil maps allocated them")
 	}
 }

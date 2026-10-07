@@ -7,7 +7,12 @@ import (
 )
 
 func TestPreferredOAuthSlotDefaultsGPT(t *testing.T) {
-	for _, name := range []string{"gpt", "chatgpt"} {
+	// Load folds the retired chatgpt/codex names into gpt, so only gpt has
+	// defaults here.
+	if _, _, _, _, _, ok := provider.PreferredOAuthSlotDefaults("chatgpt"); ok {
+		t.Fatal("chatgpt still has its own defaults")
+	}
+	for _, name := range []string{"gpt"} {
 		custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults(name)
 		if !ok {
 			t.Fatalf("expected %s defaults", name)
@@ -137,19 +142,33 @@ func TestClearUnavailablePreferredDefaults(t *testing.T) {
 	}
 }
 
-func TestClearUnavailablePreferredDefaultsMigratesLegacyGrokDefaults(t *testing.T) {
-	p := provider.Provider{
-		OAuthProvider: "grok",
-		CustomModelID: "grok-4.5",
-		OpusModel:     "grok-4.5",
-		SonnetModel:   "grok-4.3",
-		HaikuModel:    "grok-3-mini",
+// TestLaunchNeverMovesAUserGrokChoice pins S13: launch-time reconciliation
+// no longer treats a value an older ccl used as a default as "generated".
+// Moving those is a one-time config migration (NormalizeProvider), so a user
+// who deliberately picks grok-4.5 for Opus keeps it on every launch.
+func TestLaunchNeverMovesAUserGrokChoice(t *testing.T) {
+	p := provider.Provider{OAuthProvider: "grok", OpusModel: "grok-4.5", HaikuModel: "grok-3-mini"}
+	provider.ClearUnavailablePreferredDefaults(&p, []string{"grok-4.6", "grok-4.5", "grok-3-mini"})
+	if p.OpusModel != "grok-4.5" || p.HaikuModel != "grok-3-mini" {
+		t.Fatalf("launch moved user choices: %+v", p)
 	}
-	provider.ClearUnavailablePreferredDefaults(&p, []string{"grok-4.6", "grok-4.5"})
-	if p.CustomModelID != "grok-4.6" || p.OpusModel != "grok-4.6" {
-		t.Fatalf("legacy top-tier defaults were not migrated: %+v", p)
+}
+
+func TestNormalizeProviderMigratesLegacyGrokDefaultsOnlyWhenAsked(t *testing.T) {
+	legacy := func() provider.Provider {
+		return provider.Provider{OAuthProvider: "grok", Type: "openai_responses",
+			CustomModelID: "grok-4.5", OpusModel: "grok-4.5", SonnetModel: "grok-4.3", HaikuModel: "grok-3-mini"}
 	}
-	if p.SonnetModel != "grok-4.5" || p.HaikuModel != "grok-4.5" {
-		t.Fatalf("retired generated defaults were not migrated: %+v", p)
+	p := legacy()
+	provider.NormalizeProvider(&p, "grok", false)
+	if p.OpusModel != "grok-4.5" {
+		t.Fatal("slots migrated without legacySlots")
+	}
+	p = legacy()
+	if !provider.NormalizeProvider(&p, "grok", true) {
+		t.Fatal("legacy migration reported no change")
+	}
+	if p.CustomModelID != "grok-4.6" || p.OpusModel != "grok-4.6" || p.SonnetModel != "grok-4.5" || p.HaikuModel != "grok-4.5" {
+		t.Fatalf("legacy defaults = %+v", p)
 	}
 }

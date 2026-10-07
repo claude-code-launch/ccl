@@ -232,9 +232,15 @@ func runDoctor(ctx context.Context, probe bool) error {
 func printDoctorContextBudget(runtimeProvider, configured provider.Provider, modelNames map[string]string) {
 	doctorSection("Context budget")
 
-	maxContext := parseDoctorTokenEnv(configured.Env[maxContextTokensEnv])
-	compactWindow := parseDoctorTokenEnv(configured.Env[autoCompactWindowEnv])
-	compactPct := strings.TrimSpace(configured.Env[provider.EnvAutoCompactPct])
+	// The effective context env is the preset's expansion, or hand-written
+	// values when there is no preset.
+	contextEnv := provider.ContextPresetEnv(configured)
+	if contextEnv == nil {
+		contextEnv = configured.Env
+	}
+	maxContext := parseDoctorTokenEnv(contextEnv[maxContextTokensEnv])
+	compactWindow := parseDoctorTokenEnv(contextEnv[autoCompactWindowEnv])
+	compactPct := strings.TrimSpace(contextEnv[provider.EnvAutoCompactPct])
 	overridden := maxContext > 0 || compactWindow > 0 || compactPct != ""
 	// Never probe with an unset endpoint: NormalizeOpenAIModelsURL falls back to
 	// api.openai.com, which would ship this provider's key to OpenAI. Fixed
@@ -249,10 +255,10 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 
 	oauthproxy.LogDebugf("doctor context budget provider=%q max_context=%d compact_window=%d compact_pct=%q balanced=%t catalog=%q models=%d smallest=%d smallest_model=%q",
 		configured.Name, maxContext, compactWindow, compactPct,
-		provider.IsBalancedContextPreset(configured.Env), source, len(windows), smallest, smallestModel)
+		provider.ProviderContextPreset(configured) != provider.ContextPresetDefault, source, len(windows), smallest, smallestModel)
 
 	oneMSlots := oneMSlotsFromProvider(configured)
-	preset := provider.ContextPresetFromEnv(configured.Env)
+	preset := provider.ProviderContextPreset(configured)
 	balanced := preset != provider.ContextPresetDefault
 	unsupported := overridden && !balanced
 	balancedWindow := ""
@@ -334,7 +340,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 // compact much too late and the upstream rejects the turn first. The suffix is
 // only an Anthropic capability signal — it never widens a third-party window.
 func printDoctorOneMConsistency(p provider.Provider, windows map[string]int) {
-	if len(windows) == 0 || provider.IsBalancedContextPreset(p.Env) {
+	if len(windows) == 0 || provider.ProviderContextPreset(p) != provider.ContextPresetDefault {
 		return
 	}
 	oneMSlots := oneMSlotsFromProvider(p)

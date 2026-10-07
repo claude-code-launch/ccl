@@ -30,30 +30,7 @@ func resolveACPProvider() (acpProviderSnapshot, error) {
 	if !ok {
 		return acpProviderSnapshot{}, fmt.Errorf("provider %q selected for ACP was not found in configuration", name)
 	}
-	return acpProviderSnapshot{name: name, provider: cloneACPProvider(p)}, nil
-}
-
-func cloneACPProvider(p provider.Provider) provider.Provider {
-	cloned := p
-	if p.Env != nil {
-		cloned.Env = make(map[string]string, len(p.Env))
-		for key, value := range p.Env {
-			cloned.Env[key] = value
-		}
-	}
-	if p.ModelOverrides != nil {
-		cloned.ModelOverrides = make(map[string]string, len(p.ModelOverrides))
-		for key, value := range p.ModelOverrides {
-			cloned.ModelOverrides[key] = value
-		}
-	}
-	if p.ModelProtocols != nil {
-		cloned.ModelProtocols = make(map[string]string, len(p.ModelProtocols))
-		for key, value := range p.ModelProtocols {
-			cloned.ModelProtocols[key] = value
-		}
-	}
-	return cloned
+	return acpProviderSnapshot{name: name, provider: p.Clone()}, nil
 }
 
 type acpPreparedLaunch interface {

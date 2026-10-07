@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -52,8 +53,10 @@ func runBypass(out io.Writer, args []string) error {
 	if !ok {
 		return fmt.Errorf("expected on or off, got %q", args[0])
 	}
-	cfg.BypassMode = enabled
-	if err := config.Save(cfg); err != nil {
+	if err := config.Update(func(c *provider.Config) error {
+		c.BypassMode = enabled
+		return nil
+	}); err != nil {
 		return fmt.Errorf("save ccl config: %w", err)
 	}
 
