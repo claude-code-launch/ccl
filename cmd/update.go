@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"compress/gzip"
 	"context"
 	"debug/buildinfo"
 	"encoding/json"
@@ -23,6 +24,15 @@ import (
 // cclRepoReleases is the base URL for ccl's GitHub release asset downloads. Asset
 // names are produced by .github/workflows/release.yml and consumed by bin/wrapper.js.
 const cclRepoReleases = "https://github.com/claude-code-launch/ccl/releases/download"
+
+// releaseArchiveSuffix is appended to a binary's asset name on GitHub releases:
+// binaries ship gzip-compressed (about a third of their size). The npm package
+// still carries them uncompressed.
+const releaseArchiveSuffix = ".gz"
+
+// maxReleaseBinaryBytes caps the decompressed download, so a corrupt or
+// hostile archive cannot fill the disk. Release binaries are about 30 MiB.
+var maxReleaseBinaryBytes int64 = 256 << 20
 
 var updateCmd = &cobra.Command{
 	Use:   "update",
@@ -190,9 +200,10 @@ func canonicalReleaseTag(version string) string {
 	return "v" + version
 }
 
-// downloadReleaseBinary streams url into dest, rendering a progress bar on stderr
-// when stderr is a terminal (and the server reports a content length).
-func downloadReleaseBinary(ctx context.Context, url, dest string) error {
+// downloadReleaseBinary streams the gzip-compressed release asset at url into
+// dest, decompressing on the way. A progress bar (of compressed bytes) is drawn
+// on stderr when stderr is a terminal and the server reports a content length.
+func downloadReleaseBinary(ctx context.Context, url, dest string) (err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -210,52 +221,68 @@ func downloadReleaseBinary(ctx context.Context, url, dest string) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(dest)
+		}
+	}()
 
-	total := resp.ContentLength
-	isTerm := term.IsTerminal(os.Stderr.Fd())
-
-	buf := make([]byte, 32*1024)
-	var done int64
-	var lastDraw time.Time
-	for {
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				f.Close()
-				os.Remove(dest)
-				return werr
-			}
-			done += int64(n)
-			if isTerm && time.Since(lastDraw) >= 60*time.Millisecond {
-				renderDownloadProgress(done, total)
-				lastDraw = time.Now()
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			f.Close()
-			os.Remove(dest)
-			return rerr
-		}
+	progress := &downloadProgress{
+		reader: resp.Body,
+		total:  resp.ContentLength,
+		isTerm: term.IsTerminal(os.Stderr.Fd()),
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(dest)
+	archive, err := gzip.NewReader(progress)
+	if err != nil {
+		return fmt.Errorf("download is not a gzip release archive: %w", err)
+	}
+	// Read one byte past the limit so an oversized archive is detected rather
+	// than silently truncated.
+	written, err := io.Copy(f, io.LimitReader(archive, maxReleaseBinaryBytes+1))
+	if err != nil {
+		return fmt.Errorf("decompress release archive: %w", err)
+	}
+	if written > maxReleaseBinaryBytes {
+		return fmt.Errorf("release archive expands beyond %s", humanSize(maxReleaseBinaryBytes))
+	}
+	if err = archive.Close(); err != nil {
+		return fmt.Errorf("decompress release archive: %w", err)
+	}
+	if err = f.Close(); err != nil {
 		return err
 	}
-	if err := validateReleaseBinary(dest); err != nil {
-		_ = os.Remove(dest)
+	if err = validateReleaseBinary(dest); err != nil {
 		return err
 	}
 
-	if isTerm {
-		renderDownloadProgress(done, total)
+	if progress.isTerm {
+		renderDownloadProgress(progress.done, progress.total)
 		fmt.Fprintln(os.Stderr)
 	} else {
-		fmt.Fprintf(os.Stderr, "Downloaded %s\n", humanSize(done))
+		fmt.Fprintf(os.Stderr, "Downloaded %s (%s unpacked)\n", humanSize(progress.done), humanSize(written))
 	}
 	return nil
+}
+
+// downloadProgress counts the compressed bytes read from the response and
+// redraws the progress bar at most every 60ms.
+type downloadProgress struct {
+	reader   io.Reader
+	total    int64
+	done     int64
+	isTerm   bool
+	lastDraw time.Time
+}
+
+func (p *downloadProgress) Read(buf []byte) (int, error) {
+	n, err := p.reader.Read(buf)
+	p.done += int64(n)
+	if p.isTerm && n > 0 && time.Since(p.lastDraw) >= 60*time.Millisecond {
+		renderDownloadProgress(p.done, p.total)
+		p.lastDraw = time.Now()
+	}
+	return n, err
 }
 
 // Inspect without executing downloaded code. Accept both package builds and
@@ -354,7 +381,7 @@ func selfUpdate(ctx context.Context, version string) error {
 	}
 	defer os.Remove(tmp)
 
-	if err := downloadReleaseBinary(ctx, releaseDownloadURL(version, asset), tmp); err != nil {
+	if err := downloadReleaseBinary(ctx, releaseDownloadURL(version, asset+releaseArchiveSuffix), tmp); err != nil {
 		os.Remove(tmp)
 		return err
 	}

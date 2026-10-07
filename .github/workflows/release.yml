@@ -114,24 +114,29 @@ jobs:
           # Optional rotation of the built-in public Desktop OAuth client.
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
         run: bash scripts/build-release.sh
+      # GitHub releases ship each binary gzip-compressed (~28 MB -> ~10 MB);
+      # `ccl update` downloads <asset>.gz. -n drops the name and timestamp so
+      # the archive depends only on the binary.
+      - name: Compress binary
+        if: github.ref_type == 'tag'
+        run: gzip -9 -n "dist/${{ matrix.asset }}"
       - name: Upload binary
         if: github.ref_type == 'tag'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}.gz
           if-no-files-found: error
-          compression-level: 1
+          compression-level: 0
           retention-days: 3
 
-  release:
-    name: Release and publish npm
+  github-release:
+    name: GitHub release
     if: github.ref_type == 'tag'
     needs: [prepare, verify, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
     steps:
       - uses: actions/checkout@v5
       - name: Download binaries
@@ -143,38 +148,62 @@ jobs:
       - name: Verify asset set and create checksums
         run: |
           for asset in ccl-darwin-amd64 ccl-darwin-arm64 ccl-linux-amd64 ccl-linux-arm64 ccl-win32-x64.exe ccl-win32-arm64.exe; do
-            test -s "dist/$asset"
+            gzip -t "dist/$asset.gz"
           done
-          chmod +x dist/ccl-*
-          (cd dist && sha256sum ccl-* > SHA256SUMS)
+          (cd dist && sha256sum ccl-*.gz > SHA256SUMS)
           ls -lh dist
-      - name: Resolve release notes
-        id: notes
+      # gh uploads the assets concurrently (softprops uploaded them one at a
+      # time). With assets it creates a draft, uploads, then publishes, so a
+      # failed upload never leaves a half-populated release.
+      - name: Create release and upload assets
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          if [[ -f "docs/releases/$VERSION.md" ]]; then
-            echo "path=docs/releases/$VERSION.md" >> "$GITHUB_OUTPUT"
+          assets=(dist/* THIRD_PARTY_NOTICES.md)
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            # A re-run: refresh the assets of the existing release.
+            gh release upload "$VERSION" "${assets[@]}" --clobber
+            exit 0
           fi
-      - name: Create Release and Upload Assets
-        uses: softprops/action-gh-release@v3
+          notes=()
+          if [[ -f "docs/releases/$VERSION.md" ]]; then
+            # Prepended to the generated notes, as softprops body_path did.
+            notes=(--notes-file "docs/releases/$VERSION.md")
+          fi
+          gh release create "$VERSION" "${assets[@]}" --verify-tag --generate-notes "${notes[@]}"
+
+  # npm ships its own copy of the binaries (bin/wrapper.js runs them locally),
+  # so publishing does not need the GitHub release and runs alongside it.
+  npm:
+    name: Publish npm
+    if: github.ref_type == 'tag'
+    needs: [prepare, verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download binaries
+        uses: actions/download-artifact@v4
         with:
-          files: |
-            dist/*
-            THIRD_PARTY_NOTICES.md
-          body_path: ${{ steps.notes.outputs.path }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          pattern: ccl-*
+          path: dist
+          merge-multiple: true
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+      # The npm tarball is compressed as a whole, so bin/ keeps raw binaries
+      # that bin/wrapper.js can exec directly.
       - name: Prepare npm Assets
         run: |
-          cp dist/ccl-* bin/
+          for asset in ccl-darwin-amd64 ccl-darwin-arm64 ccl-linux-amd64 ccl-linux-arm64 ccl-win32-x64.exe ccl-win32-arm64.exe; do
+            gzip -dc "dist/$asset.gz" > "bin/$asset"
+            test -s "bin/$asset"
+          done
           chmod +x bin/ccl-* bin/wrapper.js
       - name: Sync Version from Git Tag
         env:

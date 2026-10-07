@@ -34,21 +34,33 @@ cd ccl
 go build -o ccl .
 ```
 
-也可以从 [GitHub Releases](https://github.com/claude-code-launch/ccl/releases) 下载对应平台的二进制：
+也可以从 [GitHub Releases](https://github.com/claude-code-launch/ccl/releases) 下载对应平台的二进制（gzip 压缩，`SHA256SUMS` 是 `.gz` 文件的校验和）：
 
 | 平台 | 文件名 |
 |------|--------|
-| macOS Intel | `ccl-darwin-amd64` |
-| macOS Apple Silicon | `ccl-darwin-arm64` |
-| Linux amd64 | `ccl-linux-amd64` |
-| Linux arm64 | `ccl-linux-arm64` |
-| Windows x64 | `ccl-win32-x64.exe` |
-| Windows arm64 | `ccl-win32-arm64.exe` |
+| macOS Intel | `ccl-darwin-amd64.gz` |
+| macOS Apple Silicon | `ccl-darwin-arm64.gz` |
+| Linux amd64 | `ccl-linux-amd64.gz` |
+| Linux arm64 | `ccl-linux-arm64.gz` |
+| Windows x64 | `ccl-win32-x64.exe.gz` |
+| Windows arm64 | `ccl-win32-arm64.exe.gz` |
 
 ```bash
+gunzip ccl-darwin-arm64.gz
 chmod +x ccl-darwin-arm64
 mv ccl-darwin-arm64 /usr/local/bin/ccl
 ```
+
+Windows（PowerShell）：
+
+```powershell
+$in = [IO.File]::OpenRead("ccl-win32-x64.exe.gz")
+$out = [IO.File]::Create("ccl.exe")
+(New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)).CopyTo($out)
+$out.Close(); $in.Close()
+```
+
+v1.5.16 及更早的版本发布的是未压缩二进制，这些版本里 `ccl update` 的“自动更新”下载不到新版本，请改用 npm 或 go 方式更新一次。
 
 安装后检查：
 
