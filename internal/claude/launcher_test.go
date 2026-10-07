@@ -228,8 +228,11 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				if s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "arn:aws:bedrock:us-east-1:123456789012:custom-model/my-model" {
 					t.Errorf("ANTHROPIC_CUSTOM_MODEL_OPTION mismatch: %s", s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"])
 				}
-				if s.Env["CLAUDE_CODE_MODEL_ID"] != "arn:aws:bedrock:us-east-1:123456789012:custom-model/my-model" {
-					t.Errorf("CLAUDE_CODE_MODEL_ID mismatch: %s", s.Env["CLAUDE_CODE_MODEL_ID"])
+				if s.Model != "arn:aws:bedrock:us-east-1:123456789012:custom-model/my-model" {
+					t.Errorf("top-level model mismatch: %s", s.Model)
+				}
+				if _, ok := s.Env["CLAUDE_CODE_MODEL_ID"]; ok {
+					t.Error("CLAUDE_CODE_MODEL_ID is still injected")
 				}
 			},
 		},
@@ -284,8 +287,8 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				if s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "my-custom-model" {
 					t.Errorf("ANTHROPIC_CUSTOM_MODEL_OPTION mismatch: %s", s.Env["ANTHROPIC_CUSTOM_MODEL_OPTION"])
 				}
-				if s.Env["CLAUDE_CODE_MODEL_ID"] != "my-custom-model" {
-					t.Errorf("CLAUDE_CODE_MODEL_ID mismatch: %s", s.Env["CLAUDE_CODE_MODEL_ID"])
+				if _, ok := s.Env["CLAUDE_CODE_MODEL_ID"]; ok {
+					t.Error("CLAUDE_CODE_MODEL_ID is still injected")
 				}
 				if s.Model != "my-custom-model" {
 					t.Errorf("top-level model mismatch: %s", s.Model)

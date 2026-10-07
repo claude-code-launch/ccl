@@ -308,7 +308,6 @@ func TestBuildEnvUsesProviderCatalogDisplayNames(t *testing.T) {
 		"ANTHROPIC_CUSTOM_MODEL_OPTION":             "DeepSeek-V4-Flash",
 		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":        "DeepSeek-V4-Flash",
 		"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Custom provider model",
-		"CLAUDE_CODE_MODEL_ID":                      "DeepSeek-V4-Flash",
 		SubagentModelEnv:                            "DeepSeek-V4-Flash",
 		"ANTHROPIC_MODEL":                           "Cantus[1m]",
 	}
@@ -316,6 +315,11 @@ func TestBuildEnvUsesProviderCatalogDisplayNames(t *testing.T) {
 		if env[key] != expected {
 			t.Errorf("%s = %q, want %q", key, env[key], expected)
 		}
+	}
+	// Claude Code does not read CLAUDE_CODE_MODEL_ID; the custom model reaches
+	// it through settings.model.
+	if _, ok := env["CLAUDE_CODE_MODEL_ID"]; ok {
+		t.Error("CLAUDE_CODE_MODEL_ID is still injected")
 	}
 }
 

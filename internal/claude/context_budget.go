@@ -123,10 +123,19 @@ func AdvertisedContextWindows(endpoint, apiKey string) (map[string]int, string) 
 	return nil, ""
 }
 
-// applyContextPolicy keeps either exact supported Balanced triplet. Any other
-// context override is retired to Default and removed from the launched session.
+// applyContextPolicy keeps either supported Balanced tier, launching it with the
+// tier's current values (a pre-85% triplet is upgraded, not dropped). Any other
+// context override is retired to Default and removed from the launched session;
+// the return value reports that, so the launcher can say so.
 func applyContextPolicy(env map[string]string) bool {
-	if env == nil || provider.IsBalancedContextPreset(env) {
+	if env == nil {
+		return false
+	}
+	if preset := provider.ContextPresetFromEnv(env); preset != provider.ContextPresetDefault {
+		maxContext, compactWindow, compactPct, _ := provider.ContextPresetValues(preset)
+		env[provider.EnvMaxContextTokens] = maxContext
+		env[provider.EnvAutoCompactWindow] = compactWindow
+		env[provider.EnvAutoCompactPct] = compactPct
 		return false
 	}
 	if !provider.HasManagedContextEnv(env) {

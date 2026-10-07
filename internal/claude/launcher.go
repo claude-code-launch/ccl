@@ -156,7 +156,6 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 		if requestModel != strings.TrimSpace(p.CustomModelID) {
 			env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"] = "Custom provider model"
 		}
-		env["CLAUDE_CODE_MODEL_ID"] = requestModel
 	}
 
 	// 2. Explicit tier model overrides (user-specified)
@@ -175,6 +174,11 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 	if p.FableModel != "" {
 		env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = catalogModelRequestName(p.FableModel, names)
 		env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"] = catalogModelDisplayName(p.FableModel, names)
+	} else if p.OpusModel != "" {
+		// Fable defaults mirror Opus. Guessing it from the pool instead picked
+		// whatever scored as "pro"/"max" (MiniMax-M2 for one gateway).
+		env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = env["ANTHROPIC_DEFAULT_OPUS_MODEL"]
+		env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"] = env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"]
 	}
 
 	// 3. Effort level; empty means ccl leaves Claude's own setting in control.
@@ -186,6 +190,13 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 	// Only used as fallback when explicit tier models aren't set
 	if p.Model != "" && (p.OpusModel == "" || p.SonnetModel == "" || p.HaikuModel == "" || p.FableModel == "") {
 		applyModelEnvWithNames(env, p.Model, names)
+	}
+	if p.CustomModelID != "" {
+		// The default model is settings.model. Claude Code ranks ANTHROPIC_MODEL
+		// above it, so the pool fallback's Sonnet default would replace the
+		// user's choice (and override the model a --resume restores). Provider
+		// Env, applied below, can still set ANTHROPIC_MODEL explicitly.
+		removeEnvKey(env, "ANTHROPIC_MODEL")
 	}
 
 	// CCL owns model discovery and tier mapping. Claude's additional gateway
@@ -352,7 +363,13 @@ func applyModelEnvWithNames(env map[string]string, modelSpec string, names map[s
 	opus := modelrouting.MapModel("claude-3-opus", "", models)
 	sonnet := modelrouting.MapModel("claude-3-5-sonnet", "", models)
 	haiku := modelrouting.MapModel("claude-3-5-haiku", "", models)
-	fable := modelrouting.MapModel("claude-fable-5-1", "", models)
+	fable := opus
+	for _, model := range models {
+		if strings.Contains(strings.ToLower(model), "fable") {
+			fable = modelrouting.MapModel("claude-fable-5-1", "", models)
+			break
+		}
+	}
 
 	setIfEmpty("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "0")
 	setIfEmpty("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
@@ -532,6 +549,9 @@ type Launch struct {
 	SettingsPath string
 	Env          []string
 	Session      *providersession.Session
+	// DroppedContextOverride reports that the provider's context env was not a
+	// supported preset and was left out of this session.
+	DroppedContextOverride bool
 
 	baseURL  string
 	useProxy bool
@@ -640,12 +660,13 @@ func PrepareContext(ctx context.Context, p provider.Provider) (*Launch, error) {
 	logSessionContextBudget(p, sessionSettings, prepared.droppedContextOverride)
 
 	return &Launch{
-		Path:         claudePath,
-		SettingsPath: settingsPath,
-		Env:          buildProcessEnv(os.Environ(), sessionSettings, prepared.useProxy),
-		Session:      prepared.session,
-		baseURL:      prepared.baseURL,
-		useProxy:     prepared.useProxy,
+		Path:                   claudePath,
+		SettingsPath:           settingsPath,
+		Env:                    buildProcessEnv(os.Environ(), sessionSettings, prepared.useProxy),
+		Session:                prepared.session,
+		DroppedContextOverride: prepared.droppedContextOverride,
+		baseURL:                prepared.baseURL,
+		useProxy:               prepared.useProxy,
 	}, nil
 }
 
@@ -658,6 +679,11 @@ func Run(p provider.Provider, args []string) error {
 	defer launch.Close()
 
 	fmt.Println("Using provider-specific claude config:", launch.SettingsPath)
+	if launch.DroppedContextOverride {
+		// Only the interactive launch says this; ACP's stdout is JSON-RPC.
+		fmt.Fprintf(os.Stderr, "ccl: provider %q has context settings (%s) that are not a supported preset; they were left out of this session. Pick Default or Balanced under Context & Compact in `ccl set %s`.\n",
+			p.Name, strings.Join(provider.ManagedContextEnvKeys(), ", "), p.Name)
+	}
 
 	cmd := launch.Command(args...)
 	cmd.Stdin = os.Stdin
@@ -826,7 +852,6 @@ func rewriteCatalogModelEnvAliases(env map[string]string, names map[string]strin
 		"ANTHROPIC_DEFAULT_SONNET_MODEL",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
 		"ANTHROPIC_DEFAULT_FABLE_MODEL",
-		"CLAUDE_CODE_MODEL_ID",
 		SubagentModelEnv,
 	} {
 		if value := strings.TrimSpace(env[key]); value != "" {
