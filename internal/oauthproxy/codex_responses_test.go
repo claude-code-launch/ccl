@@ -370,7 +370,9 @@ func TestCodexCompactionRetriesSSEOverflowOnce(t *testing.T) {
 	}
 	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", bytes.NewReader(payload))
 	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
-	response, err := (&http.Client{Timeout: 20 * time.Second}).Do(request)
+	// Counting tokens on this ~2.6MB request twice takes a few seconds, and far
+	// longer under -race on a loaded CI runner; the timeout only guards a hang.
+	response, err := (&http.Client{Timeout: 90 * time.Second}).Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
