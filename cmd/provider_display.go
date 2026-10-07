@@ -27,10 +27,14 @@ func providerAuthLabel(p provider.Provider) string {
 }
 
 func providerEffortSummary(p provider.Provider) string {
-	if strings.TrimSpace(p.EffortLevel) == "" {
-		return "default"
+	summary := "default"
+	if level := strings.TrimSpace(p.EffortLevel); level != "" {
+		summary = level
 	}
-	return p.EffortLevel
+	if p.Ultracode {
+		summary += " + ultracode"
+	}
+	return summary
 }
 
 // providerFastSummary reports the Codex fastMode state for display. Only Codex
@@ -112,11 +116,11 @@ func setProviderAuthHeaders(req *http.Request, p provider.Provider) {
 }
 
 func printProviderExperienceWarnings(p provider.Provider) {
-	if strings.TrimSpace(p.EffortLevel) != "" {
-		doctorWarn("Effort is pinned by ccl; choose Default in ccl set if Claude /model effort changes should apply.")
+	if level := strings.TrimSpace(p.EffortLevel); level != "" {
+		doctorInfo(fmt.Sprintf("Effort starts at %s each session (/effort still changes it; ccl provider effort default leaves it to Claude Code).", level))
 	}
 	if p.FastMode {
-		doctorWarn("FastMode is on: Codex faster responses at higher usage; toggle with /fast in Claude Code or ccl set Review & Apply.")
+		doctorInfo("Fast is on: ccl asks the Codex upstream for priority service (faster, higher usage); turn it off in ccl set Review & Apply.")
 	}
 	if p.OAuthProvider == "" && provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
 		doctorWarn("OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")

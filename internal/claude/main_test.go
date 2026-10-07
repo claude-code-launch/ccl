@@ -14,6 +14,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	runDirectory = func() (string, error) { return filepath.Join(dir, "run"), nil }
+	// Nor may they read the developer's Claude Code settings, which decide
+	// which preferences ccl leaves alone.
+	_ = os.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, "claude-config"))
+	userSettingsCWD = func() string { return filepath.Join(dir, "project") }
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

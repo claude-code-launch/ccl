@@ -3,7 +3,9 @@ package cmd
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"debug/buildinfo"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,100 +36,173 @@ const releaseArchiveSuffix = ".gz"
 // hostile archive cannot fill the disk. Release binaries are about 30 MiB.
 var maxReleaseBinaryBytes int64 = 256 << 20
 
-var updateCmd = &cobra.Command{
-	Use:   "update",
-	Short: "Update ccl to the latest version",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("Current version: %s\n", Version)
-		fmt.Println("Checking for updates...")
+var updateMethod string
 
-		latestVersion, err := fetchLatestNpmVersion()
-		if err != nil {
-			fmt.Printf("⚠️  Could not check for latest version: %v\n", err)
-			latestVersion = "unknown"
-		} else {
-			fmt.Printf("Latest version: %s\n\n", latestVersion)
-		}
+var updateCmd = func() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update ccl to the latest version",
+		Long: `Update ccl to the latest release.
 
-		cleanCurrent := canonicalReleaseTag(Version)
-		cleanLatest := canonicalReleaseTag(latestVersion)
+ccl detects how it was installed (npm, go install, or a downloaded binary)
+and offers that method first. --method self|npm|go skips the prompt, which
+is required when stdin is not a terminal. The self method downloads the
+release archive for this platform, checks it against the release's
+SHA256SUMS, and keeps the previous binary as a backup.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUpdate(updateMethod)
+		},
+	}
+	cmd.Flags().StringVar(&updateMethod, "method", "", "Update method: self, npm, or go (skips the prompt)")
+	return cmd
+}()
 
-		if Version != "dev" && latestVersion != "unknown" && cleanCurrent == cleanLatest {
-			fmt.Println("✨ You are already on the latest version!")
-			return nil
-		}
+func runUpdate(method string) error {
+	fmt.Printf("Current version: %s\n", Version)
+	fmt.Println("Checking for updates...")
 
-		// Prompt user for update method
-		var method string
-		fmt.Println(locale.T("选择更新方式:", "Choose update method:"))
-		fmt.Println("1. Auto update (download latest binary)")
-		fmt.Println("2. Update via npm (Global install)")
-		fmt.Println("3. Update via Go (go install)")
-		fmt.Println("4. View installation instructions")
-		fmt.Println("5. Cancel")
-		fmt.Print("Choose [1-5]: ")
-		var choiceStr string
-		fmt.Scanln(&choiceStr)
-		choiceStr = strings.ToLower(strings.TrimSpace(choiceStr))
-
-		switch choiceStr {
-		case "1", "auto", "self":
-			method = "self"
-		case "2", "npm":
-			method = "npm"
-		case "3", "go":
-			method = "go"
-		case "4", "manual":
-			method = "manual"
-		case "5", "cancel", "":
-			method = "cancel"
-		default:
-			method = "cancel"
-		}
-
-		switch method {
-		case "self":
-			fmt.Println("Downloading latest ccl binary...")
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			if err := selfUpdate(ctx, latestVersion); err != nil {
-				return fmt.Errorf("self-update failed (try the npm or go method instead): %w", err)
-			}
-			fmt.Println("\n🎉 Successfully updated ccl to the latest version!")
-		case "cancel", "":
-			fmt.Println("Update cancelled.")
-			return nil
-		case "npm":
-			fmt.Println("Updating via npm... Running 'npm install -g @claudecodelaunch/ccl@latest'")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "npm", "install", "-g", "@claudecodelaunch/ccl@latest")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Stdin = os.Stdin
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("npm update failed: %w", err)
-			}
-			fmt.Println("\n🎉 Successfully updated ccl to the latest version via npm!")
-		case "go":
-			fmt.Println("Updating via Go... Running 'go install github.com/claude-code-launch/ccl@latest'")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "go", "install", "github.com/claude-code-launch/ccl@latest")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Stdin = os.Stdin
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("go update failed: %w", err)
-			}
-			fmt.Println("\n🎉 Successfully updated ccl to the latest version via Go!")
-		case "manual":
-			fmt.Println("\nPlease visit the following link to check alternative installation methods:")
-			fmt.Println("🔗 https://github.com/claude-code-launch/ccl#安装与编译")
-		}
-
+	latestVersion, err := fetchLatestNpmVersion()
+	if err != nil {
+		fmt.Printf("⚠️  Could not check for latest version: %v\n", err)
+		latestVersion = "unknown"
+	} else {
+		fmt.Printf("Latest version: %s\n\n", latestVersion)
+	}
+	if Version != "dev" && latestVersion != "unknown" && canonicalReleaseTag(Version) == canonicalReleaseTag(latestVersion) {
+		fmt.Println("✨ You are already on the latest version!")
 		return nil
-	},
+	}
+
+	detected := detectInstallMethod()
+	method = strings.ToLower(strings.TrimSpace(method))
+	switch method {
+	case "":
+		if !term.IsTerminal(os.Stdin.Fd()) {
+			return fmt.Errorf("no terminal to ask on; run ccl update --method %s (detected) or self|npm|go", detected)
+		}
+		method = promptUpdateMethod(detected)
+	case "self", "npm", "go":
+	default:
+		return fmt.Errorf("unknown update method %q; use self, npm, or go", method)
+	}
+
+	switch method {
+	case "self":
+		fmt.Println("Downloading latest ccl binary...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := selfUpdate(ctx, latestVersion); err != nil {
+			return fmt.Errorf("self-update failed (try the npm or go method instead): %w", err)
+		}
+		fmt.Println("\n🎉 Successfully updated ccl to the latest version!")
+	case "npm":
+		fmt.Println("Updating via npm... Running 'npm install -g @claudecodelaunch/ccl@latest'")
+		if err := runUpdateCommand("npm", "install", "-g", "@claudecodelaunch/ccl@latest"); err != nil {
+			return fmt.Errorf("npm update failed: %w", err)
+		}
+		fmt.Println("\n🎉 Successfully updated ccl to the latest version via npm!")
+	case "go":
+		fmt.Println("Updating via Go... Running 'go install github.com/claude-code-launch/ccl@latest'")
+		if err := runUpdateCommand("go", "install", "github.com/claude-code-launch/ccl@latest"); err != nil {
+			return fmt.Errorf("go update failed: %w", err)
+		}
+		fmt.Println("\n🎉 Successfully updated ccl to the latest version via Go!")
+	case "manual":
+		fmt.Println("\nPlease visit the following link to check alternative installation methods:")
+		fmt.Println("🔗 https://github.com/claude-code-launch/ccl#安装与编译")
+	default:
+		fmt.Println("Update cancelled.")
+	}
+	return nil
+}
+
+// promptUpdateMethod asks which method to use; Enter picks the detected one.
+func promptUpdateMethod(detected string) string {
+	labels := map[string]string{"self": "1", "npm": "2", "go": "3"}
+	fmt.Println(locale.T("选择更新方式:", "Choose update method:"))
+	for _, row := range []struct{ key, text string }{
+		{"self", "1. Auto update (download latest binary)"},
+		{"npm", "2. Update via npm (Global install)"},
+		{"go", "3. Update via Go (go install)"},
+	} {
+		if row.key == detected {
+			fmt.Println(row.text + "  ← detected")
+		} else {
+			fmt.Println(row.text)
+		}
+	}
+	fmt.Println("4. View installation instructions")
+	fmt.Println("5. Cancel")
+	fmt.Printf("Choose [1-5] (Enter = %s): ", labels[detected])
+	var choice string
+	_, _ = fmt.Scanln(&choice)
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "":
+		return detected
+	case "1", "auto", "self":
+		return "self"
+	case "2", "npm":
+		return "npm"
+	case "3", "go":
+		return "go"
+	case "4", "manual":
+		return "manual"
+	default:
+		return "cancel"
+	}
+}
+
+func runUpdateCommand(name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdout, command.Stderr, command.Stdin = os.Stdout, os.Stderr, os.Stdin
+	return command.Run()
+}
+
+// detectInstallMethod infers how this ccl was installed from where its binary
+// lives: inside an npm package, in a Go bin directory, or anywhere else
+// (a downloaded release binary).
+func detectInstallMethod() string {
+	path, err := os.Executable()
+	if err != nil {
+		return "self"
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return installMethodForPath(path, goBinDirs())
+}
+
+func installMethodForPath(path string, goBins []string) string {
+	slashed := filepath.ToSlash(path)
+	if strings.Contains(slashed, "/node_modules/@claudecodelaunch/ccl/") {
+		return "npm"
+	}
+	dir := filepath.Dir(path)
+	for _, bin := range goBins {
+		if bin != "" && filepath.Clean(bin) == dir {
+			return "go"
+		}
+	}
+	return "self"
+}
+
+func goBinDirs() []string {
+	var dirs []string
+	if gobin := os.Getenv("GOBIN"); gobin != "" {
+		dirs = append(dirs, gobin)
+	}
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			gopath = filepath.Join(home, "go")
+		}
+	}
+	for _, entry := range filepath.SplitList(gopath) {
+		dirs = append(dirs, filepath.Join(entry, "bin"))
+	}
+	return dirs
 }
 
 func fetchLatestNpmVersion() (string, error) {
@@ -183,6 +258,40 @@ func releaseAssetName() (string, error) {
 	return fmt.Sprintf("ccl-%s-%s%s", platform, arch, ext), nil
 }
 
+// releaseChecksum fetches the release's SHA256SUMS and returns the digest
+// listed for asset. A release without one for the asset is refused rather than
+// installed unchecked.
+func releaseChecksum(ctx context.Context, version, asset string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseDownloadURL(version, "SHA256SUMS"), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download SHA256SUMS: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download SHA256SUMS: HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return "", err
+	}
+	return checksumFor(string(data), asset)
+}
+
+// checksumFor finds asset in sha256sum output ("<hex>  <name>" per line).
+func checksumFor(sums, asset string) (string, error) {
+	for _, line := range strings.Split(sums, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == asset && len(fields[0]) == 64 {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	return "", fmt.Errorf("SHA256SUMS lists no checksum for %s", asset)
+}
+
 // releaseDownloadURL resolves a release asset download URL. When the version is
 // known it pins the exact release; otherwise it follows GitHub's /latest redirect.
 func releaseDownloadURL(version, asset string) string {
@@ -203,7 +312,7 @@ func canonicalReleaseTag(version string) string {
 // downloadReleaseBinary streams the gzip-compressed release asset at url into
 // dest, decompressing on the way. A progress bar (of compressed bytes) is drawn
 // on stderr when stderr is a terminal and the server reports a content length.
-func downloadReleaseBinary(ctx context.Context, url, dest string) (err error) {
+func downloadReleaseBinary(ctx context.Context, url, dest, wantSHA256 string) (err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -233,7 +342,8 @@ func downloadReleaseBinary(ctx context.Context, url, dest string) (err error) {
 		total:  resp.ContentLength,
 		isTerm: term.IsTerminal(os.Stderr.Fd()),
 	}
-	archive, err := gzip.NewReader(progress)
+	digest := sha256.New()
+	archive, err := gzip.NewReader(io.TeeReader(progress, digest))
 	if err != nil {
 		return fmt.Errorf("download is not a gzip release archive: %w", err)
 	}
@@ -248,6 +358,16 @@ func downloadReleaseBinary(ctx context.Context, url, dest string) (err error) {
 	}
 	if err = archive.Close(); err != nil {
 		return fmt.Errorf("decompress release archive: %w", err)
+	}
+	// gzip stops at the end of its stream; drain any trailing bytes so the
+	// digest covers the whole downloaded file.
+	if _, err = io.Copy(digest, progress); err != nil {
+		return fmt.Errorf("read release archive: %w", err)
+	}
+	if wantSHA256 != "" {
+		if got := hex.EncodeToString(digest.Sum(nil)); !strings.EqualFold(got, wantSHA256) {
+			return fmt.Errorf("release archive checksum mismatch: got %s, want %s", got, wantSHA256)
+		}
 	}
 	if err = f.Close(); err != nil {
 		return err
@@ -381,7 +501,13 @@ func selfUpdate(ctx context.Context, version string) error {
 	}
 	defer os.Remove(tmp)
 
-	if err := downloadReleaseBinary(ctx, releaseDownloadURL(version, asset+releaseArchiveSuffix), tmp); err != nil {
+	archive := asset + releaseArchiveSuffix
+	wantSHA256, err := releaseChecksum(ctx, version, archive)
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := downloadReleaseBinary(ctx, releaseDownloadURL(version, archive), tmp, wantSHA256); err != nil {
 		os.Remove(tmp)
 		return err
 	}

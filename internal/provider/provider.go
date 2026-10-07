@@ -178,6 +178,9 @@ type Provider struct {
 	// three Claude Code context variables from it at launch. Older configs
 	// encoded the tier as an exact env triplet, which Load converts.
 	ContextPreset string `yaml:"contextPreset,omitempty"`
+	// Ultracode turns on Claude Code's ultracode setting (a planned workflow per
+	// substantive task) for this provider's sessions.
+	Ultracode bool `yaml:"ultracode,omitempty"`
 }
 
 // ModelsDevCatalogID returns the models.dev catalog ID behind p.

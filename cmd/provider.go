@@ -31,6 +31,8 @@ Subcommands:
   preview        Show settings JSON injected into Claude Code
   on/off         Load the active provider, or run Claude Code with its own
                  configuration (claude.ai subscription)
+  effort         Effort a provider's sessions start at (/effort still works)
+  ultracode      Claude Code's ultracode on/off for a provider
 
 Root shortcuts: ccl set / ccl ls / ccl use / ccl map.
 `,
@@ -485,6 +487,8 @@ func init() {
 		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
 		newProviderToggleCommand("on"),
 		newProviderToggleCommand("off"),
+		newProviderEffortCommand(),
+		newProviderUltracodeCommand(),
 	)
 	// Root shortcuts for the less frequent provider commands are deprecated;
 	// `rm` is gone from the root because `claude rm` is a Claude Code command.

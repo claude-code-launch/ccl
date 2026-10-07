@@ -215,6 +215,9 @@ func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming 
 			request.Header.Add(key, value)
 		}
 	}
+	for _, hint := range claudeCodeHintHeaders {
+		request.Header.Del(hint)
+	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
 	for key, values := range runtimeHeaders {

@@ -34,14 +34,25 @@ type settingsJSON struct {
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
 	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"` // Map standard IDs to provider-specific IDs
-	// OutputStyle pins Claude Code's output style for every ccl-launched session.
+	// OutputStyle, Language, StatusLine, and ModelPicker are preferences: ccl
+	// supplies them only when the user's own settings do not (see
+	// userDefinedSettings), because --settings would otherwise override them.
 	OutputStyle string `json:"outputStyle,omitempty"`
 	// Language tells Claude Code which language to reply in (a natural-language
 	// name, e.g. "中文" or "English") and is derived from the user's ccl lang.
 	Language string `json:"language,omitempty"`
-	// FastMode is always serialized (no omitempty) so turning it off in ccl set
-	// (or Claude Code /fast) can clear a previously enabled pin.
-	FastMode bool `json:"fastMode"`
+	// FastMode is written only when the provider turns it on. Writing false
+	// would undo the user's own /fast (which persists fastMode: true) on every
+	// launch.
+	FastMode bool `json:"fastMode,omitempty"`
+	// EffortLevel is the provider's starting effort. Through --settings it
+	// applies to every model, and /effort can still change it mid-session
+	// (the CLAUDE_CODE_EFFORT_LEVEL variable ccl used to set could not be).
+	EffortLevel string `json:"effortLevel,omitempty"`
+	// Ultracode has Claude plan a workflow for each substantive task.
+	Ultracode bool `json:"ultracode,omitempty"`
+	// ModelPicker lists the provider's models in /model.
+	ModelPicker *modelPickerConfig `json:"modelPicker,omitempty"`
 	// DisableClaudeAiConnectors is always serialized. A ccl session always uses a
 	// non-claude.ai auth source (a loopback runtime or a gateway's own key), so
 	// Claude Code's first-party check fails and the connector fetch can never
@@ -54,6 +65,20 @@ type settingsJSON struct {
 	// when the provider opts out, which lets Claude Code fall back to the user's
 	// statusLine from ~/.claude/settings.json.
 	StatusLine *statusLineConfig `json:"statusLine,omitempty"`
+}
+
+// modelPickerConfig is Claude Code's modelPicker settings object: the rows
+// /model offers, replacing the built-in Claude list when ReplaceBuiltInOptions
+// is set.
+type modelPickerConfig struct {
+	Options               []modelPickerOption `json:"options"`
+	ReplaceBuiltInOptions bool                `json:"replaceBuiltInOptions,omitempty"`
+}
+
+type modelPickerOption struct {
+	Model       string `json:"model"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // statusLineConfig is Claude Code's statusLine settings object. Only the
@@ -183,10 +208,8 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 		env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"] = env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"]
 	}
 
-	// 3. Effort level; empty means ccl leaves Claude's own setting in control.
-	if p.EffortLevel != "" {
-		env["CLAUDE_CODE_EFFORT_LEVEL"] = p.EffortLevel
-	}
+	// Effort travels in settings.effortLevel (see settings()), not the env
+	// variable, so /effort keeps working.
 
 	// 4. Model pool routing (auto-assign tiers from comma-separated list)
 	// Only used as fallback when explicit tier models aren't set
@@ -217,6 +240,23 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 	runtimeSettings := ResolveRuntimeSettings(p)
 	if runtimeSettings.SubagentModel != "" {
 		env[SubagentModelEnv] = catalogModelRequestName(runtimeSettings.SubagentModel, names)
+	}
+
+	// Through ccl's loopback runtime the system-prompt attribution block only
+	// reaches third-party upstreams (several converters used to strip it, one
+	// forwarded it), so it is turned off at the client, as Claude Code's
+	// gateway guide recommends. The gateway hint headers tell the runtime what
+	// a request is (compaction in particular) without guessing from prompt
+	// text; the runtime removes them before forwarding upstream. Both are
+	// defaults a provider's Env can override.
+	if useProxy {
+		env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
+		env["CLAUDE_CODE_GATEWAY_HINT_HEADERS"] = "1"
+		// Fast mode: Claude Code only asks for it on models it knows support
+		// it, which a gateway's never are, so ccl asks its runtime directly.
+		if p.FastMode {
+			env["ANTHROPIC_CUSTOM_HEADERS"] = "X-Ccl-Fast-Mode: on"
+		}
 	}
 
 	// Provider-level overrides take final precedence except for embedded-proxy
@@ -277,6 +317,36 @@ func isProxyTransportEnv(key string) bool {
 		sameEnvKey(key, "ANTHROPIC_BASE_URL")
 }
 
+// inheritedEnvToDrop lists shell variables that would take a ccl session
+// somewhere other than where ccl points it:
+//   - any CLAUDE_CODE_USE_* provider selector makes Claude Code ignore
+//     ANTHROPIC_BASE_URL;
+//   - model variables ccl did not set would override its mapping (a shell
+//     ANTHROPIC_MODEL beats settings.model);
+//   - for a direct gateway, the credential variable ccl did not set would be
+//     sent alongside the one it did;
+//   - ANTHROPIC_CUSTOM_HEADERS would leak to a third-party upstream through
+//     the loopback runtime;
+//   - CLAUDECODE / CLAUDE_CODE_CHILD_SESSION mark a nested session, which
+//     Claude Code excludes from --resume (ACP relies on it).
+func inheritedEnvToDrop(settings settingsJSON, useProxy bool) []string {
+	drop := []string{
+		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+		"CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_GATEWAY",
+		"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION",
+		"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION",
+	}
+	for _, tier := range []string{"OPUS", "SONNET", "HAIKU", "FABLE"} {
+		drop = append(drop, "ANTHROPIC_DEFAULT_"+tier+"_MODEL", "ANTHROPIC_DEFAULT_"+tier+"_MODEL_NAME")
+	}
+	if useProxy {
+		drop = append(drop, "ANTHROPIC_CUSTOM_HEADERS")
+	} else {
+		drop = append(drop, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+	}
+	return drop
+}
+
 // buildProcessEnv prevents ambient Anthropic credentials from overriding the
 // per-session endpoint and bearer token used by the embedded proxy, and exports
 // the context-sizing variables ccl manages.
@@ -296,6 +366,9 @@ func buildProcessEnv(inherited []string, settings settingsJSON, useProxy bool) [
 		suppressed[key] = struct{}{}
 	}
 	for _, key := range provider.ManagedContextEnvKeys() {
+		suppressed[key] = struct{}{}
+	}
+	for _, key := range inheritedEnvToDrop(settings, useProxy) {
 		suppressed[key] = struct{}{}
 	}
 	exported := make(map[string]string, 4)
@@ -517,21 +590,29 @@ func (c *providerContext) settings() settingsJSON {
 		HasCompletedOnboarding: true,
 		Model:                  catalogModelRequestName(c.provider.CustomModelID, c.modelNames),
 		ModelOverrides:         catalogModelOverrides(c.provider.ModelOverrides, c.modelNames),
-		OutputStyle:            DefaultOutputStyle,
-		Language:               responseLanguage(),
 		FastMode:               c.provider.FastMode,
+		EffortLevel:            c.provider.EffortLevel,
+		Ultracode:              c.provider.Ultracode,
 		// claude.ai connectors reach claude.ai over the network, which a ccl
 		// session's loopback base URL can never satisfy; pin the opt-out so the
 		// startup warning is not printed every session.
 		DisableClaudeAiConnectors: true,
 	}
-	// ccl's status line wins over the user's, because --settings outranks
-	// ~/.claude/settings.json. Providers that opt out leave the field unset.
-	if !c.provider.StatuslineDisabled {
+	userKeys := userDefinedSettings(userSettingsCWD())
+	if !userKeys["outputStyle"] {
+		settings.OutputStyle = DefaultOutputStyle
+	}
+	if !userKeys["language"] {
+		settings.Language = responseLanguage()
+	}
+	if !c.provider.StatuslineDisabled && !userKeys["statusLine"] {
 		settings.StatusLine = &statusLineConfig{
 			Type:    "command",
 			Command: statusLineCommand(),
 		}
+	}
+	if !userKeys["modelPicker"] {
+		settings.ModelPicker = providerModelPicker(c.provider, c.modelNames)
 	}
 	return settings
 }
@@ -779,7 +860,7 @@ func logSessionContextBudget(p provider.Provider, settings settingsJSON, dropped
 		settings.Env[provider.EnvAutoCompactWindow],
 		settings.Env[provider.EnvAutoCompactPct],
 		droppedOverride,
-		settings.Env["CLAUDE_CODE_EFFORT_LEVEL"],
+		settings.EffortLevel,
 		strings.Join(mapped, " "))
 }
 

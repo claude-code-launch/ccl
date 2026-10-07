@@ -29,6 +29,24 @@ type codexResponsesConvertedRequest struct {
 }
 
 func convertAnthropicToCodexResponses(raw []byte, fallbackSessionID ...string) (*codexResponsesConvertedRequest, error) {
+	return convertAnthropicToCodexResponsesWithHint(raw, "", fallbackSessionID...)
+}
+
+// convertAnthropicToCodexResponsesWithHint converts with Claude Code's own
+// statement of what the request is: compactionHint is the value of its
+// x-claude-code-compaction header (auto, manual, reactive), empty when absent.
+func convertAnthropicToCodexResponsesWithHint(raw []byte, compactionHint string, fallbackSessionID ...string) (*codexResponsesConvertedRequest, error) {
+	return convertAnthropicToCodexResponsesWith(raw, codexConvertHints{compaction: compactionHint}, fallbackSessionID...)
+}
+
+// codexConvertHints carry per-request facts from headers rather than the body.
+type codexConvertHints struct {
+	compaction string // x-claude-code-compaction value
+	fast       bool   // the session asked for priority service
+}
+
+func convertAnthropicToCodexResponsesWith(raw []byte, hints codexConvertHints, fallbackSessionID ...string) (*codexResponsesConvertedRequest, error) {
+	compactionHint := hints.compaction
 	var request anthropicMessagesRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, fmt.Errorf("invalid Anthropic Messages request: %w", err)
@@ -41,6 +59,12 @@ func convertAnthropicToCodexResponses(raw []byte, fallbackSessionID ...string) (
 		return nil, fmt.Errorf("messages must not be empty")
 	}
 	compactionReason, compactionSignals := codexClassifyCompactionRequest(&request)
+	// The header is authoritative when Claude Code sends it; phrase matching
+	// remains for versions or setups that do not.
+	if hint := strings.ToLower(strings.TrimSpace(compactionHint)); hint != "" {
+		compactionReason = "header_" + hint
+		compactionSignals = "header"
+	}
 	compaction := compactionReason != ""
 
 	upstreamModel := stripContextModelSuffix(request.Model)
@@ -92,6 +116,8 @@ func convertAnthropicToCodexResponses(raw []byte, fallbackSessionID ...string) (
 	}
 	if tier := codexServiceTier(request.ServiceTier, request.Speed); tier != "" {
 		body["service_tier"] = tier
+	} else if hints.fast {
+		body["service_tier"] = "priority"
 	}
 	if len(request.Tools) > 0 && !compaction {
 		tools, err := codexTools(request.Tools, originalToShort)

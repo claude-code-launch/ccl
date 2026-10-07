@@ -216,33 +216,28 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 ├─ acp                                在 stdio 上提供 Agent Client Protocol（Xcode 等）
 ├─ set [name]                         新增或修改 provider
 ├─ ls [-a|--all]                      列出 provider，并显示普通模式 / ACP 的选择
-├─ use <provider>                     切换普通模式使用的 provider
+├─ use <provider>                     切换普通模式使用的 provider（同时恢复 provider 加载）
 ├─ use --acp <provider>               为 ACP 固定一个 provider（--acp --follow 恢复跟随）
-├─ cp <source> <target> [-y]          复制 provider
-├─ mv <source> <target> [-y]          重命名 provider
-├─ rm <name> [-y]                     删除 provider
 ├─ map [provider]
-│  ├─ map auto [provider]             自动填充模型槽位
+│  ├─ map auto [provider] [--probe]   自动填充模型槽位
 │  └─ --opus/--sonnet/--haiku/--fable/--custom/--subagent
-├─ models [-a|--all]                  列出并检测模型
-├─ env <KEY> <VALUE>                  设置 provider 环境变量
-│  ├─ env ls                          列出环境变量
-│  ├─ env rm <KEY> [-y]               删除环境变量
-│  └─ env mv <OLD> <NEW> [-y]         重命名环境变量
-├─ preview                            预览注入 Claude Code 的 settings JSON
-├─ doctor                             检查环境、provider 和订阅健康
+├─ doctor [--probe]                   检查环境、provider 和订阅健康（--probe 逐个测模型，计费）
 │
-├─ provider                           上述 provider 命令的命名空间形式
-│  ├─ set / ls / use
-│  ├─ cp / mv / rm
-│  ├─ map / models / preview
-│  └─ env <KEY> <VALUE> | ls | rm | mv
+├─ provider                           provider 管理命名空间
+│  ├─ set / ls / use / map
+│  ├─ cp / mv / rm [--purge]
+│  ├─ models [--all] [--probe]        列出并检测模型
+│  ├─ preview                         预览注入 Claude Code 的 settings JSON
+│  ├─ env <KEY> <VALUE> | ls | rm | mv
+│  ├─ on / off                        是否加载 provider（off = 用 Claude Code 自身配置 / claude.ai 订阅）
+│  ├─ effort [low|medium|high|xhigh|default]   会话起始 effort
+│  └─ ultracode on|off                Claude Code 的 ultracode 设置
+│     （models / preview / env / effort / ultracode / doctor 支持 --provider <name> / --acp）
 │
-├─ oauth <provider> [alias]           登录订阅；别名：auth
-│  └─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | workbuddy | autoclaw | zed
-│
-├─ import <provider> [alias]          导入官方 CLI / 桌面端已保存的凭据
-│  └─ provider: autoclaw（读取 AutoClaw auth.json）
+├─ oauth <provider> [alias]           登录订阅
+│  ├─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | workbuddy | autoclaw | zed
+│  ├─ autoclaw --from-desktop         复用 AutoClaw 桌面端已登录的账号
+│  └─ prune                           删除未被任何 provider 使用的 OAuth 凭据
 │
 ├─ bypass [on|off]                    权限确认旁路
 ├─ log [on|off]                       运行时日志；别名：debug
@@ -272,18 +267,16 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 │     ├─ rename <old-alias> <new-alias>
 │     └─ set <alias>
 │
-├─ login / logout                     cloud 兼容入口
-├─ push / pull / tag / status         cloud 兼容入口
-├─ key / device                       cloud 兼容入口，保留各自子命令
-│
-├─ update                             更新 ccl
+├─ update [--method self|npm|go]     更新 ccl
 ├─ version                            打印版本
 ├─ completion                         生成 shell 补全
 │  └─ bash | fish | powershell | zsh
 └─ help [command]                     命令帮助
 ```
 
-`ccl oauth` 通过浏览器登录并创建绑定单个凭据的 provider。`ccl status` 是云同步状态；provider 体检使用 `ccl doctor`。根命令支持 `--help` 和 `--version`，每个子命令都支持 `-h/--help`。
+`ccl oauth` 通过浏览器登录并创建绑定单个凭据的 provider。provider 体检使用 `ccl doctor`。
+
+旧的根级入口 `ccl cp/mv/env/preview/models` 与 `ccl login/logout/push/pull/tag/status/key/device` 仍可用但已隐藏，执行时会提示改用 `ccl provider ...` / `ccl cloud ...`；它们会在后续版本移除。根级 `ccl rm`、`ccl import` 和 `ccl auth` 别名已移除（分别改用 `ccl provider rm`、`ccl oauth autoclaw --from-desktop`、`ccl oauth`）。根命令支持 `--help` 和 `--version`，每个子命令都支持 `-h/--help`。
 
 ### 在 Xcode 27 里用 CCL
 
@@ -324,7 +317,7 @@ ccl bypass on       # 开启
 ccl bypass off      # 关闭
 ```
 
-全局开关，写入 `~/.ccl/config.yaml` 的 `bypass_mode`。开启后，由 `ccl` 拉起的交互式 Claude Code 会话会自动带上 `--dangerously-skip-permissions`。`ccl acp` 不走这条路径，权限由 Xcode 的 `session/request_permission` 处理。
+全局开关，写入 `~/.ccl/config.yaml` 的 `bypass_mode`。开启后，由 `ccl` 拉起的交互式 Claude Code 会话会自动带上 `--dangerously-skip-permissions`。命令行已给出 `--permission-mode`，或第一个参数是 Claude Code 子命令（如 `ccl mcp`、`ccl config`）时不追加。`ccl acp` 不走这条路径，权限由 Xcode 的 `session/request_permission` 处理。
 
 > 旧版命令 `ccl auto` 和字段 `auto_mode` 已移除，配置里残留的 `auto_mode: true` 不再生效；请改用 `ccl bypass on`。
 
@@ -423,7 +416,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
   - Haiku → `zai_glm-5.3-flash`
   - 模型池包含 `zai_auto`、`zai_auto-fast`、`zaicoding_glm-5.3`、`tdpsk_deepseek-v4-flash-202605`、`tdpsk_deepseek-v4-pro-202606`、`zai_glm-5.3-flash`；旧的 `GLM-5.3` 等名称仍作为兼容别名接受。
 - 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。**Fable 槽**沿用对应后端的最强档模型（订阅目录里目前没有 Fable 系模型，写死独立 ID 会直接探测失败）；需要单独绑定 `ANTHROPIC_DEFAULT_FABLE_MODEL` 时用 `ccl map --fable <model>` 或 TUI 的 Fable 行。
-- **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：可在 `ccl set` 单页的 Runtime 区用 `←→` 调整，也可在 Claude Code 内用 `/fast` 开关。
+- **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：在 `ccl set` 单页的 Runtime 区用 `←→` 调整。开启后 ccl 通过 `X-Ccl-Fast-Mode` 让本机 runtime 向 Codex 请求 `service_tier=priority`（Claude Code 只给它认识的模型发 fast 字段，所以 ccl 自己处理）；关闭时不再往 `--settings` 写 `fastMode: false`，不会覆盖你在 Claude Code 里 `/fast` 的选择。
 - **Copilot** 使用独立的 GitHub OAuth 凭据和 `api.githubcopilot.com`；登录写盘前会验证账号确实拥有可用的 Copilot 模型。启动时读取账号实际模型目录，并根据每个模型声明的端点选择 Responses、Chat Completions 或 Anthropic Messages；该目录是 `ccl provider models --all` 的权威来源，不会混入本地兼容层的内建模型。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `copilot / auto`。
 - **Qoder** 完全由 ccl 直接接入：`ccl oauth qoder` 打开 Qoder 授权页并轮询 OAuth token；运行时直接刷新 token、读取账号模型目录、生成 COSY 签名、编码请求并把 Qoder SSE 转换为 Anthropic Messages。不会调用、探测或读取 `qodercli`，系统无需安装 Qoder CLI。模型目录由账号实时返回；`ccl provider models` 会显示 Qoder 展示名、内部模型 ID、Credit 倍率以及 New / 错峰优惠标记。暂时无法读取目录时使用最小兼容目录启动。
 - **AutoClaw**（AutoClaw Code / ZCode coding plan）通过 **CCL 本地 Anthropic-to-OpenAI Chat 代理**接入：`ccl oauth autoclaw` 启动 CCL 自己的 loopback 页面，完成人机校验和 Google OAuth 回调，并直接换取 access/refresh token；全程不需要启动 AutoClaw 主进程。若要复用桌面端已有账号，可改用 `ccl oauth autoclaw --from-desktop`，它从 `~/Library/Application Support/autoclaw/auth.json` 读取凭据，macOS 下通过 Chromium Safe Storage Keychain 解密且不修改桌面文件。两条路径都会将 `type: autoclaw` provider 绑定到 `~/.ccl/auth/` 的 0600 凭据，在会话内自动刷新 token，并把 Claude Messages 转为 OpenAI Chat Completions，发送到 `https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions`。上游使用 `X-Authorization`、`X-Request-Model`、`X-Harness-Type: zcode` 等桌面兼容 headers；Claude Code 只看到 CCL 的随机 loopback key。
@@ -641,6 +634,27 @@ ccl provider env --acp ls                   # 看 ACP 正在用的 provider
 
 槽位模型、子代理模型、上下文大小和连接（`ANTHROPIC_DEFAULT_*_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL`、上下文三个变量、`ANTHROPIC_BASE_URL`/`*_KEY`/`*_TOKEN`）由 ccl 管理，`env` 会拒绝并提示对应命令（`ccl map` / `ccl set`），避免两处设置互相覆盖。写入已安装的 Claude Code 不读取的变量时会提示"不会生效"（通过检查 Claude Code 可执行文件判断，不运行它）。`ccl provider models`、`ccl provider preview`、`ccl doctor` 同样支持 `--provider <name>` / `--acp`。
 
+### `ccl provider effort` / `ccl provider ultracode`
+
+```bash
+ccl provider effort high                 # 每次会话从 high 开始（low|medium|high|xhigh）
+ccl provider effort default              # 不设置，交给 Claude Code
+ccl provider effort                      # 查看
+ccl provider ultracode on --provider cc  # 打开 Claude Code 的 ultracode 设置
+```
+
+effort 写进 `--settings` 的 `effortLevel`，只是会话的起点：会话里 `/effort` 仍可随时调整。ccl 不再导出 `CLAUDE_CODE_EFFORT_LEVEL`（它会把 effort 锁死，`/effort` 失效）。`ccl set` 保存时不会改动这两项。
+
+### 与 Claude Code 自身配置的关系
+
+ccl 通过 `--settings` 传入的设置优先级高于 `~/.claude/settings.json`，所以下面这些**只在你自己没设置时**才由 ccl 提供：`outputStyle`（Concise）、`language`（跟随 `ccl lang`）、`statusLine`（ccl 状态栏）、`modelPicker`（`/model` 里显示 provider 的槽位和模型池）。ccl 会读取 `$CLAUDE_CONFIG_DIR`（默认 `~/.claude`）下的 `settings.json`，以及当前目录的 `.claude/settings.json`、`.claude/settings.local.json`；你在其中写了对应键，ccl 就不覆盖。
+
+为了让会话确实走 ccl 指定的 provider，启动时会丢弃 shell 里继承的这些变量：`CLAUDE_CODE_USE_*`（Bedrock / Vertex 等会让 Claude Code 忽略 `ANTHROPIC_BASE_URL`）、`ANTHROPIC_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_DEFAULT_*_MODEL` 等模型变量、嵌套会话标记 `CLAUDECODE` / `CLAUDE_CODE_CHILD_SESSION`；走本机 runtime 时还会丢弃 `ANTHROPIC_CUSTOM_HEADERS`（避免泄露给第三方上游），直连网关时丢弃 ccl 未设置的那个 `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`。需要的值请写进 provider（`ccl map` / `ccl provider env`）。
+
+走本机 runtime 的会话默认设置 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`（system prompt 里的归因块只会被发给第三方上游）和 `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`（runtime 靠 `x-claude-code-compaction` 等提示头识别压缩请求，转发上游前删除）。配置了模型的 provider 还会默认 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`，它同时会关掉自动更新检查等非必要请求；想要恢复可用 `ccl provider env CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC 0`。以上默认都可以用 `ccl provider env` 覆盖。
+
+子代理模型（`ccl map --subagent`）只是默认值：Claude 派发子代理时指定的模型、或 agent 定义里的 `model` 字段优先。想让所有子代理都强制使用它，设置 `ccl provider env CLAUDE_CODE_SUBAGENT_MODEL_FORCE 1`（Claude Code v2.1.257+）。
+
 ### 其它
 
 ```bash
@@ -648,12 +662,15 @@ ccl lang                # 交互切换语言
 ccl lang zh
 ccl lang en
 
-ccl update              # 升级
+ccl update              # 升级：识别安装方式（npm / go install / 下载的二进制）并默认选它
+ccl update --method npm # 跳过选择；非交互环境必须给 --method
 ccl version             # 版本
 ccl completion zsh      # shell 补全（也支持 bash/fish/powershell）
 ```
 
 语言优先级：`CCL_LANG` 环境变量 > `config.yaml` > 系统语言。
+
+`ccl update --method self` 下载本平台的 `.gz` 发布包，按发布里的 `SHA256SUMS` 校验后再替换，并保留旧二进制备份；校验不通过不会替换。
 
 ---
 
@@ -756,7 +773,7 @@ Anthropic 兼容网关建议确认：
 
 - `endpoint` 为裸域名，不带 `/v1`
 - Bearer 认证时 `preview` 出现 `ANTHROPIC_AUTH_TOKEN`，而不是 `ANTHROPIC_API_KEY`
-- `ccl set` 不再写入 `effortLevel` / `CLAUDE_CODE_EFFORT_LEVEL`
+- `ccl set` 不改动 `effortLevel`；它只由 `ccl provider effort` 设置，`CLAUDE_CODE_EFFORT_LEVEL` 不再注入
 - 配置了 Custom model 时，`preview` 顶层 `model` 与 `ANTHROPIC_CUSTOM_MODEL_OPTION` 一致
 
 ---
@@ -778,12 +795,14 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 
 ```text
 ├── cmd/
-│   ├── advanced_config.go     # TUI 配置向导
+│   ├── advanced_config*.go    # TUI 配置向导（状态 / 视图 / 按键 / 异步检测 / 连接，分文件）
 │   ├── auth.go                # 订阅 OAuth 登录
 │   ├── cloud_sync.go          # iCloud/Google Drive 登录、恢复密钥与同步命令
 │   ├── bypass.go              # ccl bypass（权限旁路开关）
 │   ├── log.go                 # ccl log（统一 slog 日志配置）
 │   ├── provider.go            # provider 子命令
+│   ├── provider_toggle.go     # provider on/off
+│   ├── provider_effort.go     # provider effort / ultracode
 │   ├── env.go                 # 环境变量管理
 │   ├── set.go                 # set 命令
 │   ├── select.go              # 通用 TUI 选择器
@@ -801,12 +820,13 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 ├── internal/
 │   ├── cloudsync/             # 压缩、AES-GCM 加密、快照和冲突处理
 │   ├── claude/                # Claude Code 进程拉起
-│   ├── config/                # yaml 配置读写
+│   ├── config/                # yaml 配置读写（加锁更新、版本化迁移）
 │   ├── locale/                # 多语言
 │   ├── modelrouting/          # 档位启发式映射
 │   ├── oauthproxy/            # OAuth 与 CCL 自有协议运行时
 │   ├── protocol/              # endpoint 规范化与探测
-│   └── provider/              # Provider / Config 结构
+│   ├── provider/              # Provider / Config 结构
+│   └── slotrec/               # 槽位推荐（set / map auto / 启动兜底共用）
 └── main.go
 ```
 

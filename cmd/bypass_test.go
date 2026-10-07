@@ -79,3 +79,23 @@ func TestApplyBypassMode(t *testing.T) {
 		t.Fatalf("disabled bypass changed args: %v", got)
 	}
 }
+
+// TestApplyBypassModeStaysOutOfTheWay pins S15: an explicit permission mode for
+// this run, and a Claude Code subcommand, are passed through untouched.
+func TestApplyBypassModeStaysOutOfTheWay(t *testing.T) {
+	for _, args := range [][]string{
+		{"--permission-mode", "plan"},
+		{"--permission-mode=acceptEdits", "-p", "hi"},
+		{"mcp", "list"},
+		{"doctor"},
+		{"update"},
+	} {
+		if got := applyBypassMode(args, true); !slices.Equal(got, args) {
+			t.Fatalf("applyBypassMode(%v) = %v", args, got)
+		}
+	}
+	// A session that merely mentions a subcommand name later still gets it.
+	if got := applyBypassMode([]string{"-p", "mcp"}, true); got[0] != dangerouslySkipPermissionsFlag {
+		t.Fatalf("a prompt mentioning mcp lost bypass: %v", got)
+	}
+}

@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-// claudeSubcommands are Claude Code's own subcommands (claude --help, 2.1.287).
-// A ccl root command with the same name intercepts `ccl <name>` instead of
-// passing it through, so collisions must be deliberate.
-var claudeSubcommands = []string{
-	"agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install",
-	"logs", "mcp", "plugin", "project", "respawn", "rm", "setup-token", "stop",
-	"ultrareview", "update",
-}
-
 // allowedClaudeCollisions are ccl's own diagnostics and updater. Claude Code's
 // versions stay reachable as `ccl claude doctor` / `ccl claude update`.
 var allowedClaudeCollisions = map[string]bool{"doctor": true, "update": true}

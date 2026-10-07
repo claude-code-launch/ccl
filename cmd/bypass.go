@@ -87,17 +87,42 @@ func onOff(enabled bool) string {
 
 // applyBypassMode adds Claude Code's permission-skip flag once, preserving the
 // caller's argument order after the injected flag and never mutating input.
+// It stays out of the way when the user chose a permission mode for this run
+// (--permission-mode plan would conflict) and when the arguments run a Claude
+// Code subcommand (mcp, doctor, ...) rather than a session.
 func applyBypassMode(args []string, enabled bool) []string {
 	out := append([]string(nil), args...)
 	if !enabled {
 		return out
 	}
 	for _, arg := range out {
-		if arg == dangerouslySkipPermissionsFlag {
+		if arg == dangerouslySkipPermissionsFlag ||
+			arg == "--permission-mode" || strings.HasPrefix(arg, "--permission-mode=") {
 			return out
 		}
 	}
+	if len(out) > 0 && isClaudeSubcommand(out[0]) {
+		return out
+	}
 	return append([]string{dangerouslySkipPermissionsFlag}, out...)
+}
+
+// claudeSubcommands are Claude Code's own subcommands (claude --help,
+// 2.1.287). They are not sessions, so a session flag does not belong on them,
+// and a ccl root command must not shadow one by accident.
+var claudeSubcommands = []string{
+	"agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install",
+	"logs", "mcp", "plugin", "project", "respawn", "rm", "setup-token", "stop",
+	"ultrareview", "update",
+}
+
+func isClaudeSubcommand(arg string) bool {
+	for _, name := range claudeSubcommands {
+		if arg == name {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {

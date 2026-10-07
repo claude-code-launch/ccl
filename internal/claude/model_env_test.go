@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -145,5 +146,75 @@ func TestModelDisplayNameMarksOneMillionContext(t *testing.T) {
 		if got := modelDisplayName(model); got != want {
 			t.Fatalf("modelDisplayName(%q) = %q, want %q", model, got, want)
 		}
+	}
+}
+
+func TestProcessEnvDropsVariablesThatRedirectTheSession(t *testing.T) {
+	inherited := []string{
+		"PATH=/usr/bin", "HOME=/home/u",
+		"CLAUDE_CODE_USE_BEDROCK=1", "CLAUDE_CODE_USE_VERTEX=1",
+		"ANTHROPIC_MODEL=shell-model", "ANTHROPIC_DEFAULT_OPUS_MODEL=shell-opus",
+		"ANTHROPIC_SMALL_FAST_MODEL=shell-fast", "CLAUDECODE=1", "CLAUDE_CODE_CHILD_SESSION=1",
+		"ANTHROPIC_CUSTOM_HEADERS=X-Corp: secret",
+		"ANTHROPIC_AUTH_TOKEN=other-tool-token", "ANTHROPIC_API_KEY=other-tool-key",
+	}
+	has := func(env []string, key string) bool {
+		for _, entry := range env {
+			if strings.HasPrefix(entry, key+"=") {
+				return true
+			}
+		}
+		return false
+	}
+
+	proxied := buildProcessEnv(inherited, settingsJSON{Env: map[string]string{
+		"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_AUTH_TOKEN": "session-key",
+	}}, true)
+	for _, key := range []string{"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDECODE",
+		"CLAUDE_CODE_CHILD_SESSION", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_API_KEY"} {
+		if has(proxied, key) {
+			t.Errorf("proxied session inherited %s", key)
+		}
+	}
+	if !has(proxied, "PATH") || !slicesContains(proxied, "ANTHROPIC_AUTH_TOKEN=session-key") {
+		t.Fatalf("proxied env lost what it needs: %v", proxied)
+	}
+
+	// A direct gateway that authenticates with x-api-key must not also send
+	// another tool's bearer token.
+	direct := buildProcessEnv(inherited, settingsJSON{Env: map[string]string{
+		"ANTHROPIC_BASE_URL": "https://gw.example", "ANTHROPIC_API_KEY": "gw-key",
+	}}, false)
+	if has(direct, "ANTHROPIC_AUTH_TOKEN") || has(direct, "ANTHROPIC_API_KEY") {
+		t.Fatalf("direct session inherited a shell credential: %v", direct)
+	}
+	if !has(direct, "ANTHROPIC_CUSTOM_HEADERS") {
+		t.Fatal("a direct gateway lost the user's custom headers")
+	}
+}
+
+func slicesContains(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProxySessionsTurnOffAttributionAndOnHints(t *testing.T) {
+	proxied := buildEnvWithModelNames(provider.Provider{Type: "openai", Model: "a"}, "http://127.0.0.1:1", true, nil)
+	if proxied["CLAUDE_CODE_ATTRIBUTION_HEADER"] != "0" || proxied["CLAUDE_CODE_GATEWAY_HINT_HEADERS"] != "1" {
+		t.Fatalf("proxied env = %v", proxied)
+	}
+	direct := buildEnvWithModelNames(provider.Provider{Type: "anthropic", Endpoint: "https://gw.example"}, "", false, nil)
+	if _, ok := direct["CLAUDE_CODE_GATEWAY_HINT_HEADERS"]; ok {
+		t.Fatal("hint headers were turned on for a third-party gateway ccl does not front")
+	}
+	overridden := buildEnvWithModelNames(provider.Provider{Type: "openai", Model: "a",
+		Env: map[string]string{"CLAUDE_CODE_ATTRIBUTION_HEADER": "1"}}, "http://127.0.0.1:1", true, nil)
+	if overridden["CLAUDE_CODE_ATTRIBUTION_HEADER"] != "1" {
+		t.Fatal("provider Env could not override the attribution default")
 	}
 }

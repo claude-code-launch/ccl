@@ -29,7 +29,7 @@ There is no Makefile or golangci-lint config.
 
 Unknown first args are **not** errors: `cmd/root.go` forwards them to Claude Code and starts a billed session (`ccl resume`, `ccl -p "..."`, a quoted typo like `./ccl "provider --help"`). Prefer `go test` and `--help` with unquoted subcommand args. `ccl statusline` and `ccl acp-permission` are intercepted at the top of `cmd.Execute` (before config load) and are not cobra commands.
 
-Bare `ccl lang` is interactive; use `ccl lang zh` / `ccl lang en`. Do not run `set` / `map` / `oauth` / `cloud` / `import` against the developer's real `~/.ccl/` unless asked.
+Bare `ccl lang` is interactive; use `ccl lang zh` / `ccl lang en`. Do not run `set` / `map` / `use` / `oauth` / `cloud` / `provider` (mutating subcommands) against the developer's real `~/.ccl/` unless asked.
 
 `~/.ccl/config.yaml` stores plaintext API keys — do not dump it.
 
@@ -71,10 +71,10 @@ Shared 429/5xx fast retry is `retry.go` (500ms + 1s, then relay status/body/`Ret
 
 ### Config, launch, TUI
 
-- `internal/config`: `~/.ccl/config.yaml`, migrate `~/.cc/config.yaml`, atomic write 0600. Load may rewrite inferred `oauthProvider` / OAuth `type`.
+- `internal/config`: `~/.ccl/config.yaml` (migrates `~/.cc/config.yaml`). `Load` is read-only and normalizes in memory; `Migrate` runs once at startup; every write goes through `config.Update(fn)` (file lock, re-read, apply, atomic 0600 write) — cmd code uses `updateProvider` / `replaceProvider`. `config_version` gates one-shot migrations. An OAuth provider's `type` is derived (`provider.EffectiveType`), not persisted; context sizing is the typed `contextPreset` field.
 - Global fields: `active_provider`, `acp_provider` (both are name selectors into one `providers` map; empty `acp_provider` follows `active_provider`), `provider_off` (`ccl provider on|off`: plain launches run Claude Code on its own login), `lang`, `bypass_mode` (not `auto_mode`), `log_level` (`off` default; `ccl log`). With no provider selected ccl errors; it never builds one from shell `OPENAI_API_KEY` / `ANTHROPIC_*`.
-- `internal/claude`: settings pin `outputStyle: Concise`, `language` from `ccl lang`, and a `statusLine` running `ccl statusline` (a per-provider `statuslineDisabled` opts out, since `--settings` outranks the user's `~/.claude/settings.json`); context presets Default / Balanced 500K / 800K are also exported as env because Claude Code has ignored settings-only auto-compact. Provider `Env` overrides defaults except proxy transport keys.
-- TUI (`cmd/advanced_config.go`, `github.com/grindlemire/go-tui`): components implement `Render` / `KeyMap` / `HandleMouse` / `Watchers`; use `tui.WithDisplay(tui.DisplayFlex)`. Single-page set wizard.
+- `internal/claude`: `--settings` outranks the user's own settings, so `outputStyle: Concise`, `language` (from `ccl lang`), `statusLine` (`ccl statusline`; per-provider `statuslineDisabled` opts out) and `modelPicker` (provider slots + pool) are written only when the user's `$CLAUDE_CONFIG_DIR/settings.json` or the project's `.claude/settings{,.local}.json` does not define that key (`user_settings.go`). `effortLevel` / `ultracode` come from `ccl provider effort|ultracode`; `CLAUDE_CODE_EFFORT_LEVEL` is never exported (it pins `/effort`), and `fastMode` is omitted unless on (writing `false` would undo `/fast`). Proxy sessions default `CLAUDE_CODE_ATTRIBUTION_HEADER=0` and `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`; Fast is sent as `X-Ccl-Fast-Mode` via `ANTHROPIC_CUSTOM_HEADERS`, and runtimes strip the hint headers before forwarding. `inheritedEnvToDrop` removes shell `CLAUDE_CODE_USE_*`, model vars, nested-session markers, and the unused credential/custom-header var. Context presets Default / Balanced 500K / 800K are also exported as env because Claude Code has ignored settings-only auto-compact. Provider `Env` overrides defaults except proxy transport keys. Settings files live in `~/.ccl/run` (PID-named, stale ones swept).
+- TUI (`cmd/advanced_config*.go` — state, `_view`, `_input`, `_results`, `_async`, `_connection`; `github.com/grindlemire/go-tui`): components implement `Render` / `KeyMap` / `HandleMouse` / `Watchers`; use `tui.WithDisplay(tui.DisplayFlex)`. Single-page set wizard.
 
 ### i18n layering
 
@@ -90,4 +90,4 @@ ccl is a launcher + protocol proxy, not a fork of Claude Code. Extra CLI args af
 
 OAuth public names: `gpt` `gemini` `grok` `copilot` `qoder` `kimi` `kiro` `workbuddy` `autoclaw` `zed`. `ccl oauth chatgpt` is gone; old configs may still store `chatgpt`/`codex` as `oauthProvider`. Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch; generated Grok 4.5/4.3/3-mini IDs migrate when the new default is in the catalog).
 
-`bypass` injects `--dangerously-skip-permissions`. `ccl status` is cloud sync, not provider health — use `ccl doctor`.
+`bypass` injects `--dangerously-skip-permissions`, except when `--permission-mode` is given or the first arg is a Claude Code subcommand. Root `cp/mv/env/preview/models` and the cloud verbs (`login/push/pull/status/...`) are hidden deprecated aliases (`deprecatedRootAlias`); new commands go under `ccl provider` / `ccl cloud`. `ccl doctor` is read-only and bills nothing without `--probe`. `ccl update` verifies the `.gz` asset against `SHA256SUMS`; `--method self|npm|go` is required off a TTY.

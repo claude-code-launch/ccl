@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,7 +23,7 @@ func TestUpdateRejectsInvalidDownload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("<html>maintenance</html>")) }))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "download")
-	if err := downloadReleaseBinary(context.Background(), server.URL, path); err == nil {
+	if err := downloadReleaseBinary(context.Background(), server.URL, path, ""); err == nil {
 		t.Fatal("HTML accepted as executable")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -128,7 +130,7 @@ func TestUpdateDownloadsAndUnpacksTheGzipArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(dir, "download")
-	if err := downloadReleaseBinary(context.Background(), serveBytes(t, gzipBytes(t, raw)), dest); err != nil {
+	if err := downloadReleaseBinary(context.Background(), serveBytes(t, gzipBytes(t, raw)), dest, ""); err != nil {
 		t.Fatalf("downloadReleaseBinary() = %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -137,7 +139,7 @@ func TestUpdateDownloadsAndUnpacksTheGzipArchive(t *testing.T) {
 	}
 
 	// The old raw asset is no longer a valid download: it is not gzip.
-	if err := downloadReleaseBinary(context.Background(), serveBytes(t, raw), dest); err == nil ||
+	if err := downloadReleaseBinary(context.Background(), serveBytes(t, raw), dest, ""); err == nil ||
 		!strings.Contains(err.Error(), "not a gzip release archive") {
 		t.Fatalf("raw binary error = %v", err)
 	}
@@ -151,12 +153,12 @@ func TestUpdateDownloadsAndUnpacksTheGzipArchive(t *testing.T) {
 func TestUpdateRejectsUnusableArchives(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "download")
 
-	if err := downloadReleaseBinary(context.Background(), serveBytes(t, gzipBytes(t, []byte("<html>maintenance</html>"))), dest); err == nil {
+	if err := downloadReleaseBinary(context.Background(), serveBytes(t, gzipBytes(t, []byte("<html>maintenance</html>"))), dest, ""); err == nil {
 		t.Fatal("a gzip archive of HTML was accepted")
 	}
 
 	archive := gzipBytes(t, bytes.Repeat([]byte("x"), 4096))
-	if err := downloadReleaseBinary(context.Background(), serveBytes(t, archive[:len(archive)/2]), dest); err == nil ||
+	if err := downloadReleaseBinary(context.Background(), serveBytes(t, archive[:len(archive)/2]), dest, ""); err == nil ||
 		!strings.Contains(err.Error(), "decompress release archive") {
 		t.Fatalf("truncated archive error = %v", err)
 	}
@@ -164,7 +166,7 @@ func TestUpdateRejectsUnusableArchives(t *testing.T) {
 	previous := maxReleaseBinaryBytes
 	maxReleaseBinaryBytes = 1024
 	t.Cleanup(func() { maxReleaseBinaryBytes = previous })
-	if err := downloadReleaseBinary(context.Background(), serveBytes(t, archive), dest); err == nil ||
+	if err := downloadReleaseBinary(context.Background(), serveBytes(t, archive), dest, ""); err == nil ||
 		!strings.Contains(err.Error(), "expands beyond") {
 		t.Fatalf("oversized archive error = %v", err)
 	}
@@ -183,5 +185,67 @@ func TestDownloadProgressCountsCompressedBytes(t *testing.T) {
 	n, _ = progress.Read(buf)
 	if n != 2 || progress.done != 6 {
 		t.Fatalf("second read = %d, done = %d", n, progress.done)
+	}
+}
+
+// TestUpdateVerifiesTheReleaseChecksum pins S14: the archive must match the
+// release's SHA256SUMS; a mismatch is refused and leaves nothing behind.
+func TestUpdateVerifiesTheReleaseChecksum(t *testing.T) {
+	dir := t.TempDir()
+	built := filepath.Join(dir, "built")
+	if output, err := exec.Command("go", "build", "-o", built, "../main.go").CombinedOutput(); err != nil {
+		t.Fatalf("build release fixture: %v %s", err, output)
+	}
+	raw, _ := os.ReadFile(built)
+	archive := gzipBytes(t, raw)
+	sum := sha256.Sum256(archive)
+	good := hex.EncodeToString(sum[:])
+	dest := filepath.Join(dir, "download")
+
+	if err := downloadReleaseBinary(context.Background(), serveBytes(t, archive), dest, good); err != nil {
+		t.Fatalf("matching checksum rejected: %v", err)
+	}
+	bad := strings.Repeat("0", 64)
+	if err := downloadReleaseBinary(context.Background(), serveBytes(t, archive), dest, bad); err == nil ||
+		!strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("mismatched checksum error = %v", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatal("a download with the wrong checksum was left behind")
+	}
+}
+
+func TestChecksumForParsesSHA256SUMS(t *testing.T) {
+	sums := strings.Repeat("a", 64) + "  ccl-darwin-arm64.gz\n" + strings.Repeat("b", 64) + " *ccl-linux-amd64.gz\n"
+	if got, err := checksumFor(sums, "ccl-darwin-arm64.gz"); err != nil || got != strings.Repeat("a", 64) {
+		t.Fatalf("darwin = %q, %v", got, err)
+	}
+	if got, err := checksumFor(sums, "ccl-linux-amd64.gz"); err != nil || got != strings.Repeat("b", 64) {
+		t.Fatalf("binary-mode entry = %q, %v", got, err)
+	}
+	if _, err := checksumFor(sums, "ccl-win32-x64.exe.gz"); err == nil {
+		t.Fatal("a missing entry was accepted")
+	}
+}
+
+func TestInstallMethodForPath(t *testing.T) {
+	for path, want := range map[string]string{
+		"/opt/homebrew/lib/node_modules/@claudecodelaunch/ccl/bin/ccl-darwin-arm64": "npm",
+		"/Users/u/go/bin/ccl": "go",
+		"/usr/local/bin/ccl":  "self",
+		"/custom/gobin/ccl":   "go",
+	} {
+		if got := installMethodForPath(path, []string{"/Users/u/go/bin", "/custom/gobin"}); got != want {
+			t.Fatalf("installMethodForPath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestRunUpdateWithoutTerminalNeedsAMethod(t *testing.T) {
+	previous := Version
+	Version = "v0.0.1"
+	t.Cleanup(func() { Version = previous })
+	if err := runUpdate("bogus"); err == nil || !strings.Contains(err.Error(), "unknown update method") {
+		t.Fatalf("bogus method error = %v", err)
 	}
 }

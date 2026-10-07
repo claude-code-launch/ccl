@@ -40,7 +40,16 @@ type settingsJSON struct {
 	OutputStyle            string            `json:"outputStyle,omitempty"`
 	Language               string            `json:"language,omitempty"`
 	FastMode               bool              `json:"fastMode"`
+	EffortLevel            string            `json:"effortLevel,omitempty"`
+	Ultracode              bool              `json:"ultracode,omitempty"`
 	StatusLine             *statusLineJSON   `json:"statusLine,omitempty"`
+	ModelPicker            *struct {
+		Options []struct {
+			Model string `json:"model"`
+			Label string `json:"label"`
+		} `json:"options"`
+		ReplaceBuiltInOptions bool `json:"replaceBuiltInOptions"`
+	} `json:"modelPicker,omitempty"`
 }
 
 type statusLineJSON struct {
@@ -268,8 +277,12 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				EffortLevel: "high",
 			},
 			check: func(t *testing.T, s settingsJSON) {
-				if s.Env["CLAUDE_CODE_EFFORT_LEVEL"] != "high" {
-					t.Errorf("Effort level mismatch: %s", s.Env["CLAUDE_CODE_EFFORT_LEVEL"])
+				// Effort rides in settings so /effort can still change it.
+				if s.EffortLevel != "high" {
+					t.Errorf("Effort level mismatch: %s", s.EffortLevel)
+				}
+				if _, ok := s.Env["CLAUDE_CODE_EFFORT_LEVEL"]; ok {
+					t.Error("CLAUDE_CODE_EFFORT_LEVEL would pin effort over /effort")
 				}
 			},
 		},
@@ -293,8 +306,12 @@ func TestPreviewSettingsFeatures(t *testing.T) {
 				if s.Model != "my-custom-model" {
 					t.Errorf("top-level model mismatch: %s", s.Model)
 				}
-				if s.Env["CLAUDE_CODE_EFFORT_LEVEL"] != "high" {
-					t.Errorf("Effort level mismatch: %s", s.Env["CLAUDE_CODE_EFFORT_LEVEL"])
+				// Effort rides in settings so /effort can still change it.
+				if s.EffortLevel != "high" {
+					t.Errorf("Effort level mismatch: %s", s.EffortLevel)
+				}
+				if _, ok := s.Env["CLAUDE_CODE_EFFORT_LEVEL"]; ok {
+					t.Error("CLAUDE_CODE_EFFORT_LEVEL would pin effort over /effort")
 				}
 			},
 		},
@@ -419,9 +436,10 @@ func TestPreviewSettingsWithEmbeddedCodexOAuth(t *testing.T) {
 			t.Fatalf("%s = %q, want it dropped so Claude Code sizes the session", key, got)
 		}
 	}
-	// false must still be present so Claude Code does not keep a prior /fast on.
-	if !strings.Contains(result, `"fastMode": false`) && !strings.Contains(result, `"fastMode":false`) {
-		t.Fatalf("settings JSON should always include fastMode=false when off: %s", result)
+	// Off is omitted, so the user's own /fast (fastMode: true in their
+	// settings) is not undone by ccl's higher-priority --settings.
+	if strings.Contains(result, `"fastMode"`) {
+		t.Fatalf("settings JSON pins fastMode while the provider leaves it off: %s", result)
 	}
 }
 

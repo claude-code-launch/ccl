@@ -177,3 +177,6 @@ func stripContextSuffix(model string) string {
 	}
 	return base
 }
+
+// StripContextSuffix removes the [1m] context marker(s) from a model ID.
+func StripContextSuffix(model string) string { return stripContextSuffix(model) }

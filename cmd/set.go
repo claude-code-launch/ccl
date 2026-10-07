@@ -205,9 +205,6 @@ func RunProviderSet(args []string) error {
 	}
 
 	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)
-	// Effort is managed by Claude Code. Do not persist CLAUDE_CODE_EFFORT_LEVEL
-	// from ccl set; clear any legacy effortLevel so it cannot override /effort.
-	p.EffortLevel = ""
 	setDebugf(
 		"after applyCompactConfig provider=%q type=%q effort=%q model_count=%d slots=%s compact=%s active_chosen=%t",
 		p.Name,
