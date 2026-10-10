@@ -190,7 +190,7 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 | AutoClaw / ZCode coding plan | `ccl oauth autoclaw` 由 CCL 打开 Google OAuth 与人机校验；`ccl oauth autoclaw --from-desktop` 可选读取桌面 `auth.json`；CCL 自己刷新 access/refresh token | CCL 使用 AutoClaw managed provider 的六个内建路由 ID 与上下文元数据 | CCL 本地 Anthropic 代理转换到 `{origin}/autoclaw-proxy/proxy/autoclaw/chat/completions` | `X-Authorization` + `X-Request-Model` 等桌面兼容 headers；不启动 AutoClaw 主进程 |
 | OpenAI Chat API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CCL `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
 | Codex Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查上游 `/models` | CCL 完成 Messages ↔ Responses、Codex 身份头、SSE 与错误透传 | CCL 全部拥有 |
-| GPT 订阅 | CCL 自研 OAuth、绑定凭据并刷新 token | CCL 使用 provider 槽位构建本机会话模型目录 | CCL 完成 Messages ↔ Responses，并携带账号 ID | CCL 全部拥有 |
+| GPT 订阅 | CCL 自研 OAuth、绑定凭据并刷新 token | CCL 携带客户端版本直查账号的 Codex `/models` 可见目录，失败时保留已配置模型 | CCL 完成 Messages ↔ Responses，并携带账号 ID | CCL 全部拥有 |
 | Gemini / Kimi 订阅 | CCL 对应 OAuth/device flow 登录、刷新并绑定凭据 | CCL 读取对应上游模型目录或兼容目录 | CCL 对应 adapter 完成 Messages ↔ 各自上游协议 | CCL 全部拥有 |
 | Grok 订阅 | CCL 自研 OAuth、刷新并绑定凭据 | CCL 直查 cli-chat-proxy `/models`，失败时使用 `grok-4.6` / `grok-4.5` 兼容目录 | CCL 复用 Responses 转换，并注入 Grok Build 身份头（含 `x-grok-model-override`） | CCL 全部拥有 |
 | WorkBuddy 订阅 | CCL 自研网页登录轮询、凭据绑定与刷新 | CCL 使用认证账号直查 WorkBuddy `/v3/config` | CCL gateway 注入 WorkBuddy 账号/客户端/会话头，并由 `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
@@ -390,7 +390,7 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 
 说明：
 
-- 不带别名时，会从凭据文件名派生 provider 名（如 `gpt-alice@example.com`），避免多账号互相覆盖。
+- 不带别名时，GPT 使用 `gpt-完整邮箱`（如 `gpt-alice@example.com`），不附加账号哈希或套餐名；其他 backend 从凭据文件名派生 provider 名。同一邮箱的不同 workspace 可用显式别名区分。
 - 每条 provider 通过 `oauthAccountCredential` 绑定具体账号文件。
 - 不再提供 `--protocol` 覆盖；各 OAuth backend 协议固定。
 - 登录名统一为 `gpt`，`ccl oauth chatgpt` 已移除；旧配置里的 `oauthProvider: chatgpt` / `codex` 仍按 `gpt` 处理。

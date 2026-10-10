@@ -34,6 +34,10 @@ func (m *AdvancedConfigModel) handleOAuthRuntimeDone(msg oauthRuntimeDoneMsg) {
 		// account's real models when it is saved.
 		setDebugf("oauth runtime catalog unavailable; keeping the saved model pool")
 	}
+	if len(msg.modelInfos) > 0 && !msg.catalogFallback {
+		m.live().modelDisplayMetadata = indexModelInfos(msg.modelInfos)
+		m.live().modelContextWindows = contextWindowsFromModelInfos(m.live().modelDisplayMetadata)
+	}
 	m.configureOAuthRuntime(msg.endpoint, msg.apiKey, msg.models, msg.catalogFallback)
 	m.setRuntimeModelNames(msg.names)
 	m.markDirty()

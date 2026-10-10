@@ -11,6 +11,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -312,10 +313,11 @@ type modelAvailabilityDoneMsg struct {
 // panel is already on screen by the time it arrives: the fields are everything
 // configureOAuthRuntime needs to adopt the runtime.
 type oauthRuntimeDoneMsg struct {
-	endpoint string
-	apiKey   string
-	models   []string
-	names    map[string]string
+	endpoint   string
+	apiKey     string
+	models     []string
+	names      map[string]string
+	modelInfos []protocol.ModelInfo
 	// catalogFallback reports that models is a compatibility list the runtime
 	// fell back to, not the account's catalog.
 	catalogFallback bool
@@ -982,17 +984,18 @@ func contextWindowsFromModelInfos(metadata map[string]protocol.ModelInfo) map[st
 	return windows
 }
 
-// modelDisplayLabel renders a mapping or picker row as the plain model ID plus
-// any catalog badges. The provider's display alias (for example AutoClaw's
-// "Auto" for zai_auto) is deliberately left out: the identifier is what gets
-// persisted, what the request carries, and what every other ccl surface prints.
+// modelDisplayLabel includes Qoder's catalog name so opaque IDs such as dfmodel
+// are identifiable in mapping rows and the picker. Other providers show their
+// model IDs with catalog badges. Stored slot values always remain model IDs.
 func (m *AdvancedConfigModel) modelDisplayLabel(id string) string {
+	if m.p != nil && strings.EqualFold(strings.TrimSpace(m.p.OAuthProvider), oauthproxy.ProviderQoder) {
+		return modelReportLabel(stripOneMSuffix(id), m.live().modelDisplayMetadata)
+	}
 	return modelBadgeLabel(stripOneMSuffix(id), m.live().modelDisplayMetadata)
 }
 
 // modelSearchLabel widens the picker's filter text with the provider's display
-// alias, so a model stays findable by the name its catalog advertises even
-// though the row itself shows the ID.
+// alias, so a model stays findable by either its catalog name or its ID.
 func (m *AdvancedConfigModel) modelSearchLabel(id string) string {
 	return modelReportLabel(stripOneMSuffix(id), m.live().modelDisplayMetadata)
 }

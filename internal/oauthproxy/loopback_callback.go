@@ -3,10 +3,23 @@ package oauthproxy
 import (
 	"context"
 	"errors"
+	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"time"
 )
+
+func writeOAuthCallbackPage(writer http.ResponseWriter, provider string, success bool) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	status, message := "complete", "You can close this tab and return to CCL."
+	if !success {
+		writer.WriteHeader(http.StatusBadRequest)
+		status, message = "failed", "Return to CCL for details."
+	}
+	title := html.EscapeString(provider) + " login " + status
+	_, _ = fmt.Fprintf(writer, "<!doctype html><meta charset=\"utf-8\"><title>%s</title><h2>%s</h2><p>%s</p>", title, title, message)
+}
 
 // serveLoopbackCallback serves an OAuth flow's local callback page on
 // listener. It returns a channel that receives an unexpected serve error (not

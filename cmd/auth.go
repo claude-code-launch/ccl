@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -156,8 +158,8 @@ func validateProviderAlias(alias string) error {
 
 // activateProvider persists a freshly created credential as an active
 // provider. Every login produces an independent provider entry: an explicit
-// alias becomes the provider key, otherwise one is derived from the credential
-// file so multiple accounts on the same backend never overwrite each other.
+// alias becomes the provider key; GPT otherwise uses the account email, while
+// other backends derive the name from the credential filename.
 func activateProvider(target, alias string, result oauthproxy.LoginResult) (string, provider.Provider, error) {
 	providerName := alias
 	if providerName == "" {
@@ -169,7 +171,23 @@ func activateProvider(target, alias string, result oauthproxy.LoginResult) (stri
 	// so changes made meanwhile by another ccl survive.
 	var p provider.Provider
 	err := config.Update(func(cfg *provider.Config) error {
-		p = configureOAuthProvider(cfg.Providers[providerName], providerName, target, credentialFile)
+		p = cfg.Providers[providerName]
+		if alias == "" && target == oauthproxy.ProviderChatGPT {
+			// Re-login moves an old filename-derived entry without losing its
+			// mappings or ACP selection. Explicit aliases remain independent.
+			previousName := derivedCredentialProviderName(target, result.Path)
+			previous, exists := cfg.Providers[previousName]
+			_, nameExists := cfg.Providers[providerName]
+			if exists && !nameExists && previousName != providerName &&
+				previous.OAuthProvider == target && previous.OAuthAccountCredential == credentialFile {
+				p = previous
+				delete(cfg.Providers, previousName)
+				if cfg.ACPProvider == previousName {
+					cfg.ACPProvider = providerName
+				}
+			}
+		}
+		p = configureOAuthProvider(p, providerName, target, credentialFile)
 		cfg.Providers[providerName] = p
 		cfg.ActiveProvider = providerName
 		cfg.ProviderOff = false
@@ -238,11 +256,24 @@ func isReservedProviderName(name string) bool {
 	}
 }
 
-// derivedProviderName builds an implicit alias from the credential filename so a
-// bare `ccl oauth gpt` still creates a distinct provider per account: e.g.
-// `codex-alice@example.com.json` → `gpt-alice@example.com`; if the basename
-// offers no usable fragment we fall back to `<target>-<basename>`.
+// derivedProviderName names GPT accounts by their full email, independently of
+// the account hash and plan in the credential filename. Other backends and
+// credentials without an email retain filename-derived naming.
 func derivedProviderName(target, credentialPath string) string {
+	if target == oauthproxy.ProviderChatGPT {
+		var credential struct {
+			Email string `json:"email"`
+		}
+		if raw, err := os.ReadFile(credentialPath); err == nil && json.Unmarshal(raw, &credential) == nil {
+			if email := strings.TrimSpace(credential.Email); email != "" {
+				return target + "-" + email
+			}
+		}
+	}
+	return derivedCredentialProviderName(target, credentialPath)
+}
+
+func derivedCredentialProviderName(target, credentialPath string) string {
 	base := filepath.Base(credentialPath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
 	identity := ""

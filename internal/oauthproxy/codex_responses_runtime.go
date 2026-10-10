@@ -139,6 +139,9 @@ func startCodexResponsesAPI(parent context.Context, endpoint, upstreamAPIKey, mo
 }
 
 func startCodexOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	authDir, err := ensureAuthDir()
 	if err != nil {
 		return nil, err
@@ -161,14 +164,34 @@ func startCodexOAuth(parent context.Context, modelSpec, credentialFile string) (
 	if credential.accessToken == "" && credential.refreshToken == "" {
 		return nil, fmt.Errorf("Codex credential %s has no access or refresh token", filepath.Base(path))
 	}
-	if strings.TrimSpace(modelSpec) == "" {
-		modelSpec = "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"
+	discoveryCtx, cancelDiscovery := context.WithTimeout(parent, 20*time.Second)
+	models, discoverErr := discoverCodexModels(discoveryCtx, codexOAuthBaseURL, authorizer)
+	cancelDiscovery()
+	catalogFallback := discoverErr != nil
+	if catalogFallback {
+		if parent.Err() != nil {
+			return nil, parent.Err()
+		}
+		LogWarnf("GPT model discovery failed; keeping configured models error=%v", discoverErr)
+		if strings.TrimSpace(modelSpec) == "" {
+			modelSpec = "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"
+		}
+		models = runtimeModelAliases(modelSpec)
 	}
-	runtime, err := startCodexResponsesRuntime(parent, codexOAuthBaseURL, modelSpec, authorizer)
+	// Preserve configured routes, but publish the live account catalog so stale
+	// mappings do not limit the choices shown by ccl map and ccl set.
+	effectiveModelSpec := strings.Join(append([]string{modelSpec}, models...), ",")
+	runtime, err := startCodexResponsesRuntimeWithService(parent, codexOAuthBaseURL, effectiveModelSpec, authorizer,
+		func(apiKey, endpoint string, routes []runtimeModelRoute, auth codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService {
+			service := newCodexResponsesService(apiKey, endpoint, routes, auth, usage)
+			service.models = append([]string(nil), models...)
+			return service
+		})
 	if err != nil {
 		return nil, err
 	}
 	runtime.listAuths = authorizer.listAuths
+	runtime.catalogFallback = catalogFallback
 	LogInfof("runtime start oauth provider=gpt backend=codex protocol=codex_responses port=%s credential_file=%s model_count=%d",
 		strings.TrimPrefix(strings.TrimSuffix(runtime.endpoint, "/v1"), "http://"), filepath.Base(path), len(runtime.models))
 	return runtime, nil

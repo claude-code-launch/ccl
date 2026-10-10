@@ -709,8 +709,9 @@ func TestOAuthProviderCanDiscoverModelsForSet(t *testing.T) {
 	if len(runtime.Models()) == 0 {
 		t.Fatal("gpt runtime carries no model catalog")
 	}
-	if m.live().detectionError != nil || !m.live().autoConfigured || !m.live().modelPoolFromDiscovery || p.Model == "" {
-		t.Fatalf("OAuth set discovery failed: auto=%t detected=%t models=%q err=%v", m.live().autoConfigured, m.live().modelPoolFromDiscovery, p.Model, m.live().detectionError)
+	wantDiscovered := !runtime.ModelCatalogIsFallback()
+	if m.live().detectionError != nil || m.live().autoConfigured != wantDiscovered || m.live().modelPoolFromDiscovery != wantDiscovered || (p.Model != "") != wantDiscovered {
+		t.Fatalf("OAuth set catalog state: fallback=%t auto=%t detected=%t models=%q err=%v", runtime.ModelCatalogIsFallback(), m.live().autoConfigured, m.live().modelPoolFromDiscovery, p.Model, m.live().detectionError)
 	}
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("OAuth runtime values leaked into stored provider: %+v", p)

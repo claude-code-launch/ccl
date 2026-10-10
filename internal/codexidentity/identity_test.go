@@ -7,7 +7,7 @@ import (
 
 func TestFormatUserAgentMatchesCodexCLIShape(t *testing.T) {
 	got := formatUserAgent("Mac OS", "26.5.2", "arm64", "iTerm.app/3.6.10")
-	want := "codex_cli_rs/0.147.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.10"
+	want := "codex_cli_rs/0.162.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.10"
 	if got != want {
 		t.Fatalf("formatUserAgent() = %q, want %q", got, want)
 	}

@@ -321,12 +321,6 @@ func modelCatalogForMapping(ctx context.Context, p provider.Provider) ([]string,
 		if strings.TrimSpace(p.OAuthProvider) == "" {
 			return configured, nil, nil
 		}
-		_, _, metadata, cleanup, err := fetchMappingCatalog(ctx, p)
-		if err != nil {
-			return nil, nil, err
-		}
-		defer cleanup()
-		return configured, metadata, nil
 	}
 	_, models, metadata, cleanup, err := fetchMappingCatalog(ctx, p)
 	if err != nil {
@@ -343,7 +337,7 @@ func modelCatalogForMapping(ctx context.Context, p provider.Provider) ([]string,
 // live probes plus its authoritative model IDs. OAuth endpoints such as
 // oauth://qoder are descriptors rather than HTTP URLs, so they must first be
 // resolved to the embedded loopback runtime.
-func fetchMappingCatalogFromProvider(_ context.Context, p provider.Provider) (provider.Provider, []string, map[string]protocol.ModelInfo, func(), error) {
+func fetchMappingCatalogFromProvider(ctx context.Context, p provider.Provider) (provider.Provider, []string, map[string]protocol.ModelInfo, func(), error) {
 	nop := func() {}
 	if strings.TrimSpace(p.OAuthProvider) == "" {
 		infos := fetchModelInfosForProvider(p)
@@ -354,7 +348,7 @@ func fetchMappingCatalogFromProvider(_ context.Context, p provider.Provider) (pr
 		return p, models, indexModelInfos(infos), nop, nil
 	}
 
-	runtimeProvider, runtime, cleanup, err := prepareProviderRuntime(context.Background(), p)
+	runtimeProvider, runtime, cleanup, err := prepareProviderRuntime(ctx, p)
 	if err != nil {
 		return provider.Provider{}, nil, nil, nop, err
 	}

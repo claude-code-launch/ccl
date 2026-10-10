@@ -146,10 +146,10 @@ func codexCallbackHandler(resultCh chan<- codexLoginCallback) http.Handler {
 		default:
 		}
 		if result.err != "" || result.code == "" {
-			writeKiroOAuthCallbackPage(writer, false)
+			writeOAuthCallbackPage(writer, "GPT", false)
 			return
 		}
-		writeKiroOAuthCallbackPage(writer, true)
+		writeOAuthCallbackPage(writer, "GPT", true)
 	})
 	return mux
 }

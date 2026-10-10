@@ -297,14 +297,14 @@ func TestFallbackCatalogDoesNotReplaceTheSavedModelPool(t *testing.T) {
 	}
 }
 
-func TestOAuthConfigShowsModelIDButKeepsRuntimeNameSearchable(t *testing.T) {
+func TestOAuthConfigShowsQoderRuntimeNameAndModelID(t *testing.T) {
 	p := providerFrom("qoder", "https://example.invalid", "anthropic")
 	p.OAuthProvider = "qoder"
 	p.OpusModel = "dmodel"
 	m := NewAdvancedConfigModel(&p)
 	m.setRuntimeModelNames(map[string]string{"dmodel": "Catalog display name"})
-	if label := m.modelDisplayLabel("dmodel"); label != "dmodel" {
-		t.Fatalf("row label = %q, want the bare model ID", label)
+	if label := m.modelDisplayLabel("dmodel"); label != "Catalog display name (dmodel)" {
+		t.Fatalf("row label = %q, want the catalog name and model ID", label)
 	}
 	// The catalog's own name still has to be findable through the picker filter.
 	if search := m.modelSearchLabel("dmodel"); !strings.Contains(search, "Catalog display name") {
@@ -331,8 +331,8 @@ func TestOAuthRuntimeNamesSurviveCatalogRefresh(t *testing.T) {
 		if !strings.Contains(m.modelSearchLabel("dmodel"), want) {
 			t.Fatalf("display name lost: %q", m.modelSearchLabel("dmodel"))
 		}
-		if got := m.modelDisplayLabel("dmodel"); got != "dmodel" {
-			t.Fatalf("row label = %q, want the bare model ID", got)
+		if got := m.modelDisplayLabel("dmodel"); got != want+" (dmodel)" {
+			t.Fatalf("row label = %q, want the refreshed catalog name and model ID", got)
 		}
 		if p.OpusModel != "dmodel" || p.Endpoint != "oauth://qoder" {
 			t.Fatal("display refresh mutated stored mapping or endpoint")

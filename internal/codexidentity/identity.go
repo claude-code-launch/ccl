@@ -17,7 +17,7 @@ import (
 const (
 	// ClientVersion is the Codex protocol baseline implemented by CCL. Update it
 	// deliberately when validating CCL against a newer Codex client protocol.
-	ClientVersion = "0.147.0"
+	ClientVersion = "0.162.1"
 	Originator    = "codex_cli_rs"
 )
 
