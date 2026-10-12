@@ -91,17 +91,6 @@ func TestProtocolLabel(t *testing.T) {
 	}
 }
 
-func TestProtocolLabelForCopilotShowsAutomaticRouting(t *testing.T) {
-	p := provider.Provider{Type: "openai_responses", OAuthProvider: "copilot"}
-	if got := provider.ProtocolLabelForProvider(p); got != "copilot / auto" {
-		t.Fatalf("ProtocolLabelForProvider() = %q", got)
-	}
-	p.OAuthProvider = "gpt"
-	if got := provider.ProtocolLabelForProvider(p); got != "openai-responses" {
-		t.Fatalf("non-Copilot label = %q", got)
-	}
-}
-
 func TestProtocolLabelForZedShowsAutomaticRouting(t *testing.T) {
 	p := provider.Provider{Type: "openai_responses", OAuthProvider: "Zed"}
 	if got := provider.ProtocolLabelForProvider(p); got != "zed / auto" {
@@ -244,10 +233,6 @@ func TestOAuthRuntimeType(t *testing.T) {
 	got, ok = provider.OAuthRuntimeType("chatgpt")
 	if !ok || got != "openai_responses" {
 		t.Fatalf("chatgpt = %q %v", got, ok)
-	}
-	got, ok = provider.OAuthRuntimeType("copilot")
-	if !ok || got != "openai_responses" {
-		t.Fatalf("copilot = %q %v", got, ok)
 	}
 	got, ok = provider.OAuthRuntimeType("qoder")
 	if !ok || got != "anthropic" {

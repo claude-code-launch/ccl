@@ -35,10 +35,9 @@ func TestLoopbackAuthorized(t *testing.T) {
 func TestLoopbackFrontsServeTheSameShape(t *testing.T) {
 	routes := []runtimeModelRoute{{Name: "m1", Alias: "m1"}, {Name: "m2", Alias: "m2"}}
 	fronts := map[string]http.Handler{
-		"chat":    newChatCompletionsService("key", "http://upstream.invalid/v1", routes, "up", NewUsageTracker()).handler(),
-		"mixed":   (&mixedProtocolRouter{apiKey: "key", models: []string{"m1", "m2"}}).handler(),
-		"zed":     (&zedProtocolRouter{apiKey: "key", models: []string{"m1", "m2"}}).handler(),
-		"copilot": (&copilotProtocolRouter{apiKey: "key", models: []string{"m1", "m2"}}).handler(),
+		"chat":  newChatCompletionsService("key", "http://upstream.invalid/v1", routes, "up", NewUsageTracker()).handler(),
+		"mixed": (&mixedProtocolRouter{apiKey: "key", models: []string{"m1", "m2"}}).handler(),
+		"zed":   (&zedProtocolRouter{apiKey: "key", models: []string{"m1", "m2"}}).handler(),
 	}
 	for name, front := range fronts {
 		for _, path := range []string{"/v1/models", "/models"} {

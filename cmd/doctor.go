@@ -194,7 +194,7 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 	}
 
 	// 5. Optionally send a 1-token request to each pooled model. It costs real
-	// requests (Copilot premium requests, Qoder credits), so it only runs on
+	// requests (Qoder credits), so it only runs on
 	// --probe, and doctor never rewrites the config with what it finds.
 	if endpointReachable && p.Model != "" {
 		configuredModels := parseModelList(p.Model)

@@ -34,7 +34,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "oauth <gpt|gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw|zed> [alias]",
+		Use:   "oauth <gpt|gemini|grok|qoder|kimi|kiro|workbuddy|autoclaw|zed> [alias]",
 		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
 
@@ -42,7 +42,7 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|copilot|qoder|kimi|kiro|workbuddy|autoclaw|zed
+  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|autoclaw|zed
 
 Notes:
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
@@ -131,9 +131,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 
 	fmt.Fprintf(out, "Authenticated %s as provider %q and switched active provider.\n", target, providerName)
 	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
-	if target == oauthproxy.ProviderCopilot {
-		fmt.Fprintln(out, "Protocol: automatic (Responses / Chat Completions / Anthropic Messages per model)")
-	} else if target == oauthproxy.ProviderZed {
+	if target == oauthproxy.ProviderZed {
 		fmt.Fprintln(out, "Protocol: automatic (Anthropic Messages / Responses / Chat Completions / Gemini per model)")
 	} else {
 		fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
@@ -228,7 +226,7 @@ func configureOAuthProvider(p provider.Provider, name, oauthProvider, credential
 }
 
 // oauthRuntimeType is the internal compatibility type persisted for each
-// subscription backend. Copilot's real upstream protocol remains per-model.
+// subscription backend. Zed's real upstream protocol remains per-model.
 func oauthRuntimeType(providerName string) string {
 	if runtimeType, ok := provider.OAuthRuntimeType(providerName); ok {
 		return runtimeType
@@ -243,7 +241,6 @@ func isReservedProviderName(name string) bool {
 	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy, oauthproxy.ProviderCodex,
 		oauthproxy.ProviderGemini, "antigravity",
 		oauthproxy.ProviderGrok, "xai",
-		oauthproxy.ProviderCopilot,
 		oauthproxy.ProviderQoder,
 		oauthproxy.ProviderKimi,
 		oauthproxy.ProviderKiro,

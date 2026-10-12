@@ -86,6 +86,18 @@ func isClaudeCodeAttributionSystemText(text string) bool {
 // and records the client-facing state the response assembler needs. The Antigravity
 // envelope (project/model/requestId/sessionId) is applied separately at call time.
 func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
+	return convertAnthropicToGeminiWithSchema(raw, sanitizeGeminiSchema)
+}
+
+func convertAnthropicToAntigravity(raw []byte) (*geminiConvertedRequest, error) {
+	sanitize := sanitizeGeminiSchema
+	if strings.Contains(strings.ToLower(gjson.GetBytes(raw, "model").String()), "claude") {
+		sanitize = sanitizeAntigravityClaudeSchema
+	}
+	return convertAnthropicToGeminiWithSchema(raw, sanitize)
+}
+
+func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) []byte) (*geminiConvertedRequest, error) {
 	modelResult := gjson.GetBytes(raw, "model")
 	if modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
 		return nil, fmt.Errorf("model is required")
@@ -283,12 +295,9 @@ func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
 			if description := strings.TrimSpace(tool.Get("description").String()); description != "" {
 				declaration, _ = sjson.SetBytes(declaration, "description", description)
 			}
-			// This converter targets Antigravity, not the public Gemini API.
-			// Its function declarations use parameters for both Gemini and
-			// Claude models (the Claude bridge reconstructs input_schema).
-			// Gemini rejects JSON Schema keywords outside its OpenAPI subset
-			// ($schema, propertyNames, additionalProperties, ...).
-			declaration, _ = sjson.SetRawBytes(declaration, "parameters", sanitizeGeminiSchema([]byte(schema.Raw)))
+			// Both paths use parameters; Antigravity's Claude route additionally
+			// adapts constraints that cannot survive its input_schema bridge.
+			declaration, _ = sjson.SetRawBytes(declaration, "parameters", sanitizeSchema([]byte(schema.Raw)))
 			toolItems = append(toolItems, string(declaration))
 			return true
 		})

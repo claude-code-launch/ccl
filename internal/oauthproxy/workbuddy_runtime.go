@@ -301,7 +301,7 @@ func (g *workbuddyGateway) serveHTTP(writer http.ResponseWriter, request *http.R
 		writeWorkBuddyGatewayError(writer, http.StatusRequestEntityTooLarge, "request body is too large")
 		return
 	}
-	model := copilotRequestModel(body)
+	model := requestModelID(body)
 	LogDebugEvent("request_received", "component", "workbuddy", "request_id", requestID,
 		"method", request.Method, "path", request.URL.Path, "model", model, "body_bytes", len(body))
 	response, err := g.do(requestCtx, workbuddyUpstreamPath(request.URL.Path), request.URL.RawQuery, request.Header, body)
@@ -316,9 +316,9 @@ func (g *workbuddyGateway) serveHTTP(writer http.ResponseWriter, request *http.R
 	LogUpstreamEvent(response.StatusCode, "request_complete", "component", "workbuddy", "request_id", requestID,
 		"path", request.URL.Path, "model", model, "status", response.StatusCode,
 		"retry_after", response.Header.Get("Retry-After"), "duration", logDuration(started))
-	copyCopilotHeaders(writer.Header(), response.Header)
+	copyGatewayHeaders(writer.Header(), response.Header)
 	writer.WriteHeader(response.StatusCode)
-	copyCopilotResponse(writer, response.Body)
+	copyGatewayResponse(writer, response.Body)
 }
 
 // do is the inner hop of the two-hop WorkBuddy path: this loopback gateway
@@ -348,7 +348,7 @@ func (g *workbuddyGateway) do(ctx context.Context, path, rawQuery string, header
 		// the original upstream status/body instead of turning a 401/403 into 502.
 		return response, nil
 	}
-	closeCopilotResponse(response)
+	closeGatewayResponse(response)
 	return g.doOne(ctx, path, rawQuery, headers, body, refreshed)
 }
 
@@ -361,7 +361,7 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 	if err != nil {
 		return nil, err
 	}
-	copyCopilotHeaders(request.Header, headers)
+	copyGatewayHeaders(request.Header, headers)
 	for _, name := range []string{"Authorization", "X-Api-Key", "Api-Key", "Host", "Content-Length", "User-Agent"} {
 		request.Header.Del(name)
 	}
@@ -388,7 +388,7 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 	request.Header.Set("X-Private-Data", "true")
 	request.Header.Set("x-requested-with", "XMLHttpRequest")
 	request.Header.Set("x-codebuddy-request", "1")
-	model := copilotRequestModel(body)
+	model := requestModelID(body)
 	LogDebugEvent("upstream_request", "component", "workbuddy", "request_id", requestLogID(ctx),
 		"path", path, "model", model, "credential", credential.fileName, "conversation_id", g.conversationID)
 	if len(body) > 0 {

@@ -16,9 +16,8 @@ import (
 
 const mixedMaxBodyBytes = int64(128 << 20)
 
-// mixedRouteSet buckets a model spec's routes by upstream protocol. It mirrors
-// copilotRouteSet but derives the protocol from an explicit per-model table
-// (models.dev metadata) instead of Copilot's supported_endpoints catalog.
+// mixedRouteSet buckets a model spec's routes by upstream protocol using
+// an explicit per-model table from models.dev metadata.
 type mixedRouteSet struct {
 	chat      []runtimeModelRoute
 	responses []runtimeModelRoute
@@ -79,7 +78,7 @@ func buildMixedRoutes(modelSpec string, protocols map[string]string) (mixedRoute
 // that routes each request to the correct upstream protocol for the requested
 // model: native Anthropic through a CCL passthrough, OpenAI Chat through CCL's
 // Chat Completions adapter, and OpenAI Responses through CCL's Codex Responses
-// adapter. It is the API-key gateway counterpart to the Copilot OAuth router.
+// adapter.
 func StartMixedProtocolAPIKeyRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, protocols map[string]string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -237,7 +236,7 @@ func (r *mixedProtocolRouter) handleCountTokens(writer http.ResponseWriter, requ
 		return
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
-	lower := strings.ToLower(copilotRequestModel(body))
+	lower := strings.ToLower(requestModelID(body))
 	if r.codex != nil && r.responses[lower] {
 		r.codex.handleCountTokens(writer, request)
 		return
@@ -268,7 +267,7 @@ func (r *mixedProtocolRouter) handleMessages(writer http.ResponseWriter, request
 		return
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
-	model := copilotRequestModel(body)
+	model := requestModelID(body)
 	lower := strings.ToLower(model)
 	if r.codex != nil && r.responses[lower] {
 		LogDebugEvent("protocol_route", "component", "mixed", "model", model, "protocol", "codex_responses", "owner", "ccl")

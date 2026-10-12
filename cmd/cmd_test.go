@@ -280,7 +280,6 @@ func TestProviderTypeAuthSummaryUsesCompactOAuthBackend(t *testing.T) {
 		want string
 	}{
 		{name: "autoclaw oauth", p: provider.Provider{Type: "autoclaw", OAuthProvider: "autoclaw"}, want: "autoclaw/oauth"},
-		{name: "copilot oauth", p: provider.Provider{Type: "openai_responses", OAuthProvider: "copilot"}, want: "copilot/oauth"},
 		{name: "anthropic key", p: provider.Provider{Type: "anthropic"}, want: "anthropic-messages/x-api-key"},
 	}
 	for _, tt := range tests {

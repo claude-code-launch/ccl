@@ -171,7 +171,7 @@ func runMapAuto(ctx context.Context, args []string, probe bool) error {
 	defer cleanup()
 
 	// Recommend from the catalog as is. Probing every model is a billed request
-	// each (Copilot premium requests, Qoder credits), so it is opt-in: --probe
+	// each (Qoder credits), so it is opt-in: --probe
 	// narrows the pool to the models that actually answered.
 	pool := models
 	if probe {

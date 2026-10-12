@@ -77,7 +77,7 @@ type zedCompletionBody struct {
 // it were the provider; the gateway wraps those requests in Zed's envelope,
 // owns LLM-token refresh, and unwraps Zed's NDJSON event stream.
 //
-// Like the Copilot gateway it must NOT run retryUpstream: the outer service
+// This inner gateway must NOT run retryUpstream: the outer service
 // already owns the 429/5xx fast retry, and nesting would retry 3x3 times.
 type zedGateway struct {
 	endpoint string

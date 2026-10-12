@@ -29,7 +29,7 @@ type zedRouteSet struct {
 }
 
 // buildZedRoutes maps the account catalog, plus any configured aliases such as
-// "claude-opus-4-6[1m]", onto data planes. Like Copilot, configured models
+// "claude-opus-4-6[1m]", onto data planes. Configured models
 // never narrow the authoritative catalog; a configured model the account does
 // not offer is an error so a stale slot cannot silently route elsewhere.
 func buildZedRoutes(modelSpec string, catalog []zedModel) (zedRouteSet, error) {
@@ -267,7 +267,7 @@ func (r *zedProtocolRouter) handleCountTokens(writer http.ResponseWriter, reques
 	if !ok {
 		return
 	}
-	switch wire, found := r.wires[strings.ToLower(copilotRequestModel(body))]; {
+	switch wire, found := r.wires[strings.ToLower(requestModelID(body))]; {
 	case found && wire == zedWireResponses && r.codex != nil:
 		r.codex.handleCountTokens(writer, request)
 	case found && wire == zedWireChat && r.chatSvc != nil:
@@ -290,7 +290,7 @@ func (r *zedProtocolRouter) handleMessages(writer http.ResponseWriter, request *
 	if !ok {
 		return
 	}
-	model := copilotRequestModel(body)
+	model := requestModelID(body)
 	wire, found := r.wires[strings.ToLower(model)]
 	if !found {
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "model is not routed to a supported Zed protocol")

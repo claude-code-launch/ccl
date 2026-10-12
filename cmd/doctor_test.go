@@ -217,7 +217,7 @@ func TestModelProbeTargetUsesConfiguredUpstreamForKeyProviders(t *testing.T) {
 // TestProbeWireTypeFollowsTheRuntimeSurface pins the second half of the probe
 // selection: WHICH route to use once the target is the loopback runtime. A
 // subscription persists only a compatibility type — "openai" for
-// Kimi/Gemini/WorkBuddy, "openai_responses" for GPT/Grok/Copilot/Zed — while
+// Kimi/Gemini/WorkBuddy, "openai_responses" for GPT/Grok/Zed — while
 // every embedded runtime serves the Anthropic Messages surface and nothing
 // else. Probing the compatibility wire 404s every model of a healthy
 // subscription, which is how doctor reported 0/N on a working Zed or Kimi
@@ -237,11 +237,6 @@ func TestProbeWireTypeFollowsTheRuntimeSurface(t *testing.T) {
 		{
 			name:     "zed responses compatibility type",
 			provider: provider.Provider{Type: "openai_responses", OAuthProvider: "zed"},
-			want:     "anthropic",
-		},
-		{
-			name:     "copilot responses compatibility type",
-			provider: provider.Provider{Type: "openai_responses", OAuthProvider: "copilot"},
 			want:     "anthropic",
 		},
 		{

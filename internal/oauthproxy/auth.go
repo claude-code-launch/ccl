@@ -16,7 +16,6 @@ const (
 	// files; login no longer accepts it as an alias for gpt.
 	ProviderChatGPTLegacy = "chatgpt"
 	ProviderGrok          = "grok"
-	ProviderCopilot       = "copilot"
 	ProviderQoder         = "qoder"
 	ProviderKimi          = "kimi"
 	ProviderKiro          = "kiro"
@@ -80,8 +79,6 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 	switch target {
 	case ProviderKiro:
 		return loginKiro(ctx, authDir, opts)
-	case ProviderCopilot:
-		return loginCopilot(ctx, authDir, opts)
 	case ProviderQoder:
 		return loginQoder(ctx, authDir, opts)
 	case ProviderWorkBuddy:
@@ -124,15 +121,14 @@ func ImportCredential(ctx context.Context, providerName string) (LoginResult, er
 // ValidateLoginProvider returns the canonical public OAuth provider name.
 // Codex remains an internal backend and a legacy runtime value, but new logins
 // use the public GPT name (model family) because both routes authenticate the same account.
-// Copilot is a separate GitHub OAuth and API backend. AutoClaw runs its Google
-// browser flow and stores a refreshable managed-proxy credential.
+// AutoClaw runs its Google browser flow and stores a refreshable managed-proxy credential.
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw, ProviderZed:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw, ProviderZed:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy, autoclaw, or zed)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, qoder, kimi, kiro, workbuddy, autoclaw, or zed)", providerName)
 	}
 }
 
@@ -140,8 +136,8 @@ func BackendProvider(providerName string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
 	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy:
 		return ProviderCodex, nil
-	case ProviderCopilot:
-		return ProviderCopilot, nil
+	case "copilot":
+		return "", fmt.Errorf("GitHub Copilot OAuth support has been removed; select another provider")
 	case ProviderQoder:
 		return ProviderQoder, nil
 	case ProviderGemini:

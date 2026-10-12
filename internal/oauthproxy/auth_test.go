@@ -19,12 +19,20 @@ import (
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
 )
 
+func writeTestJSON(writer http.ResponseWriter, value any) {
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(value)
+}
+
+func serverURL(request *http.Request) string {
+	return "http://" + request.Host
+}
+
 func TestBackendProviderAliases(t *testing.T) {
 	tests := map[string]string{
 		"codex":     "codex",
 		"gpt":       "codex",
 		"chatgpt":   "codex",
-		"copilot":   "copilot",
 		"qoder":     "qoder",
 		"gemini":    "antigravity",
 		"grok":      "xai",
@@ -45,7 +53,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderCopilot, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw, ProviderZed} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw, ProviderZed} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}

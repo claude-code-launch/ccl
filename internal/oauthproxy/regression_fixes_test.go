@@ -31,7 +31,6 @@ func TestInternalSubscriptionGatewaysRequireRuntimeKey(t *testing.T) {
 		name    string
 		handler http.HandlerFunc
 	}{
-		{name: "copilot", handler: (&copilotGateway{key: "runtime-secret"}).serveHTTP},
 		{name: "workbuddy", handler: (&workbuddyGateway{key: "runtime-secret"}).serveHTTP},
 	}
 	for _, tc := range tests {

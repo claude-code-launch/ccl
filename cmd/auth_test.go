@@ -26,7 +26,6 @@ func TestOAuthRuntimeTypeDefaults(t *testing.T) {
 		{oauthproxy.ProviderKimi, "openai"},
 		{oauthproxy.ProviderKiro, "anthropic"},
 		{oauthproxy.ProviderQoder, "anthropic"},
-		{oauthproxy.ProviderCopilot, "openai_responses"},
 		{oauthproxy.ProviderZed, "openai_responses"},
 		{oauthproxy.ProviderWorkBuddy, "openai"},
 	}
@@ -314,33 +313,6 @@ func TestRunAuthGrokPreservesExistingSlotPins(t *testing.T) {
 	}
 }
 
-func TestRunAuthCopilotUsesIndependentBackend(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	originalLogin := oauthLogin
-	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		if target != oauthproxy.ProviderCopilot {
-			t.Fatalf("login target = %q, want copilot", target)
-		}
-		return oauthproxy.LoginResult{Provider: target, Backend: "copilot", Path: "copilot-copilot@example.com.json"}, nil
-	}
-	t.Cleanup(func() { oauthLogin = originalLogin })
-
-	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"copilot", "gh"}, authOptions{}); err != nil {
-		t.Fatalf("runAuth() error: %v", err)
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	p, ok := cfg.Providers["gh"]
-	if !ok {
-		t.Fatalf("no copilot provider gh: %+v", cfg.Providers)
-	}
-	if p.Type != "openai_responses" || p.Endpoint != "oauth://copilot" || p.OAuthProvider != "copilot" {
-		t.Fatalf("Copilot provider = %+v", p)
-	}
-}
-
 func TestRunAuthZedCreatesMixedProtocolProvider(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	originalLogin := oauthLogin
@@ -453,31 +425,6 @@ func TestRunAuthGrokWithoutAliasDerivesName(t *testing.T) {
 	}
 	if p.OAuthProvider != "grok" {
 		t.Fatalf("Grok provider = %+v", p)
-	}
-}
-
-func TestRunAuthCopilotWithoutAliasDerivesName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	originalLogin := oauthLogin
-	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{Provider: target, Backend: "copilot", Path: "copilot-copilot@example.com.json"}, nil
-	}
-	t.Cleanup(func() { oauthLogin = originalLogin })
-
-	if err := runAuth(context.Background(), &bytes.Buffer{}, []string{"copilot"}, authOptions{}); err != nil {
-		t.Fatalf("runAuth() error: %v", err)
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	derived := "copilot-copilot@example.com"
-	p, ok := cfg.Providers[derived]
-	if !ok {
-		t.Fatalf("no derived copilot provider %q: %+v", derived, cfg.Providers)
-	}
-	if p.OAuthProvider != "copilot" {
-		t.Fatalf("Copilot provider = %+v", p)
 	}
 }
 
@@ -604,9 +551,6 @@ func TestRunAuthPreservesFastModeOnReauth(t *testing.T) {
 func TestProviderFastSummary(t *testing.T) {
 	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "gpt"}); got != "on" {
 		t.Fatalf("gpt fast = %q, want on", got)
-	}
-	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "copilot"}); got != "off" {
-		t.Fatalf("copilot fast = %q, want off", got)
 	}
 	if got := providerFastSummary(provider.Provider{FastMode: true, OAuthProvider: "gemini"}); got != "off" {
 		t.Fatalf("gemini fast = %q, want off", got)
@@ -790,9 +734,6 @@ func TestDerivedProviderNameCompactsLongIdentities(t *testing.T) {
 func TestDerivedProviderNameKeepsShortIdentities(t *testing.T) {
 	if got := derivedProviderName("grok", "grok-work@x.ai.json"); got != "grok-work@x.ai" {
 		t.Fatalf("grok derived name = %q", got)
-	}
-	if got := derivedProviderName("copilot", "copilot-copilot@example.com.json"); got != "copilot-copilot@example.com" {
-		t.Fatalf("copilot derived name = %q", got)
 	}
 }
 

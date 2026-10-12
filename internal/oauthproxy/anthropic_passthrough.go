@@ -18,7 +18,7 @@ import (
 
 // anthropicPassthroughService is a pure native-Anthropic Messages passthrough:
 // no protocol conversion, only credential resolution and 401-refresh-once. It
-// backs models.dev native-Anthropic gateways and Copilot native-Messages models
+// backs models.dev native-Anthropic gateways and Zed native-Messages models
 // (static key).
 type anthropicPassthroughService struct {
 	apiKey     string

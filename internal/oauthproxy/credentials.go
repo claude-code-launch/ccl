@@ -25,6 +25,17 @@ type CredentialInfo struct {
 	QuotaExceeded bool
 }
 
+func firstMetadataString(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := metadata[key].(string); ok {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
 // ListCredentials reads supported JSON files directly inside ~/.ccl/auth.
 // Subdirectories and unrelated JSON files are ignored.
 func ListCredentials() ([]CredentialInfo, error) {
@@ -132,8 +143,6 @@ func normalizeCredentialBackend(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy:
 		return ProviderCodex, nil
-	case ProviderCopilot:
-		return ProviderCopilot, nil
 	case ProviderQoder:
 		return ProviderQoder, nil
 	case backendXAI, ProviderGrok:

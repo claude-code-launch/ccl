@@ -24,7 +24,7 @@ lists the upstream catalog (or OAuth runtime models) instead.
 
 --probe sends a 1-token request to every listed model and reports which
 answer. That is a real request per model and counts against your plan
-(Copilot premium requests, Qoder credits, API usage).
+(Qoder credits, API usage).
 
 Examples:
   ccl provider models

@@ -134,7 +134,7 @@ type Provider struct {
 	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
-	// values are gpt, gemini, grok, copilot, qoder, kimi, kiro, workbuddy,
+	// values are gpt, gemini, grok, qoder, kimi, kiro, workbuddy,
 	// autoclaw, and zed. Load folds the retired chatgpt and codex values into gpt.
 	OAuthProvider string `yaml:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
@@ -231,12 +231,12 @@ type Config struct {
 }
 
 // OAuthRuntimeType returns the internal compatibility type ccl persists for an
-// OAuth backend. Copilot and Zed are represented by openai_responses for local
-// dispatch, but their actual upstream protocol is selected per model. ok is
+// OAuth backend. Zed is represented by openai_responses for local
+// dispatch, but its actual upstream protocol is selected per model. ok is
 // false when the backend is empty or unknown.
 func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
-	case "gpt", "chatgpt", "codex", "copilot", "grok", "zed":
+	case "gpt", "chatgpt", "codex", "grok", "zed":
 		return "openai_responses", true
 	case "gemini", "kimi", "workbuddy":
 		return "openai", true
@@ -265,6 +265,8 @@ func InferOAuthProvider(providerName, endpoint string) string {
 	case "antigravity", "gemini":
 		return "gemini"
 	case "copilot":
+		// Preserve the legacy marker so the runtime reports removed support
+		// rather than treating oauth://copilot as a manual API-key endpoint.
 		return "copilot"
 	case "qoder":
 		return "qoder"
@@ -399,7 +401,7 @@ func RuntimeModelSpec(p Provider) string {
 //
 // A backend whose real behavior is not implied by Type carries a " / " qualifier
 // instead of a second set of parentheses: AutoClaw's CCL Anthropic-to-Chat
-// adapter, Copilot's and Zed's per-model dispatch, and models.dev's per-model
+// adapter, Zed's per-model dispatch, and models.dev's per-model
 // protocols.
 func ProtocolLabel(providerType string) string {
 	trimmed := strings.TrimSpace(providerType)
@@ -423,8 +425,6 @@ func ProtocolLabel(providerType string) string {
 // backends whose real behavior cannot be inferred from the internal Type field.
 func ProtocolLabelForProvider(p Provider) string {
 	switch strings.ToLower(strings.TrimSpace(p.OAuthProvider)) {
-	case "copilot":
-		return "copilot / auto"
 	case "zed":
 		return "zed / auto"
 	}

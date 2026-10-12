@@ -160,6 +160,10 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 }
 
 func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile string) (*Runtime, error) {
+	backend, err := BackendProvider(providerName)
+	if err != nil {
+		return nil, err
+	}
 	credentialFile = strings.TrimSpace(credentialFile)
 	if credentialFile == "" {
 		return nil, fmt.Errorf("subscription provider %s is not bound to a credential file; authenticate the account again with `ccl oauth %s [alias]`", providerName, providerName)
@@ -167,15 +171,8 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if parent == nil {
 		parent = context.Background()
 	}
-	backend, err := BackendProvider(providerName)
-	if err != nil {
-		return nil, err
-	}
 	if backend == ProviderKiro {
 		return startKiroOAuth(parent, modelSpec, credentialFile)
-	}
-	if backend == ProviderCopilot {
-		return startCopilotOAuth(parent, modelSpec, credentialFile)
 	}
 	if backend == ProviderQoder {
 		return startQoderOAuth(parent, modelSpec, credentialFile)

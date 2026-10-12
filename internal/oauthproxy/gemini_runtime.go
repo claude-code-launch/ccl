@@ -290,10 +290,19 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	converted, err := convertAnthropicToGemini(raw)
+	converted, err := convertAnthropicToAntigravity(raw)
 	if err != nil {
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
+	}
+	if LogDebugEnabled() {
+		var tools []string
+		for index, declaration := range gjson.GetBytes(converted.geminiBody, "tools.0.functionDeclarations").Array() {
+			tools = append(tools, fmt.Sprintf("%d:%s", index, declaration.Get("name").String()))
+		}
+		LogDebugEvent("request_converted", "component", "gemini", "request_id", requestID,
+			"client_model", converted.clientModel, "model", converted.upstreamModel,
+			"tools", strings.Join(tools, ","))
 	}
 	envelope := antigravityEnvelope(converted.geminiBody, converted.upstreamModel, s.projectID, geminiStableSessionID(converted.geminiBody))
 	response, err := s.forward(requestCtx, converted.stream, envelope)
@@ -307,7 +316,7 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		LogUpstreamEvent(response.StatusCode, "request_failed", "component", "gemini", "request_id", requestID,
-			"status", response.StatusCode, "duration", logDuration(started))
+			"model", converted.upstreamModel, "status", response.StatusCode, "duration", logDuration(started))
 		s.forwardUpstreamError(writer, response)
 		return
 	}

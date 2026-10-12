@@ -4,12 +4,12 @@
 
 用一句话理解它：
 
-> 你继续用 Claude Code 的界面和习惯，`ccl` 负责帮你接上不同的模型来源（DeepSeek / OpenRouter / ChatGPT 订阅 / Gemini / Grok / Copilot / Kimi / WorkBuddy 等），并在需要时自动做协议翻译。
+> 你继续用 Claude Code 的界面和习惯，`ccl` 负责帮你接上不同的模型来源（DeepSeek / OpenRouter / ChatGPT 订阅 / Gemini / Grok / Kimi / WorkBuddy 等），并在需要时自动做协议翻译。
 
 适合这些场景：
 
 - 想用更便宜的 OpenAI 兼容网关跑 Claude Code
-- 想用 ChatGPT / Gemini / Grok / Copilot / Kimi / WorkBuddy 等订阅账号
+- 想用 ChatGPT / Gemini / Grok / Kimi / WorkBuddy 等订阅账号
 - 需要在多个网关 / 多个账号之间快速切换
 - 不想手写复杂的环境变量和模型映射
 
@@ -80,7 +80,6 @@ ccl doctor
 ccl oauth gpt        # GPT / Codex (OpenAI 订阅)
 ccl oauth gemini     # Google Gemini
 ccl oauth grok       # xAI Grok
-ccl oauth copilot    # GitHub Copilot
 ccl oauth qoder      # Qoder 浏览器 OAuth（不需要 Qoder CLI）
 ccl oauth kimi       # Kimi / Moonshot
 ccl oauth kiro       # Kiro Portal（Google / GitHub）
@@ -178,7 +177,7 @@ ccl bypass off      # 关闭
    配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
 
 6. **订阅 OAuth 一键接入**  
-   `gpt` / `gemini` / `grok` / `copilot` / `qoder` / `kimi` / `kiro` / `workbuddy` / `autoclaw` / `zed`，支持多账号别名；token 会在运行时刷新。
+   `gpt` / `gemini` / `grok` / `qoder` / `kimi` / `kiro` / `workbuddy` / `autoclaw` / `zed`，支持多账号别名；token 会在运行时刷新。
 
 ### 协议与运行时边界
 
@@ -194,14 +193,13 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 | Gemini / Kimi 订阅 | CCL 对应 OAuth/device flow 登录、刷新并绑定凭据 | CCL 读取对应上游模型目录或兼容目录 | CCL 对应 adapter 完成 Messages ↔ 各自上游协议 | CCL 全部拥有 |
 | Grok 订阅 | CCL 自研 OAuth、刷新并绑定凭据 | CCL 直查 cli-chat-proxy `/models`，失败时使用 `grok-4.6` / `grok-4.5` 兼容目录 | CCL 复用 Responses 转换，并注入 Grok Build 身份头（含 `x-grok-model-override`） | CCL 全部拥有 |
 | WorkBuddy 订阅 | CCL 自研网页登录轮询、凭据绑定与刷新 | CCL 使用认证账号直查 WorkBuddy `/v3/config` | CCL gateway 注入 WorkBuddy 账号/客户端/会话头，并由 `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
-| GitHub Copilot 订阅 | CCL 自研 GitHub device flow、Copilot 换票与凭据状态 | CCL 直查 Copilot 模型目录并读取每个模型声明的 endpoint | CCL 按模型路由；Responses 使用 CCL Codex 转换，Chat / 原生 Messages 使用 CCL 对应 adapter | CCL 全部拥有 |
 | Zed 订阅 | CCL 自研 zed.dev 原生应用登录（RSA 加密回调），换取并刷新短期 LLM token | CCL 直查 `cloud.zed.dev/models`，只发布账号可用且 CCL 有数据面的模型 | CCL 按模型的 provider 路由：Anthropic 走原生 Messages passthrough，OpenAI 走 Responses，xAI 走 Chat Completions，Google 走 Gemini 转换；统一封装为 Zed 的 `{provider, model, provider_request}` 信封并解封 NDJSON 事件 | CCL 全部拥有；不需要安装 Zed 编辑器 |
 | Kiro 订阅 | CCL 自研 Portal PKCE / Builder ID、刷新和单凭据运行时 | CCL 调 Kiro Portal / Amazon Q 模型接口并缓存 | CCL 完成 Messages → Amazon Q、重试、AWS EventStream → Messages | CCL 全部拥有 |
 | Qoder 订阅 | CCL 自研浏览器 OAuth、刷新和单凭据运行时 | CCL 直查 Qoder 模型目录，失败时使用最小兼容目录 | CCL 完成 COSY 签名、WAF 编码、Messages → Qoder、Qoder SSE → Messages | CCL 全部拥有 |
 
 CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上下文元数据、日志、usage 汇总和 runtime 生命周期。所有需要代理的协议都由 CCL 在本机 loopback runtime 中处理，不启动外部 provider 进程。
 
-错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；Gemini 网络错误、429、5xx 时回退控制面 base；Grok/Kimi 401 后刷新一次；WorkBuddy 只在 401/403 后尝试刷新一次，刷新失败保留原始响应，429/5xx 不重试；Copilot gateway 自己负责换票与切换凭据；Zed gateway 只在 LLM token 过期（`x-zed-expired-token` / 401）时重新换票并重发一次，429/5xx 的快速重试由外层服务负责，且 Zed 的 `upstream_http_*` 错误会还原为上游真实状态码与 `Retry-After`；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
+错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；Gemini 网络错误、429、5xx 时回退控制面 base；Grok/Kimi 401 后刷新一次；WorkBuddy 只在 401/403 后尝试刷新一次，刷新失败保留原始响应，429/5xx 不重试；Zed gateway 只在 LLM token 过期（`x-zed-expired-token` / 401）时重新换票并重发一次，429/5xx 的快速重试由外层服务负责，且 Zed 的 `upstream_http_*` 错误会还原为上游真实状态码与 `Retry-After`；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
 
 所有 `openai_responses` 网关都按 **Codex Responses** 处理，不再区分 `codex-api-key` / `generic-api-key` executor：CCL 统一注入自己维护的 `Originator: codex_cli_rs`、Codex User-Agent、`Version`、`session-id` / `thread-id` / request ID，以及当前 Codex `client_metadata`，并固定 `stream=true`、`store=false`。这些值由 CCL 明确维护，不随外部实现版本间接改变。协议仍由 provider `type` 明确选择，不根据 endpoint 的 `/codex` 路径猜测。GPT 订阅与 API Key 网关共享同一套转换和 SSE 实现，区别只在鉴权：GPT 使用 OAuth token 与 `Chatgpt-Account-Id`，网关使用用户 API Key。
 
@@ -235,7 +233,7 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 │     （models / preview / env / effort / ultracode / doctor 支持 --provider <name> / --acp）
 │
 ├─ oauth <provider> [alias]           登录订阅
-│  ├─ provider: gpt | gemini | grok | copilot | qoder | kimi | kiro | workbuddy | autoclaw | zed
+│  ├─ provider: gpt | gemini | grok | qoder | kimi | kiro | workbuddy | autoclaw | zed
 │  ├─ autoclaw --from-desktop         复用 AutoClaw 桌面端已登录的账号
 │  └─ prune                           删除未被任何 provider 使用的 OAuth 凭据
 │
@@ -334,7 +332,7 @@ ccl log off              # 关闭
 
 `log` 默认关闭，只有显式执行 `ccl log on` 或 `ccl log --level <level>` 后才记录。它是全局阈值设置，写入 `~/.ccl/config.yaml` 的 `log_level`。`ccl log on` 本身不会创建共享的 `ccl-debug.log`；每个由 `ccl` 拉起的 Claude Code 临时会话或独立 provider runtime 才会获得一个带后缀的日志文件，Claude 会话默认命名为 `~/.ccl/logs/ccl-debug-claude_<id>.log`。一个会话内的全部日志级别都写入同一文件。可用 `CCL_LOG_FILE=/path/file.log` 覆盖文件名模板（实际文件仍会加入会话后缀）。日志由 Go 标准库 `slog` 输出，带时间戳、级别和消息；运行结束时会打印 Claude 会话的实际文件路径。
 
-`INFO`（`ccl log on` 的默认值）记录 session/runtime 启动退出、数据面类型、模型路由、OAuth refresh 与上下文设置；4xx/cooldown 按 `WARN`、5xx/代理故障按 `ERROR` 记录，成功的逐请求状态只在 `DEBUG` 出现。Kiro、Qoder、Copilot、WorkBuddy 的请求会获得会话内唯一的 `request_id`，入口、凭据尝试、上游响应、切号/刷新/重试和最终结果都可用这个字段串联。常用事件包括 `request_failed`、`upstream_response`、`upstream_retry_decision`、`token_refresh_start`、`model_queued` 和 `stream_conversion_failed`。
+`INFO`（`ccl log on` 的默认值）记录 session/runtime 启动退出、数据面类型、模型路由、OAuth refresh 与上下文设置；4xx/cooldown 按 `WARN`、5xx/代理故障按 `ERROR` 记录，成功的逐请求状态只在 `DEBUG` 出现。Kiro、Qoder、WorkBuddy 的请求会获得会话内唯一的 `request_id`，入口、凭据尝试、上游响应、切号/刷新/重试和最终结果都可用这个字段串联。常用事件包括 `request_failed`、`upstream_response`、`upstream_retry_decision`、`token_refresh_start`、`model_queued` 和 `stream_conversion_failed`。
 
 一次故障建议这样查：
 
@@ -343,11 +341,11 @@ grep -E 'level=(WARN|ERROR)' ~/.ccl/logs/ccl-debug-claude_<id>.log
 grep 'request_id=r1' ~/.ccl/logs/ccl-debug-claude_<id>.log
 ```
 
-第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。CCL 的 Codex Responses、Kiro、Qoder、Copilot、WorkBuddy、OpenAI Chat、Gemini、Grok 和 Kimi 数据面都会记录上游状态、`retry_after` 和适配器采取的动作。日志中的 endpoint 会移除 userinfo、query 和 fragment。
+第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。CCL 的 Codex Responses、Kiro、Qoder、WorkBuddy、OpenAI Chat、Gemini、Grok 和 Kimi 数据面都会记录上游状态、`retry_after` 和适配器采取的动作。日志中的 endpoint 会移除 userinfo、query 和 fragment。
 
 日志覆盖存在明确边界：普通 Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到；AutoClaw 与其余 CCL 数据面都会用 `request_id` 串联入口、上游响应、token 刷新和最终状态。
 
-日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Codex Responses、Copilot、Kiro、Qoder、WorkBuddy 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
+日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Codex Responses、Kiro、Qoder、WorkBuddy 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
 
 旧的 `debug_mode`/`debug_verbose` 配置会在读取时迁移；DEBUG 的命令入口统一为 `ccl log --level debug`，`ccl debug` 别名已移除。
 
@@ -357,7 +355,6 @@ grep 'request_id=r1' ~/.ccl/logs/ccl-debug-claude_<id>.log
 ccl oauth gpt
 ccl oauth gemini
 ccl oauth grok
-ccl oauth copilot
 ccl oauth qoder
 ccl oauth kimi
 ccl oauth kiro
@@ -378,7 +375,6 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
 | provider | backend | 协议 | 登录方式 |
 | --- | --- | --- | --- |
 | `gpt` | codex | `openai-responses` | OpenAI OAuth 回调 |
-| `copilot` | copilot | 自动选择 `responses` / `chat` / `messages` | GitHub device-code |
 | `qoder` | qoder | `anthropic` | Qoder 浏览器 PKCE device flow |
 | `gemini` | antigravity | `openai-chat` | Google/Antigravity OAuth |
 | `grok` | xai | `openai-chat` | xAI device-code |
@@ -417,7 +413,6 @@ ccl oauth kiro --kiro-auth builder  # 可选：AWS Builder ID device-code
   - 模型池包含 `zai_auto`、`zai_auto-fast`、`zaicoding_glm-5.3`、`tdpsk_deepseek-v4-flash-202605`、`tdpsk_deepseek-v4-pro-202606`、`zai_glm-5.3-flash`；旧的 `GLM-5.3` 等名称仍作为兼容别名接受。
 - 启动时若上游 model list 没有对应首选模型，会清除该首选默认并回退自动发现映射。**Fable 槽**沿用对应后端的最强档模型（订阅目录里目前没有 Fable 系模型，写死独立 ID 会直接探测失败）；需要单独绑定 `ANTHROPIC_DEFAULT_FABLE_MODEL` 时用 `ccl map --fable <model>` 或 TUI 的 Fable 行。
 - **Fast mode**（约 1.5x 速度、更高用量）仅 `gpt` 有意义：在 `ccl set` 单页的 Runtime 区用 `←→` 调整。开启后 ccl 通过 `X-Ccl-Fast-Mode` 让本机 runtime 向 Codex 请求 `service_tier=priority`（Claude Code 只给它认识的模型发 fast 字段，所以 ccl 自己处理）；关闭时不再往 `--settings` 写 `fastMode: false`，不会覆盖你在 Claude Code 里 `/fast` 的选择。
-- **Copilot** 使用独立的 GitHub OAuth 凭据和 `api.githubcopilot.com`；登录写盘前会验证账号确实拥有可用的 Copilot 模型。启动时读取账号实际模型目录，并根据每个模型声明的端点选择 Responses、Chat Completions 或 Anthropic Messages；该目录是 `ccl provider models --all` 的权威来源，不会混入本地兼容层的内建模型。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `copilot / auto`。
 - **Qoder** 完全由 ccl 直接接入：`ccl oauth qoder` 打开 Qoder 授权页并轮询 OAuth token；运行时直接刷新 token、读取账号模型目录、生成 COSY 签名、编码请求并把 Qoder SSE 转换为 Anthropic Messages。不会调用、探测或读取 `qodercli`，系统无需安装 Qoder CLI。模型目录由账号实时返回；`ccl provider models` 会显示 Qoder 展示名、内部模型 ID、Credit 倍率以及 New / 错峰优惠标记。暂时无法读取目录时使用最小兼容目录启动。
 - **AutoClaw**（AutoClaw Code / ZCode coding plan）通过 **CCL 本地 Anthropic-to-OpenAI Chat 代理**接入：`ccl oauth autoclaw` 启动 CCL 自己的 loopback 页面，完成人机校验和 Google OAuth 回调，并直接换取 access/refresh token；全程不需要启动 AutoClaw 主进程。若要复用桌面端已有账号，可改用 `ccl oauth autoclaw --from-desktop`，它从 `~/Library/Application Support/autoclaw/auth.json` 读取凭据，macOS 下通过 Chromium Safe Storage Keychain 解密且不修改桌面文件。两条路径都会将 `type: autoclaw` provider 绑定到 `~/.ccl/auth/` 的 0600 凭据，在会话内自动刷新 token，并把 Claude Messages 转为 OpenAI Chat Completions，发送到 `https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions`。上游使用 `X-Authorization`、`X-Request-Model`、`X-Harness-Type: zcode` 等桌面兼容 headers；Claude Code 只看到 CCL 的随机 loopback key。
 - **Zed**（Zed Pro / Trial / Student / Business 套餐里包含的托管模型）完全由 ccl 接入，**无需安装 Zed 编辑器**。`ccl oauth zed` 在本机 `127.0.0.1` 起一个回调端口，生成一次性 RSA-2048 密钥，打开 `https://zed.dev/native_app_signin`；zed.dev 登录后把用 CCL 公钥加密的 access token 重定向回该端口，CCL 用私钥解密（OAEP-SHA256，兼容旧的 PKCS#1 v1.5），再调用 `cloud.zed.dev/client/users/me` 验证账号并把长期凭据以 0600 写入 `~/.ccl/auth/zed-<github 用户名>.json`。运行时用该凭据向 `/client/llm_tokens` 换取短期 LLM token（过期时自动重换一次），读取 `/models` 得到账号实际可用的模型，并按每个模型的 provider 选择数据面：Anthropic → 原生 Messages passthrough，OpenAI → Responses，xAI → Chat Completions，Google → Gemini 转换。所有请求都经过本机 loopback gateway 封装为 Zed 的 `{provider, model, provider_request}` 信封；CCL 以当前 Zed 稳定版本（`x-zed-version`）标识自己。配置里的 `type: openai_responses` 仅是本地调度兼容字段，`ccl ls` / `doctor` 显示为 `zed / auto`。Zed 的模型目录因账号而异且变化频繁，所以**不写入静态默认槽位**，而是由模型发现补全。仅在上游保留数据（data retention）时才提供的模型（如 `claude-fable-5*`）默认隐藏，与 Zed 编辑器要求用户明确同意一致；需要时设置 `CCL_ZED_ALLOW_DATA_RETENTION=1`。免费（Free）套餐不含托管模型，需订阅或开通试用。限制：Zed 云端自行决定 Anthropic beta 能力，因此 Claude Code 的 `metadata`、`context_management`、`service_tier` 等字段不会转发；Google 模型不支持上游 token 计数，使用本地估算。
@@ -617,7 +612,7 @@ ccl doctor --probe      # 额外逐个测试模型池（计费）
 ccl provider preview             # 预览将注入 Claude Code 的 settings JSON
 ```
 
-逐模型测试是真实请求：Copilot 会消耗 premium requests，Qoder 会消耗 Credit，API key 会产生用量，所以只在加 `--probe` 时才做。
+逐模型测试是真实请求：Qoder 会消耗 Credit，API key 会产生用量，所以只在加 `--probe` 时才做。
 
 模型目录带有展示元数据时，输出优先显示易读名称，同时保留配置请求所需的内部模型 ID；倍率和活动标记直接来自本次上游目录，不使用本地硬编码。
 

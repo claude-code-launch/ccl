@@ -18,6 +18,18 @@ const geminiSchemaMaxDepth = 32
 //
 // On any parse failure the original bytes are returned unchanged.
 func sanitizeGeminiSchema(raw []byte) []byte {
+	return sanitizeGeminiSchemaForBridge(raw, false)
+}
+
+// sanitizeAntigravityClaudeSchema accounts for the extra OpenAPI-to-Anthropic
+// conversion in Antigravity's Claude route. Unions become typed schemas with
+// native nullable flags, and constraints that cannot survive the bridge are
+// retained as instructions in descriptions.
+func sanitizeAntigravityClaudeSchema(raw []byte) []byte {
+	return sanitizeGeminiSchemaForBridge(raw, true)
+}
+
+func sanitizeGeminiSchemaForBridge(raw []byte, claudeBridge bool) []byte {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var root any
@@ -36,7 +48,7 @@ func sanitizeGeminiSchema(raw []byte) []byte {
 			}
 		}
 	}
-	cleaner := geminiSchemaCleaner{defs: defs}
+	cleaner := geminiSchemaCleaner{defs: defs, claudeBridge: claudeBridge}
 	cleaned := cleaner.clean(object, 0, nil)
 	if len(cleaned) == 0 {
 		// A declaration's parameters must describe an object; a schema whose every
@@ -51,7 +63,8 @@ func sanitizeGeminiSchema(raw []byte) []byte {
 }
 
 type geminiSchemaCleaner struct {
-	defs map[string]any
+	defs         map[string]any
+	claudeBridge bool
 }
 
 // geminiAllowedSchemaKeys are the keywords forwarded after cleaning.
@@ -70,6 +83,9 @@ func (c geminiSchemaCleaner) clean(node map[string]any, depth int, refStack []st
 		return map[string]any{"type": "object"}
 	}
 	node = c.flatten(node, depth, refStack)
+	if c.claudeBridge {
+		moveAntigravityConstraintsToDescription(node)
+	}
 
 	// const -> single-value enum.
 	if value, ok := node["const"]; ok {
@@ -122,27 +138,62 @@ func (c geminiSchemaCleaner) clean(node map[string]any, depth int, refStack []st
 			node["type"] = "array"
 		}
 	}
+	if c.claudeBridge {
+		node = c.normalizeClaudeUnion(node, depth, refStack)
+		if _, hasType := node["type"]; !hasType {
+			if values, ok := node["enum"].([]any); ok && len(values) > 0 {
+				switch values[0].(type) {
+				case string:
+					node["type"] = "string"
+				case json.Number:
+					node["type"] = "number"
+				case bool:
+					node["type"] = "boolean"
+				}
+			}
+		}
+		// A protobuf Schema with no type becomes TYPE_UNSPECIFIED in the
+		// bridge, which cannot be reconstructed as a JSON Schema type.
+		kind, _ := node["type"].(string)
+		switch kind {
+		case "string", "number", "integer", "boolean", "array", "object":
+		case "null":
+			node["type"] = "string"
+			node["nullable"] = true
+			appendGeminiSchemaHint(node, "Value must be null.")
+		default:
+			node["type"] = "object"
+			appendGeminiSchemaHint(node, "Accepts an unconstrained JSON value.")
+		}
+	}
 
 	// Gemini only supports string enums.
 	if values, ok := node["enum"].([]any); ok {
-		strs := make([]any, 0, len(values))
-		for _, value := range values {
-			switch typed := value.(type) {
-			case nil:
-				node["nullable"] = true
-			case string:
-				strs = append(strs, typed)
-			case json.Number:
-				strs = append(strs, typed.String())
-			default:
-				strs = append(strs, fmt.Sprint(typed))
-			}
-		}
-		if len(strs) == 0 {
+		if c.claudeBridge && !geminiStringEnum(node, values) {
+			// Do not change numeric/boolean arguments into strings to satisfy
+			// the protobuf enum carrier. Keep their declared type and choices.
+			appendGeminiSchemaJSONHint(node, "Allowed values", values)
 			delete(node, "enum")
 		} else {
-			node["enum"] = strs
-			node["type"] = "string"
+			strs := make([]any, 0, len(values))
+			for _, value := range values {
+				switch typed := value.(type) {
+				case nil:
+					node["nullable"] = true
+				case string:
+					strs = append(strs, typed)
+				case json.Number:
+					strs = append(strs, typed.String())
+				default:
+					strs = append(strs, fmt.Sprint(typed))
+				}
+			}
+			if len(strs) == 0 {
+				delete(node, "enum")
+			} else {
+				node["enum"] = strs
+				node["type"] = "string"
+			}
 		}
 	}
 
@@ -248,9 +299,91 @@ func (c geminiSchemaCleaner) clean(node map[string]any, depth int, refStack []st
 	return node
 }
 
+// foldAntigravityEnumUnion preserves all choices of a union of string enums.
+func foldAntigravityEnumUnion(node map[string]any, alternatives []any) bool {
+	if kind, _ := node["type"].(string); kind != "" && kind != "string" {
+		return false
+	}
+	if _, exists := node["enum"]; exists {
+		return false
+	}
+	var values []any
+	seen := make(map[string]bool)
+	nullable := false
+	for _, alternative := range alternatives {
+		branch, ok := alternative.(map[string]any)
+		if !ok || branch["type"] != "string" {
+			return false
+		}
+		for key := range branch {
+			switch key {
+			case "type", "enum", "description", "nullable":
+			default:
+				return false
+			}
+		}
+		enum, ok := branch["enum"].([]any)
+		if !ok || len(enum) == 0 {
+			return false
+		}
+		for _, value := range enum {
+			text, ok := value.(string)
+			if !ok {
+				return false
+			}
+			if !seen[text] {
+				values = append(values, text)
+				seen[text] = true
+			}
+		}
+		if branch["nullable"] == true {
+			nullable = true
+		}
+	}
+	if len(values) == 0 {
+		return false
+	}
+	node["type"] = "string"
+	node["enum"] = values
+	if nullable {
+		node["nullable"] = true
+	}
+	delete(node, "anyOf")
+	for _, alternative := range alternatives {
+		if description, ok := alternative.(map[string]any)["description"].(string); ok {
+			appendGeminiSchemaHint(node, description)
+		}
+	}
+	return true
+}
+
+// Only schema nodes are visited: a tool argument named "minLength" or
+// "maxItems" inside properties must retain its name and its schema.
+func moveAntigravityConstraintsToDescription(node map[string]any) {
+	constraints := make(map[string]any)
+	for _, key := range []string{
+		"minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
+		"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+		"pattern", "format", "uniqueItems", "contains", "default", "examples",
+		"additionalProperties", "propertyNames", "not",
+	} {
+		if value, exists := node[key]; exists {
+			constraints[key] = value
+			delete(node, key)
+		}
+	}
+	if len(constraints) == 0 {
+		return
+	}
+	appendGeminiSchemaJSONHint(node, "Input constraints", constraints)
+}
+
 // flatten resolves local $ref pointers and merges allOf members into node,
 // returning a fresh map so shared definitions are never mutated.
 func (c geminiSchemaCleaner) flatten(node map[string]any, depth int, refStack []string) map[string]any {
+	if depth > geminiSchemaMaxDepth {
+		return map[string]any{"type": "object"}
+	}
 	merged := make(map[string]any, len(node))
 	for key, value := range node {
 		merged[key] = value

@@ -24,6 +24,9 @@ type statuslinePayload struct {
 	ContextWindow struct {
 		UsedPercentage *float64 `json:"used_percentage"`
 	} `json:"context_window"`
+	PromptCache *struct {
+		HitRatio *float64 `json:"hit_ratio"`
+	} `json:"prompt_cache"`
 }
 
 // runStatusline renders ccl's status line from the JSON Claude Code writes to
@@ -43,15 +46,16 @@ func runStatusline() {
 	}
 }
 
-// formatStatusline renders "model · effort · NN%" from a status-line payload,
-// dropping empty segments. It returns "" when nothing can be shown.
+// formatStatusline renders the model, effort, context use, and prompt-cache hit
+// ratio from a status-line payload, dropping absent fields.
+// It returns "" when nothing can be shown.
 func formatStatusline(payload []byte) string {
 	var parsed statuslinePayload
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return ""
 	}
 
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if model := statuslineModel(parsed); model != "" {
 		parts = append(parts, model)
 	}
@@ -60,6 +64,12 @@ func formatStatusline(payload []byte) string {
 	}
 	if parsed.ContextWindow.UsedPercentage != nil {
 		parts = append(parts, fmt.Sprintf("%.0f%%", *parsed.ContextWindow.UsedPercentage))
+	}
+	if parsed.PromptCache != nil && parsed.PromptCache.HitRatio != nil {
+		ratio := *parsed.PromptCache.HitRatio
+		if ratio >= 0 && ratio <= 1 {
+			parts = append(parts, fmt.Sprintf("cache %.0f%%", ratio*100))
+		}
 	}
 	return strings.Join(parts, " · ")
 }

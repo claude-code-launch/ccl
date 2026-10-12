@@ -28,7 +28,7 @@ ccl-debug-claude_<id>.log. All slog levels for that session share one file.
 Levels:
   on / info  Normal runtime events, including startup, model routing, upstream
              status errors, OAuth refreshes, cooldowns, and context settings.
-  debug      Includes INFO plus request metadata. Copilot, Kiro, and Qoder also
+  debug      Includes INFO plus request metadata. Kiro and Qoder also
              record final upstream request payloads and failed response bodies.
              These can contain prompts, tool results, and user-provided secrets;
              keep this log local.
@@ -43,7 +43,7 @@ Configure logging:
   ccl log --level debug
   ccl log off
 
-Kiro, Qoder, and Copilot requests include a request_id for correlating retries
+Kiro and Qoder requests include a request_id for correlating retries
 and credential rotation. Plain Anthropic API-key providers are direct: their
 upstream 429/503 responses remain visible in Claude Code, not in ccl's log.
 `,
