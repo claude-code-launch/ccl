@@ -238,6 +238,9 @@ type AdvancedConfigModel struct {
 	filterInputWidth int
 
 	// Model mapping
+	// mappingOnly edits an already-loaded catalog without changing or verifying
+	// the provider connection. ccl map does not need a live runtime to edit slots.
+	mappingOnly       bool
 	activeSlot        int
 	filterText        *tui.State[string]
 	filterFocused     bool
@@ -388,6 +391,9 @@ func (m *AdvancedConfigModel) currentRow() configRowKind {
 // credential from the start, but its catalog arrives with the loopback runtime
 // that is started in the background, so it is ready only once that lands.
 func (m *AdvancedConfigModel) connectionReady() bool {
+	if m.mappingOnly {
+		return len(m.live().modelPool) > 0
+	}
 	if m.usesOAuth() {
 		return m.runtimeReady
 	}
@@ -401,6 +407,20 @@ func (m *AdvancedConfigModel) connectionReady() bool {
 // detection the Model Mapping / Runtime rows still render but are marked
 // non-editable (greyed out) until the connection is ready.
 func (m *AdvancedConfigModel) visibleRows() []configRow {
+	if m.mappingOnly {
+		ready := m.connectionReady()
+		return []configRow{
+			{kind: rowOpus, editable: ready},
+			{kind: rowSonnet, editable: ready},
+			{kind: rowHaiku, editable: ready},
+			{kind: rowFable, editable: ready},
+			{kind: rowCustom, editable: ready},
+			{kind: rowSubagent, editable: ready},
+			{kind: rowContext, editable: ready},
+			{kind: rowSave},
+			{kind: rowCancel},
+		}
+	}
 	rows := make([]configRow, 0, 4)
 	if m.usesOAuth() {
 		// OAuth keeps its original row set: no Source stepper, no endpoint input,
@@ -670,6 +690,9 @@ func (m *AdvancedConfigModel) slotModelForRow(kind configRowKind) string {
 // one whose Connection was edited since the last detection, must have a
 // successful detection first. OAuth providers never detect over HTTP.
 func (m *AdvancedConfigModel) canSave() bool {
+	if m.mappingOnly {
+		return m.connectionReady()
+	}
 	if m.usesOAuth() {
 		// Nothing to probe, but the page must not be saved before the runtime
 		// that owns the catalog has answered — the pool and the slot mapping it
@@ -900,8 +923,12 @@ func (m *AdvancedConfigModel) textInputHasKeyboard() bool {
 // display labels and context hints.
 func NewAdvancedMappingModel(p *provider.Provider, modelPool []string, metadata map[string]protocol.ModelInfo) *AdvancedConfigModel {
 	m := NewAdvancedConfigModel(p)
-	m.live().modelPool = modelPool
+	m.mappingOnly = true
+	m.live().modelPool = uniqueModels(modelPool)
+	m.p.Model = strings.Join(m.live().modelPool, ",")
 	m.live().modelPoolFromDiscovery = true
+	m.live().autoDetectOnOpen = false
+	m.live().autoVerifyPending = false
 	m.live().modelDisplayMetadata = copyModelInfoIndex(metadata)
 	m.live().modelContextWindows = contextWindowsFromModelInfos(m.live().modelDisplayMetadata)
 	m.urlFocused = false

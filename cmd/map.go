@@ -7,6 +7,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/slotrec"
@@ -272,14 +273,16 @@ func runMapTUI(args []string) error {
 		return fmt.Errorf("failed running mapping panel: %w", err)
 	}
 
-	updatedModel := m
-	p = *updatedModel.p
-
-	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)
-
-	if err := replaceProvider(providerName, p); err != nil {
+	saved, err := persistMappingModel(providerName, m)
+	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
+	if !saved {
+		fmt.Println(locale.T("ℹ️ 已取消映射，未保存。", "ℹ️ Mapping canceled; no changes were saved."))
+		return nil
+	}
+	p = *m.p
+	applyCompactConfig(&p, m.live().oneMSlots, m.live().compactPreset)
 
 	fmt.Printf("\n✓ Slot mapping saved for provider %q:\n", providerName)
 	printSlot := func(label, val string) {
@@ -301,6 +304,29 @@ func runMapTUI(args []string) error {
 	}
 
 	return nil
+}
+
+// persistMappingModel writes only fields the mapping panel owns, after an
+// explicit Save. Re-reading under the config lock preserves connection and
+// runtime options changed by another ccl process while the panel was open.
+func persistMappingModel(providerName string, m *AdvancedConfigModel) (bool, error) {
+	if !m.saveConfirmed {
+		return false, nil
+	}
+	if !m.canSave() {
+		return false, fmt.Errorf("no models available for mapping")
+	}
+	err := updateProvider(providerName, func(p *provider.Provider) error {
+		p.Model = m.p.Model
+		p.OpusModel, p.SonnetModel, p.HaikuModel = m.p.OpusModel, m.p.SonnetModel, m.p.HaikuModel
+		p.FableModel, p.CustomModelID, p.SubagentModel = m.p.FableModel, m.p.CustomModelID, m.p.SubagentModel
+		if p.Env != nil {
+			delete(p.Env, claude.SubagentModelEnv)
+		}
+		applyCompactConfig(p, m.live().oneMSlots, m.live().compactPreset)
+		return nil
+	})
+	return err == nil, err
 }
 
 func mappedModelOutputLabel(model string, metadata map[string]protocol.ModelInfo) string {

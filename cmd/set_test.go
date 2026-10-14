@@ -789,7 +789,7 @@ func TestInconclusiveModelProbeIsNotDisplayedAsUnavailable(t *testing.T) {
 	t.Cleanup(func() { locale.SetLanguage(previous) })
 	locale.SetLanguage("en")
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
-	m := NewAdvancedMappingModel(&p, []string{"model-a"}, nil)
+	m := enterDetectedReview(NewAdvancedConfigModel(&p), "model-a")
 	m.modelTesting = true
 	m.modelTestID = 7
 	m.handleAvailabilityDone(modelAvailabilityDoneMsg{

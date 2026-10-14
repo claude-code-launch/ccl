@@ -587,6 +587,10 @@ ccl provider preview
 
 ### `ccl map` — 快速映射模型槽位
 
+模型目录加载完成后，`ccl map` 可直接编辑六个模型槽位和上下文设置，无需再次验证连接。选择模型后，在「保存映射」上按 Enter 才会写入配置；Esc、Ctrl+C 或「取消」会放弃修改。
+
+槽位用于设置默认模型，无需为模型池中的每个模型都建立映射；Claude Code 的 `/model` 也会列出未映射的模型。
+
 ```bash
 ccl map                                          # 交互式 TUI
 ccl map auto                                     # 按 ccl set 的规则自动填充槽位（--probe 先测试，计费）

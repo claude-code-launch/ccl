@@ -161,6 +161,12 @@ func (m *AdvancedConfigModel) Render(app *tui.App) *tui.Element {
 // keepCursorVisible reuses it to locate the cursor row's precise body line for
 // scrolling. Section renderers are read-only — they only build elements.
 func (m *AdvancedConfigModel) bodyRows() []*tui.Element {
+	if m.mappingOnly {
+		rows := m.renderPageHeader(locale.T("模型映射", "Model Mapping"), m.p.Name)
+		rows = append(rows, m.viewMappingSection()...)
+		rows = append(rows, plainLine(""), stepperRow(locale.T("上下文与压缩", "Context & Compact"), "‹ "+m.compactSummary()+" ›", m.cursor == m.mainRowIndex(rowContext)))
+		return append(rows, m.viewActionSection()...)
+	}
 	rows := m.renderPageHeader(locale.T("Provider 配置", "Provider Configuration"), m.pageBadge())
 	rows = append(rows, m.viewConnectionSection()...)
 	rows = append(rows, m.viewDetectionSection()...)
@@ -447,6 +453,9 @@ func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
 	renderMappingRow(rowFable, "Fable", m.modelDisplayLabel(m.p.FableModel), m.p.FableModel, m.live().oneMSlots["fable"])
 	renderMappingRow(rowCustom, "Custom", m.modelDisplayLabel(m.p.CustomModelID), m.p.CustomModelID, m.live().oneMSlots["custom"])
 	renderMappingRow(rowSubagent, "Subagent", m.subagentDisplayLabel(), m.p.SubagentModel, m.live().oneMSlots["subagent"])
+	if m.mappingOnly {
+		return rows
+	}
 
 	// Check — optional; each probe consumes quota, so the
 	// user opts in explicitly. Results are shown next to the model rows above.
@@ -542,6 +551,8 @@ func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
 // reads as "configuration canceled".
 func (m *AdvancedConfigModel) saveBlockedReason() string {
 	switch {
+	case m.mappingOnly:
+		return locale.T("没有可用于映射的模型", "No models available for mapping")
 	case m.usesOAuth():
 		return locale.T("本地代理就绪后才能保存", "Saving is available once the local proxy is ready")
 	case m.usesModelsDev() && m.live().detecting:
@@ -561,6 +572,9 @@ func (m *AdvancedConfigModel) viewActionSection() []*tui.Element {
 	applyLabel := locale.T("保存并激活", "Save & Activate")
 	if !m.IsActiveChosen {
 		applyLabel = locale.T("保存 Provider", "Save Provider")
+	}
+	if m.mappingOnly {
+		applyLabel = locale.T("保存映射", "Save Mapping")
 	}
 	cancelLabel := locale.T("取消", "Cancel")
 	applyDisabled := !m.canSave()
@@ -775,7 +789,7 @@ func (m *AdvancedConfigModel) viewModelPicker() *tui.Element {
 			display = m.modelDisplayLabel(mod)
 		}
 		status := ""
-		if stringInSlice(mod, m.live().modelPool) {
+		if stringInSlice(mod, m.live().modelPool) && (!m.mappingOnly || m.modelAvailability[mod] != modelAvailabilityUnknown) {
 			badge := m.availabilitySpan(mod)
 			status = "  " + badge.Text
 		}
@@ -798,7 +812,11 @@ func (m *AdvancedConfigModel) viewModelPicker() *tui.Element {
 	}
 	root.AddChild(spanLine(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool)), stSelected))
 	root.AddChild(plainLine(""))
-	root.AddChild(spanLine(locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel"), stGray))
+	hint := locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel")
+	if m.mappingOnly {
+		hint = locale.T("键盘输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel")
+	}
+	root.AddChild(spanLine(hint, stGray))
 	return panelWrap(root, m.panelWidth())
 }
 

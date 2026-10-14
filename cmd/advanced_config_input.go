@@ -841,7 +841,7 @@ func rowClickLabelPrefixes(kind configRowKind) []string {
 	}
 	// "Save Provider" is the other rendering of the Save button.
 	if kind == rowSave {
-		prefixes = append(prefixes, "Save Provider", "保存 Provider")
+		prefixes = append(prefixes, "Save Provider", "保存 Provider", "Save Mapping", "保存映射")
 	}
 	return prefixes
 }

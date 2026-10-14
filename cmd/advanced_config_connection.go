@@ -272,6 +272,9 @@ func (m *AdvancedConfigModel) applyModelsDevProvider(p modelsdev.Provider) {
 // providers are always ready so they skip this. Called once from Watchers()
 // startup (go-tui has no Init() on the SetRootComponent path).
 func (m *AdvancedConfigModel) startAutoDetect() {
+	if m.mappingOnly {
+		return
+	}
 	if m.usesModelsDev() {
 		m.startModelsDevVerification()
 		return
