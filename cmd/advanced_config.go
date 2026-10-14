@@ -427,9 +427,6 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		// no Auto Configure (a subscription has no connection to probe), and
 		// Protocol stays in the Runtime section (its Connection block is
 		// read-only subscription metadata).
-		rows = append(rows,
-			configRow{kind: rowAPIKey},
-		)
 		ready := m.connectionReady()
 		rows = append(rows,
 			configRow{kind: rowOpus, editable: ready},
@@ -440,7 +437,6 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 			configRow{kind: rowSubagent, editable: ready},
 			configRow{kind: rowTestModels, editable: ready},
 			configRow{kind: rowContext, editable: ready},
-			configRow{kind: rowProtocol, editable: ready},
 			configRow{kind: rowFast, editable: ready},
 			configRow{kind: rowStatusline, editable: ready},
 			configRow{kind: rowActive, editable: ready},
@@ -522,11 +518,10 @@ func (m *AdvancedConfigModel) mainRowIndex(kind configRowKind) int {
 // keeps visible is exactly the window View slices, never a line taller than the
 // renderer's actual body lines.
 func scrollBodyBudget(height int) int {
-	budget := height - 8
-	if budget < 6 {
-		budget = 6
+	if height < 18 {
+		return max(height-2, 1) // only the panel border on short terminals
 	}
-	return budget
+	return max(height-8, 1)
 }
 
 // keepCursorVisible clamps scrollOffset so the cursor row stays inside the
@@ -577,7 +572,7 @@ func (m *AdvancedConfigModel) cursorBodyLine(rows []*tui.Element) int {
 	kind := vrows[m.cursor].kind
 	// Cancel shares the Save & Activate line; match Save's labels so the row
 	// locates instead of resolving to 0 (which would snap the scroll to the top).
-	if kind == rowCancel {
+	if kind == rowCancel && !m.splitActions() {
 		kind = rowSave
 	}
 	prefixes := rowClickLabelPrefixes(kind)
@@ -592,6 +587,7 @@ func (m *AdvancedConfigModel) cursorBodyLine(rows []*tui.Element) int {
 	if width <= 0 {
 		width = 80
 	}
+	fallback := -1
 	for i, line := range strings.Split(tui.Sprint(container, tui.WithPrintWidth(width)), "\n") {
 		// Sprint emits ANSI SGR codes ahead of every styled span; strip them
 		// before the label match, exactly like the mouse hit-test does.
@@ -605,11 +601,18 @@ func (m *AdvancedConfigModel) cursorBodyLine(rows []*tui.Element) int {
 		}
 		for _, p := range prefixes {
 			if strings.HasPrefix(trimmed, p) {
-				return i
+				// OAuth's read-only Connection summary and editable Runtime
+				// section both contain Fast. Anchor to the selected row first.
+				if strings.Contains(stripANSI(line), "> ") {
+					return i
+				}
+				if fallback < 0 {
+					fallback = i
+				}
 			}
 		}
 	}
-	return 0
+	return max(fallback, 0)
 }
 
 // isModelRow reports whether a row kind is one of the model slots.
@@ -1123,12 +1126,17 @@ func (m *AdvancedConfigModel) syncTerminalSize(app *tui.App) {
 		return
 	}
 	w, h := app.Size()
+	changed := w != m.width || h != m.height
 	if w > 0 {
 		m.width = w
 	}
 	if h > 0 {
 		m.height = h
-		m.updateInputWidths()
+	}
+	m.updateInputWidths()
+	if changed {
+		m.keepCursorVisible()
+		m.keepPickersVisible()
 	}
 }
 
@@ -1144,7 +1152,7 @@ func (m *AdvancedConfigModel) panelWidth() int {
 }
 
 func (m *AdvancedConfigModel) updateInputWidths() {
-	inputWidth := max(m.panelWidth()-8, 20)
+	inputWidth := max(m.panelWidth()-8, 1)
 	m.urlInputWidth = inputWidth
 	m.keyInputWidth = inputWidth
 	m.filterInputWidth = inputWidth

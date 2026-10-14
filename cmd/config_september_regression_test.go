@@ -278,7 +278,7 @@ func TestFallbackCatalogDoesNotReplaceTheSavedModelPool(t *testing.T) {
 		t.Fatal("page unsaveable after the runtime came up")
 	}
 	view := renderView(t, m)
-	if !strings.Contains(view, locale.T("已就绪 · 模型列表获取失败，沿用已保存的", "Ready · model list unavailable, keeping the saved one")) {
+	if !strings.Contains(view, locale.T("已就绪 · 模型列表获取失败，沿用已保存的", "Ready · model list unavailable; saved models")) {
 		t.Fatalf("fallback catalog was not surfaced: %q", view)
 	}
 

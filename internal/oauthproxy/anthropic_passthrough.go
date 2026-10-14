@@ -21,19 +21,20 @@ import (
 // backs models.dev native-Anthropic gateways and Zed native-Messages models
 // (static key).
 type anthropicPassthroughService struct {
-	apiKey     string
-	authorizer chatAuthorizer
-	models     []string
-	client     *http.Client
-	usage      *UsageTracker
-	baseURL    string
+	apiKey        string
+	authorizer    chatAuthorizer
+	models        []string
+	client        *http.Client
+	usage         *UsageTracker
+	baseURL       string
+	anthropicAuth string
 }
 
 // newAnthropicPassthroughService builds a native-Messages passthrough against
 // baseURL. The caller's Anthropic-Beta header passes through untouched.
 func newAnthropicPassthroughService(apiKey, baseURL string, models []string, authorizer chatAuthorizer, usage *UsageTracker) *anthropicPassthroughService {
 	return &anthropicPassthroughService{
-		apiKey: apiKey, baseURL: baseURL, models: models, authorizer: authorizer,
+		apiKey: apiKey, baseURL: baseURL, models: models, authorizer: authorizer, anthropicAuth: "bearer",
 		usage:  usage,
 		client: &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
@@ -215,7 +216,11 @@ func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming 
 	for _, hint := range claudeCodeHintHeaders {
 		request.Header.Del(hint)
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
+	if strings.EqualFold(s.anthropicAuth, "bearer") {
+		request.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		request.Header.Set("X-Api-Key", token)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	for key, values := range runtimeHeaders {
 		request.Header.Del(key)

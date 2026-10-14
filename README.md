@@ -213,6 +213,8 @@ CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上
 ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参数会透传
 ├─ acp                                在 stdio 上提供 Agent Client Protocol（Xcode 等）
 ├─ set [name]                         新增或修改 provider
+├─ proxy [-p provider]                开启后台代理，让直接运行的 claude 使用指定 provider
+│  └─ start [provider] / stop / status
 ├─ ls [-a|--all]                      列出 provider，并显示普通模式 / ACP 的选择
 ├─ use <provider>                     切换普通模式使用的 provider（同时恢复 provider 加载）
 ├─ use --acp <provider>               为 ACP 固定一个 provider（--acp --follow 恢复跟随）
@@ -306,6 +308,22 @@ ccl                              # 启动
 ccl resume                       # 透传参数给 Claude Code
 ccl --dangerously-skip-permissions
 ```
+
+### `ccl proxy` — 直接用 Claude Code 连接后台代理
+
+```bash
+ccl proxy -p provider1            # 开启指定 provider 的代理
+ccl proxy start provider1         # 同一功能的完整写法
+claude                            # 直接进入 Claude Code，使用上述 provider
+ccl proxy status                  # 查看 provider、地址和进程状态，不显示凭据
+ccl proxy stop                    # 关闭代理，恢复原有 Claude 配置
+```
+
+不指定 provider 时使用 `ccl use` 选中的 provider。支持 API Key 网关、OAuth 订阅，以及原生 Anthropic 网关。代理在后台运行，关闭启动它的终端不会停止；不注册开机服务。再次开启同一份配置会复用已有进程；配置已修改或指定另一 provider 时会重启代理。切换后请重启已打开的 Claude 会话。
+
+开启时更新当前用户的 `~/.claude/settings.json`，也支持 `CLAUDE_CONFIG_DIR`。模型槽位、Custom、模型目录和运行时选项复用 CCL 配置；上游凭据留在 CCL，Claude 只使用本机临时凭据。停止时按字段恢复旧值，保留期间新增或修改的其他设置。项目配置、企业策略及显式 `--settings` 仍遵循 Claude Code 自身的优先级。
+
+普通 `ccl` / ACP 会话仍使用各自选择的 provider；`ccl provider off` 会在该次启动中恢复原有 Claude 设置，不停止供其他客户端使用的独立代理。代理意外退出或机器重启后，`ccl proxy stop` 可恢复配置，重新执行 `ccl proxy -p provider1` 也会先恢复再启动。诊断日志位于 `~/.ccl/proxy/proxy.log`。
 
 ### `ccl bypass` — 权限确认旁路（原 `ccl auto`）
 
@@ -544,6 +562,8 @@ TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Auto Conf
 - **Context & Compact**：`←→` 在 Default / Balanced 500K / Balanced 800K 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
 - **Runtime**：Protocol / Fast / **Status Line** 均可 `←→` 调整。Custom provider 的 Protocol 可在 Chat / Responses / Anthropic 三种协议间切换。**Status Line** 是 ccl 内置状态栏（`模型 · effort · NN%`）的开关：ccl 通过 `--settings` 注入 `statusLine`，其优先级高于 `~/.claude/settings.json`，关掉它即可保留你自己的状态栏。工具并发与 `ENABLE_TOOL_SEARCH` 跟随 Claude Code 默认，需要覆盖时用 `ccl provider env`。
 - 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。新配置未填写连接时，Model Mapping / Runtime 区置灰不可编辑。
+
+窗口大小会实时影响布局：窄屏缩短长字段并将保存与取消分行，短窗口精简边距，模型和 provider 筛选列表随高度调整；缩放后当前选中项保持可见。支持方向键、`PageUp` / `PageDown` 和鼠标滚轮。低于 `32×8` 时显示放大窗口提示，暂停编辑；`Esc` / `Ctrl+C` 仍可取消。
 
 Context & Compact：
 

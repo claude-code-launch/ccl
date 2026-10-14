@@ -47,6 +47,8 @@ Data flow:
 
 Loopback runtimes bind `127.0.0.1` and a random per-session key that is never written back to config. Upstream OAuth secrets live in `~/.ccl/auth/*.json` (0600), bound by `oauthAccountCredential`.
 
+`ccl proxy [-p name]` / `ccl proxy start [name]` runs a detached standalone runtime; `stop` / `status` manage it via a separately authenticated loopback control endpoint. `internal/proxymanager` serializes starts/stops and journals a field-level Claude user-settings overlay in `~/.ccl/proxy/state.json` before applying it. Shutdown or crash recovery restores only unchanged owned values. Native Anthropic gateways use the passthrough in this mode (`providersession.PrepareProxy`), preserving x-api-key vs bearer auth. `internal/claude/standalone_overlay.go` makes normal/ACP launches override the standalone settings and lets provider-off launches recover their original view without stopping the daemon. Never exercise proxy start/stop on a real home during tests.
+
 ### Protocol ownership (`internal/oauthproxy`)
 
 Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external provider process (no qodercli, no Codex CLI).

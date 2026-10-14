@@ -106,7 +106,10 @@ func (m *AdvancedConfigModel) renderPageHeader(title, badge string) []*tui.Eleme
 // tui.StringWidth.
 func truncateMiddle(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if max < 8 || tui.StringWidth(s) <= max {
+	if max <= 0 {
+		return ""
+	}
+	if tui.StringWidth(s) <= max {
 		return s
 	}
 	runess := []rune(s)
@@ -143,6 +146,11 @@ func truncateMiddle(s string, max int) string {
 // offline.
 func (m *AdvancedConfigModel) Render(app *tui.App) *tui.Element {
 	m.syncTerminalSize(app)
+	if m.width > 0 && m.height > 0 && (m.width < 32 || m.height < 8) {
+		return m.smallTerminalView()
+	}
+	m.keepCursorVisible()
+	m.keepPickersVisible()
 	// Model picker overlay: when the filter input has focus, render only the
 	// filtered model list (search + availability) instead of the main page.
 	if m.filterFocused {
@@ -164,7 +172,7 @@ func (m *AdvancedConfigModel) bodyRows() []*tui.Element {
 	if m.mappingOnly {
 		rows := m.renderPageHeader(locale.T("模型映射", "Model Mapping"), m.p.Name)
 		rows = append(rows, m.viewMappingSection()...)
-		rows = append(rows, plainLine(""), stepperRow(locale.T("上下文与压缩", "Context & Compact"), "‹ "+m.compactSummary()+" ›", m.cursor == m.mainRowIndex(rowContext)))
+		rows = append(rows, plainLine(""), m.stepperRow(locale.T("上下文与压缩", "Context & Compact"), "‹ "+m.compactSummary()+" ›", m.cursor == m.mainRowIndex(rowContext)))
 		return append(rows, m.viewActionSection()...)
 	}
 	rows := m.renderPageHeader(locale.T("Provider 配置", "Provider Configuration"), m.pageBadge())
@@ -198,9 +206,9 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 		// button: the subscription already owns its endpoint, credential, and
 		// model catalog, so there is nothing left to detect.
 		return append(rows,
-			kvRow("Provider", span(m.p.OAuthProvider, stCyan)),
-			kvRow("Fast", span(providerFastSummary(*m.p), stCyan)),
-			kvRow(locale.T("鉴权", "Auth"), span(providerAuthLabel(*m.p), stAvailable)),
+			m.kvRow("Provider", span(m.p.OAuthProvider, stCyan)),
+			m.kvRow("Fast", span(providerFastSummary(*m.p), stCyan)),
+			m.kvRow(locale.T("鉴权", "Auth"), span(providerAuthLabel(*m.p), stAvailable)),
 			m.localProxyRow(),
 		)
 	}
@@ -218,7 +226,7 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 	// input view with its cursor. Double-clicking a value row copies the full
 	// value. Trailing blank lines from the textarea's fixed height are
 	// trimmed so the field does not consume extra rows in the panel.
-	const idleWidth = 60
+	idleWidth := max(m.bodyWidth()-2, 1)
 
 	// Source stepper: single-value ‹ › toggle between Custom and models.dev,
 	// styled like the other steppers below (purple when idle, accent when
@@ -227,7 +235,7 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 	if m.source == sourceCustom {
 		sourceVal = locale.T("自定义", "Custom")
 	}
-	rows = append(rows, stepperRow(locale.T("来源", "Source"), "‹ "+sourceVal+" ›", m.cursor == m.mainRowIndex(rowSource)))
+	rows = append(rows, m.stepperRow(locale.T("来源", "Source"), "‹ "+sourceVal+" ›", m.cursor == m.mainRowIndex(rowSource)))
 
 	if m.usesModelsDev() {
 		// models.dev: endpoint/protocol come from metadata (read-only). The
@@ -240,25 +248,31 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 		if name == "" {
 			name = locale.T("选择 Provider", "Select provider")
 		}
-		rows = append(rows, stepperRow("Provider", "‹ "+name+" ›", m.cursor == m.mainRowIndex(rowProvider)))
-		rows = append(rows, kvRow(locale.T("端点", "Endpoint"), span(truncateMiddle(m.p.Endpoint, idleWidth), stCyan)))
+		rows = append(rows, m.stepperRow("Provider", "‹ "+name+" ›", m.cursor == m.mainRowIndex(rowProvider)))
+		rows = append(rows, m.kvRow(locale.T("端点", "Endpoint"), span(truncateMiddle(m.p.Endpoint, idleWidth), stCyan)))
 	} else {
 		urlValue := truncateMiddle(m.urlText.Get(), idleWidth) + urlCopiedHint
+		if m.currentRow() == rowEndpoint {
+			urlValue = editViewport(m.urlText.Get(), idleWidth)
+		}
 		rows = append(rows, credentialField(locale.T("端点 URL", "Endpoint URL"), urlValue, m.cursor == m.mainRowIndex(rowEndpoint))...)
 	}
 
 	keyValue := truncateMiddle(m.keyText.Get(), idleWidth) + copiedHint
+	if m.currentRow() == rowAPIKey {
+		keyValue = editViewport(m.keyText.Get(), idleWidth)
+	}
 	rows = append(rows, credentialField("API Key", keyValue, m.cursor == m.mainRowIndex(rowAPIKey))...)
 
 	// Protocol moved up from Runtime: Chat/Responses/Anthropic is selectable
 	// for a manual Custom gateway; fixed and per-model runtimes stay read-only.
 	if m.usesModelsDev() {
-		rows = append(rows, kvRow(locale.T("协议", "Protocol"), span("auto/mixed", stAvailable)))
+		rows = append(rows, m.kvRow(locale.T("协议", "Protocol"), span("auto/mixed", stAvailable)))
 	} else if m.canSelectCustomProtocol() {
 		value := customProtocolLabel(m.p.Type)
-		rows = append(rows, stepperRow(locale.T("协议", "Protocol"), "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowProtocol)))
+		rows = append(rows, m.stepperRow(locale.T("协议", "Protocol"), "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowProtocol)))
 	} else {
-		rows = append(rows, kvRow(locale.T("协议", "Protocol"), span(m.getProtocol(), stAvailable)))
+		rows = append(rows, m.kvRow(locale.T("协议", "Protocol"), span(m.getProtocol(), stAvailable)))
 	}
 	// Auth row: how the upstream verifies requests (API key / OAuth binding).
 	// For OAuth providers the Connection block is subscription metadata, and
@@ -268,13 +282,13 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 		if value == "" {
 			value = "Auto"
 		}
-		rows = append(rows, stepperRow(locale.T("鉴权", "Auth"), "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowAuth)))
+		rows = append(rows, m.stepperRow(locale.T("鉴权", "Auth"), "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowAuth)))
 	} else {
 		value := providerAuthLabel(*m.p)
 		if strings.TrimSpace(m.p.Type) == "" {
 			value = "Auto"
 		}
-		rows = append(rows, kvRow(locale.T("鉴权", "Auth"), span(value, stAvailable)))
+		rows = append(rows, m.kvRow(locale.T("鉴权", "Auth"), span(value, stAvailable)))
 	}
 
 	// Custom alone needs a manual Auto Configure action; models.dev verifies
@@ -314,18 +328,18 @@ func (m *AdvancedConfigModel) localProxyRow() *tui.Element {
 	label := locale.T("本地代理", "Local Proxy")
 	switch {
 	case m.runtimeLoading:
-		return kvRow(label, span(
+		return m.kvRow(label, span(
 			fmt.Sprintf("%s %s", spinnerAt(m.runtimeFrame), locale.T("启动中…", "Starting...")),
 			stSelected,
 		))
 	case m.runtimeErr != nil:
-		return kvRow(label, span(locale.T("启动失败（仅本次会话）", "Start failed (this session only)"), stUnavailable))
+		return m.kvRow(label, span(locale.T("启动失败（仅本次会话）", "Start failed (this session only)"), stUnavailable))
 	case m.runtimeCatalogFallback:
 		// Up, but serving a guess. Saying so is the point: otherwise the page
 		// looks healthy while the model list underneath it is wrong.
-		return kvRow(label, span(locale.T("已就绪 · 模型列表获取失败，沿用已保存的", "Ready · model list unavailable, keeping the saved one"), stUnavailable))
+		return m.kvRow(label, span(locale.T("已就绪 · 模型列表获取失败，沿用已保存的", "Ready · model list unavailable; saved models"), stUnavailable))
 	default:
-		return kvRow(label, span(locale.T("已就绪（仅本次会话）", "Ready (this session only)"), stAvailable))
+		return m.kvRow(label, span(locale.T("已就绪（仅本次会话）", "Ready (this session only)"), stAvailable))
 	}
 }
 
@@ -442,7 +456,7 @@ func (m *AdvancedConfigModel) viewMappingSection() []*tui.Element {
 		row := line(
 			span(prefix, prefixStyle),
 			span(fmt.Sprintf("%-10s ", label), tui.NewStyle()),
-			span(truncateMiddle(display, 52), styleOf(val)),
+			span(truncateMiddle(display, max(m.bodyWidth()-13-tui.StringWidth(" "+badgeText), 1)), styleOf(val)),
 			span(" "+badgeText, badgeStyle),
 		)
 		rows = append(rows, row)
@@ -505,12 +519,12 @@ func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
 	}
 	ready := m.connectionReady()
 	renderEditable := func(kind configRowKind, label, value string) {
-		rows = append(rows, stepperRow(label, value, ready && m.cursor == m.mainRowIndex(kind)))
+		rows = append(rows, m.stepperRow(label, value, ready && m.cursor == m.mainRowIndex(kind)))
 	}
 	if m.usesOAuth() {
 		// OAuth subscriptions keep the read-only protocol display here: their
 		// Connection block is subscription metadata with no protocol concept.
-		rows = append(rows, kvRow(locale.T("协议", "Protocol"), span(m.getProtocol(), stAvailable)))
+		rows = append(rows, m.kvRow(locale.T("协议", "Protocol"), span(m.getProtocol(), stAvailable)))
 	}
 	// Context & Compact — per-slot [1m] via Space on the model rows above; the
 	// provider-wide fallback cycles with ←→ (shown as ‹ › like other editable
@@ -608,6 +622,11 @@ func (m *AdvancedConfigModel) viewActionSection() []*tui.Element {
 			span(cancelLabel, cancelStyle),
 		),
 	}
+	if m.splitActions() {
+		rows = []*tui.Element{plainLine(""),
+			line(span(applyPrefix, applyPrefixStyle), span(applyLabel, applyStyle)),
+			line(span(cancelPrefix, cancelPrefixStyle), span(cancelLabel, cancelStyle))}
+	}
 	if m.live().connectionDirty && !m.usesOAuth() {
 		rows = append(rows, spanLine(locale.T("连接已修改，保存前请重新检测", "Connection changed; re-test before saving"), stGray))
 	} else if applyDisabled {
@@ -634,9 +653,14 @@ func (m *AdvancedConfigModel) wrapMainPanel(rows []*tui.Element) *tui.Element {
 		tui.WithWrap(false),
 		tui.WithBorder(tui.BorderRounded),
 		tui.WithPaddingTRBL(0, 2, 0, 2),
+		tui.WithWidth(m.panelWidth()),
 	)
 	for _, r := range m.scrollWindow(rows) {
+		fitElementText(r, m.bodyWidth())
 		panel.AddChild(r)
+	}
+	if m.height > 0 && m.height < 18 {
+		return panel
 	}
 
 	content := tui.New(tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Column), tui.WithWrap(false), tui.WithPaddingTRBL(1, 0, 1, 0))
@@ -647,10 +671,12 @@ func (m *AdvancedConfigModel) wrapMainPanel(rows []*tui.Element) *tui.Element {
 	}
 	content.AddChild(panel)
 	content.AddChild(plainLine(""))
-	content.AddChild(spanLine(locale.T(
+	tip := spanLine(locale.T(
 		"💡 提示: 使用 `ccl lang` 更改终端显示语言",
 		"💡 Tip: Change the TUI display language with `ccl lang`",
-	), stGray))
+	), stGray)
+	fitElementText(tip, m.panelWidth())
+	content.AddChild(tip)
 	return content
 }
 
@@ -668,9 +694,6 @@ func (m *AdvancedConfigModel) scrollWindowOffset(rows []*tui.Element) int {
 	offset := m.scrollOffset
 	if offset < 0 {
 		offset = 0
-	}
-	if m.cursor >= m.mainRowIndex(rowSave) {
-		offset = len(rows) - maxBody
 	}
 	if offset+maxBody > len(rows) {
 		offset = len(rows) - maxBody
@@ -771,11 +794,11 @@ func (m *AdvancedConfigModel) viewModelPicker() *tui.Element {
 	filterText := m.filterText.Get()
 	root.AddChild(line(
 		span(locale.T("🔍 过滤模型: ", "🔍 Filter model: "), stFilter),
-		span(filterText, tui.NewStyle()),
+		span(editViewport(filterText, max(m.bodyWidth()-18, 1)), tui.NewStyle()),
 	))
 
 	start := m.filterWindowStart
-	end := start + filterViewHeight
+	end := start + m.pickerHeight(false)
 	if end > len(m.filteredPool) {
 		end = len(m.filteredPool)
 	}
@@ -810,14 +833,14 @@ func (m *AdvancedConfigModel) viewModelPicker() *tui.Element {
 	if end < len(m.filteredPool) {
 		root.AddChild(spanLine(fmt.Sprintf("   ↓ ... %d more below ...", len(m.filteredPool)-end), stGray))
 	}
-	root.AddChild(spanLine(fmt.Sprintf("  %d/%d", m.slotListCursor+1, len(m.filteredPool)), stSelected))
+	root.AddChild(spanLine(fmt.Sprintf("  %d/%d", min(m.slotListCursor+1, len(m.filteredPool)), len(m.filteredPool)), stSelected))
 	root.AddChild(plainLine(""))
 	hint := locale.T("状态来自可用性测试 · 键盘输入过滤 · ↑↓ 选择 · enter 锁定 · esc 取消", "Status comes from availability test · type to filter · ↑↓ scroll · enter lock · esc cancel")
 	if m.mappingOnly {
 		hint = locale.T("键盘输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel")
 	}
 	root.AddChild(spanLine(hint, stGray))
-	return panelWrap(root, m.panelWidth())
+	return m.wrapPicker(root)
 }
 
 // viewModelsDevPicker renders the models.dev provider overlay opened from the
@@ -828,7 +851,7 @@ func (m *AdvancedConfigModel) viewModelsDevPicker() *tui.Element {
 	root.AddChild(plainLine(""))
 	root.AddChild(line(
 		span(locale.T("🔍 过滤: ", "🔍 Filter: "), stFilter),
-		span(m.modelsDevText.Get(), tui.NewStyle()),
+		span(editViewport(m.modelsDevText.Get(), max(m.bodyWidth()-14, 1)), tui.NewStyle()),
 	))
 	root.AddChild(plainLine(""))
 
@@ -841,7 +864,7 @@ func (m *AdvancedConfigModel) viewModelsDevPicker() *tui.Element {
 		root.AddChild(spanLine(locale.T("(无匹配)", "(no match)"), stGray))
 	} else {
 		start := m.modelsDevWindow
-		end := start + selectViewHeight
+		end := start + m.pickerHeight(true)
 		if end > len(m.modelsDevFiltered) {
 			end = len(m.modelsDevFiltered)
 		}
@@ -853,6 +876,9 @@ func (m *AdvancedConfigModel) viewModelsDevPicker() *tui.Element {
 			display := p.Name
 			if p.ID != "" && p.ID != p.Name {
 				display = fmt.Sprintf("%s  (%s)", p.Name, p.ID)
+			}
+			if tui.StringWidth(display) > m.bodyWidth()-4 && p.Name != "" {
+				display = p.Name
 			}
 			prefix := "  "
 			prefixStyle := tui.NewStyle()
@@ -871,7 +897,7 @@ func (m *AdvancedConfigModel) viewModelsDevPicker() *tui.Element {
 
 	root.AddChild(plainLine(""))
 	root.AddChild(spanLine(locale.T("输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel"), stGray))
-	return panelWrap(root, m.panelWidth())
+	return m.wrapPicker(root)
 }
 
 // panelWrap wraps an overlay body in the shared rounded panel.

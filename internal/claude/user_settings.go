@@ -32,6 +32,12 @@ func claudeConfigDir() string {
 // settings.local.json under cwd). Unreadable files count as empty.
 func userDefinedSettings(cwd string) map[string]bool {
 	keys := make(map[string]bool)
+	installed := make(map[string]bool)
+	for _, change := range standaloneChanges() {
+		if !change.Env && (len(change.Before) == 0 || string(change.Before) == "null") {
+			installed[change.Key] = true
+		}
+	}
 	var paths []string
 	if dir := claudeConfigDir(); dir != "" {
 		paths = append(paths, filepath.Join(dir, "settings.json"))
@@ -51,6 +57,9 @@ func userDefinedSettings(cwd string) map[string]bool {
 			continue
 		}
 		for key, value := range parsed {
+			if path == UserSettingsPath() && installed[key] {
+				continue
+			}
 			if string(value) != "null" {
 				keys[key] = true
 			}

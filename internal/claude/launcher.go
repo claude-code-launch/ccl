@@ -30,6 +30,7 @@ import (
 
 // settingsJSON is the per-session settings file consumed by the Claude CLI (--settings).
 type settingsJSON struct {
+	proxyDefaults          map[string]json.RawMessage
 	Env                    map[string]string `json:"env"`
 	HasCompletedOnboarding bool              `json:"hasCompletedOnboarding"`
 	Model                  string            `json:"model,omitempty"`
@@ -488,6 +489,10 @@ func writeSettingsFile(content settingsJSON, session string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal settings: %w", err)
 	}
+	return writeSettingsBytes(data, session)
+}
+
+func writeSettingsBytes(data []byte, session string) (string, error) {
 
 	path := sessionSettingsPath(session)
 	// O_EXCL: never reuse or overwrite another session's settings file.
@@ -614,6 +619,7 @@ func (c *providerContext) settings() settingsJSON {
 	if !userKeys["modelPicker"] {
 		settings.ModelPicker = providerModelPicker(c.provider, c.modelNames)
 	}
+	applyStandaloneDefaults(&settings, userKeys, c.useProxy)
 	return settings
 }
 

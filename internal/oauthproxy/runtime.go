@@ -92,12 +92,14 @@ type UpstreamProtocol string
 const (
 	ProtocolOpenAIChat      UpstreamProtocol = "openai_chat"
 	ProtocolOpenAIResponses UpstreamProtocol = "openai_responses"
+	ProtocolAnthropic       UpstreamProtocol = "anthropic"
 )
 
 type StartOptions struct {
 	Protocol      UpstreamProtocol
 	Endpoint      string
 	APIKey        string
+	AnthropicAuth string
 	ModelSpec     string
 	OAuthProvider string
 	// OAuthAccountCredential optionally restricts the runtime to a single
@@ -154,6 +156,8 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		return StartOpenAIChatAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	case ProtocolOpenAIResponses:
 		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
+	case ProtocolAnthropic:
+		return StartAnthropicAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec, options.AnthropicAuth)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -322,6 +326,9 @@ func (r *Runtime) ClaudeBaseURL() string {
 }
 
 func (r *Runtime) APIKey() string { return r.apiKey }
+
+// Done closes when the local HTTP server exits.
+func (r *Runtime) Done() <-chan struct{} { return r.done }
 
 // Stop cancels the run context, waits for Serve to exit on its own, and only
 // force-calls http.Server.Shutdown if that wait times out.

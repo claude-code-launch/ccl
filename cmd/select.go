@@ -26,7 +26,8 @@ type selectComponent struct {
 	cursor *tui.State[int]    // index into filtered
 	result string             // chosen item, empty if cancelled
 
-	app *tui.App // set by BindApp; markDirty is a no-op until then
+	app           *tui.App // set by BindApp; markDirty is a no-op until then
+	width, height int
 }
 
 func newSelectComponent(title string, items []string) *selectComponent {
@@ -63,6 +64,9 @@ func (s *selectComponent) clampCursor() {
 }
 
 func (s *selectComponent) moveCursor(delta int) {
+	if s.tooSmall() {
+		return
+	}
 	c := max(s.cursor.Get()+delta, 0)
 	c = min(c, max(len(s.filtered)-1, 0))
 	s.cursor.Set(c)
@@ -72,18 +76,25 @@ func (s *selectComponent) moveCursor(delta int) {
 // so the cursor row stays inside the window.
 func (s *selectComponent) visibleWindow() (start, end int) {
 	cursor := max(s.cursor.Get(), 0)
-	start = max(cursor-selectViewHeight+1, 0)
-	end = min(start+selectViewHeight, len(s.filtered))
-	start = max(end-selectViewHeight, 0)
+	height := s.listHeight()
+	start = max(cursor-height+1, 0)
+	end = min(start+height, len(s.filtered))
+	start = max(end-height, 0)
 	return start, end
 }
 
 func (s *selectComponent) typeRune(ke tui.KeyEvent) {
+	if s.tooSmall() {
+		return
+	}
 	s.text.Set(s.text.Get() + string(ke.Rune))
 	s.applyFilter()
 }
 
 func (s *selectComponent) backspace() {
+	if s.tooSmall() {
+		return
+	}
 	t := s.text.Get()
 	if t == "" {
 		return
@@ -100,7 +111,12 @@ func (s *selectComponent) KeyMap() tui.KeyMap {
 		tui.OnStop(tui.KeyCtrlC, func(ke tui.KeyEvent) { ke.App().Stop() }),
 		tui.OnStop(tui.KeyUp, func(ke tui.KeyEvent) { s.moveCursor(-1); s.markDirty() }),
 		tui.OnStop(tui.KeyDown, func(ke tui.KeyEvent) { s.moveCursor(1); s.markDirty() }),
+		tui.OnStop(tui.KeyPageUp, func(ke tui.KeyEvent) { s.moveCursor(-s.listHeight()); s.markDirty() }),
+		tui.OnStop(tui.KeyPageDown, func(ke tui.KeyEvent) { s.moveCursor(s.listHeight()); s.markDirty() }),
 		tui.OnStop(tui.KeyEnter, func(ke tui.KeyEvent) {
+			if s.tooSmall() {
+				return
+			}
 			c := s.cursor.Get()
 			if len(s.filtered) > 0 && c >= 0 && c < len(s.filtered) {
 				s.result = s.filtered[c]
@@ -135,6 +151,12 @@ func (s *selectComponent) BindApp(app *tui.App) {
 // It is hand-written element-tree construction (no .gsx template) so the CLI
 // stays free of a code-generation build step.
 func (s *selectComponent) Render(app *tui.App) *tui.Element {
+	if app != nil {
+		s.width, s.height = app.Size()
+	}
+	if s.tooSmall() {
+		return smallTerminalView(s.width, s.height)
+	}
 	root := tui.New(
 		tui.WithDisplay(tui.DisplayFlex),
 		tui.WithDirection(tui.Column),
@@ -196,7 +218,46 @@ func (s *selectComponent) Render(app *tui.App) *tui.Element {
 		tui.WithText(locale.T("输入过滤 · ↑↓ 选择 · enter 确认 · esc 取消", "type to filter · ↑↓ choose · enter confirm · esc cancel")),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	))
+	if s.width > 0 {
+		for _, row := range root.Children() {
+			if len(row.Children()) > 0 {
+				// Flatten each list/filter row into styled spans before clipping;
+				// sibling flex text children otherwise squeeze the cursor away.
+				var spans []tui.TextSpan
+				for _, child := range row.Children() {
+					spans = append(spans, span(child.Text(), child.TextStyle()))
+				}
+				row.RemoveAllChildren()
+				row.SetRichText(spans...)
+			}
+			fitElementText(row, max(s.width-2, 1))
+		}
+	}
 	return root
+}
+
+func (s *selectComponent) tooSmall() bool {
+	return s.width > 0 && s.height > 0 && (s.width < 32 || s.height < 8)
+}
+
+func (s *selectComponent) listHeight() int {
+	if s.height <= 0 {
+		return selectViewHeight
+	}
+	return min(selectViewHeight, max(s.height-7, 1))
+}
+
+func (s *selectComponent) HandleMouse(me tui.MouseEvent) bool {
+	switch me.Button {
+	case tui.MouseWheelUp:
+		s.moveCursor(-1)
+	case tui.MouseWheelDown:
+		s.moveCursor(1)
+	default:
+		return false
+	}
+	s.markDirty()
+	return true
 }
 
 // runSelect runs a filterable select prompt and returns the chosen item (or ""

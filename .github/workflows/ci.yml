@@ -56,7 +56,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test portable filesystem, protocol and provider contracts
-        run: go test -race ./internal/fsutil ./internal/provider ./internal/protocol ./internal/modelrouting ./internal/slotrec ./internal/modelsdev
+        run: go test -race ./internal/fsutil ./internal/provider ./internal/protocol ./internal/modelrouting ./internal/slotrec ./internal/modelsdev ./internal/proxymanager
       - name: Build native CLI
         run: go build -o ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }} .
       - uses: actions/setup-node@v5
