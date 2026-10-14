@@ -19,7 +19,7 @@ func discoverCodexModels(ctx context.Context, endpoint string, authorizer *codex
 	}
 	models, status, err := requestCodexModels(ctx, authorizer.client, endpoint, auth)
 	if status == http.StatusUnauthorized {
-		auth, refreshErr := authorizer.authorize(ctx, true)
+		auth, refreshErr := authorizer.authorize(withRejectedOAuthToken(ctx, auth.token), true)
 		if refreshErr != nil {
 			return nil, fmt.Errorf("discover GPT models: refresh rejected credential: %w", refreshErr)
 		}

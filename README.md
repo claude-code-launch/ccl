@@ -786,7 +786,7 @@ git tag v1.2.0
 git push origin v1.2.0
 ```
 
-GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + npm。
+GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + npm。npm 安装只下载当前平台的二进制，无需同时下载另外五个平台的版本。分平台 npm 包的首次发布配置见 [npm 发布说明](docs/npm-release.md)。
 
 ---
 

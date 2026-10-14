@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -40,7 +39,6 @@ var (
 type kimiOAuthAuthorizer struct {
 	path   string
 	client *http.Client
-	mu     sync.Mutex
 }
 
 type kimiOAuthCredential struct {
@@ -54,8 +52,11 @@ type kimiOAuthCredential struct {
 }
 
 func (a *kimiOAuthAuthorizer) authorize(ctx context.Context, force bool) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	release, err := lockOAuthCredential(ctx, a.path)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	credential, err := a.load()
 	if err != nil {
 		return "", err
@@ -63,6 +64,7 @@ func (a *kimiOAuthAuthorizer) authorize(ctx context.Context, force bool) (string
 	if credential.disabled {
 		return "", fmt.Errorf("Kimi credential %s is disabled", filepath.Base(a.path))
 	}
+	force = force && oauthTokenStillRejected(ctx, credential.accessToken)
 	if force || credential.accessToken == "" || (!credential.expiresAt.IsZero() && time.Now().Add(time.Minute).After(credential.expiresAt)) {
 		credential, err = a.refresh(ctx, credential)
 		if err != nil {
@@ -188,7 +190,7 @@ func (a *kimiOAuthAuthorizer) refresh(ctx context.Context, credential *kimiOAuth
 }
 
 func (a *kimiOAuthAuthorizer) decorateHeader(header http.Header, _ *chatCompletionsConvertedRequest) {
-	deviceID := a.deviceIDLocked()
+	deviceID := a.deviceIDFromFile()
 	if deviceID == "" {
 		deviceID = kimiDeviceID()
 	}
@@ -213,11 +215,9 @@ func kimiCommonHeaders(deviceID, deviceModel string) http.Header {
 	return header
 }
 
-// deviceIDLocked reads the credential's persisted device_id under the same lock
-// as authorize to avoid racing a concurrent refresh.
-func (a *kimiOAuthAuthorizer) deviceIDLocked() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// deviceIDFromFile reads the persisted device identity; atomic credential writes
+// keep this read complete while a concurrent refresh replaces the file.
+func (a *kimiOAuthAuthorizer) deviceIDFromFile() string {
 	credential, err := a.load()
 	if err != nil {
 		return ""
@@ -564,11 +564,8 @@ func startKimiOAuth(parent context.Context, modelSpec, credentialFile string) (*
 	}
 	path := filepath.Join(authDir, filepath.Base(credentialFile))
 	authorizer := &kimiOAuthAuthorizer{
-		path: path,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
+		path:   path,
+		client: &http.Client{Transport: newUpstreamTransport(30 * time.Second)},
 	}
 	credential, err := authorizer.load()
 	if err != nil {

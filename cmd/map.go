@@ -95,31 +95,34 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 		return fmt.Errorf("provider %q not found", providerName)
 	}
 
-	if cmd.Flags().Changed("opus") {
-		p.OpusModel = opts.opus
-	}
-	if cmd.Flags().Changed("sonnet") {
-		p.SonnetModel = opts.sonnet
-	}
-	if cmd.Flags().Changed("haiku") {
-		p.HaikuModel = opts.haiku
-	}
-	if cmd.Flags().Changed("fable") {
-		p.FableModel = opts.fable
-	}
-	if cmd.Flags().Changed("custom") {
-		p.CustomModelID = opts.custom
-	}
-	if cmd.Flags().Changed("subagent") {
-		p.SubagentModel = opts.subagent
-		if p.Env != nil {
-			delete(p.Env, claude.SubagentModelEnv)
+	if err := updateProvider(providerName, func(latest *provider.Provider) error {
+		if cmd.Flags().Changed("opus") {
+			latest.OpusModel = opts.opus
 		}
-	}
+		if cmd.Flags().Changed("sonnet") {
+			latest.SonnetModel = opts.sonnet
+		}
+		if cmd.Flags().Changed("haiku") {
+			latest.HaikuModel = opts.haiku
+		}
+		if cmd.Flags().Changed("fable") {
+			latest.FableModel = opts.fable
+		}
+		if cmd.Flags().Changed("custom") {
+			latest.CustomModelID = opts.custom
+		}
+		if cmd.Flags().Changed("subagent") {
+			latest.SubagentModel = opts.subagent
+			if latest.Env != nil {
+				delete(latest.Env, claude.SubagentModelEnv)
+			}
+		}
 
-	applyOneMSuffixes(&p, oneMSlotsFromProvider(p))
+		applyOneMSuffixes(latest, oneMSlotsFromProvider(*latest))
 
-	if err := replaceProvider(providerName, p); err != nil {
+		p = *latest
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -189,22 +192,20 @@ func runMapAuto(ctx context.Context, args []string, probe bool) error {
 	if len(pool) == 0 {
 		return fmt.Errorf("the provider's catalog is empty")
 	}
-	p.Model = strings.Join(models, ",")
-
-	// The same recommender as the ccl set page. Mapping starts from scratch, so
-	// the current slots are not preserved; a slot keeps its [1m] marker only
-	// when the recommender confirms the model serves 1M.
+	// Apply only catalog and slot fields to the latest provider under the lock.
+	// Runtime options changed while catalog discovery was in flight survive.
 	rec := slotrec.Recommend(provider.Provider{}, pool, metadata)
-	p.OpusModel, p.SonnetModel, p.HaikuModel = rec.Opus, rec.Sonnet, rec.Haiku
-	p.FableModel, p.CustomModelID, p.SubagentModel = rec.Fable, rec.Custom, rec.Subagent
-	applyOneMSuffixes(&p, rec.OneMSlots)
-	// Mapping does not change Default/Balanced, but retires unsupported old or
-	// hand-written context combinations when encountered.
-	if hasUnsupportedContextConfig(p) {
-		applyCompactPreset(&p, compactPresetDefault)
-	}
-
-	if err := replaceProvider(providerName, p); err != nil {
+	if err := updateProvider(providerName, func(latest *provider.Provider) error {
+		latest.Model = strings.Join(models, ",")
+		latest.OpusModel, latest.SonnetModel, latest.HaikuModel = rec.Opus, rec.Sonnet, rec.Haiku
+		latest.FableModel, latest.CustomModelID, latest.SubagentModel = rec.Fable, rec.Custom, rec.Subagent
+		applyOneMSuffixes(latest, rec.OneMSlots)
+		if hasUnsupportedContextConfig(*latest) {
+			applyCompactPreset(latest, compactPresetDefault)
+		}
+		p = *latest
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 

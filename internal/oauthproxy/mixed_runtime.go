@@ -188,6 +188,15 @@ func startMixedProtocolRouter(parent context.Context, endpoint, upstreamAPIKey s
 		// see the routed models instead of falling through to heuristics.
 		models: append([]string(nil), routes.models...),
 	}
+	if router.codex != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.codex.client))
+	}
+	if router.chatSvc != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.chatSvc.client))
+	}
+	if router.anthropicSvc != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.anthropicSvc.client))
+	}
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {

@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -46,18 +45,13 @@ type qoderCredentialPool struct {
 	credentialFile string
 	client         *http.Client
 	next           atomic.Uint64
-	refreshMu      sync.Mutex
 }
 
 func newQoderCredentialPool(authDir, credentialFile string) *qoderCredentialPool {
 	return &qoderCredentialPool{
 		authDir:        authDir,
 		credentialFile: strings.TrimSpace(credentialFile),
-		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			ForceAttemptHTTP2:     true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 
@@ -151,17 +145,20 @@ func (pool *qoderCredentialPool) usable(ctx context.Context, credential *qoderCr
 		return nil, fmt.Errorf("Qoder credential %s has expired and has no refresh token", credential.fileName)
 	}
 
-	pool.refreshMu.Lock()
-	defer pool.refreshMu.Unlock()
+	release, err := lockOAuthCredential(ctx, credential.path)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	// Another request may have refreshed this file while we waited for the lock.
 	latest, err := pool.loadCredential(credential.path)
-	if err == nil && !force && (latest.expiresAt.IsZero() || time.Now().Before(latest.expiresAt)) {
+	if err != nil {
+		return nil, err
+	}
+	if (!force || latest.accessToken != credential.accessToken) && (latest.expiresAt.IsZero() || time.Now().Before(latest.expiresAt)) {
 		return latest, nil
 	}
-	if err == nil && latest.accessToken != credential.accessToken {
-		credential = latest
-	}
-	return pool.refresh(ctx, credential)
+	return pool.refresh(ctx, latest)
 }
 
 func (pool *qoderCredentialPool) loadCredential(path string) (*qoderCredential, error) {

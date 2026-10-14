@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	tui "github.com/grindlemire/go-tui"
 )
@@ -178,5 +180,34 @@ func TestEmptyMappingPanelCannotSave(t *testing.T) {
 	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
 	if m.saveConfirmed || m.quitRequested {
 		t.Fatal("empty catalog accepted Save")
+	}
+}
+
+func TestMapAutoPreservesChangesMadeDuringCatalogFetch(t *testing.T) {
+	p := provider.Provider{Name: "mapping-concurrent", Type: "openai", Endpoint: "https://unused.invalid/v1", APIKey: "fake-key", Model: "model-a"}
+	if err := config.Save(&provider.Config{ActiveProvider: p.Name, Providers: map[string]provider.Provider{p.Name: p}}); err != nil {
+		t.Fatal(err)
+	}
+	original := fetchMappingCatalog
+	t.Cleanup(func() { fetchMappingCatalog = original })
+	fetchMappingCatalog = func(_ context.Context, p provider.Provider) (provider.Provider, []string, map[string]protocol.ModelInfo, func(), error) {
+		err := updateProvider(p.Name, func(latest *provider.Provider) error {
+			latest.FastMode = true
+			latest.EffortLevel = "high"
+			latest.Env = map[string]string{"KEEP_ME": "concurrent"}
+			return nil
+		})
+		return p, []string{"model-a", "new-model"}, nil, func() {}, err
+	}
+	if err := runMapAuto(context.Background(), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Providers[p.Name]
+	if got.Model != "model-a,new-model" || !got.FastMode || got.EffortLevel != "high" || got.Env["KEEP_ME"] != "concurrent" {
+		t.Fatal("automatic mapping overwrote concurrent runtime changes")
 	}
 }

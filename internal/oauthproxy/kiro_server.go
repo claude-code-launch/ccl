@@ -84,11 +84,7 @@ func startKiroOAuth(parent context.Context, modelSpec, credentialFile string) (*
 		modelCatalog: newKiroModelCatalog(kiroAvailableModelsEndpoint),
 		pool:         pool,
 		usage:        usageTracker,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			ForceAttemptHTTP2:     true,
-			ResponseHeaderTimeout: 60 * time.Second,
-		}},
+		client:       &http.Client{Transport: newUpstreamTransport(60 * time.Second)},
 		upstreamURL: func(credential *kiroCredential) string {
 			return "https://q." + credential.effectiveAPIRegion() + ".amazonaws.com/generateAssistantResponse"
 		},
@@ -118,6 +114,7 @@ func startKiroOAuth(parent context.Context, modelSpec, credentialFile string) (*
 		started: started,
 		usage:   usageTracker,
 	}
+	proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(service.client, pool.client))
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {

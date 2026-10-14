@@ -2,37 +2,35 @@
 var spawn = require('child_process').spawn;
 var fs = require('fs');
 var path = require('path');
+var platformFor = require('./platforms').platformFor;
 
-var archMap = {
-    darwin: { x64: 'amd64', arm64: 'arm64' },
-    linux: { x64: 'amd64', arm64: 'arm64' },
-    win32: { x64: 'x64', arm64: 'arm64' },
-};
-
-var platformArch = archMap[process.platform] && archMap[process.platform][process.arch];
-if (!platformArch) {
-    console.error('Unsupported platform: ' + process.platform + ' ' + process.arch);
-    process.exit(1);
+function resolveBinary(binDir, os, arch) {
+    var platform = platformFor(os, arch);
+    if (!platform) throw new Error('Unsupported platform: ' + os + ' ' + arch);
+    // Keep older bundled/source installations usable during the transition.
+    var bundled = path.join(binDir, platform.asset);
+    if (fs.existsSync(bundled)) return bundled;
+    try {
+        return require.resolve(platform.packageName + '/bin/' + platform.binary, { paths: [path.dirname(binDir)] });
+    } catch (err) {
+        throw new Error('ccl binary for ' + os + ' ' + arch + ' is not installed. Reinstall @claudecodelaunch/ccl with optional dependencies enabled.');
+    }
 }
 
-var ext = process.platform === 'win32' ? '.exe' : '';
-var binaryName = 'ccl-' + process.platform + '-' + platformArch + ext;
-var binaryPath = path.join(__dirname, binaryName);
-
-if (!fs.existsSync(binaryPath)) {
-    console.error('ccl binary not found: ' + binaryPath);
-    console.error('Reinstall @claudecodelaunch/ccl or download a release binary from GitHub.');
-    process.exit(1);
+function run() {
+    var binaryPath;
+    try { binaryPath = resolveBinary(__dirname, process.platform, process.arch); }
+    catch (err) { console.error(err.message); process.exit(1); }
+    var child = spawn(binaryPath, process.argv.slice(2), { stdio: 'inherit' });
+    child.on('error', function (err) {
+        console.error('Failed to launch ccl: ' + err.message);
+        process.exit(1);
+    });
+    child.on('close', function (code, signal) {
+        var signals = require('os').constants.signals;
+        process.exit(typeof code === 'number' ? code : (signals[signal] ? 128 + signals[signal] : 1));
+    });
 }
 
-var args = process.argv.slice(2);
-var child = spawn(binaryPath, args, { stdio: 'inherit' });
-
-child.on('error', function (err) {
-    console.error('Failed to launch ccl: ' + err.message);
-    process.exit(1);
-});
-
-child.on('close', function (code) {
-    process.exit(typeof code === 'number' ? code : 1);
-});
+module.exports = { resolveBinary: resolveBinary };
+if (require.main === module) run();

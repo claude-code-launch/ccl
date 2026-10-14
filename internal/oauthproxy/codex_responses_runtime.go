@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
@@ -66,7 +65,6 @@ func (*codexStaticAuthorizer) isOAuth() bool          { return false }
 type codexOAuthAuthorizer struct {
 	path   string
 	client *http.Client
-	mu     sync.Mutex
 }
 
 type codexOAuthCredential struct {
@@ -148,11 +146,8 @@ func startCodexOAuth(parent context.Context, modelSpec, credentialFile string) (
 	}
 	path := filepath.Join(authDir, filepath.Base(credentialFile))
 	authorizer := &codexOAuthAuthorizer{
-		path: path,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
+		path:   path,
+		client: &http.Client{Transport: newUpstreamTransport(30 * time.Second)},
 	}
 	credential, err := authorizer.load()
 	if err != nil {
@@ -238,6 +233,7 @@ func startCodexResponsesRuntimeWithService(parent context.Context, endpoint, mod
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, models: append([]string(nil), service.models...), usage: usage,
 	}
+	runtime.cleanup = append(runtime.cleanup, closeIdleClients(service.client, authorizerHTTPClient(authorizer)))
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -283,11 +279,8 @@ func newResponsesService(apiKey, endpoint string, routes []runtimeModelRoute, au
 	return &codexResponsesService{
 		apiKey: apiKey, endpoint: endpoint, models: models, modelRoute: modelRoute,
 		authorizer: authorizer, usage: usage, installationID: uuidString(), windowID: uuidString(),
-		xai: xai,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		xai:    xai,
+		client: &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 
@@ -690,7 +683,7 @@ func (s *codexResponsesService) call(ctx context.Context, body []byte, sessionID
 			if currentErr == nil && current.token != "" && current.token != auth.token {
 				auth = current
 			} else {
-				auth, err = s.authorizer.authorize(ctx, true)
+				auth, err = s.authorizer.authorize(withRejectedOAuthToken(ctx, auth.token), true)
 			}
 			if err != nil {
 				return nil, &codexResponsesUpstreamError{
@@ -883,8 +876,11 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 func (a *codexOAuthAuthorizer) isOAuth() bool { return true }
 
 func (a *codexOAuthAuthorizer) authorize(ctx context.Context, force bool) (codexResponsesAuthorization, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	release, err := lockOAuthCredential(ctx, a.path)
+	if err != nil {
+		return codexResponsesAuthorization{}, err
+	}
+	defer release()
 	credential, err := a.load()
 	if err != nil {
 		return codexResponsesAuthorization{}, err
@@ -892,6 +888,7 @@ func (a *codexOAuthAuthorizer) authorize(ctx context.Context, force bool) (codex
 	if credential.disabled {
 		return codexResponsesAuthorization{}, fmt.Errorf("Codex credential %s is disabled", filepath.Base(a.path))
 	}
+	force = force && oauthTokenStillRejected(ctx, credential.accessToken)
 	if force || credential.accessToken == "" || (!credential.expiresAt.IsZero() && time.Now().Add(time.Minute).After(credential.expiresAt)) {
 		credential, err = a.refresh(ctx, credential)
 		if err != nil {

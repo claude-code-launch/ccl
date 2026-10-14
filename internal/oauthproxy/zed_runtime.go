@@ -208,6 +208,18 @@ func startZedProtocolRouter(parent context.Context, gateway *zedGateway, routes 
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, usage: usage, listAuths: session.listAuths,
 	}
+	if router.codex != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.codex.client))
+	}
+	if router.chatSvc != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.chatSvc.client))
+	}
+	if router.anthropicSvc != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.anthropicSvc.client))
+	}
+	if router.gemini != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.gemini.client))
+	}
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -525,10 +537,7 @@ type zedGeminiService struct {
 func newZedGeminiService(apiKey string, gateway *zedGateway, usage *UsageTracker) *zedGeminiService {
 	return &zedGeminiService{
 		apiKey: apiKey, gateway: gateway, usage: usage,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		client: &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 

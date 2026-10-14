@@ -34,11 +34,8 @@ type anthropicPassthroughService struct {
 func newAnthropicPassthroughService(apiKey, baseURL string, models []string, authorizer chatAuthorizer, usage *UsageTracker) *anthropicPassthroughService {
 	return &anthropicPassthroughService{
 		apiKey: apiKey, baseURL: baseURL, models: models, authorizer: authorizer,
-		usage: usage,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		usage:  usage,
+		client: &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 
@@ -158,7 +155,7 @@ func (s *anthropicPassthroughService) forward(ctx context.Context, incoming *htt
 		}
 		if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
 			_ = response.Body.Close()
-			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
+			if _, authErr := s.authorizer.authorize(rejectedResponseContext(ctx, response), true); authErr != nil {
 				return nil, fmt.Errorf("refresh OAuth token: %w", authErr)
 			}
 			response, callErr = s.forwardOnce(ctx, incoming, path, body, nil)

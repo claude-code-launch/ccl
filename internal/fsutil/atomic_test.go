@@ -3,6 +3,7 @@ package fsutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -20,7 +21,9 @@ func TestWriteFileAtomicReplacesWithExactMode(t *testing.T) {
 		t.Fatalf("content = %q, %v", data, err)
 	}
 	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0o600 {
+	// Windows reports synthetic Unix mode bits; its writable flag is the
+	// relevant contract, while POSIX requires the exact private mode.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %o", info.Mode().Perm())
 	}
 	entries, _ := os.ReadDir(dir)

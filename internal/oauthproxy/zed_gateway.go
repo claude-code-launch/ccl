@@ -132,6 +132,9 @@ func (g *zedGateway) Stop() {
 	_ = g.server.Shutdown(ctx)
 	cancel()
 	waitClosed(g.done, runtimeStopTimeout)
+	if g.session != nil {
+		closeIdleClients(g.session.client)()
+	}
 }
 
 // zedGatewayRoute maps a loopback path to its wire. The trailing "/google" path

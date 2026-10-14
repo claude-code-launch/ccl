@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,18 +53,13 @@ type workbuddyCredentialStore struct {
 	authDir        string
 	credentialFile string
 	client         *http.Client
-	mu             sync.Mutex
 }
 
 func newWorkBuddyCredentialStore(authDir, credentialFile string) *workbuddyCredentialStore {
 	return &workbuddyCredentialStore{
 		authDir:        authDir,
 		credentialFile: filepath.Base(strings.TrimSpace(credentialFile)),
-		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			ForceAttemptHTTP2:     true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 
@@ -98,8 +92,11 @@ func (s *workbuddyCredentialStore) load() (*workbuddyCredential, error) {
 }
 
 func (s *workbuddyCredentialStore) authorize(ctx context.Context, forceRefresh bool) (*workbuddyCredential, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	release, err := lockOAuthCredential(ctx, filepath.Join(s.authDir, s.credentialFile))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	credential, err := s.load()
 	if err != nil {
 		return nil, err
@@ -108,6 +105,7 @@ func (s *workbuddyCredentialStore) authorize(ctx context.Context, forceRefresh b
 		return nil, fmt.Errorf("WorkBuddy credential %s is disabled", credential.fileName)
 	}
 	token := credential.token()
+	forceRefresh = forceRefresh && oauthTokenStillRejected(ctx, token.AccessToken)
 	if !forceRefresh && !workbuddyTokenNeedsRefresh(token) {
 		return credential, nil
 	}
@@ -166,8 +164,6 @@ func (s *workbuddyCredentialStore) authorize(ctx context.Context, forceRefresh b
 }
 
 func (s *workbuddyCredentialStore) listAuths() []*AuthInfo {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	credential, err := s.load()
 	if err != nil {
 		return nil
@@ -273,6 +269,9 @@ func (g *workbuddyGateway) Stop() {
 	_ = g.server.Shutdown(ctx)
 	cancel()
 	waitClosed(g.done, runtimeStopTimeout)
+	if g.store != nil {
+		closeIdleClients(g.store.client)()
+	}
 }
 
 func (g *workbuddyGateway) serveHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -340,7 +339,7 @@ func (g *workbuddyGateway) do(ctx context.Context, path, rawQuery string, header
 	status := response.StatusCode
 	LogWarnEvent("upstream_auth_retry", "component", "workbuddy", "request_id", requestLogID(ctx),
 		"path", path, "status", status, "credential", credential.fileName)
-	refreshed, refreshErr := g.store.authorize(ctx, true)
+	refreshed, refreshErr := g.store.authorize(withRejectedOAuthToken(ctx, credential.token().AccessToken), true)
 	if refreshErr != nil {
 		LogWarnEvent("upstream_auth_retry_skipped", "component", "workbuddy", "request_id", requestLogID(ctx),
 			"path", path, "status", status, "credential", credential.fileName, "error", refreshErr)
@@ -466,7 +465,7 @@ func (g *workbuddyGateway) discoverModels(ctx context.Context) ([]workbuddyModel
 		workbuddyAuthenticatedHeaders(credential.token(), credential.account()))
 	var apiErr *workbuddyAPIError
 	if errors.As(err, &apiErr) && (apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden) {
-		refreshed, refreshErr := g.store.authorize(ctx, true)
+		refreshed, refreshErr := g.store.authorize(withRejectedOAuthToken(ctx, credential.token().AccessToken), true)
 		if refreshErr == nil {
 			credential = refreshed
 			envelope, err = workbuddyJSON[workbuddyProductConfig](ctx, g.store.client, http.MethodGet, endpoint, nil,

@@ -8,10 +8,6 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-// maxPickerModels caps the pool rows: a gateway can expose hundreds of models,
-// and the picker is for choosing, not browsing a catalog.
-const maxPickerModels = 80
-
 // providerModelPicker builds the /model lineup for a provider: the tier
 // aliases (labeled with the model each one maps to), the custom model, then
 // the model pool. It replaces Claude's built-in rows, which name models a
@@ -44,18 +40,13 @@ func providerModelPicker(p provider.Provider, names map[string]string) *modelPic
 		})
 		seen[strings.ToLower(provider.StripContextSuffix(request))] = true
 	}
-	added := 0
 	for _, model := range modelrouting.SplitCSV(p.Model) {
 		request := catalogModelRequestName(model, names)
 		key := strings.ToLower(provider.StripContextSuffix(request))
 		if seen[key] {
 			continue
 		}
-		if added == maxPickerModels {
-			break
-		}
 		seen[key] = true
-		added++
 		options = append(options, modelPickerOption{
 			Model: request,
 			Label: catalogModelDisplayName(model, names),

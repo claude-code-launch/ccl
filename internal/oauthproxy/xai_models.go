@@ -32,7 +32,7 @@ func discoverXaiModels(ctx context.Context, endpoint string, authorizer *xaiOAut
 	}
 	models, status, err := requestXaiModels(ctx, authorizer.client, endpoint, auth)
 	if status == http.StatusUnauthorized {
-		refreshed, refreshErr := authorizer.authorize(ctx, true)
+		refreshed, refreshErr := authorizer.authorize(withRejectedOAuthToken(ctx, auth.token), true)
 		if refreshErr != nil {
 			return nil, fmt.Errorf("discover Grok models: refresh rejected credential: %w", refreshErr)
 		}
