@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/claude-code-launch/ccl/internal/acp"
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
@@ -59,11 +58,11 @@ func Execute() {
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "acp-permission" {
-		if err := acp.RunPermissionMCP(os.Stdin, os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
+		fmt.Fprintln(os.Stderr, "acp-permission was removed; permissions are handled by claude-agent-acp")
+		os.Exit(1) // A stale MCP entry must never fall through to a Claude prompt.
+	}
+	if len(os.Args) > 1 && os.Args[1] == "acp" {
+		acpQuietErrors = true // Include flag/argument errors before PreRun.
 	}
 
 	// Persist config migrations once, under the config lock, before any command

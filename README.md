@@ -300,11 +300,20 @@ ccl [Claude Code 参数...]             启动 Claude Code；未知命令和参�
 
 ### 在 Xcode 27 里用 CCL
 
-Xcode 通过 Agent Client Protocol（stdio 上的 JSON-RPC）驱动编辑器内 Agent。Claude Code CLI 没有原生 `--acp`，所以由 `ccl acp` 做这一层：
+`ccl acp` 为上游 [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) 注入 CCL 配置。ACP 协议和 Agent 行为由上游实现，CCL 管理服务商、模型、环境变量和代理：
 
 ```
-Xcode 27  →  ccl acp  →  Claude Code (stream-json)  →  当前 acp_provider
+Xcode / ACP 客户端 ↔ ccl acp ↔ claude-agent-acp ↔ Claude Agent SDK → 当前 ACP provider
 ```
+
+安装 Node.js **22 或更新版本**，再安装上游适配器：
+
+```bash
+npm install -g @agentclientprotocol/claude-agent-acp
+ccl use --acp provider1
+```
+
+适配器通过 Claude Agent SDK 自带的 Claude 运行，`ccl acp` 无需另装 Claude CLI。普通 `ccl` 启动和 `ccl proxy` 仍使用已有 Claude CLI。当前 CI 固定验证适配器 `0.90.0`。
 
 Settings → Intelligence → Agents → Add an Agent：
 
@@ -315,9 +324,20 @@ Arguments:   acp
 Interpreter: 留空
 ```
 
-先用 `ccl oauth` / `ccl set` 创建 provider。ACP 默认**跟随**普通模式的选择（`ccl use <name>`）；需要不同时用 `ccl use --acp <name>` 为 ACP 单独固定，`ccl use --acp --follow` 取消固定。`ccl ls` 的 `USED BY` 列会显示 `normal`、`ACP` 或 `normal+ACP`。普通模式与 ACP 可以选择不同名称，例如普通终端用 `ccl use a`，Xcode 同时用 `ccl use --acp b`；两者始终引用同一个 `providers` 配置表，不会复制出一份 ACP provider。运行中的 `ccl acp` 会在**下一条 prompt 开始前**检测 ACP 选择及所选 provider 的 endpoint、model、env、OAuth account 等变化，重启该会话的 Claude 子进程并通过 `--resume` 保留上下文；当前正在流式执行的 prompt 不会被中断，也无需重启 Xcode Agent。
+先用 `ccl oauth` / `ccl set` 创建 provider。ACP 默认**跟随**普通模式的选择（`ccl use <name>`）；需要不同时用 `ccl use --acp <name>` 为 ACP 单独固定，`ccl use --acp --follow` 取消固定。`ccl ls` 的 `USED BY` 列会显示 `normal`、`ACP` 或 `normal+ACP`。普通模式与 ACP 可以选择不同名称，例如普通终端用 `ccl use a`，Xcode 同时用 `ccl use --acp b`；两者引用同一个 `providers` 配置表。
 
-工具调用会以 `session/update`（Edit/Write 带 diff）发给 Xcode；权限走 `session/request_permission`（`ccl bypass` 对 `ccl acp` 无效）。图片和 Xcode 提供的 MCP 会转给 Claude Code；ACP 到 Claude 的映射持久化在 `~/.ccl/acp/sessions/`，所以重启 `ccl acp` 后仍可恢复。该 store 不保存 provider 凭据或 MCP credentials。没有直播终端（Bash 只作为 `tool_call` `kind=execute`）。如果 `session/new` 报找不到 `claude`，给这个 Agent 配一份 GUI 能看到的 `PATH`。
+运行中修改 ACP 选择或服务商配置，会在**下一条空闲 prompt 前**通过上游会话恢复接口应用改动并保留上下文。执行中及已排队的 prompt 继续使用原配置。修改默认模型或映射时，CCL 通过上游模型配置接口应用新默认值；仅更新凭据时保留会话中选定的模型。
+
+模型选择、权限、工具、图片、终端、MCP、历史记录和协议扩展，均由上游适配器与客户端协商。`ccl bypass` 不参与 ACP 的权限处理。新会话及历史记录由上游 SDK 管理；旧版 `~/.ccl/acp/sessions/` 映射仅用于兼容恢复，不再写入。
+
+GUI 的 `PATH` 需要包含 Node.js 和适配器。也可在 Agent 的 Arguments 中指定适配器绝对路径，或设置 `CCL_ACP_ADAPTER`；Windows 支持 npm 的 `.cmd` 入口及带空格、中文的路径。上游 CLI 选项放在 `--` 后：
+
+```bash
+ccl acp --adapter /absolute/path/to/claude-agent-acp
+ccl acp -- --help
+```
+
+stdout 直接连接上游 ACP，诊断写入 stderr，配置凭据在日志中遮蔽。
 
 ---
 
@@ -864,6 +884,7 @@ gofmt -l .
 go test -race ./...
 go vet ./...
 go build -o /tmp/ccl-debug .
+node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs
 
 export CCL_TEST_HOME="$(mktemp -d)"
 ccl_test() {
@@ -884,6 +905,15 @@ TUI 和代理验证应使用临时目录中的假凭据及本地模拟上游。�
 CCL_TEST_BINARY=/tmp/ccl-debug go test -race -v ./integration/proxy
 ```
 
+ACP 集成测试启动真实 `claude-agent-acp` 和 SDK 自带的 Claude，使用临时用户目录、假凭据和本地模拟模型接口，验证模型列表、模型选择、流式输出、会话恢复及 Anthropic → OpenAI 服务商切换，不访问付费模型：
+
+```bash
+npm install --prefix /tmp/ccl-acp-test --ignore-scripts --no-audit --no-fund @agentclientprotocol/claude-agent-acp@0.90.0
+CCL_TEST_BINARY=/tmp/ccl-debug \
+  CCL_TEST_AGENT_ACP=/tmp/ccl-acp-test/node_modules/.bin/claude-agent-acp \
+  go test -race -v ./integration/acp
+```
+
 Windows PowerShell：
 
 ```powershell
@@ -891,6 +921,12 @@ $cclTestBinary = Join-Path $env:TEMP ("ccl-test-" + [guid]::NewGuid().ToString()
 go build -o $cclTestBinary .
 $env:CCL_TEST_BINARY = $cclTestBinary
 go test -race -v ./integration/proxy
+$cclTestAdapter = Join-Path $env:TEMP ("ccl-acp-" + [guid]::NewGuid().ToString())
+npm install --prefix $cclTestAdapter --ignore-scripts --no-audit --no-fund @agentclientprotocol/claude-agent-acp@0.90.0
+$env:CCL_TEST_AGENT_ACP = Join-Path $cclTestAdapter "node_modules/.bin/claude-agent-acp.cmd"
+go test -race -v ./integration/acp
+Remove-Item Env:CCL_TEST_AGENT_ACP
+Remove-Item -Recurse -Force $cclTestAdapter
 Remove-Item Env:CCL_TEST_BINARY
 Remove-Item $cclTestBinary
 ```
@@ -906,7 +942,7 @@ Anthropic 兼容网关建议确认：
 
 ## CI/CD
 
-PR 和 `main` 推送触发检查：Linux 运行完整竞态测试、vet 和构建；Linux、macOS、Windows 均运行核心契约测试、原生 CLI 构建、真实后台代理进程集成测试和 npm 安装测试。Windows 另外验证中英文终端布局、窗口缩放、中文按钮坐标及代理命令路由。
+PR 和 `main` 推送触发检查：Linux 运行完整竞态测试、vet 和构建；Linux、macOS、Windows 均运行核心契约测试、原生 CLI 构建、真实后台代理进程集成测试、npm 安装测试、ACP 配置包装测试，以及固定版本真实 `claude-agent-acp` / SDK 的本地模型集成测试。Windows 另外验证中英文终端布局、窗口缩放、中文按钮坐标及代理命令路由。
 
 模型设置测试还会通过实际子进程检查 `/model` 的标签、中文、`(1M)`、未映射模型和继承环境隔离，并在 Windows 分别覆盖原生与 npm 启动入口。修改 Claude 启动或模型列表相关文件时，`Claude Code compatibility` 工作流会在 Windows ConPTY 中运行固定版本的真实 Claude Code（默认 `2.1.300`），打开 `/model` 并核对普通启动和独立代理两种模式，保存终端文本证据。该检查使用临时用户目录、假凭据及本地拒绝推理的端点，不提交模型请求；也可手动运行工作流指定其他 Claude Code 版本。
 

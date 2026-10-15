@@ -24,9 +24,9 @@ func TestAcpHelp(t *testing.T) {
 	}
 }
 
-func TestAcpPermissionIsHiddenIntercept(t *testing.T) {
+func TestAcpPermissionIsRetired(t *testing.T) {
 	if isCclCommand("acp-permission") {
-		t.Fatal("acp-permission must not be a cobra command; cmd.Execute intercepts it like statusline")
+		t.Fatal("retired acp-permission must not be a cobra command")
 	}
 	for _, command := range RootCmd().Commands() {
 		if command.Name() == "acp-permission" {

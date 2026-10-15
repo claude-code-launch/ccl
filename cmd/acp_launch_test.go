@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,8 +17,8 @@ type fakeACPPreparedLaunch struct {
 	closed atomic.Int32
 }
 
-func (l *fakeACPPreparedLaunch) Command(args ...string) *exec.Cmd {
-	return exec.Command("fake-claude", args...)
+func (l *fakeACPPreparedLaunch) Options(cwd string) (json.RawMessage, error) {
+	return json.RawMessage(`{"settings":{},"env":{}}`), nil
 }
 
 func (l *fakeACPPreparedLaunch) Close() {

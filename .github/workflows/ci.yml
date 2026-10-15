@@ -56,7 +56,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test portable filesystem, protocol and provider contracts
-        run: go test -race ./internal/fsutil ./internal/provider ./internal/protocol ./internal/modelrouting ./internal/slotrec ./internal/modelsdev ./internal/proxymanager
+        run: go test -race ./internal/fsutil ./internal/provider ./internal/protocol ./internal/modelrouting ./internal/slotrec ./internal/modelsdev ./internal/proxymanager ./internal/acp
       - name: Build native CLI
         run: go build -o ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }} .
       - name: Test standalone proxy process lifecycle
@@ -67,9 +67,16 @@ jobs:
         if: runner.os == 'Windows'
         run: go test -race ./cmd -run 'Test(ConfigAllRows|PickersFollow|CJKCancel|ProviderSelectionFits|OAuthAndMapping|TooSmallTerminal|Proxy)'
       - name: Test Claude model picker labels and process launch
-        run: go test -race -v ./internal/claude -run 'Test(ModelPicker|ProviderModelPicker|BuildEnvUsesProviderCatalogDisplayNames|CatalogModelOverrides|ModelDisplayName|SettingsRespectTheUsersOwnPreferences|ProcessEnv)'
+        run: go test -race -v ./internal/claude -run 'Test(Agent|ModelPicker|ProviderModelPicker|BuildEnvUsesProviderCatalogDisplayNames|CatalogModelOverrides|ModelDisplayName|SettingsRespectTheUsersOwnPreferences|ProcessEnv)'
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Test npm platform resolution and packaging
-        run: node --test scripts/npm-packages.test.js
+      - name: Test npm packaging and ACP configuration decorators
+        run: node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs
+      - name: Install pinned upstream ACP adapter
+        run: npm install --prefix "${{ runner.temp }}/ccl-acp-adapter" --ignore-scripts --no-audit --no-fund @agentclientprotocol/claude-agent-acp@0.90.0
+      - name: Test real ACP adapter and SDK with local providers
+        env:
+          CCL_TEST_BINARY: ${{ github.workspace }}/ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }}
+          CCL_TEST_AGENT_ACP: ${{ runner.temp }}/ccl-acp-adapter/node_modules/.bin/claude-agent-acp${{ runner.os == 'Windows' && '.cmd' || '' }}
+        run: go test -race -v ./integration/acp
