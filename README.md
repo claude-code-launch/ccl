@@ -876,6 +876,23 @@ ccl_test map --help
 
 TUI 和代理验证应使用临时目录中的假凭据及本地模拟上游。在这个隔离环境中配置 provider 后，可用 `ccl_test set demo`、`ccl_test map demo` 验证交互，`ccl_test provider preview` 预览配置；代理验证结束后用 `ccl_test proxy stop` 恢复临时 Claude 配置。`--help` 不会启动 Claude 会话。
 
+代理进程集成测试会自行创建临时 HOME / USERPROFILE、假凭据和本地模拟上游，覆盖带空格及中文的路径、后台启动、鉴权、并发重复启动、映射重载、provider 切换、停止恢复、强制终止后的恢复以及损坏配置保护。它不启动真实 Claude 或调用付费模型；未设置 `CCL_TEST_BINARY` 时跳过。
+
+```bash
+CCL_TEST_BINARY=/tmp/ccl-debug go test -race -v ./integration/proxy
+```
+
+Windows PowerShell：
+
+```powershell
+$cclTestBinary = Join-Path $env:TEMP ("ccl-test-" + [guid]::NewGuid().ToString() + ".exe")
+go build -o $cclTestBinary .
+$env:CCL_TEST_BINARY = $cclTestBinary
+go test -race -v ./integration/proxy
+Remove-Item Env:CCL_TEST_BINARY
+Remove-Item $cclTestBinary
+```
+
 Anthropic 兼容网关建议确认：
 
 - `endpoint` 为裸域名，不带 `/v1`
@@ -886,6 +903,8 @@ Anthropic 兼容网关建议确认：
 ---
 
 ## CI/CD
+
+PR 和 `main` 推送触发检查：Linux 运行完整竞态测试、vet 和构建；Linux、macOS、Windows 均运行核心契约测试、原生 CLI 构建、真实后台代理进程集成测试和 npm 安装测试。Windows 另外验证中英文终端布局、窗口缩放、中文按钮坐标及代理命令路由。
 
 推送 `v*` tag 触发多平台构建与发布：
 
