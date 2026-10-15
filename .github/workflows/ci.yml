@@ -66,6 +66,8 @@ jobs:
       - name: Test Windows configuration UI and command routing
         if: runner.os == 'Windows'
         run: go test -race ./cmd -run 'Test(ConfigAllRows|PickersFollow|CJKCancel|ProviderSelectionFits|OAuthAndMapping|TooSmallTerminal|Proxy)'
+      - name: Test Claude model picker labels and process launch
+        run: go test -race -v ./internal/claude -run 'Test(ModelPicker|ProviderModelPicker|BuildEnvUsesProviderCatalogDisplayNames|CatalogModelOverrides|ModelDisplayName|SettingsRespectTheUsersOwnPreferences|ProcessEnv)'
       - uses: actions/setup-node@v5
         with:
           node-version: '24'

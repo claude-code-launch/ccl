@@ -9,6 +9,9 @@ import (
 // TestMain keeps every test in this package away from the developer's real
 // ~/.ccl/run: settings files written by tests go to a throwaway directory.
 func TestMain(m *testing.M) {
+	if os.Getenv("CCL_TEST_MODEL_PICKER_CHILD") == "1" {
+		os.Exit(modelPickerChild())
+	}
 	dir, err := os.MkdirTemp("", "ccl-claude-test-run-")
 	if err != nil {
 		panic(err)
