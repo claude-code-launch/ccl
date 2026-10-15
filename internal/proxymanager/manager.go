@@ -120,6 +120,35 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return m.stop(ctx)
 }
 
+// RecoverStale restores the settings overlay of a proxy that died without
+// cleaning up (kill -9, power loss), so a plain claude stops pointing at a
+// closed port. It never waits: a start or stop in progress owns the command
+// lock and recovers on its own, and a held daemon lock means the proxy is
+// alive. Reports whether it restored anything.
+func (m *Manager) RecoverStale(ctx context.Context) (bool, error) {
+	if _, err := os.Stat(m.statePath()); err != nil {
+		return false, nil
+	}
+	releaseCommand, ok, err := fsutil.TryFileLock(filepath.Join(m.Dir, "command.lock"))
+	if err != nil || !ok {
+		return false, err
+	}
+	defer releaseCommand()
+	s, err := m.Read()
+	if err != nil || s == nil {
+		return false, err
+	}
+	releaseDaemon, ok, err := fsutil.TryFileLock(filepath.Join(m.Dir, "daemon.lock"))
+	if err != nil || !ok {
+		return false, err
+	}
+	defer releaseDaemon()
+	if err := restoreSettings(ctx, s); err != nil {
+		return false, fmt.Errorf("restore Claude settings: %w", err)
+	}
+	return true, os.Remove(m.statePath())
+}
+
 func (m *Manager) stop(ctx context.Context) error {
 	s, err := m.Read()
 	if err != nil || s == nil {

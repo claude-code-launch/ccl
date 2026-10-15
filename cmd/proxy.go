@@ -17,6 +17,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// recoverStaleProxy undoes the Claude settings overlay of a standalone proxy
+// that died without cleanup, so one kill -9 or power loss does not leave a
+// plain claude pointing at a closed port until someone runs ccl proxy stop.
+// It is quiet unless it restored something, and never fatal.
+func recoverStaleProxy() {
+	m, err := proxymanager.Default()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	restored, err := m.RecoverStale(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, locale.T("ccl: 无法恢复已退出代理的 Claude 配置：%v；请运行 ccl proxy stop\n", "ccl: could not restore Claude settings for an exited proxy: %v; run ccl proxy stop\n"), err)
+		return
+	}
+	if restored {
+		fmt.Fprintln(os.Stderr, locale.T("ccl: 代理已意外退出，原有 Claude 配置已恢复", "ccl: the proxy had exited; previous Claude settings restored"))
+	}
+}
+
 func proxyProvider(name string) (provider.Provider, error) {
 	cfg, err := config.Load()
 	if err != nil {

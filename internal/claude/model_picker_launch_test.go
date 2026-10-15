@@ -135,10 +135,9 @@ func TestModelPickerReachesLaunchedProcess(t *testing.T) {
 				{Model: "opus", Label: "Opus \u00b7 acme/pro (1M)", Description: "Opus tier \u2192 acme/pro[1m]"},
 				{Model: "sonnet", Label: "Sonnet \u00b7 acme/pro", Description: "Sonnet tier \u2192 acme/pro"},
 				{Model: "haiku", Label: "Haiku \u00b7 acme/flash", Description: "Haiku tier \u2192 acme/flash"},
-				{Model: "fable", Label: "Fable \u00b7 acme/pro", Description: "Fable tier \u2192 acme/pro"},
+				// Fable shares Sonnet's model, and the pool's acme/pro and
+				// acme/flash are reachable from the tier rows: listed once.
 				{Model: "acme/custom", Label: "Custom \u00b7 acme/custom", Description: "Default model for this provider"},
-				{Model: "acme/pro", Label: "acme/pro"},
-				{Model: "acme/flash", Label: "acme/flash"},
 				{Model: "acme/unmapped-\u6a21\u578b", Label: "acme/unmapped-\u6a21\u578b"},
 			}
 			if !reflect.DeepEqual(picker.Options, want) {
@@ -162,7 +161,6 @@ func TestProviderModelPickerCatalogNames(t *testing.T) {
 		{Model: "opus", Label: "Opus \u00b7 Provider Pro (1M)", Description: "Opus tier \u2192 Provider Pro[1m]"},
 		{Model: "sonnet", Label: "Sonnet \u00b7 Provider Pro", Description: "Sonnet tier \u2192 Provider Pro"},
 		{Model: "Provider Custom", Label: "Custom \u00b7 Provider Custom", Description: "Default model for this provider"},
-		{Model: "Provider Pro", Label: "Provider Pro"},
 		{Model: "Provider Flash", Label: "Provider Flash"},
 		{Model: "Provider \u6a21\u578b", Label: "Provider \u6a21\u578b"},
 	}

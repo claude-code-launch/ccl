@@ -151,9 +151,12 @@ def main():
                 time.sleep(0.5)
                 child.write("\r")
                 expected = ["Select model", "Opus · acme/pro (1M)", "Sonnet · acme/pro",
-                            "Haiku · acme/custom", "Fable · acme/pro",
                             "Custom · acme/custom", "acme/unmapped-模型"]
                 text = wait_for(lambda text: all(label in text for label in expected))
+                # Haiku shares the Custom model and Fable shares Sonnet's, so
+                # each model is listed once.
+                for label in ("Haiku · acme/custom", "Fable · acme/pro"):
+                    assert label not in text, f"Duplicate model picker row: {label}"
                 assert "�" not in text, "Invalid Unicode in model picker"
                 assert not calls, f"Unexpected inference calls: {calls}"
                 print(f"PASS {mode}: real /model tier, Custom, unmapped Unicode and 1M labels", flush=True)

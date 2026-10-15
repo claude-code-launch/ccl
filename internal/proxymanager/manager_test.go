@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/fsutil"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -187,6 +188,59 @@ func TestDeadProxyRecoveryRestoresJournal(t *testing.T) {
 	}
 	if len(fields) != 1 || string(fields["language"]) != `"English"` {
 		t.Fatalf("restored fields=%v", fields)
+	}
+}
+
+func TestRecoverStaleRestoresOnlyADeadProxy(t *testing.T) {
+	m, path := isolatedManager(t)
+	if restored, err := m.RecoverStale(context.Background()); restored || err != nil {
+		t.Fatalf("no journal: restored=%v err=%v", restored, err)
+	}
+	if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("recovery without a journal created the proxy directory")
+	}
+	if err := writeJSON(path, map[string]any{"language": "English"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(m.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &State{ID: "dead", SettingsPath: path, ControlURL: "http://127.0.0.1:1", ControlToken: "fake"}
+	settings := map[string]json.RawMessage{"env": json.RawMessage(`{"ANTHROPIC_BASE_URL":"http://127.0.0.1:12345"}`), "model": json.RawMessage(`"proxy-model"`)}
+	if err := applySettings(context.Background(), s, settings, m.statePath()); err != nil {
+		t.Fatal(err)
+	}
+
+	// A live proxy holds the daemon lock; a start or stop holds the command
+	// lock. Either way the overlay is not ours to undo.
+	for _, lock := range []string{"daemon.lock", "command.lock"} {
+		release, err := fsutil.AcquireFileLock(context.Background(), filepath.Join(m.Dir, lock))
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := m.RecoverStale(context.Background())
+		release()
+		if restored || err != nil {
+			t.Fatalf("%s held: restored=%v err=%v", lock, restored, err)
+		}
+		if fields, _ := readSettings(path); string(fields["model"]) != `"proxy-model"` {
+			t.Fatalf("%s held: overlay removed: %v", lock, fields)
+		}
+	}
+
+	restored, err := m.RecoverStale(context.Background())
+	if !restored || err != nil {
+		t.Fatalf("dead proxy: restored=%v err=%v", restored, err)
+	}
+	fields, err := readSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 1 || string(fields["language"]) != `"English"` {
+		t.Fatalf("restored fields=%v", fields)
+	}
+	if _, err := os.Stat(m.statePath()); !os.IsNotExist(err) {
+		t.Fatalf("journal not removed: %v", err)
 	}
 }
 
