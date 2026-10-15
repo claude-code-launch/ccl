@@ -1,0 +1,62 @@
+name: Claude Code compatibility
+
+on:
+  pull_request:
+    paths:
+      - internal/claude/**
+      - integration/modelpicker/**
+      - .github/workflows/claude-compatibility.yml
+  push:
+    branches: [main]
+    paths:
+      - internal/claude/**
+      - integration/modelpicker/**
+      - .github/workflows/claude-compatibility.yml
+  workflow_dispatch:
+    inputs:
+      claude_version:
+        description: Claude Code version to check
+        default: '2.1.300'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-model-picker:
+    name: Windows /model with real Claude Code
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install terminal test tools and pinned Claude Code
+        env:
+          CLAUDE_VERSION: ${{ inputs.claude_version || '2.1.300' }}
+        run: |
+          python -m pip install pywinpty==3.0.5 pyte==0.8.2
+          npm install --prefix "$env:RUNNER_TEMP/claude-compat" --ignore-scripts --no-audit --no-fund "@anthropic-ai/claude-code@$env:CLAUDE_VERSION"
+      - name: Build CCL
+        run: go build -o ccl-verify.exe .
+      - name: Verify real model picker without inference
+        env:
+          CCL_TEST_BINARY: ${{ github.workspace }}/ccl-verify.exe
+          CCL_TEST_CLAUDE: ${{ runner.temp }}/claude-compat/node_modules/@anthropic-ai/claude-code-win32-x64/claude.exe
+          CCL_TEST_EVIDENCE: ${{ runner.temp }}/model-picker-evidence
+        run: python integration/modelpicker/verify.py
+      - name: Save terminal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-model-picker
+          path: ${{ runner.temp }}/model-picker-evidence
+          if-no-files-found: ignore

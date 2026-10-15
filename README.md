@@ -674,6 +674,8 @@ ccl provider preview
 
 槽位用于设置默认模型，无需为模型池中的每个模型都建立映射；默认情况下，Claude Code 的 `/model` 会列出完整模型池，包括未映射的模型。Custom 只是默认主模型槽位。如果你已在 Claude settings 中定义自己的 `modelPicker`，则沿用你的列表。
 
+`/model` 的槽位显示为 `Opus · 实际模型名`、`Sonnet · 实际模型名` 等，默认主模型显示为 `Custom · 实际模型名`，其余模型直接显示目录名称或模型 ID；`[1m]` 在标签中显示为 `(1M)`。Windows 使用相同规则，支持安装目录、用户目录中的空格与中文，兼容原生 `claude.exe` 和 npm 的 `claude.cmd` 入口。模型列表由 Claude Code 的 `modelPicker` 设置提供；若旧版 Claude Code 未显示该列表，请先升级 Claude Code。
+
 ```bash
 ccl map                                          # 交互式 TUI
 ccl map auto                                     # 按 ccl set 的规则自动填充槽位（--probe 先测试，计费）
@@ -905,6 +907,8 @@ Anthropic 兼容网关建议确认：
 ## CI/CD
 
 PR 和 `main` 推送触发检查：Linux 运行完整竞态测试、vet 和构建；Linux、macOS、Windows 均运行核心契约测试、原生 CLI 构建、真实后台代理进程集成测试和 npm 安装测试。Windows 另外验证中英文终端布局、窗口缩放、中文按钮坐标及代理命令路由。
+
+模型设置测试还会通过实际子进程检查 `/model` 的标签、中文、`(1M)`、未映射模型和继承环境隔离，并在 Windows 分别覆盖原生与 npm 启动入口。修改 Claude 启动或模型列表相关文件时，`Claude Code compatibility` 工作流会在 Windows ConPTY 中运行固定版本的真实 Claude Code（默认 `2.1.300`），打开 `/model` 并核对普通启动和独立代理两种模式，保存终端文本证据。该检查使用临时用户目录、假凭据及本地拒绝推理的端点，不提交模型请求；也可手动运行工作流指定其他 Claude Code 版本。
 
 推送 `v*` tag 触发多平台构建与发布：
 

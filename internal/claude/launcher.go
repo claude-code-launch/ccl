@@ -676,12 +676,7 @@ func (l *Launch) Command(args ...string) *exec.Cmd {
 	claudeArgs := make([]string, 0, 2+len(args))
 	claudeArgs = append(claudeArgs, "--settings", l.SettingsPath)
 	claudeArgs = append(claudeArgs, args...)
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", append([]string{"/c", l.Path}, claudeArgs...)...)
-	} else {
-		cmd = exec.Command(l.Path, claudeArgs...)
-	}
+	cmd := claudeCommand(l.Path, claudeArgs...)
 	cmd.Env = l.Env
 	return cmd
 }
