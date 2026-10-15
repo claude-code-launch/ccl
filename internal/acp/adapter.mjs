@@ -379,21 +379,29 @@ prototype.cancel = function (params) {
   });
 };
 
-prototype.closeSession = async function (params) {
-  const connection = state(this);
-  const session = boundSession(connection, params.sessionId);
-  for (const abort of session?.preparing ?? []) abort.abort();
-  await session?.ready;
-  const result = await originals.closeSession.call(this, {
-    ...params,
-    sessionId: session?.backendID ?? params.sessionId,
-  });
-  if (session) {
-    connection.sessions.delete(params.sessionId);
-    await release(session.lease);
-  }
-  return result;
-};
+// Upstream delete and archive tear a loaded session down without going through
+// closeSession, so each of them must release the session's provider lease too.
+for (const name of ["closeSession", "deleteSession", "archiveSession"]) {
+  const original = originals[name];
+  if (!original) continue;
+  prototype[name] = async function (params, ...rest) {
+    const connection = state(this);
+    const session = boundSession(connection, params.sessionId);
+    for (const abort of session?.preparing ?? []) abort.abort();
+    await session?.ready;
+    const result = await original.call(
+      this,
+      { ...params, sessionId: session?.backendID ?? params.sessionId },
+      ...rest,
+    );
+    if (session) {
+      for (const [id, bound] of connection.sessions)
+        if (bound === session) connection.sessions.delete(id);
+      await release(session.lease);
+    }
+    return result;
+  };
+}
 
 // These methods are delegated without interpreting any of their fields. The
 // alias is needed only by conversations created before CCL used this adapter.
@@ -401,7 +409,6 @@ for (const name of [
   "prompt",
   "setSessionMode",
   "setSessionConfigOption",
-  "deleteSession",
   "steer",
   "stopAsyncTask",
   "goal",

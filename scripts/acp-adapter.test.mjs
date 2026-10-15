@@ -29,6 +29,8 @@ export class ClaudeAcpAgent {
   }
   async cancel(params) { this.held.get(params.sessionId)?.({ stopReason: 'cancelled' }); this.held.delete(params.sessionId); }
   async closeSession(params) { this.sessions.delete(params.sessionId); return { upstreamClose: true }; }
+  async deleteSession(params) { this.sessions.delete(params.sessionId); return { upstreamDelete: true }; }
+  async archiveSession(params) { this.sessions.delete(params.sessionId); return { upstreamArchive: true }; }
   async setSessionMode(params) { return { modeFromUpstream: params }; }
   async setSessionConfigOption(params) { return { configFromUpstream: params }; }
 }
@@ -43,7 +45,7 @@ const agent = new ClaudeAcpAgent({
   sessionUpdate: params => send({ jsonrpc: '2.0', method: 'session/update', params }),
   requestPermission: params => new Promise(resolve => { pending.set('upstream:opaque', resolve); send({ jsonrpc: '2.0', id: 'upstream:opaque', method: 'session/request_permission', params }); }),
 });
-const methods = { 'session/new': 'newSession', 'session/load': 'loadSession', 'session/resume': 'resumeSession', 'session/prompt': 'prompt', 'session/cancel': 'cancel', 'session/close': 'closeSession', 'session/set_mode': 'setSessionMode', 'session/set_config_option': 'setSessionConfigOption' };
+const methods = { 'session/new': 'newSession', 'session/load': 'loadSession', 'session/resume': 'resumeSession', 'session/prompt': 'prompt', 'session/cancel': 'cancel', 'session/close': 'closeSession', 'session/delete': 'deleteSession', '_session/archive': 'archiveSession', 'session/set_mode': 'setSessionMode', 'session/set_config_option': 'setSessionConfigOption' };
 const input = readline.createInterface({ input: process.stdin });
 input.on('line', async line => {
   const request = JSON.parse(line);
@@ -381,6 +383,25 @@ test("upstream foreground turns and repeated loads retain their active configura
   assert.deepEqual([...f.state.leases.values()], [2]);
   await f.call("session/close", { sessionId });
   assert.equal(f.state.leases.size, 0);
+});
+
+test("delete and archive release the configuration lease of a loaded session", async (t) => {
+  const f = await fixture(t);
+  for (const [method, result] of [
+    ["session/delete", { upstreamDelete: true }],
+    ["_session/archive", { upstreamArchive: true }],
+  ]) {
+    const created = await f.call("session/new", {
+      cwd: f.directory,
+      mcpServers: [],
+    });
+    assert.equal(f.state.leases.size, 1);
+    const ended = await f.call(method, {
+      sessionId: created.result.sessionId,
+    });
+    assert.deepEqual(ended.result, result);
+    assert.equal(f.state.leases.size, 0, method);
+  }
 });
 
 test("cancel interrupts configuration preparation before a prompt is forwarded", async (t) => {

@@ -52,11 +52,16 @@ func TestUpstreamACPConfiguration(t *testing.T) {
 		}
 		body, _ := io.ReadAll(r.Body)
 		var request struct {
-			Model string `json:"model"`
+			Model string            `json:"model"`
+			Tools []json.RawMessage `json:"tools"`
 		}
 		_ = json.Unmarshal(body, &request)
-		t.Logf("local fixture %s model=%s", r.URL.Path, request.Model)
-		requests <- request.Model
+		t.Logf("local fixture %s model=%s tools=%d", r.URL.Path, request.Model, len(request.Tools))
+		// Only agent turns carry tools. Side requests such as the SDK's
+		// background session title may land after the next turn has started.
+		if len(request.Tools) > 0 {
+			requests <- request.Model
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if strings.Contains(r.URL.Path, "chat/completions") {
 			if r.Header.Get("Authorization") != "Bearer fake-b-key" {
