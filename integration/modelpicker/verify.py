@@ -12,6 +12,7 @@ import queue
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,6 +21,9 @@ import pyte
 
 
 def main():
+    # GitHub's redirected Windows stdout otherwise defaults to cp1252.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     ccl_source = Path(os.environ["CCL_TEST_BINARY"]).resolve()
     claude_source = Path(os.environ["CCL_TEST_CLAUDE"]).resolve()
     evidence = Path(os.environ["CCL_TEST_EVIDENCE"])
@@ -77,8 +81,10 @@ def main():
                 "hasCompletedOnboarding": True, "theme": "dark",
                 "lastOnboardingVersion": version.split()[0],
                 "customApiKeyResponses": {"approved": ["fake-local-key"]},
-                "projects": {str(project): {"hasTrustDialogAccepted": True,
-                                            "hasCompletedProjectOnboarding": True}},
+                "projects": {key: {"hasTrustDialogAccepted": True,
+                                   "hasCompletedProjectOnboarding": True}
+                             for path in (project, project.resolve())
+                             for key in (str(path), path.as_posix())},
             }), encoding="utf-8")
             env = dict(os.environ, HOME=str(home), USERPROFILE=str(home),
                        CLAUDE_CONFIG_DIR=str(config_dir), CCL_LANG="en", TERM="xterm-256color",
