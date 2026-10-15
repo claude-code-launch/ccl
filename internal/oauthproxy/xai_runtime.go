@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -69,7 +68,6 @@ func applyXaiGrokHeaders(header http.Header, sessionID, requestID, agentID, mode
 type xaiOAuthAuthorizer struct {
 	path   string
 	client *http.Client
-	mu     sync.Mutex
 }
 
 type xaiOAuthCredential struct {
@@ -84,8 +82,11 @@ type xaiOAuthCredential struct {
 }
 
 func (a *xaiOAuthAuthorizer) authorize(ctx context.Context, force bool) (codexResponsesAuthorization, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	release, err := lockOAuthCredential(ctx, a.path)
+	if err != nil {
+		return codexResponsesAuthorization{}, err
+	}
+	defer release()
 	credential, err := a.load()
 	if err != nil {
 		return codexResponsesAuthorization{}, err
@@ -93,6 +94,7 @@ func (a *xaiOAuthAuthorizer) authorize(ctx context.Context, force bool) (codexRe
 	if credential.disabled {
 		return codexResponsesAuthorization{}, fmt.Errorf("xAI credential %s is disabled", filepath.Base(a.path))
 	}
+	force = force && oauthTokenStillRejected(ctx, credential.accessToken)
 	if force || credential.accessToken == "" || (!credential.expiresAt.IsZero() && time.Now().Add(time.Minute).After(credential.expiresAt)) {
 		credential, err = a.refresh(ctx, credential)
 		if err != nil {
@@ -239,11 +241,8 @@ func startXaiOAuth(parent context.Context, modelSpec, credentialFile string) (*R
 	}
 	path := filepath.Join(authDir, filepath.Base(credentialFile))
 	authorizer := &xaiOAuthAuthorizer{
-		path: path,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
+		path:   path,
+		client: &http.Client{Transport: newUpstreamTransport(30 * time.Second)},
 	}
 	credential, err := authorizer.load()
 	if err != nil {

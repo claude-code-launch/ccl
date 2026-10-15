@@ -27,6 +27,16 @@ type Session struct {
 // Prepare discovers any missing API-key gateway models, starts the shared
 // Anthropic Messages adapter when required, and returns the resolved endpoint.
 func Prepare(ctx context.Context, configured provider.Provider) (*Session, error) {
+	return prepare(ctx, configured, false)
+}
+
+// PrepareProxy always provides a local Messages endpoint, including for native
+// Anthropic gateways that normal launches can contact directly.
+func PrepareProxy(ctx context.Context, configured provider.Provider) (*Session, error) {
+	return prepare(ctx, configured, true)
+}
+
+func prepare(ctx context.Context, configured provider.Provider, forceProxy bool) (*Session, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -36,7 +46,7 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 		Provider: resolved,
 		BaseURL:  resolved.Endpoint,
 	}
-	session.UseProxy = provider.IsOpenAICompatibleType(resolved.Type) || provider.IsModelsDevType(resolved.Type) ||
+	session.UseProxy = forceProxy || provider.IsOpenAICompatibleType(resolved.Type) || provider.IsModelsDevType(resolved.Type) ||
 		strings.TrimSpace(resolved.OAuthProvider) != ""
 	if !session.UseProxy {
 		return session, nil
@@ -45,7 +55,19 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 	// The provider has not declared its own model pool: discover it from the
 	// gateway's OpenAI-shaped model list before the runtime starts.
 	if resolved.OAuthProvider == "" && strings.TrimSpace(resolved.Model) == "" {
-		models, err := protocol.GetOpenAIModelsContext(ctx, resolved.Endpoint, resolved.APIKey)
+		var models string
+		var err error
+		if provider.IsAnthropicType(resolved.Type) {
+			var infos []protocol.ModelInfo
+			infos, err = protocol.GetAnthropicModelInfosWithAuthContext(ctx, resolved.Endpoint, resolved.APIKey, resolved.AnthropicAuth)
+			ids := make([]string, 0, len(infos))
+			for _, info := range infos {
+				ids = append(ids, info.ID)
+			}
+			models = strings.Join(ids, ",")
+		} else {
+			models, err = protocol.GetOpenAIModelsContext(ctx, resolved.Endpoint, resolved.APIKey)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("discover OpenAI models before starting the provider runtime: %w", err)
 		}
@@ -56,6 +78,7 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 		Protocol:               upstreamProtocol(resolved),
 		Endpoint:               resolved.Endpoint,
 		APIKey:                 resolved.APIKey,
+		AnthropicAuth:          resolved.AnthropicAuth,
 		ModelSpec:              provider.RuntimeModelSpec(resolved),
 		OAuthProvider:          resolved.OAuthProvider,
 		OAuthAccountCredential: resolved.OAuthAccountCredential,
@@ -83,6 +106,9 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 }
 
 func upstreamProtocol(p provider.Provider) oauthproxy.UpstreamProtocol {
+	if provider.IsAnthropicType(p.Type) {
+		return oauthproxy.ProtocolAnthropic
+	}
 	if provider.IsOpenAIResponsesType(p.Type) {
 		return oauthproxy.ProtocolOpenAIResponses
 	}

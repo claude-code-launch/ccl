@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/claude-code-launch/ccl/internal/claude"
 	"io"
 	"os"
 	"os/exec"
@@ -28,7 +29,8 @@ func newProviderToggleCommand(use string) *cobra.Command {
 ccl ls shows the current state.
 
 While off, the environment is passed to Claude Code unchanged and no ccl
-settings, proxy, or status line are added. ccl bypass still applies. ccl acp
+settings, proxy, or status line are added. If ccl proxy is running, its settings
+overlay is bypassed for this launch without stopping it. ccl bypass still applies. ccl acp
 keeps using its acp_provider. Selecting a provider with ccl use turns provider
 loading back on.`,
 		Args: cobra.NoArgs,
@@ -85,6 +87,14 @@ func runClaudeWithoutProvider(args []string) error {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		return fmt.Errorf("claude CLI not found in PATH: %w", err)
+	}
+	settingsPath, cleanup, err := claude.PlainSettingsWithoutProxy()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if settingsPath != "" {
+		args = append([]string{"--settings", settingsPath}, args...)
 	}
 	fmt.Fprintln(os.Stderr, locale.T(
 		"ccl provider 已关闭：以 Claude Code 自身配置启动（ccl provider on 可恢复）",

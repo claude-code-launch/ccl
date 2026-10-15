@@ -72,6 +72,8 @@ func antigravityHTTPTransport() *http.Transport {
 			ForceAttemptHTTP2:     false,
 			TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
 			TLSClientConfig:       &tls.Config{NextProtos: []string{"http/1.1"}},
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 90 * time.Second,
 		}
 	})
@@ -94,7 +96,6 @@ func resolveAntigravityHost(base string) string {
 type antigravityOAuthAuthorizer struct {
 	path   string
 	client *http.Client
-	mu     sync.Mutex
 }
 
 type antigravityOAuthCredential struct {
@@ -108,8 +109,11 @@ type antigravityOAuthCredential struct {
 }
 
 func (a *antigravityOAuthAuthorizer) authorize(ctx context.Context, force bool) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	release, err := lockOAuthCredential(ctx, a.path)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	credential, err := a.load()
 	if err != nil {
 		return "", err
@@ -117,6 +121,7 @@ func (a *antigravityOAuthAuthorizer) authorize(ctx context.Context, force bool) 
 	if credential.disabled {
 		return "", fmt.Errorf("Gemini credential %s is disabled", filepath.Base(a.path))
 	}
+	force = force && oauthTokenStillRejected(ctx, credential.accessToken)
 	if force || credential.accessToken == "" || (!credential.expiresAt.IsZero() && time.Now().Add(time.Minute).After(credential.expiresAt)) {
 		credential, err = a.refresh(ctx, credential)
 		if err != nil {
@@ -380,7 +385,7 @@ func (s *geminiService) forward(ctx context.Context, stream bool, envelope []byt
 		}
 		if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
 			_ = response.Body.Close()
-			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
+			if _, authErr := s.authorizer.authorize(rejectedResponseContext(ctx, response), true); authErr != nil {
 				return nil, fmt.Errorf("refresh Gemini OAuth token: %w", authErr)
 			}
 			response, err = s.forwardOnce(ctx, stream, envelope)
@@ -509,11 +514,8 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 	}
 	path := filepath.Join(authDir, filepath.Base(credentialFile))
 	authorizer := &antigravityOAuthAuthorizer{
-		path: path,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
+		path:   path,
+		client: &http.Client{Transport: newUpstreamTransport(30 * time.Second)},
 	}
 	credential, err := authorizer.load()
 	if err != nil {
@@ -569,6 +571,7 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, models: models, usage: usage, listAuths: authorizer.listAuths,
 	}
+	runtime.cleanup = append(runtime.cleanup, closeIdleClients(service.client, authorizer.client))
 	go func() {
 		err := server.Serve(listener)
 		if err == http.ErrServerClosed {

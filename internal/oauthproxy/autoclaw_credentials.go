@@ -83,10 +83,7 @@ func newAutoClawOAuthAuthorizer(credentialFile string) (*autoClawOAuthAuthorizer
 		path:      filepath.Join(authDir, fileName),
 		sessionID: uuid.NewString(),
 		agentID:   "auto-coder",
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
+		client:    &http.Client{Transport: newUpstreamTransport(30 * time.Second)},
 	}
 	credential, err := authorizer.load()
 	if err != nil {
@@ -165,6 +162,7 @@ func (a *autoClawOAuthAuthorizer) authorize(ctx context.Context, forceRefresh bo
 	if strings.TrimSpace(credential.accessToken) == "" {
 		return "", fmt.Errorf("AutoClaw credential %s has no access token; run `ccl oauth autoclaw`", credential.fileName)
 	}
+	forceRefresh = forceRefresh && oauthTokenStillRejected(ctx, credential.accessToken)
 	if forceRefresh || autoClawTokenNeedsRefresh(credential) {
 		credential, err = a.refresh(ctx, credential, forceRefresh)
 		if err != nil {

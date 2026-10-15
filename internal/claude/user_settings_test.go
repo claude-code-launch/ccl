@@ -109,10 +109,10 @@ func TestProviderModelPickerListsTiersCustomAndPool(t *testing.T) {
 	}
 
 	var many []string
-	for i := range maxPickerModels + 20 {
+	for i := range 200 {
 		many = append(many, "model-"+string(rune('a'+i%26))+strings.Repeat("x", i))
 	}
-	if got := len(providerModelPicker(provider.Provider{Model: strings.Join(many, ",")}, nil).Options); got != maxPickerModels {
-		t.Fatalf("picker rows = %d, want the cap %d", got, maxPickerModels)
+	if got := len(providerModelPicker(provider.Provider{Model: strings.Join(many, ",")}, nil).Options); got != len(many) {
+		t.Fatalf("picker rows = %d, want every unmapped model (%d)", got, len(many))
 	}
 }

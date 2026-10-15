@@ -59,6 +59,13 @@ func (m *AdvancedConfigModel) handleModelsDevPickerKey(ke tui.KeyEvent) {
 		return
 	}
 	switch ke.Key {
+	case tui.KeyPageUp, tui.KeyPageDown:
+		delta := m.pickerHeight(true)
+		if ke.Key == tui.KeyPageUp {
+			delta = -delta
+		}
+		m.modelsDevCursor = min(max(m.modelsDevCursor+delta, 0), max(len(m.modelsDevFiltered)-1, 0))
+		m.keepPickersVisible()
 	case tui.KeyUp:
 		if m.modelsDevCursor > 0 {
 			m.modelsDevCursor--
@@ -70,8 +77,8 @@ func (m *AdvancedConfigModel) handleModelsDevPickerKey(ke tui.KeyEvent) {
 		if m.modelsDevCursor < len(m.modelsDevFiltered)-1 {
 			m.modelsDevCursor++
 		}
-		if m.modelsDevCursor >= m.modelsDevWindow+selectViewHeight {
-			m.modelsDevWindow = m.modelsDevCursor - selectViewHeight + 1
+		if m.modelsDevCursor >= m.modelsDevWindow+m.pickerHeight(true) {
+			m.modelsDevWindow = m.modelsDevCursor - m.pickerHeight(true) + 1
 		}
 	case tui.KeyEnter:
 		if len(m.modelsDevFiltered) > 0 && m.modelsDevCursor >= 0 && m.modelsDevCursor < len(m.modelsDevFiltered) {
@@ -257,6 +264,9 @@ func (m *AdvancedConfigModel) handleFocusRow(row configRowKind) {
 // that the slot picker filter and the endpoint/key inputs take printable
 // keys, and the remaining keys move the page cursor.
 func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
+	if m.width > 0 && m.height > 0 && (m.width < 32 || m.height < 8) && ke.Key != tui.KeyEscape && !(ke.Mod == tui.ModCtrl && ke.Rune == 'c') {
+		return
+	}
 	if m.modelsDevPicker {
 		m.handleModelsDevPickerKey(ke)
 		m.markDirty()
@@ -323,6 +333,28 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		m.quit()
 		return
 
+	case tui.KeyPageUp, tui.KeyPageDown:
+		delta := max(scrollBodyBudget(m.height)/2, 1)
+		if m.filterFocused {
+			delta = m.pickerHeight(false)
+		}
+		if ke.Key == tui.KeyPageUp {
+			delta = -delta
+		}
+		if m.filterFocused {
+			m.slotListCursor = min(max(m.slotListCursor+delta, 0), max(len(m.filteredPool)-1, 0))
+			m.keepPickersVisible()
+		} else {
+			wasKeyRow := m.usesModelsDev() && m.currentRow() == rowAPIKey
+			m.urlFocused, m.keyFocused = false, false
+			m.cursor = min(max(m.cursor+delta, 0), max(len(m.visibleRows())-1, 0))
+			m.keepCursorVisible()
+			if wasKeyRow {
+				m.startModelsDevVerification()
+			}
+		}
+		m.markDirty()
+		return
 	case tui.KeyUp:
 		if inputHasKeyboard && ke.IsRune() {
 			return // navigation alias yielded to text input
@@ -362,8 +394,8 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		if m.filterFocused {
 			if m.slotListCursor < len(m.filteredPool)-1 {
 				m.slotListCursor++
-				if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
-					m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
+				if m.slotListCursor >= m.filterWindowStart+m.pickerHeight(false) {
+					m.filterWindowStart = m.slotListCursor - m.pickerHeight(false) + 1
 				}
 			}
 			m.markDirty()
@@ -448,8 +480,8 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 		if m.filterFocused {
 			if m.slotListCursor < len(m.filteredPool)-1 {
 				m.slotListCursor++
-				if m.slotListCursor >= m.filterWindowStart+filterViewHeight {
-					m.filterWindowStart = m.slotListCursor - filterViewHeight + 1
+				if m.slotListCursor >= m.filterWindowStart+m.pickerHeight(false) {
+					m.filterWindowStart = m.slotListCursor - m.pickerHeight(false) + 1
 				}
 			}
 			m.markDirty()
@@ -751,13 +783,13 @@ func isANSIFinalByte(c byte) bool {
 func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
 	// Strip leading border, cursor arrow, and whitespace to find the first field.
 	trimmed := strings.TrimLeft(text, " │|>")
-	lead := len(text) - len(trimmed)
+	lead := tui.StringWidth(text[:len(text)-len(trimmed)])
 	// Account for a checkbox "[x] "/"[ ] " before the label.
 	rest := trimmed
 	if strings.HasPrefix(rest, "[") {
 		if idx := strings.Index(rest, "] "); idx >= 0 {
 			rest = rest[idx+2:]
-			lead = len(text) - len(rest)
+			lead = tui.StringWidth(text[:len(text)-len(rest)])
 		}
 	}
 	// Find every label that starts the trimmed field. Both the English and the
@@ -815,7 +847,7 @@ func matchRowLabel(text string, x int, allowButton bool) (configRowKind, bool) {
 			if idx < 0 {
 				continue
 			}
-			absIdx := lead + idx
+			absIdx := lead + tui.StringWidth(rest[:idx])
 			if absIdx <= x && (bestIdx > x || absIdx > bestIdx) {
 				best = kind
 				bestIdx = absIdx
@@ -841,7 +873,10 @@ func rowClickLabelPrefixes(kind configRowKind) []string {
 	}
 	// "Save Provider" is the other rendering of the Save button.
 	if kind == rowSave {
-		prefixes = append(prefixes, "Save Provider", "保存 Provider")
+		prefixes = append(prefixes, "Save Provider", "保存 Provider", "Save Mapping", "保存映射")
+	}
+	if kind == rowContext {
+		prefixes = append(prefixes, "Context", "上下文")
 	}
 	return prefixes
 }
@@ -864,6 +899,14 @@ func (m *AdvancedConfigModel) KeyMap() tui.KeyMap {
 // presses are handled; the wheel is deliberately ignored (the page anchors its
 // scroll window to the cursor instead).
 func (m *AdvancedConfigModel) HandleMouse(me tui.MouseEvent) bool {
+	if me.Button == tui.MouseWheelUp || me.Button == tui.MouseWheelDown {
+		key := tui.KeyUp
+		if me.Button == tui.MouseWheelDown {
+			key = tui.KeyDown
+		}
+		m.handleKey(tui.KeyEvent{Key: key})
+		return true
+	}
 	if m.modelsDevPicker || m.filterFocused {
 		return false
 	}

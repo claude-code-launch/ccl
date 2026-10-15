@@ -54,18 +54,11 @@ type kiroCredentialPool struct {
 	cache          kiroCredentialCache
 }
 
-// kiroCredentialRefreshLocks serializes token refreshes per credential file.
-// It is process-global on purpose: several runtimes (and therefore several
-// pools) can point at the same file in ~/.ccl/auth, and a refresh must not be
-// attempted twice concurrently. Entries are keyed by credential path, so the map
-// is bounded by the number of credential files the process has seen.
-var kiroCredentialRefreshLocks sync.Map
-
 func newKiroCredentialPool(authDir, credentialFile string) *kiroCredentialPool {
 	return &kiroCredentialPool{
 		authDir:        authDir,
 		credentialFile: strings.TrimSpace(credentialFile),
-		client:         &http.Client{Timeout: 60 * time.Second},
+		client:         &http.Client{Timeout: 60 * time.Second, Transport: newUpstreamTransport(30 * time.Second)},
 	}
 }
 
@@ -270,20 +263,28 @@ func (p *kiroCredentialPool) orderedCredentials() ([]*kiroCredential, error) {
 }
 
 func (p *kiroCredentialPool) usableCredential(ctx context.Context, credential *kiroCredential, forceRefresh bool) (*kiroCredential, error) {
-	lockValue, _ := kiroCredentialRefreshLocks.LoadOrStore(credential.path, &sync.Mutex{})
-	refreshLock := lockValue.(*sync.Mutex)
-	refreshLock.Lock()
-	defer refreshLock.Unlock()
+	if !forceRefresh && !credential.disabled && credential.accessToken != "" &&
+		(credential.expiresAt.IsZero() || time.Until(credential.expiresAt) > kiroTokenRefreshSkew) {
+		return credential, nil
+	}
+	release, err := lockOAuthCredential(ctx, credential.path)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
-	latest, err := p.cache.get(credential.path, nil)
+	// A different process can replace the file without changing a coarse mtime.
+	// Read the credential directly while holding the cross-process refresh lock.
+	latest, err := loadKiroCredential(credential.path)
 	if err != nil {
 		return nil, err
 	}
 	if latest.disabled {
 		return nil, fmt.Errorf("Kiro credential %s is disabled", latest.fileName)
 	}
-	if !forceRefresh && latest.accessToken != "" &&
+	if (!forceRefresh || latest.accessToken != credential.accessToken) && latest.accessToken != "" &&
 		(latest.expiresAt.IsZero() || time.Until(latest.expiresAt) > kiroTokenRefreshSkew) {
+		p.cache.invalidate(latest.path)
 		return latest, nil
 	}
 	if latest.refreshToken == "" {

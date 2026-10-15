@@ -35,13 +35,17 @@ type AnthropicModel struct {
 // token-limit, rate, and catalog badge metadata from an Anthropic-compatible
 // /v1/models endpoint. Unknown extension fields remain safely ignored.
 func GetAnthropicModelInfosWithAuth(baseURL, key, authStyle string) ([]ModelInfo, error) {
+	return GetAnthropicModelInfosWithAuthContext(context.Background(), baseURL, key, authStyle)
+}
+
+func GetAnthropicModelInfosWithAuthContext(ctx context.Context, baseURL, key, authStyle string) ([]ModelInfo, error) {
 	if key == "" {
 		return nil, errors.New("api key is empty")
 	}
 	modelsURL := NormalizeAnthropicModelsURL(baseURL)
 
 	req, err := http.NewRequestWithContext(
-		context.Background(),
+		ctx,
 		http.MethodGet,
 		modelsURL,
 		nil,

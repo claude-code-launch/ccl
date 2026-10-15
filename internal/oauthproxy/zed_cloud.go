@@ -268,10 +268,7 @@ func newZedSession(credential *zedCredential) *zedSession {
 	return &zedSession{
 		credential:     credential,
 		organizationID: credential.organizationID,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 

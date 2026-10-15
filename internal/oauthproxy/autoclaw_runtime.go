@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -44,10 +43,9 @@ func startAutoClawOAuth(parent context.Context, _ string, modelSpec, credentialF
 			// AutoClaw's managed broker is implemented with Node fetch/undici,
 			// which currently sends HTTP/1.1. Match that transport when CCL
 			// calls the same endpoint; some WAF rules distinguish HTTP/2.
-			service.client.Transport = &http.Transport{
-				Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: false,
-				ResponseHeaderTimeout: 90 * time.Second,
-			}
+			transport := newUpstreamTransport(90 * time.Second)
+			transport.ForceAttemptHTTP2 = false
+			service.client.Transport = transport
 		})
 	if err != nil {
 		return nil, err

@@ -155,6 +155,7 @@ func startOpenAIChatRuntimeService(parent context.Context, endpoint string, rout
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, models: append([]string(nil), service.models...), usage: usage,
 	}
+	runtime.cleanup = append(runtime.cleanup, closeIdleClients(service.client, authorizerHTTPClient(authorizer)))
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -196,10 +197,7 @@ func newChatCompletionsServiceWithAuthorizer(apiKey, endpoint string, routes []r
 	return &chatCompletionsService{
 		apiKey: apiKey, endpoint: endpoint, authorizer: authorizer,
 		models: models, modelRoute: modelRoute, usage: usage, fastRetry: true,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		client: &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 
@@ -230,8 +228,16 @@ func (s *chatCompletionsService) handleCountTokens(writer http.ResponseWriter, r
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	converted, err := s.convertRequest(raw)
+	if err != nil {
+		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	tokens, estimator := countChatInputTokens(converted.model, converted.body)
+	LogDebugEvent("token_counted", "component", "openai_chat", "model", converted.model,
+		"body_bytes", len(converted.body), "input_tokens", tokens, "estimator", estimator)
 	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateApproxTokensBytes(raw)})
+	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": tokens})
 }
 
 func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, request *http.Request) {
@@ -255,42 +261,12 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	converted, err := convertAnthropicToChatCompletions(raw)
+	converted, err := s.convertRequest(raw)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "openai_chat", "request_id", requestID,
 			"status", http.StatusBadRequest, "reason", "request_conversion", "error", err)
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
-	}
-	if route := s.modelRoute[strings.ToLower(converted.clientModel)]; route != "" {
-		if s.normalizeModel != nil {
-			route = s.normalizeModel(route)
-		}
-		converted.model = route
-		converted.upstreamModel = route
-		var body map[string]any
-		if decodeProtocolJSON(converted.body, &body) == nil {
-			body["model"] = route
-			converted.body, _ = json.Marshal(body)
-		}
-	}
-	if s.normalizeBody != nil {
-		normalized, normalizeErr := s.normalizeBody(converted.body)
-		if normalizeErr != nil {
-			LogWarnEvent("request_rejected", "component", "openai_chat", "request_id", requestID,
-				"status", http.StatusBadRequest, "reason", "body_normalization", "error", normalizeErr)
-			writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
-			return
-		}
-		converted.body = normalized
-	}
-	if s.normalizeRequest != nil {
-		if normalizeErr := s.normalizeRequest(converted); normalizeErr != nil {
-			LogWarnEvent("request_rejected", "component", "openai_chat", "request_id", requestID,
-				"status", http.StatusBadRequest, "reason", "request_normalization", "error", normalizeErr)
-			writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
-			return
-		}
 	}
 	LogDebugEvent("request_converted", "component", "openai_chat", "request_id", requestID,
 		"client_model", converted.clientModel, "upstream_model", converted.model,
@@ -374,7 +350,7 @@ func (s *chatCompletionsService) call(ctx context.Context, converted *chatComple
 			// OAuth subscription: a stale token 401s once, then we force-refresh and
 			// retry the request exactly once before surfacing the failure.
 			_ = response.Body.Close()
-			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
+			if _, authErr := s.authorizer.authorize(rejectedResponseContext(ctx, response), true); authErr != nil {
 				return nil, fmt.Errorf("refresh OpenAI Chat OAuth token: %w", authErr)
 			}
 			response, err = s.callOnce(ctx, converted)
@@ -435,4 +411,40 @@ func chatDrainError(ctx context.Context, response *http.Response) error {
 		status: response.StatusCode, body: strings.TrimSpace(string(body)),
 		retryAfter: response.Header.Get("Retry-After"), requestID: firstHeader(response.Header, "X-Request-Id", "Request-Id"),
 	}
+}
+
+// convertRequest is shared by inference and count_tokens, so alias routing and
+// backend-specific normalization do not leave counting on a different payload.
+func (s *chatCompletionsService) convertRequest(raw []byte) (*chatCompletionsConvertedRequest, error) {
+	converted, err := convertAnthropicToChatCompletions(raw)
+	if err != nil {
+		return nil, err
+	}
+	if route := s.modelRoute[strings.ToLower(converted.clientModel)]; route != "" {
+		if s.normalizeModel != nil {
+			route = s.normalizeModel(route)
+		}
+		converted.model, converted.upstreamModel = route, route
+		var body map[string]any
+		if err := decodeProtocolJSON(converted.body, &body); err != nil {
+			return nil, err
+		}
+		body["model"] = route
+		converted.body, err = json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if s.normalizeBody != nil {
+		converted.body, err = s.normalizeBody(converted.body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if s.normalizeRequest != nil {
+		if err := s.normalizeRequest(converted); err != nil {
+			return nil, err
+		}
+	}
+	return converted, nil
 }

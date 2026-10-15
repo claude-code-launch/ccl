@@ -117,6 +117,27 @@ type mixedProtocolRouter struct {
 }
 
 func startMixedProtocolRouter(parent context.Context, endpoint, upstreamAPIKey string, routes mixedRouteSet) (*Runtime, error) {
+	return startMixedProtocolRouterWithAuth(parent, endpoint, upstreamAPIKey, routes, "bearer")
+}
+
+// StartAnthropicAPI serves a native Anthropic gateway through an authenticated
+// loopback endpoint without exposing the upstream credential to Claude Code.
+func StartAnthropicAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec, auth string) (*Runtime, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if strings.TrimSpace(endpoint) == "" || strings.TrimSpace(upstreamAPIKey) == "" {
+		return nil, fmt.Errorf("Anthropic runtime requires endpoint and API key")
+	}
+	routes := runtimeModelRoutes(modelSpec)
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("Anthropic runtime requires at least one model")
+	}
+	set := mixedRouteSet{anthropic: routes, models: runtimeModelAliases(modelSpec)}
+	return startMixedProtocolRouterWithAuth(parent, endpoint, upstreamAPIKey, set, auth)
+}
+
+func startMixedProtocolRouterWithAuth(parent context.Context, endpoint, upstreamAPIKey string, routes mixedRouteSet, auth string) (*Runtime, error) {
 	apiKey, err := sessionAPIKey()
 	if err != nil {
 		return nil, err
@@ -172,6 +193,7 @@ func startMixedProtocolRouter(parent context.Context, endpoint, upstreamAPIKey s
 			anthropicNames = append(anthropicNames, route.Alias)
 		}
 		router.anthropicSvc = newAnthropicPassthroughService(apiKey, protocol.NormalizeAnthropicBaseURLForClaude(endpoint), anthropicNames, &chatStaticAuthorizer{token: upstreamAPIKey}, usage)
+		router.anthropicSvc.anthropicAuth = auth
 	}
 	runCtx, cancel := context.WithCancel(parent)
 	server := &http.Server{
@@ -187,6 +209,15 @@ func startMixedProtocolRouter(parent context.Context, endpoint, upstreamAPIKey s
 		// Surface the catalog so callers like `ccl map` and `ccl provider models --all`
 		// see the routed models instead of falling through to heuristics.
 		models: append([]string(nil), routes.models...),
+	}
+	if router.codex != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.codex.client))
+	}
+	if router.chatSvc != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.chatSvc.client))
+	}
+	if router.anthropicSvc != nil {
+		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.anthropicSvc.client))
 	}
 	go func() {
 		err := server.Serve(listener)

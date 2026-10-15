@@ -21,24 +21,22 @@ import (
 // backs models.dev native-Anthropic gateways and Zed native-Messages models
 // (static key).
 type anthropicPassthroughService struct {
-	apiKey     string
-	authorizer chatAuthorizer
-	models     []string
-	client     *http.Client
-	usage      *UsageTracker
-	baseURL    string
+	apiKey        string
+	authorizer    chatAuthorizer
+	models        []string
+	client        *http.Client
+	usage         *UsageTracker
+	baseURL       string
+	anthropicAuth string
 }
 
 // newAnthropicPassthroughService builds a native-Messages passthrough against
 // baseURL. The caller's Anthropic-Beta header passes through untouched.
 func newAnthropicPassthroughService(apiKey, baseURL string, models []string, authorizer chatAuthorizer, usage *UsageTracker) *anthropicPassthroughService {
 	return &anthropicPassthroughService{
-		apiKey: apiKey, baseURL: baseURL, models: models, authorizer: authorizer,
-		usage: usage,
-		client: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
-			ResponseHeaderTimeout: 90 * time.Second,
-		}},
+		apiKey: apiKey, baseURL: baseURL, models: models, authorizer: authorizer, anthropicAuth: "bearer",
+		usage:  usage,
+		client: &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 
@@ -158,7 +156,7 @@ func (s *anthropicPassthroughService) forward(ctx context.Context, incoming *htt
 		}
 		if response.StatusCode == http.StatusUnauthorized && s.authorizer != nil && s.authorizer.isOAuth() {
 			_ = response.Body.Close()
-			if _, authErr := s.authorizer.authorize(ctx, true); authErr != nil {
+			if _, authErr := s.authorizer.authorize(rejectedResponseContext(ctx, response), true); authErr != nil {
 				return nil, fmt.Errorf("refresh OAuth token: %w", authErr)
 			}
 			response, callErr = s.forwardOnce(ctx, incoming, path, body, nil)
@@ -218,7 +216,11 @@ func (s *anthropicPassthroughService) forwardOnce(ctx context.Context, incoming 
 	for _, hint := range claudeCodeHintHeaders {
 		request.Header.Del(hint)
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
+	if strings.EqualFold(s.anthropicAuth, "bearer") {
+		request.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		request.Header.Set("X-Api-Key", token)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	for key, values := range runtimeHeaders {
 		request.Header.Del(key)

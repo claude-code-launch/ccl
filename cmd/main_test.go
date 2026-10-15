@@ -17,6 +17,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	_ = os.Setenv("HOME", home)
+	_ = os.Setenv("USERPROFILE", home)
 	_ = os.Setenv("CLAUDE_CONFIG_DIR", home+"/.claude")
 	locale.SetLanguage("en")
 	code := m.Run()

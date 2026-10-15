@@ -7,6 +7,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/slotrec"
@@ -94,31 +95,34 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 		return fmt.Errorf("provider %q not found", providerName)
 	}
 
-	if cmd.Flags().Changed("opus") {
-		p.OpusModel = opts.opus
-	}
-	if cmd.Flags().Changed("sonnet") {
-		p.SonnetModel = opts.sonnet
-	}
-	if cmd.Flags().Changed("haiku") {
-		p.HaikuModel = opts.haiku
-	}
-	if cmd.Flags().Changed("fable") {
-		p.FableModel = opts.fable
-	}
-	if cmd.Flags().Changed("custom") {
-		p.CustomModelID = opts.custom
-	}
-	if cmd.Flags().Changed("subagent") {
-		p.SubagentModel = opts.subagent
-		if p.Env != nil {
-			delete(p.Env, claude.SubagentModelEnv)
+	if err := updateProvider(providerName, func(latest *provider.Provider) error {
+		if cmd.Flags().Changed("opus") {
+			latest.OpusModel = opts.opus
 		}
-	}
+		if cmd.Flags().Changed("sonnet") {
+			latest.SonnetModel = opts.sonnet
+		}
+		if cmd.Flags().Changed("haiku") {
+			latest.HaikuModel = opts.haiku
+		}
+		if cmd.Flags().Changed("fable") {
+			latest.FableModel = opts.fable
+		}
+		if cmd.Flags().Changed("custom") {
+			latest.CustomModelID = opts.custom
+		}
+		if cmd.Flags().Changed("subagent") {
+			latest.SubagentModel = opts.subagent
+			if latest.Env != nil {
+				delete(latest.Env, claude.SubagentModelEnv)
+			}
+		}
 
-	applyOneMSuffixes(&p, oneMSlotsFromProvider(p))
+		applyOneMSuffixes(latest, oneMSlotsFromProvider(*latest))
 
-	if err := replaceProvider(providerName, p); err != nil {
+		p = *latest
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -188,22 +192,20 @@ func runMapAuto(ctx context.Context, args []string, probe bool) error {
 	if len(pool) == 0 {
 		return fmt.Errorf("the provider's catalog is empty")
 	}
-	p.Model = strings.Join(models, ",")
-
-	// The same recommender as the ccl set page. Mapping starts from scratch, so
-	// the current slots are not preserved; a slot keeps its [1m] marker only
-	// when the recommender confirms the model serves 1M.
+	// Apply only catalog and slot fields to the latest provider under the lock.
+	// Runtime options changed while catalog discovery was in flight survive.
 	rec := slotrec.Recommend(provider.Provider{}, pool, metadata)
-	p.OpusModel, p.SonnetModel, p.HaikuModel = rec.Opus, rec.Sonnet, rec.Haiku
-	p.FableModel, p.CustomModelID, p.SubagentModel = rec.Fable, rec.Custom, rec.Subagent
-	applyOneMSuffixes(&p, rec.OneMSlots)
-	// Mapping does not change Default/Balanced, but retires unsupported old or
-	// hand-written context combinations when encountered.
-	if hasUnsupportedContextConfig(p) {
-		applyCompactPreset(&p, compactPresetDefault)
-	}
-
-	if err := replaceProvider(providerName, p); err != nil {
+	if err := updateProvider(providerName, func(latest *provider.Provider) error {
+		latest.Model = strings.Join(models, ",")
+		latest.OpusModel, latest.SonnetModel, latest.HaikuModel = rec.Opus, rec.Sonnet, rec.Haiku
+		latest.FableModel, latest.CustomModelID, latest.SubagentModel = rec.Fable, rec.Custom, rec.Subagent
+		applyOneMSuffixes(latest, rec.OneMSlots)
+		if hasUnsupportedContextConfig(*latest) {
+			applyCompactPreset(latest, compactPresetDefault)
+		}
+		p = *latest
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
@@ -272,14 +274,16 @@ func runMapTUI(args []string) error {
 		return fmt.Errorf("failed running mapping panel: %w", err)
 	}
 
-	updatedModel := m
-	p = *updatedModel.p
-
-	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)
-
-	if err := replaceProvider(providerName, p); err != nil {
+	saved, err := persistMappingModel(providerName, m)
+	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
+	if !saved {
+		fmt.Println(locale.T("ℹ️ 已取消映射，未保存。", "ℹ️ Mapping canceled; no changes were saved."))
+		return nil
+	}
+	p = *m.p
+	applyCompactConfig(&p, m.live().oneMSlots, m.live().compactPreset)
 
 	fmt.Printf("\n✓ Slot mapping saved for provider %q:\n", providerName)
 	printSlot := func(label, val string) {
@@ -301,6 +305,29 @@ func runMapTUI(args []string) error {
 	}
 
 	return nil
+}
+
+// persistMappingModel writes only fields the mapping panel owns, after an
+// explicit Save. Re-reading under the config lock preserves connection and
+// runtime options changed by another ccl process while the panel was open.
+func persistMappingModel(providerName string, m *AdvancedConfigModel) (bool, error) {
+	if !m.saveConfirmed {
+		return false, nil
+	}
+	if !m.canSave() {
+		return false, fmt.Errorf("no models available for mapping")
+	}
+	err := updateProvider(providerName, func(p *provider.Provider) error {
+		p.Model = m.p.Model
+		p.OpusModel, p.SonnetModel, p.HaikuModel = m.p.OpusModel, m.p.SonnetModel, m.p.HaikuModel
+		p.FableModel, p.CustomModelID, p.SubagentModel = m.p.FableModel, m.p.CustomModelID, m.p.SubagentModel
+		if p.Env != nil {
+			delete(p.Env, claude.SubagentModelEnv)
+		}
+		applyCompactConfig(p, m.live().oneMSlots, m.live().compactPreset)
+		return nil
+	})
+	return err == nil, err
 }
 
 func mappedModelOutputLabel(model string, metadata map[string]protocol.ModelInfo) string {

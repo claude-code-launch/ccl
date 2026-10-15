@@ -173,8 +173,8 @@ jobs:
           fi
           gh release create "$VERSION" "${assets[@]}" --verify-tag --generate-notes "${notes[@]}"
 
-  # npm ships its own copy of the binaries (bin/wrapper.js runs them locally),
-  # so publishing does not need the GitHub release and runs alongside it.
+  # Each platform package ships one native binary; npm installs only the
+  # matching optional dependency. Publish the launcher after all six versions.
   npm:
     name: Publish npm
     if: github.ref_type == 'tag'
@@ -196,37 +196,11 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-      # The npm tarball is compressed as a whole, so bin/ keeps raw binaries
-      # that bin/wrapper.js can exec directly.
-      - name: Prepare npm Assets
-        run: |
-          for asset in ccl-darwin-amd64 ccl-darwin-arm64 ccl-linux-amd64 ccl-linux-arm64 ccl-win32-x64.exe ccl-win32-arm64.exe; do
-            gzip -dc "dist/$asset.gz" > "bin/$asset"
-            test -s "bin/$asset"
-          done
-          chmod +x bin/ccl-* bin/wrapper.js
-      - name: Sync Version from Git Tag
+      - name: Prepare platform-specific npm packages
         env:
           TAG_NAME: ${{ needs.prepare.outputs.version }}
-        run: |
-          RAW_VERSION="${TAG_NAME#v}"
-          if [[ "$RAW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            CLEAN_VERSION=$(echo "$RAW_VERSION" | sed -E 's/\.([0-9]+)$/-\1/')
-          else
-            CLEAN_VERSION="$RAW_VERSION"
-          fi
-          npm version "$CLEAN_VERSION" --no-git-tag-version
-      - name: Check npm Version
-        id: npm_version
-        run: |
-          PKG_NAME=$(node -p "require('./package.json').name")
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if npm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
-            echo 'exists=true' >> "$GITHUB_OUTPUT"
-            echo "${PKG_NAME}@${PKG_VERSION} already exists; skipping npm publish."
-          else
-            echo 'exists=false' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish to npm with Trusted Publishing
-        if: steps.npm_version.outputs.exists != 'true'
-        run: npm publish --provenance --access public
+        run: node scripts/build-npm-packages.js "$TAG_NAME"
+      - name: Verify npm packaging
+        run: node --test scripts/npm-packages.test.js
+      - name: Publish platform packages and launcher with Trusted Publishing
+        run: node scripts/publish-npm-packages.js dist/npm

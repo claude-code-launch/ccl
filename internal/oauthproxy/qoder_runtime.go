@@ -152,6 +152,7 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 		catalogFallback: catalogFallback,
 		usage:           usageTracker,
 	}
+	proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(service.client))
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {

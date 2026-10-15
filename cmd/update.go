@@ -179,6 +179,11 @@ func installMethodForPath(path string, goBins []string) string {
 	if strings.Contains(slashed, "/node_modules/@claudecodelaunch/ccl/") {
 		return "npm"
 	}
+	for _, platform := range []string{"darwin-x64", "darwin-arm64", "linux-x64", "linux-arm64", "win32-x64", "win32-arm64"} {
+		if strings.Contains(slashed, "/node_modules/@claudecodelaunch/ccl-"+platform+"/") {
+			return "npm"
+		}
+	}
 	dir := filepath.Dir(path)
 	for _, bin := range goBins {
 		if bin != "" && filepath.Clean(bin) == dir {

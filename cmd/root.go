@@ -28,6 +28,7 @@ Common commands:
   ccl provider on|off         Load the active provider, or run Claude Code with
                               its own configuration (claude.ai subscription)
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
+  ccl proxy -p <name>         Connect direct claude invocations to a background proxy
   ccl oauth <gpt|grok|workbuddy|...>
                               Log in with a subscription account
   ccl doctor                  Environment + provider + subscription health

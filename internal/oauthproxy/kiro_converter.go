@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -760,21 +759,25 @@ func kiroEnvironmentState() map[string]any {
 	}
 }
 
-// estimateApproxTokens approximates the token count of text as one token per four
-// runes. Counting runes in place keeps this allocation-free, which matters both
-// for whole request bodies and for the per-delta calls on the streaming path.
+// estimateApproxTokens preserves the ASCII text-budget estimate but charges
+// non-ASCII bytes more conservatively, avoiding the old CJK undercount without
+// halving the retained English history. Upstream usage remains authoritative.
 func estimateApproxTokens(text string) int {
-	if text == "" {
-		return 0
-	}
-	return (utf8.RuneCountInString(text) + 3) / 4
+	return estimateUnknownTextTokens(text)
 }
 
 // estimateApproxTokensBytes is estimateApproxTokens without forcing a []byte to
 // string copy of the payload.
 func estimateApproxTokensBytes(raw []byte) int {
-	if len(raw) == 0 {
-		return 0
+	return estimateUnknownTextTokens(raw)
+}
+
+func estimateUnknownTextTokens[T ~string | ~[]byte](text T) int {
+	ascii := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] < 128 {
+			ascii++
+		}
 	}
-	return (utf8.RuneCount(raw) + 3) / 4
+	return (ascii+3)/4 + (len(text)-ascii+1)/2
 }

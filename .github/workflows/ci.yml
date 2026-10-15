@@ -41,3 +41,33 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+  portable:
+    name: Core contracts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test portable filesystem, protocol and provider contracts
+        run: go test -race ./internal/fsutil ./internal/provider ./internal/protocol ./internal/modelrouting ./internal/slotrec ./internal/modelsdev ./internal/proxymanager
+      - name: Build native CLI
+        run: go build -o ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }} .
+      - name: Test standalone proxy process lifecycle
+        env:
+          CCL_TEST_BINARY: ${{ github.workspace }}/ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: go test -race -v ./integration/proxy
+      - name: Test Windows configuration UI and command routing
+        if: runner.os == 'Windows'
+        run: go test -race ./cmd -run 'Test(ConfigAllRows|PickersFollow|CJKCancel|ProviderSelectionFits|OAuthAndMapping|TooSmallTerminal|Proxy)'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Test npm platform resolution and packaging
+        run: node --test scripts/npm-packages.test.js
