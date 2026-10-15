@@ -98,12 +98,31 @@ func TestProviderModelPickerListsTiersCustomAndPool(t *testing.T) {
 		models = append(models, option.Model)
 	}
 	got := strings.Join(models, ",")
-	if got != "opus,haiku,m-chat,m-pro,m-flash[1m]" {
+	// m-pro is reachable from the opus row; m-flash[1m] stays because its
+	// window differs from the haiku tier's.
+	if got != "opus,haiku,m-chat,m-flash[1m]" {
 		t.Fatalf("picker rows = %s", got)
 	}
 	if !strings.Contains(picker.Options[0].Label, "m-pro") {
 		t.Fatalf("tier row does not name its model: %+v", picker.Options[0])
 	}
+
+	// A tier on the custom model, or on another tier's model, adds no row.
+	same := providerModelPicker(provider.Provider{
+		Model:         "m-pro,m-chat",
+		OpusModel:     "m-pro",
+		SonnetModel:   "m-chat",
+		FableModel:    "m-pro",
+		CustomModelID: "m-pro",
+	}, nil)
+	models = models[:0]
+	for _, option := range same.Options {
+		models = append(models, option.Model)
+	}
+	if got := strings.Join(models, ","); got != "sonnet,m-pro" {
+		t.Fatalf("picker rows = %s", got)
+	}
+
 	if providerModelPicker(provider.Provider{}, nil) != nil {
 		t.Fatal("an empty provider produced a lineup")
 	}
