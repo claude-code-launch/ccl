@@ -18,6 +18,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
+	"github.com/claude-code-launch/ccl/internal/process"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/providersession"
@@ -586,6 +587,10 @@ func (c *providerContext) cleanup() {
 }
 
 func (c *providerContext) settings() settingsJSON {
+	return c.settingsForCWD(userSettingsCWD())
+}
+
+func (c *providerContext) settingsForCWD(cwd string) settingsJSON {
 	env := buildEnvWithModelNames(c.provider, c.baseURL, c.useProxy, c.modelNames)
 	// Applied after the provider Env overrides: a preset an older ccl stored must
 	// not survive into a session Claude Code should size itself.
@@ -603,7 +608,7 @@ func (c *providerContext) settings() settingsJSON {
 		// startup warning is not printed every session.
 		DisableClaudeAiConnectors: true,
 	}
-	userKeys := userDefinedSettings(userSettingsCWD())
+	userKeys := userDefinedSettings(cwd)
 	if !userKeys["outputStyle"] {
 		settings.OutputStyle = DefaultOutputStyle
 	}
@@ -676,7 +681,7 @@ func (l *Launch) Command(args ...string) *exec.Cmd {
 	claudeArgs := make([]string, 0, 2+len(args))
 	claudeArgs = append(claudeArgs, "--settings", l.SettingsPath)
 	claudeArgs = append(claudeArgs, args...)
-	cmd := claudeCommand(l.Path, claudeArgs...)
+	cmd := process.Command(l.Path, claudeArgs...)
 	cmd.Env = l.Env
 	return cmd
 }

@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"os/exec"
 	"reflect"
 	"sync"
 
@@ -34,7 +34,7 @@ func resolveACPProvider() (acpProviderSnapshot, error) {
 }
 
 type acpPreparedLaunch interface {
-	Command(args ...string) *exec.Cmd
+	Options(cwd string) (json.RawMessage, error)
 	Close()
 }
 
@@ -59,7 +59,7 @@ type acpLaunchManager struct {
 
 func newACPLaunchManager() *acpLaunchManager {
 	return newACPLaunchManagerWithContext(resolveACPProvider, func(ctx context.Context, p provider.Provider) (acpPreparedLaunch, error) {
-		return claude.PrepareContext(ctx, p)
+		return claude.PrepareAgentContext(ctx, p)
 	})
 }
 
@@ -81,15 +81,6 @@ func newACPLaunchManagerWithContext(
 		prepareContext: prepare,
 		generations:    make(map[uint64]*acpLaunchGeneration),
 	}
-}
-
-func (m *acpLaunchManager) primeContext(ctx context.Context) error {
-	lease, err := m.acquireContext(ctx)
-	if err != nil {
-		return err
-	}
-	lease.Release()
-	return nil
 }
 
 func (m *acpLaunchManager) acquire() (*acpLaunchLease, error) {
@@ -209,15 +200,11 @@ func (l *acpLaunchLease) Generation() uint64 {
 	return l.generation.id
 }
 
-func (l *acpLaunchLease) Command(cwd string, extra []string) *exec.Cmd {
+func (l *acpLaunchLease) Options(cwd string) (json.RawMessage, error) {
 	if l == nil || l.generation == nil || l.generation.launch == nil {
-		return nil
+		return nil, fmt.Errorf("ACP launch is not available")
 	}
-	cmd := l.generation.launch.Command(extra...)
-	if cmd != nil {
-		cmd.Dir = cwd
-	}
-	return cmd
+	return l.generation.launch.Options(cwd)
 }
 
 func (l *acpLaunchLease) Release() {

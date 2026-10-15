@@ -1,4 +1,4 @@
-package claude
+package process
 
 import (
 	"os/exec"
@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-func claudeCommand(path string, args ...string) *exec.Cmd {
+func Command(path string, args ...string) *exec.Cmd {
 	if ext := filepath.Ext(path); strings.EqualFold(ext, ".exe") || strings.EqualFold(ext, ".com") {
 		return exec.Command(path, args...)
 	}
