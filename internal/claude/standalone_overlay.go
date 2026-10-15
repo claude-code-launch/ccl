@@ -100,6 +100,31 @@ func (s settingsJSON) MarshalJSON() ([]byte, error) {
 	return json.Marshal(fields)
 }
 
+// standaloneAbsentValues pins the pre-proxy view of a key the daemon installed
+// while it was absent from the user's own settings. Claude Code drops the whole
+// --settings file when one of these keys is null (verified with 2.1.296), which
+// would silently fall back to the standalone overlay, so each gets a valid
+// value that behaves like the key being absent. Keys whose schema tolerates
+// null (effortLevel, ultracode, modelPicker, ...) keep it.
+var standaloneAbsentValues = map[string]json.RawMessage{
+	"model":          json.RawMessage(`""`),
+	"modelOverrides": json.RawMessage(`{}`),
+	"fastMode":       json.RawMessage(`false`),
+	"outputStyle":    json.RawMessage(`"default"`),
+	"language":       json.RawMessage(`""`),
+	"statusLine":     json.RawMessage(`{"type":"command","command":""}`),
+}
+
+func standaloneOverlayDefault(key string, before json.RawMessage) json.RawMessage {
+	if len(before) > 0 && string(before) != "null" {
+		return before
+	}
+	if value, ok := standaloneAbsentValues[key]; ok {
+		return value
+	}
+	return json.RawMessage(`null`)
+}
+
 func applyStandaloneDefaults(settings *settingsJSON, userKeys map[string]bool, useProxy bool) {
 	changes := standaloneChanges()
 	if len(changes) == 0 {
@@ -122,11 +147,7 @@ func applyStandaloneDefaults(settings *settingsJSON, userKeys map[string]bool, u
 				continue
 			}
 		}
-		value := change.Before
-		if len(value) == 0 {
-			value = json.RawMessage(`null`)
-		}
-		settings.proxyDefaults[change.Key] = value
+		settings.proxyDefaults[change.Key] = standaloneOverlayDefault(change.Key, change.Before)
 	}
 	// An unused credential from the standalone user settings must never be
 	// merged into a different ccl provider session.
@@ -176,10 +197,7 @@ func PlainSettingsWithoutProxy() (string, func(), error) {
 			}
 			env[change.Key] = value
 		} else if !projectKeys[change.Key] {
-			if len(value) == 0 {
-				value = json.RawMessage(`null`)
-			}
-			fields[change.Key] = value
+			fields[change.Key] = standaloneOverlayDefault(change.Key, value)
 		}
 	}
 	var err error
