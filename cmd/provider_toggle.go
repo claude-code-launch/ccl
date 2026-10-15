@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"github.com/claude-code-launch/ccl/internal/claude"
 	"io"
@@ -29,11 +30,15 @@ func newProviderToggleCommand(use string) *cobra.Command {
 ccl ls shows the current state.
 
 While off, the environment is passed to Claude Code unchanged and no ccl
-settings, proxy, or status line are added. If ccl proxy is running, its settings
-overlay is bypassed for this launch without stopping it. ccl bypass still applies. ccl acp
+settings, proxy, or status line are added. ccl provider off fails whenever
+ccl proxy is running; stop it first with ccl proxy stop. While off, ccl proxy
+needs an explicit provider name, and plain ccl launches bypass that proxy's
+settings overlay without stopping it. ccl bypass still applies. ccl acp
 keeps using its acp_provider. Selecting a provider with ccl use turns provider
 loading back on.`,
-		Args: cobra.NoArgs,
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runProviderToggle(cmd.OutOrStdout(), cmd.Name())
 		},
@@ -50,6 +55,17 @@ func runProviderToggle(out io.Writer, action string) error {
 	}
 
 	off := action == "off"
+	// Off exists to run Claude Code on its own subscription. A running proxy
+	// keeps rewriting Claude's settings for a provider, so refuse every off
+	// while one runs (even a repeated off) and say how to stop it.
+	if off {
+		if name, running := runningProxyProvider(context.Background()); running {
+			return fmt.Errorf(locale.T(
+				"ccl proxy 正在为 %s 运行；请先运行 ccl proxy stop，再关闭 provider 加载",
+				"ccl proxy is running for %s; stop it with ccl proxy stop before turning provider loading off",
+			), name)
+		}
+	}
 	if err := config.Update(func(c *provider.Config) error {
 		c.ProviderOff = off
 		return nil

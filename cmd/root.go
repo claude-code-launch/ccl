@@ -44,7 +44,12 @@ to Claude Code (for example: ccl resume, ccl -p "hello"). ccl doctor and
 ccl update are ccl's own; reach Claude Code's with ccl claude doctor and
 ccl claude update.
 `,
+	// Execute prints every error once; cobra printing it as well duplicated it.
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Arguments are valid by now: a launch failure such as a missing
+		// Claude Code needs its own message, not the command usage.
+		cmd.SilenceUsage = true
 		return runClaude(args)
 	},
 }

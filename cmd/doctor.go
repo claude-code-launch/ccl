@@ -138,6 +138,15 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 		claudePath, _ := exec.LookPath("claude")
 		doctorOK("Claude Code CLI: " + claudePath)
 	}
+	// ccl acp only: a missing adapter is not an error for normal launches.
+	if adapter, err := resolveACPAdapter(""); err != nil {
+		doctorInfo("ACP adapter (ccl acp only): not installed")
+		doctorHint(acpInstallHint())
+	} else if _, err := resolveNode(); err != nil {
+		doctorWarn("ACP adapter: " + adapter + "; " + err.Error())
+	} else {
+		doctorOK("ACP adapter: " + adapter)
+	}
 
 	// 2. Check Configuration File
 	cfg, err := config.Load()

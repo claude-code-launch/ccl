@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -186,5 +187,40 @@ func TestListShowsProviderLoadingOff(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "off") {
 		t.Fatalf("on state mentions off:\n%s", out.String())
+	}
+}
+
+func fakeRunningProxy(t *testing.T, name string, running bool) {
+	t.Helper()
+	previous := runningProxyProvider
+	runningProxyProvider = func(context.Context) (string, bool) { return name, running }
+	t.Cleanup(func() { runningProxyProvider = previous })
+}
+
+func TestProviderOffRefusesWhileProxyRuns(t *testing.T) {
+	saveToggleFixture(t, &provider.Config{ActiveProvider: "a", Providers: map[string]provider.Provider{
+		"a": {Name: "a", Type: "openai", Endpoint: "https://example.com/v1", Model: "m"},
+	}})
+	fakeRunningProxy(t, "a", true)
+	err := runProviderToggle(&bytes.Buffer{}, "off")
+	if err == nil || !strings.Contains(err.Error(), "ccl proxy stop") {
+		t.Fatalf("error = %v", err)
+	}
+	if loadToggleConfig(t).ProviderOff {
+		t.Fatal("provider_off was saved while the proxy runs")
+	}
+	// Turning loading on never conflicts with the proxy.
+	if err := runProviderToggle(&bytes.Buffer{}, "on"); err != nil {
+		t.Fatal(err)
+	}
+	fakeRunningProxy(t, "", false)
+	if err := runProviderToggle(&bytes.Buffer{}, "off"); err != nil {
+		t.Fatal(err)
+	}
+	// Repeating off is refused too while a proxy started with an explicit
+	// provider runs: the user asked for the subscription, so say why.
+	fakeRunningProxy(t, "b", true)
+	if err := runProviderToggle(&bytes.Buffer{}, "off"); err == nil || !strings.Contains(err.Error(), "running for b") {
+		t.Fatalf("repeated off with a running proxy: %v", err)
 	}
 }

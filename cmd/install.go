@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,7 +52,7 @@ func RunInstallerScript() error {
 
 	// Windows: use PowerShell installer
 	if runtime.GOOS == "windows" {
-		fmt.Println("Installing/Updating Claude Code CLI via official PowerShell installer...")
+		fmt.Println(locale.T("正在通过官方 PowerShell 安装脚本安装 Claude Code……", "Installing Claude Code with the official PowerShell installer..."))
 		// prefer pwsh if available
 		pwsh, _ := exec.LookPath("pwsh")
 		ps, _ := exec.LookPath("powershell")
@@ -79,13 +80,13 @@ func RunInstallerScript() error {
 	tmpDir := os.TempDir()
 	tmpFile := filepath.Join(tmpDir, "claude_install.sh")
 	if curlPath != "" {
-		fmt.Println("Downloading installer with curl...")
+		fmt.Println(locale.T("正在用 curl 下载官方安装脚本……", "Downloading the official installer with curl..."))
 		// show progress with -# (no -s)
 		if err := runCmdStream(ctx, curlPath, "-#", "-fSL", "https://claude.ai/install.sh", "-o", tmpFile); err != nil {
 			return fmt.Errorf("curl download failed: %w", err)
 		}
 	} else {
-		fmt.Println("Downloading installer with wget...")
+		fmt.Println(locale.T("正在用 wget 下载官方安装脚本……", "Downloading the official installer with wget..."))
 		if err := runCmdStream(ctx, wgetPath, "https://claude.ai/install.sh", "-O", tmpFile); err != nil {
 			return fmt.Errorf("wget download failed: %w", err)
 		}
@@ -112,7 +113,7 @@ func RunInstallerScript() error {
 	}
 
 	// run installer with bash
-	fmt.Println("Running installer script...")
+	fmt.Println(locale.T("正在运行安装脚本……", "Running the installer..."))
 	if err := runCmdStream(ctx, "bash", tmpFile); err != nil {
 		return fmt.Errorf("installer execution failed: %w", err)
 	}
@@ -123,8 +124,19 @@ func RunInstallerScript() error {
 }
 
 var errInstallNeedsTerminal = errors.New(
-	"claude is not installed and stdin is not a terminal, so the installer was not run. " +
-		"Install it manually (https://code.claude.com/) or run ccl from a terminal to be prompted")
+	"claude is not installed and stdin is not a terminal, so the installer was not run")
+
+// manualInstallHint lists the commands that install Claude Code by hand.
+func manualInstallHint() string {
+	official := "curl -fsSL https://claude.ai/install.sh | bash"
+	if runtime.GOOS == "windows" {
+		official = "irm https://claude.ai/install.ps1 | iex"
+	}
+	return fmt.Sprintf(locale.T(
+		"手动安装 Claude Code 后重新运行 ccl：\n  %s\n或使用 npm：\n  npm install -g @anthropic-ai/claude-code\n详见 https://code.claude.com/",
+		"Install Claude Code, then run ccl again:\n  %s\nor with npm:\n  npm install -g @anthropic-ai/claude-code\nSee https://code.claude.com/",
+	), official)
+}
 
 // checkInstallConsent interprets the answer to the "(Y/n)" install prompt and
 // returns nil only when the installer may run. The prompt defaults to yes,
@@ -133,11 +145,11 @@ var errInstallNeedsTerminal = errors.New(
 // download and execute an installer unattended.
 func checkInstallConsent(answer string, stdinIsTerminal bool) error {
 	if !stdinIsTerminal {
-		return errInstallNeedsTerminal
+		return fmt.Errorf("%w.\n%s", errInstallNeedsTerminal, manualInstallHint())
 	}
 	switch strings.ToLower(strings.TrimSpace(answer)) {
 	case "n", "no":
-		return errors.New("installation cancelled. You can install it manually by referring to https://code.claude.com/")
+		return fmt.Errorf("%s\n%s", locale.T("已取消安装。", "Installation cancelled."), manualInstallHint())
 	default:
 		return nil
 	}
@@ -150,7 +162,10 @@ func AutoInstall() error {
 
 	var answer string
 	if stdinIsTerminal {
-		fmt.Println("Claude Code is not installed.")
+		fmt.Println(locale.T(
+			"未找到 Claude Code（PATH 中没有 claude）。可以运行 Anthropic 官方安装脚本自动安装，进度会显示在下方。",
+			"Claude Code was not found (no claude in PATH). ccl can run Anthropic's official installer; its progress is shown below.",
+		))
 		fmt.Print(locale.T("是否自动安装？(Y/n): ", "Automatically install? (Y/n): "))
 		_, _ = fmt.Scanln(&answer)
 	}
@@ -160,9 +175,42 @@ func AutoInstall() error {
 	}
 
 	if err := RunInstallerScript(); err != nil {
+		return fmt.Errorf("%w\n%s", err, manualInstallHint())
+	}
+	if err := ensureInstalledClaudeOnPath(os.Stdout); err != nil {
 		return err
 	}
+	fmt.Println(locale.T("✓ Claude Code 安装完成", "✓ Claude Code installed"))
+	return nil
+}
 
-	fmt.Println("✓ Claude Code CLI installed successfully!")
+// ensureInstalledClaudeOnPath lets this launch continue when the official
+// installer put claude in ~/.local/bin but the shell's PATH does not contain
+// that directory yet. Only this process's PATH changes; the user is told how
+// to make it permanent.
+func ensureInstalledClaudeOnPath(out io.Writer) error {
+	if IsInstalled() {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".local", "bin")
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name = "claude.exe"
+	}
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		return errors.New(locale.T(
+			"安装脚本已结束，但仍找不到 claude；请打开新的终端后重新运行 ccl",
+			"the installer finished but claude is still not found; open a new terminal and run ccl again",
+		))
+	}
+	_ = os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fmt.Fprintf(out, locale.T(
+		"Claude Code 已安装到 %s，但该目录不在 PATH 中；本次启动已临时使用它。请把它加入 shell 配置的 PATH。\n",
+		"Claude Code was installed to %s, which is not in PATH; this launch uses it directly. Add it to PATH in your shell profile.\n",
+	), dir)
 	return nil
 }

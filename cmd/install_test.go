@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"errors"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -39,5 +41,37 @@ func TestInstallConsentHonorsAnExplicitNo(t *testing.T) {
 		if !strings.Contains(err.Error(), "code.claude.com") {
 			t.Fatalf("answer %q: decline message has no manual install pointer: %v", answer, err)
 		}
+	}
+}
+
+func TestManualInstallHintOffersTheOfficialInstallerAndNpm(t *testing.T) {
+	for _, err := range []error{checkInstallConsent("", false), checkInstallConsent("n", true)} {
+		for _, text := range []string{"claude.ai/install", "npm install -g @anthropic-ai/claude-code"} {
+			if err == nil || !strings.Contains(err.Error(), text) {
+				t.Fatalf("hint missing %q: %v", text, err)
+			}
+		}
+	}
+}
+
+func TestInstalledClaudeOutsidePathIsUsedForThisLaunch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PATH", t.TempDir())
+	var out strings.Builder
+	if err := ensureInstalledClaudeOnPath(&out); err == nil {
+		t.Fatal("a missing claude was reported as installed")
+	}
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name = "claude.exe"
+	}
+	writeExecutable(t, filepath.Join(home, ".local", "bin", name))
+	if err := ensureInstalledClaudeOnPath(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !IsInstalled() || !strings.Contains(out.String(), filepath.Join(home, ".local", "bin")) {
+		t.Fatalf("claude not on PATH after install; output %q", out.String())
 	}
 }

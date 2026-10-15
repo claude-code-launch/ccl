@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/acp"
 	"github.com/claude-code-launch/ccl/internal/claude"
@@ -24,7 +24,8 @@ var acpCmd = &cobra.Command{
 	Short: locale.T("为 claude-agent-acp 注入 CCL 配置，并透传 ACP", "Wrap claude-agent-acp with CCL configuration and pass through ACP"),
 	Long: locale.T(`ACP 协议由 claude-agent-acp 完整实现；CCL 只处理 provider、模型、环境和代理配置。
 
-先安装 Node.js >=22 和上游适配器：
+先安装 Node.js >=22，再安装上游适配器（二选一）：
+  ccl acp install                                    # 安装到 ~/.ccl/acp-adapter，显示 npm 进度
   npm install -g @agentclientprotocol/claude-agent-acp
 适配器通过 Claude Agent SDK 自带的 Claude 运行，无需单独安装 Claude CLI。
 
@@ -40,7 +41,8 @@ Xcode 27 配置（Settings → Intelligence → Agents → Add an Agent）：
 用 --adapter <绝对路径> 或 CCL_ACP_ADAPTER 指定 GUI 可访问的适配器入口；-- 后的选项透传上游。
 stdout 只输出上游 ACP；日志走 stderr。`, `The complete ACP implementation is claude-agent-acp. CCL only supplies provider, model, environment and proxy configuration.
 
-Install Node.js >=22 and the upstream adapter first:
+Install Node.js >=22, then the upstream adapter (either one):
+  ccl acp install                                    # into ~/.ccl/acp-adapter, with npm progress
   npm install -g @agentclientprotocol/claude-agent-acp
 The adapter uses the Claude executable shipped with the Agent SDK; a separate Claude CLI is not required.
 
@@ -74,19 +76,15 @@ stdout is upstream ACP only; logs go to stderr.`),
 }
 
 func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter string, args []string) error {
-	if adapter == "" {
-		adapter = os.Getenv("CCL_ACP_ADAPTER")
-	}
-	if adapter == "" {
-		adapter = "claude-agent-acp"
-	}
-	adapterPath, err := exec.LookPath(adapter)
+	// stdin/stdout belong to the ACP client, so nothing is installed here:
+	// the errors name the terminal command that installs what is missing.
+	adapterPath, err := resolveACPAdapter(adapter)
 	if err != nil {
-		return fmt.Errorf("claude-agent-acp not found: install Node.js >=22 and run npm install -g @agentclientprotocol/claude-agent-acp, or use ccl acp --adapter <absolute-path>: %w", err)
+		return err
 	}
-	nodePath, err := exec.LookPath("node")
+	nodePath, err := resolveNode()
 	if err != nil {
-		return fmt.Errorf("Node.js >=22 is required by claude-agent-acp: %w", err)
+		return err
 	}
 	ctx, stop := process.SignalContext(ctx)
 	defer stop()
@@ -106,6 +104,7 @@ func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter stri
 	if err != nil {
 		return err
 	}
+	env = prependPath(env, filepath.Dir(nodePath))
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -119,7 +118,22 @@ func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter stri
 	})
 }
 
+// prependPath puts dir first in the PATH entry of env, so tools the adapter
+// starts find the same Node.js even when a GUI client launched ccl acp.
+func prependPath(env []string, dir string) []string {
+	result := append([]string(nil), env...)
+	for i, entry := range result {
+		key, value, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "PATH") {
+			result[i] = key + "=" + dir + string(os.PathListSeparator) + value
+			return result
+		}
+	}
+	return append(result, "PATH="+dir)
+}
+
 func init() {
+	acpCmd.AddCommand(newACPInstallCommand())
 	acpCmd.Flags().String("adapter", "", locale.T("claude-agent-acp 入口的路径", "Path to the claude-agent-acp entry"))
 	rootCmd.AddCommand(acpCmd)
 }

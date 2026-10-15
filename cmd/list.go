@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
@@ -21,7 +22,7 @@ func newProviderListCommand(use string) *cobra.Command {
 		Use:   use,
 		Short: "List registered providers",
 		Long: `List providers from ~/.ccl/config.yaml. The USED BY column shows which
-entry is selected by normal mode, ACP mode, both, or neither.
+entry is selected by normal mode, ACP mode and a running ccl proxy.
 
 -a/--all switches the table to a detailed view with full model pools and slot
 details.
@@ -61,6 +62,10 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	}
 
 	fmt.Fprintln(out, heading)
+	proxyName, running := runningProxyProvider(context.Background())
+	if !running {
+		proxyName = ""
+	}
 	if cfg.ProviderOff {
 		defer fmt.Fprintln(out, locale.T(
 			"\nProvider 加载为 off：ccl 以 Claude Code 自身配置启动（claude.ai 订阅）；ccl provider on 可恢复",
@@ -68,7 +73,7 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 		))
 	}
 	if showAll {
-		return printProviderDetails(out, cfg, names)
+		return printProviderDetails(out, cfg, names, proxyName)
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
@@ -79,7 +84,7 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 			tw,
 			"%s\t%s\t%s\t%s\n",
 			name,
-			providerUsageSummary(cfg, name),
+			providerUsageSummary(cfg, name, proxyName),
 			providerTypeAuthSummary(p),
 			formatModelCount(p.Model),
 		)
@@ -88,11 +93,11 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	return tw.Flush()
 }
 
-func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) error {
+func printProviderDetails(out io.Writer, cfg *provider.Config, names []string, proxyName string) error {
 	for i, name := range names {
 		p := cfg.Providers[name]
 		fmt.Fprintln(out, name)
-		fmt.Fprintf(out, "    Used By  : %s\n", providerUsageSummary(cfg, name))
+		fmt.Fprintf(out, "    Used By  : %s\n", providerUsageSummary(cfg, name, proxyName))
 		fmt.Fprintf(out, "    Type     : %s\n", provider.ProtocolLabelForProvider(p))
 		fmt.Fprintf(out, "    Auth     : %s\n", providerAuthLabel(p))
 		if p.OAuthProvider != "" {
@@ -114,8 +119,10 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string) e
 	return nil
 }
 
-func providerUsageSummary(cfg *provider.Config, name string) string {
-	usedBy := make([]string, 0, 2)
+// providerUsageSummary names the consumers of a provider. proxyName is the
+// provider a running standalone proxy serves, or empty.
+func providerUsageSummary(cfg *provider.Config, name, proxyName string) string {
+	usedBy := make([]string, 0, 3)
 	if name == cfg.ActiveProvider {
 		if cfg.ProviderOff {
 			usedBy = append(usedBy, "normal(off)")
@@ -125,6 +132,9 @@ func providerUsageSummary(cfg *provider.Config, name string) string {
 	}
 	if name == cfg.EffectiveACPProvider() {
 		usedBy = append(usedBy, "ACP")
+	}
+	if name == proxyName {
+		usedBy = append(usedBy, "proxy")
 	}
 	if len(usedBy) == 0 {
 		return "-"

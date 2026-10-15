@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -54,6 +55,22 @@ func proxyProvider(name string) (provider.Provider, error) {
 	return p, nil
 }
 
+// runningProxyProvider reports the provider a live standalone proxy serves. A
+// stale journal of a dead proxy does not count: startup recovery restores it.
+var runningProxyProvider = func(ctx context.Context) (string, bool) {
+	m, err := proxymanager.Default()
+	if err != nil {
+		return "", false
+	}
+	s, err := m.Read()
+	if err != nil || s == nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return s.Provider, m.Running(ctx, s)
+}
+
 func runProxyStart(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("provider")
 	if len(args) > 0 {
@@ -62,7 +79,22 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 		}
 		name = args[0]
 	}
-	p, err := proxyProvider(strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
+	if name == "" {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		// Off means no provider is selected for ccl, so the proxy needs an
+		// explicit choice, as ccl use does.
+		if cfg.ProviderOff {
+			return errors.New(locale.T(
+				"Provider 加载为 off：请显式指定 provider，例如 ccl proxy start <name>",
+				"provider loading is off: name the provider, e.g. ccl proxy start <name>",
+			))
+		}
+	}
+	p, err := proxyProvider(name)
 	if err != nil {
 		return err
 	}
@@ -96,7 +128,8 @@ func newProxyCommand() *cobra.Command {
 
   ccl proxy -p provider1        Start with a named provider
   ccl proxy start provider1     Equivalent explicit command
-  ccl proxy                    Start with the active provider
+  ccl proxy                    Start with the active provider (a name is
+                               required while ccl provider off is set)
   ccl proxy status             Show the running provider and local endpoint
   ccl proxy stop               Stop and restore previous Claude settings
 
@@ -160,6 +193,11 @@ User edits to unrelated settings are retained when the proxy stops.`}
 	}}
 	serve.Flags().String("instance", "", "Internal startup identity")
 	serve.Flags().String("settings-path", "", "Internal Claude settings path")
+	// Proxy failures are runtime errors, not usage mistakes: print the error
+	// once (from Execute) without cobra's usage block.
+	for _, c := range []*cobra.Command{command, start, stop, status, serve} {
+		c.SilenceUsage, c.SilenceErrors = true, true
+	}
 	command.AddCommand(start, stop, status, serve)
 	return command
 }
