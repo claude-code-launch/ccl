@@ -1,6 +1,6 @@
 # ccl: Claude Code 多网关智能代理启动器
 
-`ccl` 是 **Claude Code**（Anthropic 官方 CLI）的多模型网关启动器。
+`ccl` 是 **Claude Code**（Anthropic 官方 CLI）的多模型网关启动器和本地代理。可以用 `ccl` 启动会话，也可以开启 `ccl proxy`，继续直接运行 `claude`。
 
 用一句话理解它：
 
@@ -12,6 +12,9 @@
 - 想用 ChatGPT / Gemini / Grok / Kimi / WorkBuddy 等订阅账号
 - 需要在多个网关 / 多个账号之间快速切换
 - 不想手写复杂的环境变量和模型映射
+- 希望在多个终端直接运行 `claude`，统一使用指定 provider
+
+[快速上手](#5-分钟上手新手优先看这里) · [命令速查](#命令速查) · [后台代理](#ccl-proxy--直接用-claude-code-连接后台代理) · [配置界面](#ccl-set--添加--更新-provider) · [模型映射](#ccl-map--快速映射模型槽位)
 
 ---
 
@@ -69,7 +72,7 @@ ccl version
 ccl doctor
 ```
 
-`ccl doctor` 会检查本地依赖与当前 provider；如果还没装 Claude Code CLI，会尝试自动安装。
+`ccl doctor` 会检查本地依赖与当前 provider，不自动安装软件；默认不发送模型推理请求，`--probe` 才会逐个测试模型并消耗额度。尚未安装 Claude Code 时，可运行 `ccl` 按提示安装，或参考 [Claude Code 官方网站](https://code.claude.com/)。直接使用 `claude` 前，请先用 `claude --version` 确认它已安装并在 `PATH` 中。
 
 ### 2. 选一条入门路径
 
@@ -85,6 +88,7 @@ ccl oauth kimi       # Kimi / Moonshot
 ccl oauth kiro       # Kiro Portal（Google / GitHub）
 ccl oauth workbuddy  # WorkBuddy 网页登录
 ccl oauth autoclaw   # AutoClaw / ZCode coding plan（浏览器登录 + 本地 Anthropic-to-Chat 代理）
+ccl oauth zed        # Zed 账号（不需要安装 Zed 编辑器）
 
 # 登录成功后直接启动
 ccl
@@ -110,10 +114,10 @@ ccl set deepseek
 
 按提示填写：
 
-1. **Endpoint URL**（例如 `https://api.deepseek.com`）
-2. **API Key**
-3. 选择 **Auto**（自动映射模型）或 **Manual**（自己指定 Opus / Sonnet / Haiku / Fable）
-4. 在最后一页核对并保存
+1. 在同一配置页填写 **Endpoint URL**（例如 `https://api.deepseek.com`）和 **API Key**。
+2. 选择 **Auto Configure**，读取模型目录、识别连接并推荐槽位映射。
+3. 如需修改，在模型行按 `Enter` 筛选模型，用 `←→` 调整上下文和运行时选项。
+4. 选择 **Save & Activate** 保存并激活；主界面的 `Esc` / `Ctrl+C` 或 **Cancel** 放弃本次编辑。
 
 然后启动：
 
@@ -129,6 +133,15 @@ ccl ls              # 看看有哪些 provider
 ccl use deepseek    # 切换 provider
 ccl doctor          # 连不通时先跑诊断
 ```
+
+如果习惯直接运行 `claude`，先为已有 provider 开启后台代理：
+
+```bash
+ccl proxy -p deepseek
+claude
+```
+
+代理会持续在后台运行，多个终端可以共享；使用 `ccl proxy stop` 停止并恢复原有 Claude 配置。切换、重载和故障恢复见[后台代理说明](#ccl-proxy--直接用-claude-code-连接后台代理)。
 
 可选：信任环境里不想每次点权限确认时：
 
@@ -151,6 +164,10 @@ ccl bypass off      # 关闭
 | 想换中英文界面 | `ccl lang zh` / `ccl lang en` |
 | 旧文档里的 `ccl auto` | 已更名为 **`ccl bypass`**，配置字段是 `bypass_mode` |
 | 想在 Xcode 27 里用 CCL | ACP 默认跟随 `ccl use` 的选择，也可用 `ccl use --acp <name>` 单独固定，再配置 `ccl acp`；Executable 必须是 `ccl` 的绝对路径，Arguments 填 `acp` |
+| 希望直接运行 `claude` 使用指定 provider | `ccl proxy -p <name>`；`ccl proxy status` 查看当前代理 |
+| `ccl use` 后直接运行 `claude` 仍是旧 provider | 用 `ccl proxy start -p <name>` 切换后台代理，再重启 Claude 会话 |
+| 代理意外退出，Claude 连接失败 | `ccl proxy stop` 恢复原配置，或重新运行 `ccl proxy -p <name>` |
+| 小窗口里看不到保存或模型列表 | 用方向键、翻页键或滚轮移动；至少需要 32 列 × 8 行，推荐 80 列 × 24 行 |
 
 ---
 
@@ -165,13 +182,13 @@ ccl bypass off      # 关闭
    用 `ccl set` / `ccl map` 手动指定后，对应档位以手动为准。
 
 2. **协议翻译与流式代理**  
-   OpenAI Chat、Codex Responses 与订阅 provider 统一暴露本机 `/v1/messages`。CCL 自研各协议的请求转换、身份 headers、SSE 解析、错误透传与 usage 处理；Kiro、Qoder 使用各自的 CCL 直接适配器；Anthropic 兼容网关保持直连。
+   OpenAI Chat、Codex Responses 与订阅 provider 统一暴露本机 `/v1/messages`。CCL 自研各协议的请求转换、身份 headers、SSE 解析、错误透传与 usage 处理；Kiro、Qoder 使用各自的 CCL 直接适配器；普通启动时 Anthropic 兼容网关保持直连，`ccl proxy` 模式通过本地 Messages 转发接入。
 
 3. **交互式 TUI 配置**  
-   全屏向导配置 endpoint、协议、模型槽位、上下文压缩等；支持中文 / English（`ccl lang`）。
+   单页配置 endpoint、协议、模型槽位、上下文压缩等；支持中文 / English（`ccl lang`），并适配窄屏、短窗口和运行中的窗口缩放。
 
 4. **环境诊断**  
-   `ccl doctor` 检查依赖、连通性、鉴权，并批量测模型可用性。
+   `ccl doctor` 检查依赖、连通性与鉴权；加 `--probe` 后批量测模型可用性（计费）。
 
 5. **多通道 / 多账号**  
    配置在 `~/.ccl/config.yaml`；OAuth 凭据在 `~/.ccl/auth`。可随时 `use` / `ls` / `cp` / `mv` / `rm`。
@@ -179,13 +196,16 @@ ccl bypass off      # 关闭
 6. **订阅 OAuth 一键接入**  
    `gpt` / `gemini` / `grok` / `qoder` / `kimi` / `kiro` / `workbuddy` / `autoclaw` / `zed`，支持多账号别名；token 会在运行时刷新。
 
+7. **独立后台代理**
+   `ccl proxy -p <name>` 将直接运行的 `claude` 接到指定 provider，支持状态查询、配置重载、provider 切换和停止恢复。
+
 ### 协议与运行时边界
 
 Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Session 先决定直连还是启动本机 runtime，并负责模型补全、loopback 地址、随机会话 key 和清理生命周期。之后的最新边界如下：
 
 | 接入类型 | 登录、凭据与刷新 | 模型目录 | 请求路由与协议转换 | CCL runtime 所有权 |
 |---|---|---|---|---|
-| Anthropic API Key 网关 | CCL 保存用户 API Key | CCL 直查 Anthropic `/v1/models` | Claude Code 直连 Messages | Claude Code 直连（CCL 不代理） |
+| Anthropic API Key 网关 | CCL 保存用户 API Key | CCL 直查 Anthropic `/v1/models` | 普通启动直连 Messages；`ccl proxy` 模式本地转发，保留 x-api-key / bearer 鉴权方式 | 普通启动无 runtime；独立代理由 CCL 管理 |
 | AutoClaw / ZCode coding plan | `ccl oauth autoclaw` 由 CCL 打开 Google OAuth 与人机校验；`ccl oauth autoclaw --from-desktop` 可选读取桌面 `auth.json`；CCL 自己刷新 access/refresh token | CCL 使用 AutoClaw managed provider 的六个内建路由 ID 与上下文元数据 | CCL 本地 Anthropic 代理转换到 `{origin}/autoclaw-proxy/proxy/autoclaw/chat/completions` | `X-Authorization` + `X-Request-Model` 等桌面兼容 headers；不启动 AutoClaw 主进程 |
 | OpenAI Chat API Key 网关 | CCL 保存用户 API Key | CCL 直查 OpenAI `/models` | CCL `chatCompletionsService` 完成 Messages ↔ Chat Completions | CCL 全部拥有 |
 | Codex Responses API Key 网关 | CCL 保存用户 API Key | CCL 直查上游 `/models` | CCL 完成 Messages ↔ Responses、Codex 身份头、SSE 与错误透传 | CCL 全部拥有 |
@@ -199,7 +219,7 @@ Claude Code 始终从 Anthropic Messages 侧进入。CCL 的统一 Provider Sess
 
 CCL 还统一负责 provider 选择、模型槽位映射、可用性探测、上下文元数据、日志、usage 汇总和 runtime 生命周期。所有需要代理的协议都由 CCL 在本机 loopback runtime 中处理，不启动外部 provider 进程。
 
-错误恢复跟随数据面，不设置跨协议的 CCL 全局策略：Codex Responses 的 GPT OAuth 只在 401 后刷新并重试一次，API Key 网关及其余 403、429、5xx 不做全局重试，保留原状态和 `Retry-After`；Gemini 网络错误、429、5xx 时回退控制面 base；Grok/Kimi 401 后刷新一次；WorkBuddy 只在 401/403 后尝试刷新一次，刷新失败保留原始响应，429/5xx 不重试；Zed gateway 只在 LLM token 过期（`x-zed-expired-token` / 401）时重新换票并重发一次，429/5xx 的快速重试由外层服务负责，且 Zed 的 `upstream_http_*` 错误会还原为上游真实状态码与 `Retry-After`；Qoder 自己负责刷新、切换凭据和队列错误映射；Kiro 针对瞬时限流先轮换凭据，再按 1、2、4 秒重试整轮。
+CCL 代理的数据面共享 429/5xx 快速重试：分别等待 500 毫秒、1 秒，最多请求三次；仍失败时透传最终上游状态、正文和 `Retry-After`，让 Claude Code 决定后续退避。401 不进入这层重试，由各后端按需刷新 OAuth 凭据；同一凭据的刷新通过跨进程锁协调，迟到的旧 token 401 会复用已刷新的凭据。WorkBuddy / Zed 内层网关不叠加这层快速重试；Kiro 保留自己的 1、2、4 秒重试流程。普通启动时直连的 Anthropic 网关由 Claude Code 处理请求与重试。
 
 所有 `openai_responses` 网关都按 **Codex Responses** 处理，不再区分 `codex-api-key` / `generic-api-key` executor：CCL 统一注入自己维护的 `Originator: codex_cli_rs`、Codex User-Agent、`Version`、`session-id` / `thread-id` / request ID，以及当前 Codex `client_metadata`，并固定 `stream=true`、`store=false`。这些值由 CCL 明确维护，不随外部实现版本间接改变。协议仍由 provider `type` 明确选择，不根据 endpoint 的 `/codex` 路径猜测。GPT 订阅与 API Key 网关共享同一套转换和 SSE 实现，区别只在鉴权：GPT 使用 OAuth token 与 `Chatgpt-Account-Id`，网关使用用户 API Key。
 
@@ -311,19 +331,48 @@ ccl --dangerously-skip-permissions
 
 ### `ccl proxy` — 直接用 Claude Code 连接后台代理
 
+先用 `ccl ls` 确认 provider 已通过 `ccl set` 或 `ccl oauth` 创建，并用 `ccl --help` 确认当前安装版本提供 `proxy` 命令。独立代理需要已有的 Claude Code CLI；它不会自动安装 `claude`。
+
 ```bash
-ccl proxy -p provider1            # 开启指定 provider 的代理
-ccl proxy start provider1         # 同一功能的完整写法
+ccl proxy start -p provider1       # 为已有 provider 开启后台代理
 claude                            # 直接进入 Claude Code，使用上述 provider
-ccl proxy status                  # 查看 provider、地址和进程状态，不显示凭据
-ccl proxy stop                    # 关闭代理，恢复原有 Claude 配置
 ```
 
-不指定 provider 时使用 `ccl use` 选中的 provider。支持 API Key 网关、OAuth 订阅，以及原生 Anthropic 网关。代理在后台运行，关闭启动它的终端不会停止；不注册开机服务。再次开启同一份配置会复用已有进程；配置已修改或指定另一 provider 时会重启代理。切换后请重启已打开的 Claude 会话。
+| 命令 | 行为 |
+|------|------|
+| `ccl proxy -p provider1` | 开启指定 provider；与 `ccl proxy start -p provider1` 等价 |
+| `ccl proxy start provider1` | 使用位置参数指定 provider；名称与 `-p` 二选一 |
+| `ccl proxy` / `ccl proxy start` | 启动时读取当前 `active_provider` |
+| `ccl proxy status` | 显示运行中的 provider、本地地址、PID 和 Claude settings 路径，不显示凭据 |
+| `ccl proxy start -p provider2` | 切换独立代理的 provider |
+| `ccl proxy stop` | 停止代理，恢复先前的 Claude 配置 |
 
-开启时更新当前用户的 `~/.claude/settings.json`，也支持 `CLAUDE_CONFIG_DIR`。模型槽位、Custom、模型目录和运行时选项复用 CCL 配置；上游凭据留在 CCL，Claude 只使用本机临时凭据。停止时按字段恢复旧值，保留期间新增或修改的其他设置。项目配置、企业策略及显式 `--settings` 仍遵循 Claude Code 自身的优先级。
+这里的 `-p` 是 `--provider`。普通启动中的 `ccl -p "hello"` 仍将参数传给 Claude Code。
 
-普通 `ccl` / ACP 会话仍使用各自选择的 provider；`ccl provider off` 会在该次启动中恢复原有 Claude 设置，不停止供其他客户端使用的独立代理。代理意外退出或机器重启后，`ccl proxy stop` 可恢复配置，重新执行 `ccl proxy -p provider1` 也会先恢复再启动。诊断日志位于 `~/.ccl/proxy/proxy.log`。
+支持 API Key 网关、OAuth 订阅，以及原生 Anthropic 网关。同一 CCL 用户同时管理一个独立代理，多个终端可以共享；关闭启动它的终端不会停止代理。进程不注册开机服务。
+
+再次开启同一份配置会复用已有进程；指定另一 provider 或所选 provider 的配置已修改时，会重启代理。`ccl use` 只切换普通启动的选择，不会实时切换已运行的独立代理。用 `ccl set`、`ccl map` 或 `ccl provider env` 修改后，重新执行 `ccl proxy start -p <name>` 应用改动。开启、切换或停止代理后，重新启动已打开的 Claude 会话以使用对应设置。
+
+直接运行 `claude` 时，命令行参数由你自行传入；`ccl bypass` 开关只作用于 CCL 拉起的会话。
+
+开启时更新当前用户的 `~/.claude/settings.json`，也支持 `CLAUDE_CONFIG_DIR`。模型槽位、Custom、模型目录和运行时选项复用 CCL 配置；上游凭据留在 CCL，Claude 只使用本机临时凭据。停止时逐字段恢复仍由代理管理的值，保留运行期间的其他修改。项目配置、企业策略及显式 `--settings` 仍遵循 Claude Code 自身的优先级。
+
+| 启动方式 | 使用的 provider / 配置 |
+|----------|------------------------|
+| `claude` | 独立代理开启时使用该代理绑定的 provider |
+| `ccl` | 使用 `ccl use` 选择的 provider，可与独立代理不同 |
+| `ccl acp` | 使用 ACP 的选择，未固定时跟随普通模式的选择 |
+| `ccl provider off` 后运行 `ccl` | 该次启动恢复原有 Claude 配置视图，独立代理继续供其他客户端使用 |
+
+异常退出或重启机器后，可用以下命令恢复原配置，或直接重新开启代理：
+
+```bash
+ccl proxy status                  # 检查代理进程是否响应
+ccl proxy stop                    # 根据保存的恢复记录还原 Claude 配置
+ccl proxy start -p provider1       # 重启；存在旧记录时先恢复再启动
+```
+
+恢复记录位于 `~/.ccl/proxy/state.json`；启动失败的诊断输出位于 `~/.ccl/proxy/proxy.log`。`status` 检查代理进程是否响应；上游账号、模型目录和连接问题可用 `ccl doctor --provider provider1` 检查，只有加 `--probe` 才发送模型测试请求。
 
 ### `ccl bypass` — 权限确认旁路（原 `ccl auto`）
 
@@ -361,7 +410,7 @@ grep 'request_id=r1' ~/.ccl/logs/ccl-debug-claude_<id>.log
 
 第一条先找失败摘要，第二条用摘要里的 `request_id` 展开完整链路。CCL 的 Codex Responses、Kiro、Qoder、WorkBuddy、OpenAI Chat、Gemini、Grok 和 Kimi 数据面都会记录上游状态、`retry_after` 和适配器采取的动作。日志中的 endpoint 会移除 userinfo、query 和 fragment。
 
-日志覆盖存在明确边界：普通 Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到；AutoClaw 与其余 CCL 数据面都会用 `request_id` 串联入口、上游响应、token 刷新和最终状态。
+日志覆盖存在明确边界：普通启动时，Anthropic API-key provider 是 Claude Code 直连，`provider_ready` 会显示 `data_plane=direct upstream_errors_visible=false`，它的 429/503 正文只能从 Claude Code 终端看到；在 `ccl proxy` 模式下该网关经过 CCL 转发，可记录代理请求。AutoClaw 与其余 CCL 数据面都会用 `request_id` 串联入口、上游响应、token 刷新和最终状态。独立代理的 `proxy.log` 用于启动与进程诊断；详细请求日志同样由 `ccl log` 控制。修改日志级别后，先执行 `ccl proxy stop` 再重新开启代理，让新进程读取日志设置。
 
 日志不会主动记录 access token、refresh token、Authorization header、API key 或 URL 查询参数。`DEBUG` 对 Codex Responses、Kiro、Qoder、WorkBuddy 自研/混合运行时额外记录最终上游请求体与失败响应体；payload 仍可能包含提示词、工具结果或用户输入的敏感信息，应只在本机短时开启。
 
@@ -560,10 +609,24 @@ TUI 是**单页配置**：顶部填写 Endpoint 与 API Key，点击 **Auto Conf
 
 - **Model Mapping**：每个槽位右侧显示模型（可 `enter` 进筛选弹层），`Space` 切换 `[1m]` 扩展上下文徽标。**检查**行为可选项——会为每个模型发送一次最小请求（消耗额度），测试后槽位旁显示 `✓`/`✗` 状态。
 - **Context & Compact**：`←→` 在 Default / Balanced 500K / Balanced 800K 间切换 provider 级压缩预算（按槽位 `[1m]` 独立）。
-- **Runtime**：Protocol / Fast / **Status Line** 均可 `←→` 调整。Custom provider 的 Protocol 可在 Chat / Responses / Anthropic 三种协议间切换。**Status Line** 是 ccl 内置状态栏（`模型 · effort · NN%`）的开关：ccl 通过 `--settings` 注入 `statusLine`，其优先级高于 `~/.claude/settings.json`，关掉它即可保留你自己的状态栏。工具并发与 `ENABLE_TOOL_SEARCH` 跟随 Claude Code 默认，需要覆盖时用 `ccl provider env`。
+- **Connection**：Custom 来源可编辑 Endpoint / API Key，并在 Chat / Responses / Anthropic 间切换 Protocol。models.dev 来源通过目录选择 provider，API Key 会自动验证；该验证可能发送最小推理请求并计费。OAuth 来源显示订阅和本地代理状态，协议只读。
+- **Runtime**：`←→` 调整 Fast 和 **Status Line**。**Status Line** 是 ccl 内置状态栏（`模型 · effort · NN%`）的开关：未定义自己的状态栏时，ccl 会提供默认值；关闭后使用 Claude Code 自身或你的状态栏配置。工具并发与 `ENABLE_TOOL_SEARCH` 跟随 Claude Code 默认，需要覆盖时用 `ccl provider env`。
 - 底部 **Save & Activate** / **Cancel**。高度不足时页面滚动，操作栏保持可达。新配置未填写连接时，Model Mapping / Runtime 区置灰不可编辑。
 
-窗口大小会实时影响布局：窄屏缩短长字段并将保存与取消分行，短窗口精简边距，模型和 provider 筛选列表随高度调整；缩放后当前选中项保持可见。支持方向键、`PageUp` / `PageDown` 和鼠标滚轮。低于 `32×8` 时显示放大窗口提示，暂停编辑；`Esc` / `Ctrl+C` 仍可取消。
+窗口大小会实时影响布局：窄屏缩短长字段并将保存与取消分行，短窗口精简边距，模型和 provider 筛选列表随高度调整；缩放后当前选中项保持可见。最小尺寸为 **32 列 × 8 行**，推荐 **80 列 × 24 行**或更大。低于最小尺寸时显示放大窗口提示并暂停编辑；`Esc` / `Ctrl+C` 仍可取消。长字段的省略显示不改变实际保存的内容。
+
+| 按键 / 操作 | 行为 |
+|-------------|------|
+| `↑` / `↓`、鼠标滚轮 | 移动当前字段或列表选中项，并滚动到可见位置 |
+| `PageUp` / `PageDown` | 按当前窗口大小翻页移动 |
+| `←` / `→` | 调整选中设置；模型行切换 `[1m]` |
+| 模型行 `Enter` | 打开筛选；输入关键字过滤，`Enter` 选定模型并返回配置页 |
+| 模型行 `Space` | 切换该槽位的 `[1m]` 标记 |
+| **Save & Activate** / **Save Provider** 上 `Enter` | 保存本次编辑；只有前者同时激活该 provider |
+| `Esc` | 退出当前筛选或测试；普通主界面取消本次编辑 |
+| 主界面 `Ctrl+C` / **Cancel** | 取消并退出，不保存本次编辑 |
+
+在筛选弹层选中模型只修改草稿，仍需回到主界面保存。连接修改后，按页面提示完成检测或验证，保存按钮才会可用。
 
 Context & Compact：
 
@@ -609,7 +672,7 @@ ccl provider preview
 
 模型目录加载完成后，`ccl map` 可直接编辑六个模型槽位和上下文设置，无需再次验证连接。选择模型后，在「保存映射」上按 Enter 才会写入配置；Esc、Ctrl+C 或「取消」会放弃修改。
 
-槽位用于设置默认模型，无需为模型池中的每个模型都建立映射；Claude Code 的 `/model` 也会列出未映射的模型。
+槽位用于设置默认模型，无需为模型池中的每个模型都建立映射；默认情况下，Claude Code 的 `/model` 会列出完整模型池，包括未映射的模型。Custom 只是默认主模型槽位。如果你已在 Claude settings 中定义自己的 `modelPicker`，则沿用你的列表。
 
 ```bash
 ccl map                                          # 交互式 TUI
@@ -719,7 +782,6 @@ providers:
     anthropicAuth: bearer
   gpt:
     name: gpt
-    type: openai_responses
     endpoint: oauth://codex
     oauthProvider: gpt
     oauthAccountCredential: codex-user@example.com.json
@@ -730,16 +792,16 @@ providers:
 - `active_provider` 和 `acp_provider` 都只是 `providers` 里的名称引用，分别由 `ccl use <name>` 与 `ccl use --acp <name>` 设置；`acp_provider` 为空时 ACP 跟随 `active_provider`。ACP 不保存第二份 provider 配置。
 - 没有选择 provider 时，ccl 不会再用 shell 里的 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 自动拼一个 provider（那些 key 可能是给别的工具用的）；请用 `ccl set` / `ccl use`，或 `ccl provider off` 直接走 Claude Code 自己的登录。
 - `provider_off: true`（`ccl provider off`）时，普通启动不加载 provider，以 Claude Code 自身配置运行；`ccl provider on` 或 `ccl use <name>` 恢复。
-- `type: openai`（显示 `openai-chat`）：经 CCL `chatCompletionsService` 转到上游 Chat Completions；`type: openai_responses`（显示 `openai-responses`）：经 CCL 自研 Codex Responses runtime 走 Responses API；`type: anthropic`（显示 `anthropic-messages`）：由 Claude Code 直连 Anthropic Messages。协议由 `type` 明确选择，不根据 endpoint 路径猜测；Custom provider 可在核对页切换 Chat / Responses / Anthropic。
-- `type: anthropic`：普通 API-key provider 由 Claude Code 直连；`oauthProvider: kiro` 使用本机 Messages → Amazon Q 适配器；`oauthProvider: qoder` 使用本机 Messages → Qoder 直接适配器。
+- `type: openai`（显示 `openai-chat`）：经 CCL `chatCompletionsService` 转到上游 Chat Completions；`type: openai_responses`（显示 `openai-responses`）：经 CCL 自研 Codex Responses runtime 走 Responses API；`type: anthropic`（显示 `anthropic-messages`）：普通启动由 Claude Code 直连，独立代理模式经本地 Messages 转发。协议由 `type` 明确选择，不根据 endpoint 路径猜测；Custom 来源可在单页配置中切换 Chat / Responses / Anthropic。
+- OAuth provider 的协议由 `oauthProvider` 推导，无需持久化 `type`；例如 `kiro` 使用本机 Messages → Amazon Q 适配器，`qoder` 使用本机 Messages → Qoder 适配器。
 - `type: autoclaw`（显示 `openai-chat / autoclaw`）：`ccl oauth autoclaw` / `ccl oauth autoclaw --from-desktop` 写入的 AutoClaw provider。`endpoint` 保存 managed Chat base，`oauthAccountCredential` 绑定 `~/.ccl/auth/` 的浏览器登录或桌面导入凭据；会话启动时 CCL 创建 loopback Anthropic-to-Chat runtime，由 runtime 保管并刷新 access/refresh token，发送 `X-Authorization` 等上游 headers。
 - `oauthProvider`：使用已保存的 OAuth 凭据；运行时使用本机会话地址与随机 key，不写回配置。
 - `oauthAccountCredential`：该订阅 provider 精确绑定的 `~/.ccl/auth/` 凭据文件名。
-- `bypass_mode`：全局是否自动附加 `--dangerously-skip-permissions`。
+- `bypass_mode`：CCL 启动交互式会话时是否自动附加 `--dangerously-skip-permissions`；不控制直接运行的 `claude`，也不适用于 ACP。
 - Anthropic 直连时 `endpoint` 建议裸域名（如 `https://token.sensenova.cn`），避免拼出 `/v1/v1/messages`。
 - 运行时默认：子代理模型优先 Custom/Sonnet；工具并发与 `ENABLE_TOOL_SEARCH` 跟随 Claude Code 自身默认（CCL 不再注入），可在配置页或 `ccl provider env` 覆盖。输出上限由 Claude Code、协议转换层和上游模型管理，CCL 不设置默认值。
 
-OAuth 凭据目录：`~/.ccl/auth/`（每个账号一个 JSON）。
+OAuth 凭据目录：`~/.ccl/auth/`（每个账号一个 JSON）。独立代理的进程状态和 Claude 配置恢复记录位于 `~/.ccl/proxy/`，不保存在 provider 配置里。
 
 ---
 
@@ -750,8 +812,26 @@ OAuth 凭据目录：`~/.ccl/auth/`（每个账号一个 JSON）。
 ```bash
 ccl set deepseek
 # Endpoint: https://api.deepseek.com
-# 填 API Key → Auto 映射 → 保存
+# 填 API Key → Auto Configure → 核对模型槽位 → Save & Activate
 ccl
+```
+
+### 用后台代理直接启动 Claude
+
+```bash
+ccl set gateway
+ccl proxy -p gateway
+claude
+
+# 另一个终端也可以直接运行 claude，共享这个代理
+ccl proxy status
+
+# 修改模型映射后重载，再重新启动 Claude 会话
+ccl map gateway
+ccl proxy start -p gateway
+
+# 恢复原有 Claude 配置
+ccl proxy stop
 ```
 
 ### ChatGPT 订阅 + 本地 API 网关并存
@@ -778,15 +858,23 @@ ccl doctor            # 连通性 / 鉴权
 ## 本地验证（开发者）
 
 ```bash
-go test ./...
+gofmt -l .
+go test -race ./...
+go vet ./...
 go build -o /tmp/ccl-debug .
 
 export CCL_TEST_HOME="$(mktemp -d)"
-HOME="$CCL_TEST_HOME" /tmp/ccl-debug set sensenova
-HOME="$CCL_TEST_HOME" /tmp/ccl-debug preview
-HOME="$CCL_TEST_HOME" /tmp/ccl-debug doctor
-HOME="$CCL_TEST_HOME" /tmp/ccl-debug models --all
+ccl_test() {
+  env HOME="$CCL_TEST_HOME" CLAUDE_CONFIG_DIR="$CCL_TEST_HOME/.claude" \
+    /tmp/ccl-debug "$@"
+}
+ccl_test --help
+ccl_test proxy --help
+ccl_test set --help
+ccl_test map --help
 ```
+
+TUI 和代理验证应使用临时目录中的假凭据及本地模拟上游。在这个隔离环境中配置 provider 后，可用 `ccl_test set demo`、`ccl_test map demo` 验证交互，`ccl_test provider preview` 预览配置；代理验证结束后用 `ccl_test proxy stop` 恢复临时 Claude 配置。`--help` 不会启动 Claude 会话。
 
 Anthropic 兼容网关建议确认：
 
@@ -822,6 +910,7 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 │   ├── provider.go            # provider 子命令
 │   ├── provider_toggle.go     # provider on/off
 │   ├── provider_effort.go     # provider effort / ultracode
+│   ├── proxy.go                # 独立后台代理：start / stop / status
 │   ├── env.go                 # 环境变量管理
 │   ├── set.go                 # set 命令
 │   ├── select.go              # 通用 TUI 选择器
@@ -838,13 +927,15 @@ GitHub Actions 会构建 6 个平台二进制，并发布到 GitHub Releases + n
 │   └── version.go             # 版本
 ├── internal/
 │   ├── cloudsync/             # 压缩、AES-GCM 加密、快照和冲突处理
-│   ├── claude/                # Claude Code 进程拉起
+│   ├── claude/                # Claude Code 启动、会话设置与独立代理配置隔离
 │   ├── config/                # yaml 配置读写（加锁更新、版本化迁移）
 │   ├── locale/                # 多语言
 │   ├── modelrouting/          # 档位启发式映射
 │   ├── oauthproxy/            # OAuth 与 CCL 自有协议运行时
 │   ├── protocol/              # endpoint 规范化与探测
 │   ├── provider/              # Provider / Config 结构
+│   ├── providersession/       # 普通启动与独立代理共用的 provider 准备流程
+│   ├── proxymanager/          # 后台进程、控制接口和 Claude 配置恢复
 │   └── slotrec/               # 槽位推荐（set / map auto / 启动兜底共用）
 └── main.go
 ```
