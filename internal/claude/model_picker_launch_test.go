@@ -106,7 +106,8 @@ func TestModelPickerReachesLaunchedProcess(t *testing.T) {
 				launch.Path = shim
 			}
 			// Arguments with spaces and non-ASCII must survive the launch too.
-			args := []string{"--model", "acme/custom", "--resume", "session with spaces \u6d4b\u8bd5"}
+			args := []string{"--model", "acme/custom", "--resume", "session with spaces \u6d4b\u8bd5",
+				"--mcp-config", `{"mcpServers":{}}`, "literal & | < > ^ ! %CCL_TEST_MODEL_PICKER_CHILD%", "", `trailing slash\`}
 			output, err := launch.Command(args...).CombinedOutput()
 			if err != nil {
 				t.Fatalf("launch model picker reader: %v\n%s", err, output)
