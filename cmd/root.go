@@ -73,6 +73,11 @@ func Execute() {
 		fmt.Fprintf(os.Stderr, "ccl: could not migrate ~/.ccl/config.yaml: %v\n", err)
 	}
 	configureLogging()
+	// ccl proxy start/stop recover under their own lifecycle lock; serve is
+	// the proxy itself.
+	if len(os.Args) < 2 || os.Args[1] != "proxy" {
+		recoverStaleProxy()
+	}
 
 	if len(os.Args) > 1 {
 		firstArg := os.Args[1]

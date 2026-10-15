@@ -43,3 +43,22 @@ func AcquireFileLock(ctx context.Context, path string) (func(), error) {
 		}
 	}
 }
+
+// TryFileLock is AcquireFileLock without waiting: ok is false, with a nil
+// release, while another holder has the lock.
+func TryFileLock(path string) (release func(), ok bool, err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, fmt.Errorf("open file lock: %w", err)
+	}
+	locked, err := tryFileLock(f)
+	if err != nil || !locked {
+		_ = f.Close()
+		if err != nil {
+			return nil, false, fmt.Errorf("acquire file lock: %w", err)
+		}
+		return nil, false, nil
+	}
+	var once sync.Once
+	return func() { once.Do(func() { unlockFile(f); _ = f.Close() }) }, true, nil
+}

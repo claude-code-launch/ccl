@@ -260,9 +260,16 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	if out := cli("proxy", "status"); !strings.Contains(out, "not responding") {
 		t.Fatalf("crash not detected: %s", out)
 	}
-	cli("proxy", "stop")
+	// Any other ccl command undoes the dead proxy's overlay on its way in.
+	if out := cli("ls"); !strings.Contains(out, "previous Claude settings restored") {
+		t.Fatalf("stale overlay not recovered: %s", out)
+	}
 	assertRestored(t, settingsPath)
-	t.Log("forced process termination and recovery journal passed")
+	if s, err := manager.Read(); err != nil || s != nil {
+		t.Fatalf("journal retained after recovery: %v", err)
+	}
+	cli("proxy", "stop")
+	t.Log("forced process termination and automatic recovery passed")
 
 	broken := []byte("{broken settings")
 	if err := os.WriteFile(settingsPath, broken, 0o600); err != nil {
