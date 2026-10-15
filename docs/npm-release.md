@@ -23,6 +23,16 @@ npm Trusted Publishing is configured separately for each package. Before the fir
 
 The existing launcher's trusted publisher remains in place. Initial package creation must use the maintainer's normal npm publishing access; this repository does not store a bootstrap token.
 
+This bootstrap was completed on 2026-10-15: each platform package has a `0.0.0` placeholder (package.json and README only) and a `release.yml` trusted publisher. Notes for repeating it, e.g. when a platform is added:
+
+- `npm trust` requires the package to exist, and a new name can take about ten minutes before the registry serves it; a trust request sent earlier fails with `400`.
+- Use npm 11.15 or newer and pass `--allow-publish`. Older npm sends no permission flag and the registry answers a bare `400`:
+
+  ```bash
+  npx -y npm@latest trust github @claudecodelaunch/ccl-<platform> --file release.yml --repository claude-code-launch/ccl --allow-publish -y
+  ```
+- Every publish and trust call needs its own browser 2FA confirmation, which expires after about five minutes.
+
 ## Release workflow
 
 `node scripts/build-npm-packages.js vMAJOR.MINOR.PATCH` validates all six compressed release assets under `dist/` and stages seven packages under `dist/npm/`. Legacy four-component tags become npm prerelease versions, matching the previous workflow.

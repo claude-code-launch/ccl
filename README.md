@@ -37,6 +37,11 @@ cd ccl
 go build -o ccl .
 ```
 
+npm 安装只下载当前平台的二进制（约 10 MB）：`@claudecodelaunch/ccl` 本身只有启动脚本，原生二进制在 `@claudecodelaunch/ccl-<平台>` 可选依赖里，由 npm 按 `os` / `cpu` 自动选择。支持 macOS、Linux、Windows 的 x64 与 arm64。
+
+- 不要用 `--omit=optional` 或 `--no-optional` 安装，否则会缺少二进制；运行时提示 `ccl binary for ... is not installed` 时，去掉该选项重新执行 `npm install -g @claudecodelaunch/ccl`。
+- 从 v1.5.20 及更早的版本升级：`ccl update --method npm` 或 `npm install -g @claudecodelaunch/ccl@latest`，旧版安装在升级前仍可正常运行。
+
 也可以从 [GitHub Releases](https://github.com/claude-code-launch/ccl/releases) 下载对应平台的二进制（gzip 压缩，`SHA256SUMS` 是 `.gz` 文件的校验和）：
 
 | 平台 | 文件名 |
@@ -364,7 +369,9 @@ claude                            # 直接进入 Claude Code，使用上述 prov
 | `ccl acp` | 使用 ACP 的选择，未固定时跟随普通模式的选择 |
 | `ccl provider off` 后运行 `ccl` | 该次启动恢复原有 Claude 配置视图，独立代理继续供其他客户端使用 |
 
-异常退出或重启机器后，可用以下命令恢复原配置，或直接重新开启代理：
+在 `/model` 中选择的模型会写入 `~/.claude/settings.json`，属于你的修改，停止代理后保留。选择 Opus / Sonnet 等槽位行时写入的是别名，停止后由 Claude Code 解析为官方模型；选择模型池中的具体模型 ID 时，停止代理后直接运行 `claude` 会请求该 ID，需要自行改回。
+
+代理被强制结束（如 `kill -9`、断电）而未能还原配置时，下次运行任意 `ccl` 命令（`ccl proxy` 子命令除外）会自动按恢复记录还原，并提示 `代理已意外退出，原有 Claude 配置已恢复`；代理仍在运行时不会触碰配置。也可以手动恢复，或直接重新开启代理：
 
 ```bash
 ccl proxy status                  # 检查代理进程是否响应
@@ -673,6 +680,8 @@ ccl provider preview
 模型目录加载完成后，`ccl map` 可直接编辑六个模型槽位和上下文设置，无需再次验证连接。选择模型后，在「保存映射」上按 Enter 才会写入配置；Esc、Ctrl+C 或「取消」会放弃修改。
 
 槽位用于设置默认模型，无需为模型池中的每个模型都建立映射；默认情况下，Claude Code 的 `/model` 会列出完整模型池，包括未映射的模型。Custom 只是默认主模型槽位。如果你已在 Claude settings 中定义自己的 `modelPicker`，则沿用你的列表。
+
+每个模型在 `/model` 中只出现一次：已由槽位或 Custom 覆盖的模型不会在模型池里重复；槽位与 Custom 是同一模型时只保留 Custom 一行（当前会话选中的就是它）；多个槽位映射到同一模型时只保留排在前面的槽位。模型池里带 `[1m]` 的版本与槽位上下文不同，会单独保留。这只影响列表显示，`opus` / `sonnet` 等别名仍按槽位映射解析，子代理和 `--model` 不受影响。
 
 `/model` 的槽位显示为 `Opus · 实际模型名`、`Sonnet · 实际模型名` 等，默认主模型显示为 `Custom · 实际模型名`，其余模型直接显示目录名称或模型 ID；`[1m]` 在标签中显示为 `(1M)`。Windows 使用相同规则，支持安装目录、用户目录中的空格与中文，兼容原生 `claude.exe` 和 npm 的 `claude.cmd` 入口。模型列表由 Claude Code 的 `modelPicker` 设置提供；若旧版 Claude Code 未显示该列表，请先升级 Claude Code。
 
