@@ -14,7 +14,9 @@ const { resolveBinary } = require('../bin/wrapper');
 const { buildPackages, releaseVersion } = require('./build-npm-packages');
 
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccl-npm-test-'));
+  // macOS exposes /var through /private/var, and require.resolve returns the
+  // canonical path. Keep the fixture and package resolution on the same root.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ccl-npm-test-')));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
