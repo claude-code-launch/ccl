@@ -91,6 +91,7 @@ def main():
             screen = pyte.Screen(160, 50)
             stream = pyte.Stream(screen)
             transcript = []
+            trust_answered = False
 
             def read_terminal(process):
                 try:
@@ -105,6 +106,7 @@ def main():
                     output.put(str(error))
 
             def wait_for(predicate):
+                nonlocal trust_answered
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline:
                     try:
@@ -114,8 +116,16 @@ def main():
                     transcript.append(chunk)
                     stream.feed(chunk)
                     text = "\n".join(screen.display)
+                    if not trust_answered and "Yes, I trust this folder" in text:
+                        # Claude normalizes Windows project paths differently
+                        # across versions. Trust only our newly created fixture.
+                        trust_answered = True
+                        child.write("\x1b[B")
+                        time.sleep(0.2)
+                        child.write("\r")
                     if predicate(text):
                         return text
+                print("\n".join(screen.display).strip(), flush=True)
                 raise AssertionError("Timed out waiting for Claude terminal; see evidence")
 
             try:
