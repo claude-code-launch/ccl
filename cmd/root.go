@@ -69,6 +69,9 @@ func Execute() {
 	if len(os.Args) > 1 && os.Args[1] == "acp" {
 		acpQuietErrors = true // Include flag/argument errors before PreRun.
 	}
+	// Every claude lookup (launch, provider off, doctor) must see an install
+	// the official installer left outside PATH.
+	localClaudeDir = useLocalClaudeInstall()
 
 	// Persist config migrations once, under the config lock, before any command
 	// reads it. Load itself never writes. A failure (read-only home, say) is not
@@ -155,6 +158,9 @@ func isCclCommand(arg string) bool {
 }
 
 func runClaude(args []string) error {
+	if localClaudeDir != "" {
+		printLocalClaudeHint(os.Stderr, localClaudeDir)
+	}
 	if !IsInstalled() {
 		if err := AutoInstall(); err != nil {
 			return err

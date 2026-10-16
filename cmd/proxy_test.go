@@ -44,7 +44,6 @@ func TestProxyNeedsAnExplicitProviderWhileProviderOff(t *testing.T) {
 	}})
 	// A regression would start a real proxy: keep its settings overlay away
 	// from the developer's own Claude configuration.
-	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), ".claude"))
 	for _, args := range [][]string{{}, {"start"}, {"start", " "}} {
 		cmd := newProxyCommand()

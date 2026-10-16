@@ -184,33 +184,53 @@ func AutoInstall() error {
 	return nil
 }
 
-// ensureInstalledClaudeOnPath lets this launch continue when the official
-// installer put claude in ~/.local/bin but the shell's PATH does not contain
-// that directory yet. Only this process's PATH changes; the user is told how
-// to make it permanent.
-func ensureInstalledClaudeOnPath(out io.Writer) error {
+// useLocalClaudeInstall finds the official installer's claude in ~/.local/bin
+// when the shell's PATH lacks that directory (Cloud Shell, a fresh login, a
+// shell profile that was not reloaded). Without this, every later ccl run
+// would offer to install Claude Code again. Only this process's PATH changes;
+// it returns the directory it added, or "".
+func useLocalClaudeInstall() string {
 	if IsInstalled() {
-		return nil
+		return ""
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return ""
 	}
 	dir := filepath.Join(home, ".local", "bin")
 	name := "claude"
 	if runtime.GOOS == "windows" {
 		name = "claude.exe"
 	}
-	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-		return errors.New(locale.T(
-			"安装脚本已结束，但仍找不到 claude；请打开新的终端后重新运行 ccl",
-			"the installer finished but claude is still not found; open a new terminal and run ccl again",
-		))
+	if !fileExists(filepath.Join(dir, name)) {
+		return ""
 	}
 	_ = os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return dir
+}
+
+// localClaudeDir is set when Execute put ~/.local/bin on PATH for claude.
+var localClaudeDir string
+
+func printLocalClaudeHint(out io.Writer, dir string) {
 	fmt.Fprintf(out, locale.T(
-		"Claude Code 已安装到 %s，但该目录不在 PATH 中；本次启动已临时使用它。请把它加入 shell 配置的 PATH。\n",
-		"Claude Code was installed to %s, which is not in PATH; this launch uses it directly. Add it to PATH in your shell profile.\n",
+		"ccl：Claude Code 位于 %s，但该目录不在 PATH 中；ccl 已直接使用它。要在 shell 里直接运行 claude，请把它加入 PATH，例如（zsh 用 ~/.zshrc）：\n  echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc\n",
+		"ccl: Claude Code is in %s, which is not in PATH; ccl uses it directly. To run claude from your shell, add it to PATH, e.g. (~/.zshrc for zsh):\n  echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc\n",
 	), dir)
-	return nil
+}
+
+// ensureInstalledClaudeOnPath lets this launch continue when the installer put
+// claude outside PATH, and tells the user how to make that permanent.
+func ensureInstalledClaudeOnPath(out io.Writer) error {
+	if dir := useLocalClaudeInstall(); dir != "" {
+		printLocalClaudeHint(out, dir)
+		return nil
+	}
+	if IsInstalled() {
+		return nil
+	}
+	return errors.New(locale.T(
+		"安装脚本已结束，但仍找不到 claude；请打开新的终端后重新运行 ccl",
+		"the installer finished but claude is still not found; open a new terminal and run ccl again",
+	))
 }

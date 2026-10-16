@@ -75,3 +75,31 @@ func TestInstalledClaudeOutsidePathIsUsedForThisLaunch(t *testing.T) {
 		t.Fatalf("claude not on PATH after install; output %q", out.String())
 	}
 }
+
+// Cloud Shell: the installer put claude in ~/.local/bin, which a new shell's
+// PATH lacks. A later ccl run must use it instead of offering to install again.
+func TestLaterRunsFindClaudeInLocalBin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PATH", t.TempDir())
+	if dir := useLocalClaudeInstall(); dir != "" || IsInstalled() {
+		t.Fatalf("no install: dir %q", dir)
+	}
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name = "claude.exe"
+	}
+	writeExecutable(t, filepath.Join(home, ".local", "bin", name))
+	if dir := useLocalClaudeInstall(); dir != filepath.Join(home, ".local", "bin") || !IsInstalled() {
+		t.Fatalf("local install not used: dir %q", dir)
+	}
+	if dir := useLocalClaudeInstall(); dir != "" {
+		t.Fatalf("PATH changed twice: %q", dir)
+	}
+	var out strings.Builder
+	printLocalClaudeHint(&out, filepath.Join(home, ".local", "bin"))
+	if !strings.Contains(out.String(), `export PATH="$HOME/.local/bin:$PATH"`) {
+		t.Fatalf("hint = %q", out.String())
+	}
+}

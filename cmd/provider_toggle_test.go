@@ -15,7 +15,9 @@ import (
 
 func saveToggleFixture(t *testing.T, cfg *provider.Config) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]provider.Provider{}
 	}
