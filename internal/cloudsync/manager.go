@@ -331,6 +331,7 @@ func LoginGoogleDrive(
 	if err := remote.uploadBundle(cacheDir); err != nil {
 		return LoginResult{}, err
 	}
+	result.RemoteDir = label
 	return result, nil
 }
 

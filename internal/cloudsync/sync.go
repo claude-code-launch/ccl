@@ -503,7 +503,7 @@ func (m *Manager) Pull(tagValue string, force bool) (PullResult, error) {
 		)
 	}
 
-	_, localHash, localErr := collectLocalFiles()
+	localFiles, localHash, localErr := collectLocalFiles()
 	if localErr != nil && !errors.Is(localErr, ErrNoLocalData) {
 		return PullResult{}, localErr
 	}
@@ -523,7 +523,11 @@ func (m *Manager) Pull(tagValue string, force bool) (PullResult, error) {
 		}
 		return PullResult{Tag: tag, Hash: payload.Hash, ID: id, Downloaded: false}, nil
 	}
-	if localHash != "" && !force {
+	// A device that has never synchronized and has no providers or OAuth
+	// logins holds only ccl's own defaults, which the pull may replace (the
+	// backup below still keeps them).
+	freshInstall := state.LastLocalHash == "" && !localFilesHaveProviders(localFiles)
+	if localHash != "" && !force && !freshInstall {
 		if state.LastLocalHash == "" || localHash != state.LastLocalHash {
 			return PullResult{}, fmt.Errorf("local configuration has unsynchronized changes; run `ccl cloud push`, tag it, or use `ccl cloud pull --force`")
 		}

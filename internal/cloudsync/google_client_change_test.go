@@ -193,8 +193,8 @@ func TestGoogleLoginMovesAProfileToANewOAuthClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !joined.Existing {
-		t.Fatalf("new device created another profile: %+v", joined)
+	if !joined.Existing || joined.RemoteDir != "Google Drive appDataFolder" {
+		t.Fatalf("new device login = %+v", joined)
 	}
 	if manager, err := Load(); err != nil || manager.profileID != oldProfile.ID {
 		t.Fatalf("new device profile = %v, %v", manager, err)

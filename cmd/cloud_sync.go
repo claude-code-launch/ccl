@@ -239,6 +239,7 @@ func newCloudPushCommand() *cobra.Command {
 			if all && strings.TrimSpace(target) != "" {
 				return fmt.Errorf("--all and --to cannot be used together")
 			}
+			cmd.SilenceUsage = true
 			outcomes, pushErr := cloudsync.PushRemotes(target, all, force, bestEffort)
 			for _, outcome := range outcomes {
 				if outcome.Err != nil {
@@ -277,6 +278,7 @@ func newCloudPullCommand() *cobra.Command {
 		Short: "Pull and decrypt a ccl snapshot from cloud storage",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
 			manager, err := cloudsync.LoadRemote(source)
 			if err != nil {
 				return err

@@ -622,6 +622,46 @@ func TestNewDeviceOpensTheProfileWithOnlyTheCloudAccount(t *testing.T) {
 	if err != nil || !bytes.Equal(secondKey, firstKey) {
 		t.Fatalf("second device key differs: %v", err)
 	}
+
+	// The first pull on the new device may replace ccl's own defaults, but
+	// not a provider configured there.
+	t.Setenv("HOME", firstHome)
+	if err := os.WriteFile(filepath.Join(firstHome, ".ccl", "config.yaml"), []byte("providers:\n  a: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pushFrom(t)
+	t.Setenv("HOME", secondHome)
+	secondConfig := filepath.Join(secondHome, ".ccl", "config.yaml")
+	if err := os.WriteFile(secondConfig, []byte("providers:\n  local: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Pull(defaultTag, false); err == nil || !strings.Contains(err.Error(), "unsynchronized changes") {
+		t.Fatalf("pull over a configured provider: %v", err)
+	}
+	if err := os.WriteFile(secondConfig, []byte("provider_off: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := manager.Pull(defaultTag, false); err != nil || !result.Downloaded {
+		t.Fatalf("first pull over defaults = %+v, %v", result, err)
+	}
+	if data, _ := os.ReadFile(secondConfig); !strings.Contains(string(data), "a: {}") {
+		t.Fatalf("pulled config = %q", data)
+	}
+}
+
+func pushFrom(t *testing.T) {
+	t.Helper()
+	manager, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Push(false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func currentProfileID(t *testing.T, home string) string {

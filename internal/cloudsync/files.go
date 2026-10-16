@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path"
 	"path/filepath"
@@ -196,4 +197,21 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return fsutil.WriteFileAtomic(path, data, mode)
+}
+
+// localFilesHaveProviders reports whether a local snapshot holds anything a
+// user configured: an OAuth login or at least one provider.
+func localFilesHaveProviders(files []snapshotFile) bool {
+	for _, file := range files {
+		if file.Path != "config.yaml" {
+			return true
+		}
+		var config struct {
+			Providers map[string]any `yaml:"providers"`
+		}
+		if err := yaml.Unmarshal(file.Data, &config); err != nil || len(config.Providers) > 0 {
+			return true
+		}
+	}
+	return false
 }
