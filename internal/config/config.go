@@ -70,6 +70,10 @@ func read() (*provider.Config, bool, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg.LogLevel = "off"
+			// A fresh install runs Claude Code on its own login until a provider
+			// is activated (ccl set / ccl oauth / ccl use turn loading on). An
+			// existing file without provider_off keeps meaning on.
+			cfg.ProviderOff = true
 			return cfg, false, nil
 		}
 		return cfg, false, err

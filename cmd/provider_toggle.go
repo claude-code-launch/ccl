@@ -27,7 +27,8 @@ func newProviderToggleCommand(use string) *cobra.Command {
                        (your claude.ai subscription), loading no provider
   ccl provider on      ccl loads the active provider again
 
-ccl ls shows the current state.
+A fresh install starts with loading off; activating a provider (ccl oauth,
+Save & Activate in ccl set, ccl use) turns it on. ccl ls shows the current state.
 
 While off, the environment is passed to Claude Code unchanged and no ccl
 settings, proxy, or status line are added. ccl provider off fails whenever

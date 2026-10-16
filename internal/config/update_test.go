@@ -194,3 +194,37 @@ func TestOAuthTypeIsDerivedNotPersisted(t *testing.T) {
 		t.Fatalf("stale OAuth type not reported as a change: %t, %v", changed, err)
 	}
 }
+
+// A fresh install has no provider yet, so plain launches use Claude Code's own
+// login. Existing configs never stored provider_off while on and keep it on.
+func TestProviderLoadingDefaultsOffOnlyWithoutAConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cfg, err := Load()
+	if err != nil || !cfg.ProviderOff {
+		t.Fatalf("fresh install: ProviderOff=%v, err=%v", cfg.ProviderOff, err)
+	}
+	// The default is persisted with the first write, and activation clears it.
+	if err := Update(func(c *provider.Config) error { c.Lang = "en"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := Load(); !cfg.ProviderOff {
+		t.Fatal("first write dropped the off default")
+	}
+	if err := Update(func(c *provider.Config) error {
+		c.Providers["a"] = provider.Provider{Name: "a", Type: "openai", Endpoint: "https://example.com/v1"}
+		c.ActiveProvider, c.ProviderOff = "a", false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := Load(); cfg.ProviderOff {
+		t.Fatal("activating a provider left loading off")
+	}
+
+	writeRawConfig(t, "active_provider: a\nproviders:\n  a:\n    type: openai\n    endpoint: https://example.com/v1\n")
+	if cfg, _ := Load(); cfg.ProviderOff {
+		t.Fatal("an existing config without provider_off turned off")
+	}
+}
