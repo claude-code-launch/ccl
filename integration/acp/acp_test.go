@@ -32,6 +32,23 @@ func TestUpstreamACPConfiguration(t *testing.T) {
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Registered first, so it runs after ccl acp has exited. The SDK's Claude
+	// may still flush session files into CLAUDE_CONFIG_DIR for a moment, which
+	// made TempDir's single RemoveAll fail with "directory not empty".
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := os.RemoveAll(home)
+			if err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("files still written 5s after ccl acp exited: %v", err)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "Claude settings \u914d\u7f6e"))
