@@ -138,9 +138,14 @@ func TestValidateRemoteProfileAcceptsBothKeyTypes(t *testing.T) {
 		t.Fatalf("passphrase profile rejected: %v", err)
 	}
 	generated := passphraseProfile
-	generated.PairingPublicKey = testPairingPublicKey(t)
+	if _, err := ensureProfileAccountKey(&generated, bytes.Repeat([]byte{9}, 32)); err != nil {
+		t.Fatal(err)
+	}
 	if err := validateRemoteProfile(generated); err != nil {
-		t.Fatalf("profile with a pairing key rejected: %v", err)
+		t.Fatalf("profile with an account key rejected: %v", err)
+	}
+	if _, err := ensureProfileAccountKey(&generated, bytes.Repeat([]byte{8}, 32)); err == nil {
+		t.Fatal("a profile's account key was replaced by another key")
 	}
 	masterKeyProfile, _, err := newMasterKeyProfile()
 	if err != nil {
@@ -170,10 +175,10 @@ func TestValidateRemoteProfileAcceptsBothKeyTypes(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid cloud sync salt") {
 		t.Fatalf("bad salt error = %v", err)
 	}
-	badPairing := passphraseProfile
-	badPairing.PairingPublicKey = "not-a-key"
-	if err := validateRemoteProfile(badPairing); err == nil {
-		t.Fatal("an unusable pairing key was accepted")
+	badAccountKey := passphraseProfile
+	badAccountKey.AccountKey = "not-a-key"
+	if err := validateRemoteProfile(badAccountKey); err == nil {
+		t.Fatal("an unusable account key was accepted")
 	}
 }
 
@@ -241,21 +246,6 @@ func TestDecodeRecoveryKeyRejectsMalformedValues(t *testing.T) {
 	if err != nil || gotID != profileID || !bytes.Equal(gotKey, bytes.Repeat([]byte{7}, 32)) {
 		t.Fatalf("reformatted key = %s, %d bytes, %v", gotID, len(gotKey), err)
 	}
-}
-
-// testPairingPublicKey asks the package's own pairing code for a valid key, so
-// the profile validator is exercised against something it must accept.
-func testPairingPublicKey(t *testing.T) string {
-	t.Helper()
-	profileID, err := randomHexIdentifier(16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	public, err := pairingPublicKey(bytes.Repeat([]byte{9}, 32), profileID)
-	if err != nil {
-		t.Fatalf("pairingPublicKey: %v", err)
-	}
-	return public
 }
 
 // TestRecoveryKeyRoundTripsThroughAProfile ties the encoder to the decoder with

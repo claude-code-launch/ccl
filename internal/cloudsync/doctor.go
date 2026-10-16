@@ -1,10 +1,10 @@
 package cloudsync
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // DiagnoseLocal runs the local cloud-sync health checks in fixed order.
@@ -24,7 +24,6 @@ func DiagnoseLocal() DiagnosticReport {
 	diagnoseProfile(&report, localDir, registry)
 	diagnoseRemotes(&report, localDir, registry)
 	diagnoseOperations(&report, localDir, registry)
-	diagnosePendingPairing(&report, localDir)
 	return report
 }
 
@@ -149,7 +148,9 @@ func diagnoseRemoteProvider(report *DiagnosticReport, localDir, alias, id string
 	case providerGoogleDrive:
 		authPath := remoteAuthPath(localDir, id)
 		checkSecureFile(report, authPath, alias+" OAuth token", false)
-		if _, err := loadGoogleToken(authPath); err != nil {
+		if _, err := loadGoogleToken(authPath); errors.Is(err, errGoogleClientChanged) {
+			report.add("error", fmt.Sprintf("%s: %v; run `ccl cloud login google-drive %s`", alias, err, alias))
+		} else if err != nil {
 			report.add("error", fmt.Sprintf("%s: invalid Google authorization: %v", alias, err))
 		}
 		checkSecureDirectory(report, remote.RemoteDir, alias+" cache")
@@ -243,38 +244,5 @@ func diagnoseOperations(
 			shortIdentifier(operation.SnapshotID),
 			len(operation.CompletedIDs), len(operation.TargetIDs),
 		))
-	}
-}
-
-func diagnosePendingPairing(report *DiagnosticReport, localDir string) {
-	entries, err := os.ReadDir(pendingPairingDirectory(localDir))
-	if err != nil {
-		if !os.IsNotExist(err) {
-			report.add("error", fmt.Sprintf("cannot inspect pending pairing: %v", err))
-		}
-		return
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" ||
-			strings.HasPrefix(entry.Name(), "remote-") {
-			continue
-		}
-		var pending pendingPairing
-		path := filepath.Join(pendingPairingDirectory(localDir), entry.Name())
-		if err := readLimitedJSONFile(path, &pending); err != nil {
-			report.add("error", fmt.Sprintf("invalid pending pairing %q: %v", entry.Name(), err))
-			continue
-		}
-		if nowUTC().After(pending.Request.ExpiresAt) {
-			report.add("warning", fmt.Sprintf(
-				"expired local pairing request %s can be removed",
-				pairingCode(pending.Request),
-			))
-		} else {
-			report.add("info", fmt.Sprintf(
-				"local pairing request %s is waiting for approval",
-				pairingCode(pending.Request),
-			))
-		}
 	}
 }

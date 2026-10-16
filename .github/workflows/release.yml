@@ -111,12 +111,16 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ needs.prepare.outputs.version }}
           OUTPUT: dist/${{ matrix.asset }}
-          # Optional rotation of the built-in public Desktop OAuth client.
+          # Public Desktop OAuth client for Google Drive cloud sync; release
+          # binaries carry no built-in client, so both are required.
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          # "TVs and Limited Input devices" client for ccl cloud login --device.
-          GOOGLE_DEVICE_CLIENT_ID: ${{ secrets.GOOGLE_DEVICE_CLIENT_ID }}
-          GOOGLE_DEVICE_CLIENT_SECRET: ${{ secrets.GOOGLE_DEVICE_CLIENT_SECRET }}
-        run: bash scripts/build-release.sh
+        run: |
+          if [[ -z "$GOOGLE_OAUTH_CLIENT_ID" || -z "$GOOGLE_OAUTH_CLIENT_SECRET" ]]; then
+            echo "GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET secrets are required" >&2
+            exit 1
+          fi
+          bash scripts/build-release.sh
       # GitHub releases ship each binary gzip-compressed (~28 MB -> ~10 MB);
       # `ccl update` downloads <asset>.gz. -n drops the name and timestamp so
       # the archive depends only on the binary.

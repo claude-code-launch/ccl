@@ -150,16 +150,14 @@ func SetRemoteMirror(alias string, enabled bool) error {
 
 // loginNamedFirstRemote runs the provider's legacy first login when no v2
 // registry exists, migrates the resulting configuration, and renames the
-// default alias to the requested one. failedLogin lets each provider route
-// login failures into its own rememberFailedPairingLogin bookkeeping.
+// default alias to the requested one.
 func loginNamedFirstRemote(
 	normalized, localDir, provider string,
 	legacyLogin func() (LoginResult, error),
-	failedLogin func(err error) (LoginResult, error),
 ) (LoginResult, error) {
 	result, loginErr := legacyLogin()
 	if loginErr != nil {
-		return failedLogin(loginErr)
+		return LoginResult{}, loginErr
 	}
 	registry, err := loadRegistry(localDir, true)
 	if err != nil {
@@ -244,24 +242,24 @@ func LoginGoogleDriveNamed(
 			func() (LoginResult, error) {
 				return LoginGoogleDrive(ctx, usePassphrase, passphrase, notice)
 			},
-			func(loginErr error) (LoginResult, error) {
-				cacheDir, cacheErr := googleCacheDirectory()
-				if cacheErr != nil {
-					return LoginResult{}, loginErr
-				}
-				return LoginResult{}, rememberFailedPairingLogin(
-					normalized, providerGoogleDrive, cacheDir,
-					"Google Drive appDataFolder",
-					filepath.Join(localDir, googleAuthName), loginErr,
-				)
-			},
 		)
 	}
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if registry.Aliases[normalized] != "" {
-		return loginExistingRemote(localDir, registry, normalized, providerGoogleDrive)
+	if remoteID := registry.Aliases[normalized]; remoteID != "" {
+		if _, tokenErr := loadGoogleToken(remoteAuthPath(localDir, remoteID)); !errors.Is(tokenErr, errGoogleClientChanged) {
+			return loginExistingRemote(localDir, registry, normalized, providerGoogleDrive)
+		}
+		// A previous OAuth client's Cloud project has its own appDataFolder,
+		// unreachable now: reconnect the alias as a new remote of the same
+		// profile, which uploads the local state.
+		if _, err := LogoutRemote(ctx, normalized, LogoutOptions{}); err != nil {
+			return LoginResult{}, err
+		}
+		if registry, err = loadRegistry(localDir, true); err != nil {
+			return LoginResult{}, err
+		}
 	}
 	if err := verifyActiveProfileBeforeAttach(registry); err != nil {
 		return LoginResult{}, err
@@ -320,15 +318,6 @@ func LoginICloudNamed(alias string, usePassphrase bool, passphrase string) (Logi
 				}
 				return LoginICloudLocalKey()
 			},
-			func(loginErr error) (LoginResult, error) {
-				remoteDir, remoteErr := defaultICloudDirectory()
-				if remoteErr != nil {
-					return LoginResult{}, loginErr
-				}
-				return LoginResult{}, rememberFailedPairingLogin(
-					normalized, providerICloud, remoteDir, remoteDir, "", loginErr,
-				)
-			},
 		)
 	}
 	if err != nil {
@@ -386,7 +375,7 @@ func attachRemote(
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if changed, err := ensureProfilePairingPublicKey(&metadata, key); err != nil {
+	if changed, err := ensureProfileAccountKey(&metadata, key); err != nil {
 		return LoginResult{}, err
 	} else if changed {
 		if err := writeJSONAtomic(
@@ -420,14 +409,11 @@ func attachRemote(
 				alias, shortIdentifier(remoteProfileValue.ID), shortIdentifier(registry.ActiveProfileID),
 			)
 		}
-		expectedPublicKey := metadata.PairingPublicKey
-		switch {
-		case remoteProfileValue.PairingPublicKey == "":
-			remoteProfileValue.PairingPublicKey = expectedPublicKey
-			remoteProfileChanged = true
-		case remoteProfileValue.PairingPublicKey != expectedPublicKey:
-			return LoginResult{}, fmt.Errorf("cloud remote %q has a different pairing public key", alias)
+		changed, err := ensureProfileAccountKey(&remoteProfileValue, key)
+		if err != nil {
+			return LoginResult{}, fmt.Errorf("cloud remote %q: %w", alias, err)
 		}
+		remoteProfileChanged = changed
 	}
 	manager := &Manager{
 		localDir: localDir, remoteDir: remoteDir, remoteLabel: remoteLabel,

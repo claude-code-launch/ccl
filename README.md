@@ -106,7 +106,7 @@ Claude Code 始终说 Anthropic Messages。Anthropic API-key 网关在普通启�
 
 ### 云同步
 
-`ccl cloud login`（默认 Google Drive；macOS 也可 `ccl cloud login icloud`）之后 `push` / `pull`。没有浏览器的环境（SSH、Cloud Shell、无图形界面的 Linux）会自动改用设备码登录：终端显示二维码和短代码，在手机或电脑上打开 `google.com/device` 输入即可；`--device` / `--device=false` 可强制选择。同步 `config.yaml` 与 `auth/*.json`，gzip 后用 AES-256-GCM 加密；Google Drive 仅申请 `drive.appdata` 权限。新设备用 `ccl cloud key export/import` 的离线恢复密钥，或 `ccl cloud device request/approve/complete` 配对。恢复密钥丢失且无授权设备时无法解密。冲突时 push / pull 会停止，不会静默覆盖。
+`ccl cloud login`（默认 Google Drive；macOS 也可 `ccl cloud login icloud`）之后 `push` / `pull`。没有浏览器的环境（SSH、Cloud Shell、无图形界面的 Linux）会自动改为打印授权链接：在任意设备的浏览器中打开并授权，随后浏览器跳转到一个打不开的 `127.0.0.1` 地址，把地址栏里的完整地址粘贴回终端即可；`--no-browser` / `--no-browser=false` 可强制选择。同步 `config.yaml` 与 `auth/*.json`，gzip 后用 AES-256-GCM 加密；Google Drive 仅申请 `drive.appdata` 权限。密钥随云端 profile 一起保存，新设备只需用同一账号 `ccl cloud login` 即可 `pull`，无需密码或配对；相应地，能登录该云账号（或持有其 ccl 授权）的人也能解密同步的 provider 凭据。冲突时 push / pull 会停止，不会静默覆盖。
 
 ### 开发
 
@@ -229,7 +229,7 @@ Claude Code always speaks Anthropic Messages. Anthropic API-key gateways are cal
 
 ### Cloud sync
 
-`ccl cloud login` (Google Drive by default; `ccl cloud login icloud` on macOS), then `push` / `pull`. Without a browser (SSH, Cloud Shell, Linux without a display) Google Drive login uses the device flow: the terminal shows a QR code and a short code to enter at `google.com/device` on a phone or another computer; `--device` / `--device=false` forces either way. It syncs `config.yaml` and `auth/*.json`, gzip-compressed and encrypted with AES-256-GCM; Google Drive uses only the `drive.appdata` scope. Add a new device with the offline recovery key (`ccl cloud key export/import`) or by pairing (`ccl cloud device request/approve/complete`). If the recovery key is lost and no authorized device remains, data cannot be decrypted. On conflicts push / pull stop instead of overwriting.
+`ccl cloud login` (Google Drive by default; `ccl cloud login icloud` on macOS), then `push` / `pull`. Without a browser (SSH, Cloud Shell, Linux without a display) Google Drive login prints the authorization URL instead: approve it in a browser on any device, which then lands on a `127.0.0.1` address that fails to load; paste that whole address back into the terminal. `--no-browser` / `--no-browser=false` forces either way. It syncs `config.yaml` and `auth/*.json`, gzip-compressed and encrypted with AES-256-GCM; Google Drive uses only the `drive.appdata` scope. The key is stored with the cloud profile, so a new device only needs `ccl cloud login` with the same account before `pull`, with no passphrase or pairing; in turn, anyone who can sign in to that cloud account (or holds its ccl authorization) can decrypt the synced provider credentials. On conflicts push / pull stop instead of overwriting.
 
 ### Development
 

@@ -137,7 +137,7 @@ func (plan *pushPlan) commit(prepared preparedPush, clearPending bool) (PushResu
 			return PushResult{}, fmt.Errorf("cloud remote index changed after preflight; refresh before pushing")
 		}
 	}
-	profileChanged, err := m.ensureRemotePairingPublicKey()
+	profileChanged, err := m.ensureRemoteAccountKey()
 	if err != nil {
 		return PushResult{}, err
 	}

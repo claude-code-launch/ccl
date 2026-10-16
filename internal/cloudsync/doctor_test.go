@@ -253,6 +253,14 @@ func TestCloudDoctorDetectsRemoteProblems(t *testing.T) {
 		t.Fatal(err)
 	}
 	report = DiagnoseLocal()
+	reportHas(t, report, "error", "ccl cloud login google-drive personal")
+
+	if err := os.WriteFile(authPath, []byte(
+		`{"version":1,"token":{"access_token":"a","refresh_token":"r","token_type":"Bearer"},"client_id":"`+googleOAuthClientID+`"}`,
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report = DiagnoseLocal()
 	reportHas(t, report, "error", "cache is unavailable")
 
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
@@ -264,9 +272,8 @@ func TestCloudDoctorDetectsRemoteProblems(t *testing.T) {
 	}
 }
 
-// TestCloudDoctorReportsPendingOperationsAndPairings covers the two journal
-// directories: interrupted pushes and pairing requests waiting for approval.
-func TestCloudDoctorReportsPendingOperationsAndPairings(t *testing.T) {
+// TestCloudDoctorReportsPendingOperations covers interrupted pushes.
+func TestCloudDoctorReportsPendingOperations(t *testing.T) {
 	fixture := newCloudDoctorFixture(t)
 	operations := operationsDirectory(fixture.local)
 	if err := os.MkdirAll(filepath.Join(operations, "not-an-id"), 0o700); err != nil {
@@ -311,45 +318,9 @@ func TestCloudDoctorReportsPendingOperationsAndPairings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pairing := pendingPairingDirectory(fixture.local)
-	expired := pendingPairing{Request: pairingRequestEnvelope{
-		RequestID:          "req-expired",
-		ProfileID:          fixture.profile,
-		EphemeralPublicKey: "public-key",
-		ExpiresAt:          time.Now().UTC().Add(-time.Hour),
-	}}
-	if err := writeJSONAtomic(filepath.Join(pairing, "expired.json"), expired, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	waiting := pendingPairing{Request: pairingRequestEnvelope{
-		RequestID:          "req-waiting",
-		ProfileID:          fixture.profile,
-		EphemeralPublicKey: "public-key",
-		ExpiresAt:          time.Now().UTC().Add(time.Hour),
-	}}
-	if err := writeJSONAtomic(filepath.Join(pairing, "waiting.json"), waiting, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Ignored shapes: unreadable JSON is reported, a directory named *.json and
-	// a remote-side object are skipped without a word.
-	if err := os.WriteFile(filepath.Join(pairing, "broken.json"), []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(pairing, "nested.json"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(pairing, "remote-mirror.json"), []byte("{"), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-
 	report = DiagnoseLocal()
 	reportHas(t, report, "warning", "partial push")
 	reportHas(t, report, "error", "belongs to another profile")
-	reportHas(t, report, "warning", "expired local pairing request")
-	reportHas(t, report, "info", "waiting for approval")
-	reportHas(t, report, "error", "invalid pending pairing")
 }
 
 // TestDefaultICloudDirectoryResolvesTheExpectedPath pins the path the login

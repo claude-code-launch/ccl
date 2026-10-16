@@ -16,12 +16,12 @@ import (
 func newCloudLoginCommand() *cobra.Command {
 	var passphraseFile string
 	var passphraseMode bool
-	var device bool
+	var noBrowser bool
 	cmd := &cobra.Command{
 		Use:   "login [platform] [alias]",
 		Short: "Connect an encrypted cloud synchronization provider",
-		Long: `Connect ccl to a cloud sync provider, create or open an end-to-end encrypted
-profile, and register a local remote alias.
+		Long: `Connect ccl to a cloud sync provider, create or open an encrypted profile,
+and register a local remote alias.
 
 Platforms (default: google-drive):
 
@@ -29,9 +29,9 @@ Platforms (default: google-drive):
   google-drive   Opens a browser OAuth flow (aliases: google, drive)
                  Built-in Desktop OAuth client + PKCE; no OAuth JSON required
                  Tokens refresh automatically; only drive.appdata is requested
-                 --device shows a QR code and short code to approve on another
-                 device instead (default over SSH, in Cloud Shell, and on Linux
-                 without a display)
+                 --no-browser prints the URL to open on any device and reads
+                 the redirected 127.0.0.1 address pasted back (default over
+                 SSH, in Cloud Shell, and on Linux without a display)
                  Encrypted bundle lives in the app-private appDataFolder
 
 Alias (optional second argument):
@@ -49,23 +49,18 @@ Examples:
   ccl cloud login google-drive work
   ccl login google-drive              # root compatibility alias
 
-Encryption key (never uploaded):
+Encryption key:
 
-  macOS default     random 256-bit key at
-                    ~/.ccl/cloud/profiles/<profile-id>/key
-  Linux / Windows   passphrase-derived key (prompt, or non-interactive below)
-  --passphrase      force passphrase mode on macOS
+  A random 256-bit key, kept at ~/.ccl/cloud/profiles/<profile-id>/key and in
+  the cloud profile itself, so access to the cloud account protects the data:
+  a new device only needs ccl cloud login with the same account. Anyone who
+  controls that account (or a ccl token for it) can read the synced
+  provider credentials.
+
+  --passphrase      derive the key of a new profile from a passphrase instead
   --passphrase-file read passphrase from a local file
   CCL_SYNC_PASSPHRASE
                     non-interactive passphrase from the environment
-
-After a successful local-key login, run:
-
-  ccl cloud key export
-
-and store the recovery key offline. New devices without a local key should use
-ccl cloud key import or ccl cloud device request after authorizing the same
-cloud account.
 
 Related:
 
@@ -78,7 +73,7 @@ Related:
   ccl cloud login icloud
   ccl cloud login google-drive --passphrase
   ccl cloud login google-drive --passphrase-file ~/.ccl-passphrase
-  ccl cloud login google-drive --device     # approve on another device (QR code)`,
+  ccl cloud login google-drive --no-browser # approve in a browser on another machine`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Login failures are runtime errors; print them without the usage.
@@ -114,7 +109,7 @@ Related:
 				return profileErr
 			}
 			usePassphrase := !hasProfile &&
-				(passphraseMode || strings.TrimSpace(passphraseFile) != "" || runtime.GOOS != "darwin")
+				(passphraseMode || strings.TrimSpace(passphraseFile) != "")
 			if usePassphrase {
 				passphrase, err = readSyncPassphrase(cmd.InOrStdin(), cmd.ErrOrStderr(), passphraseFile)
 			}
@@ -123,11 +118,14 @@ Related:
 				case "icloud":
 					result, err = cloudsync.LoginICloudNamed(alias, usePassphrase, passphrase)
 				case "google-drive":
-					useDevice := headlessHost() && cloudsync.DeviceAuthorizationAvailable()
-					if cmd.Flags().Changed("device") {
-						useDevice = device
+					ctx := cmd.Context()
+					paste := headlessHost()
+					if cmd.Flags().Changed("no-browser") || cmd.Flags().Changed("device") {
+						paste = noBrowser
 					}
-					ctx := cloudsync.WithDeviceAuthorization(cmd.Context(), useDevice)
+					if paste {
+						ctx = cloudsync.WithPastedRedirect(ctx, cmd.InOrStdin())
+					}
 					result, err = cloudsync.LoginGoogleDriveNamed(
 						ctx, alias, usePassphrase, passphrase, cmd.ErrOrStderr(),
 					)
@@ -142,23 +140,23 @@ Related:
 			fmt.Fprintf(cmd.OutOrStdout(), "Device: %s\n", result.DeviceID)
 			fmt.Fprintf(cmd.OutOrStdout(), "Unlock: %s\n", cloudsync.KeyModeDescription(result.KeyMode))
 			if !result.Existing {
-				fmt.Fprintln(cmd.OutOrStdout(), "A new end-to-end encrypted sync profile was created.")
+				fmt.Fprintln(cmd.OutOrStdout(), "A new encrypted sync profile was created.")
 			}
 			if result.Migrated {
 				fmt.Fprintln(cmd.OutOrStdout(), "The existing encryption key was migrated to the selected local key mode.")
-			}
-			if result.KeyMode == "local" {
-				fmt.Fprintln(cmd.OutOrStdout(), "Run `ccl cloud key export` now and keep the recovery key offline.")
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&passphraseMode, "passphrase", false,
-		"Force passphrase-derived key mode (default on Linux/Windows; optional on macOS)")
+		"Derive the key of a new profile from a passphrase")
 	cmd.Flags().StringVar(&passphraseFile, "passphrase-file", "",
 		"Read passphrase from a local file (also: CCL_SYNC_PASSPHRASE)")
-	cmd.Flags().BoolVar(&device, "device", false,
-		"Google Drive: approve on another device with a QR code and short code (default on SSH, Cloud Shell and Linux without a display)")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false,
+		"Google Drive: print the URL instead of opening a browser and paste back the redirected address (default on SSH, Cloud Shell and Linux without a display)")
+	// v1.5.23 called this --device (Google's device flow rejects drive.appdata).
+	cmd.Flags().BoolVar(&noBrowser, "device", false, "")
+	_ = cmd.Flags().MarkHidden("device")
 	return cmd
 }
 
@@ -557,10 +555,9 @@ Preferred forms:
   ccl cloud pull
   ccl cloud status
   ccl cloud key export
-  ccl cloud device request --via personal
   ccl cloud remote ls
 
-Root-level login/push/pull/status/key/device/logout/tag remain available as
+Root-level login/push/pull/status/key/logout/tag remain available as
 compatibility aliases for the same subcommands.
 `,
 		Args: cobra.NoArgs,
@@ -779,176 +776,17 @@ func confirmCloudRemoteDeletion(in io.Reader, errOut io.Writer, alias string, ye
 	return nil
 }
 
+// newCloudDeviceCommand keeps the retired pairing commands from falling
+// through to Claude Code as a prompt: a new device now only needs a login.
 func newCloudDeviceCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "device",
-		Short: "Pair a new device with an encrypted cloud profile",
-		Args:  cobra.NoArgs,
-	}
-	cmd.AddCommand(
-		newCloudDeviceRequestCommand(),
-		newCloudDeviceListCommand(),
-		newCloudDeviceApproveCommand(),
-		newCloudDeviceDenyCommand(),
-		newCloudDeviceCompleteCommand(),
-		newCloudDevicePendingCommand(),
-	)
-	return cmd
-}
-
-func newCloudDeviceRequestCommand() *cobra.Command {
-	var via string
-	var name string
-	cmd := &cobra.Command{
-		Use:   "request",
-		Short: "Request approval from an authorized device",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if strings.TrimSpace(via) == "" {
-				return fmt.Errorf("--via requires the alias used during cloud login")
-			}
-			result, err := cloudsync.StartPairing(cmd.Context(), via, name)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Pairing approval code: %s\n", result.Code)
-			fmt.Fprintf(cmd.OutOrStdout(), "Remote: %s\n", result.Alias)
-			fmt.Fprintf(
-				cmd.OutOrStdout(), "Expires: %s\n",
-				result.ExpiresAt.Format("2006-01-02 15:04:05Z"),
-			)
-			fmt.Fprintln(
-				cmd.OutOrStdout(),
-				"On an authorized device, run `ccl cloud device approve "+result.Code+"`.",
-			)
-			fmt.Fprintln(
-				cmd.OutOrStdout(),
-				"After approval, run `ccl cloud device complete "+result.Code+"` on this device.",
-			)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&via, "via", "", "Cloud remote alias used to exchange pairing envelopes")
-	cmd.Flags().StringVar(&name, "name", "", "Name shown on the approving device")
-	return cmd
-}
-
-func newCloudDeviceListCommand() *cobra.Command {
-	var via string
-	var all bool
-	cmd := &cobra.Command{
-		Use:   "ls",
-		Short: "List pending pairing requests",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if all && strings.TrimSpace(via) != "" {
-				return fmt.Errorf("--all and --via cannot be used together")
-			}
-			requests, err := cloudsync.ListPairingRequests(cmd.Context(), via, all)
-			if err != nil {
-				return err
-			}
-			if len(requests) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No pending device pairing requests.")
-				return nil
-			}
-			for _, request := range requests {
-				fmt.Fprintf(
-					cmd.OutOrStdout(),
-					"- %s  %s  via %s  expires %s\n",
-					request.Code, request.DeviceName, request.Alias,
-					request.ExpiresAt.Format("2006-01-02 15:04:05Z"),
-				)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&via, "via", "", "Inspect one cloud remote alias")
-	cmd.Flags().BoolVar(&all, "all", false, "Inspect every configured cloud remote")
-	return cmd
-}
-
-func newCloudDeviceApproveCommand() *cobra.Command {
-	var via string
-	cmd := &cobra.Command{
-		Use:   "approve <code>",
-		Short: "Approve a pairing request using the code shown on the new device",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := cloudsync.ApprovePairing(cmd.Context(), args[0], via)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(
-				cmd.OutOrStdout(), "Approved %s for device %s (%s).\n",
-				result.Code, result.DeviceName, shortSyncID(result.DeviceID),
-			)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&via, "via", "", "Approve through one cloud remote alias")
-	return cmd
-}
-
-func newCloudDeviceDenyCommand() *cobra.Command {
-	var via string
-	cmd := &cobra.Command{
-		Use:   "deny <code>",
-		Short: "Delete a pending pairing request",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := cloudsync.DenyPairing(cmd.Context(), args[0], via); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Denied pairing request %s.\n", args[0])
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&via, "via", "", "Deny through one cloud remote alias")
-	return cmd
-}
-
-func newCloudDeviceCompleteCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "complete <code>",
-		Short: "Finish pairing after an authorized device approves it",
-		Args:  cobra.ExactArgs(1),
+		Use:                "device",
+		Short:              "Retired: a new device only needs ccl cloud login",
+		Hidden:             true,
+		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := cloudsync.CompletePairing(cmd.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Device pairing completed.")
-			fmt.Fprintf(cmd.OutOrStdout(), "Remote: %s\n", result.Alias)
-			fmt.Fprintf(cmd.OutOrStdout(), "Profile: %s\n", shortSyncID(result.ProfileID))
-			fmt.Fprintf(cmd.OutOrStdout(), "Device: %s\n", result.DeviceID)
-			return nil
-		},
-	}
-}
-
-func newCloudDevicePendingCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "pending",
-		Short: "Show pairing requests created on this device",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			requests, err := cloudsync.PendingPairingRequests()
-			if err != nil {
-				return err
-			}
-			if len(requests) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No local pending pairing requests.")
-				return nil
-			}
-			for _, request := range requests {
-				fmt.Fprintf(
-					cmd.OutOrStdout(), "- %s  via %s  expires %s\n",
-					request.Code, request.Alias,
-					request.ExpiresAt.Format("2006-01-02 15:04:05Z"),
-				)
-			}
-			return nil
+			cmd.SilenceUsage = true
+			return fmt.Errorf("device pairing was removed; on a new device run `ccl cloud login` with the same cloud account")
 		},
 	}
 }

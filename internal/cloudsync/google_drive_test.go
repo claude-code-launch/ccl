@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -263,34 +264,52 @@ func TestSavingTokenSourceKeepsRefreshToken(t *testing.T) {
 	}
 }
 
-func TestGoogleOAuthClientSecretCanBeInjectedAtBuildOrDevelopmentTime(t *testing.T) {
-	original := googleOAuthClientSecret
-	t.Cleanup(func() {
-		googleOAuthClientSecret = original
-		_ = os.Unsetenv("CCL_GOOGLE_OAUTH_CLIENT_SECRET")
-	})
+func TestGoogleOAuthClientIsInjectedAtBuildOrDevelopmentTime(t *testing.T) {
+	originalID, originalSecret := googleOAuthClientID, googleOAuthClientSecret
+	t.Cleanup(func() { googleOAuthClientID, googleOAuthClientSecret = originalID, originalSecret })
 
-	// Built-in Desktop secret is always present so local builds work without
-	// ldflags or env. Empty env must fall back to the package default.
-	googleOAuthClientSecret = original
+	// Release -ldflags set the package vars.
+	googleOAuthClientID, googleOAuthClientSecret = "release-id", "release-secret"
+	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_ID", "")
 	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_SECRET", "")
-	if got := googleOAuthConfig("http://127.0.0.1/callback").ClientSecret; got == "" {
-		t.Fatal("expected built-in Desktop OAuth client secret")
-	} else if got != original {
-		t.Fatalf("default OAuth client secret = %q, want built-in value", got)
+	if config := googleOAuthConfig(""); config.ClientID != "release-id" || config.ClientSecret != "release-secret" {
+		t.Fatalf("release client = %q / %q", config.ClientID, config.ClientSecret)
 	}
-
-	// Development env overrides the built-in/default package value.
+	// Development env overrides them.
+	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_ID", "development-id")
 	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_SECRET", "development-secret")
-	if got := googleOAuthConfig("http://127.0.0.1/callback").ClientSecret; got != "development-secret" {
-		t.Fatalf("OAuth client secret = %q", got)
+	if config := googleOAuthConfig(""); config.ClientID != "development-id" || config.ClientSecret != "development-secret" {
+		t.Fatalf("development client = %q / %q", config.ClientID, config.ClientSecret)
 	}
+	// A build without a client refuses to start a login.
+	googleOAuthClientID = ""
+	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_ID", "")
+	if _, err := authorizeGoogleDriveAt(context.Background(), filepath.Join(t.TempDir(), googleAuthName), nil); err == nil ||
+		!strings.Contains(err.Error(), "no Google OAuth client") {
+		t.Fatalf("login without a client: %v", err)
+	}
+}
 
-	// Release -ldflags override only applies when env is unset.
-	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_SECRET", "")
-	googleOAuthClientSecret = "release-secret"
-	if got := googleOAuthConfig("http://127.0.0.1/callback").ClientSecret; got != "release-secret" {
-		t.Fatalf("release OAuth client secret = %q", got)
+func TestGoogleTokenFromAPreviousClientIsNotRefreshed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), googleAuthName)
+	token := &oauth2.Token{AccessToken: "a", RefreshToken: "r"}
+	// Files written before client_id was recorded came from the previous
+	// Cloud project's client.
+	if err := writeJSONAtomic(path, googleAuthFile{Version: formatVersion, Token: token}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadGoogleToken(path); !errors.Is(err, errGoogleClientChanged) {
+		t.Fatalf("legacy token: %v", err)
+	}
+	if _, err := loadAuthorizedGoogleDriveAt(context.Background(), path, "google-drive"); err == nil ||
+		!strings.Contains(err.Error(), "ccl cloud login google-drive google-drive") {
+		t.Fatalf("push with a legacy token: %v", err)
+	}
+	if err := saveGoogleToken(path, token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadGoogleToken(path); err != nil {
+		t.Fatalf("token of the current client: %v", err)
 	}
 }
 

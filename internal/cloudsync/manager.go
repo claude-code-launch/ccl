@@ -157,6 +157,13 @@ func loginLocalKeyAtProvider(remoteDir, provider, remoteLabel string) (LoginResu
 		)
 	}
 
+	if key, ok := profileAccountKey(profile); ok {
+		return finishLoginForProvider(
+			remoteDir, profile, key, true, keyModeLocal, false,
+			provider, remoteLabel,
+		)
+	}
+
 	uninitialized, err := isUninitializedRemoteProfile(remoteDir)
 	if err != nil {
 		return LoginResult{}, err
@@ -164,7 +171,7 @@ func loginLocalKeyAtProvider(remoteDir, provider, remoteLabel string) (LoginResu
 	if uninitialized {
 		return replaceUninitializedProfileLocalForProvider(remoteDir, provider, remoteLabel)
 	}
-	return LoginResult{}, fmt.Errorf("this device has no local key for the cloud sync profile; run `ccl cloud key import` or log in with `--passphrase` for a passphrase profile")
+	return LoginResult{}, fmt.Errorf("this cloud sync profile predates keys stored in the cloud; run `ccl cloud push` once on a device that already syncs it, then log in again (or use `ccl cloud key import`)")
 }
 
 func isUninitializedRemoteProfile(remoteDir string) (bool, error) {
@@ -237,11 +244,11 @@ func finishLoginForProvider(
 	if err := manager.verifyOrCreateProfileKey(profile.ID, !existing); err != nil {
 		return LoginResult{}, fmt.Errorf("verify cloud login: %w", err)
 	}
-	if changed, err := ensureProfilePairingPublicKey(&profile, key); err != nil {
+	if changed, err := ensureProfileAccountKey(&profile, key); err != nil {
 		return LoginResult{}, err
 	} else if changed {
 		if err := writeJSONAtomic(filepath.Join(remoteDir, profileFileName), profile, 0o600); err != nil {
-			return LoginResult{}, fmt.Errorf("enable device pairing for cloud profile: %w", err)
+			return LoginResult{}, fmt.Errorf("store the key in the cloud profile: %w", err)
 		}
 	}
 	localConfig := localCloudConfig{
@@ -387,7 +394,9 @@ func (m *Manager) verifyProfileKey(profileID string) error {
 	return nil
 }
 
-func (m *Manager) ensureRemotePairingPublicKey() (bool, error) {
+// ensureRemoteAccountKey adds the key to a cloud profile created before
+// profiles carried it, so the next push lets other devices log in.
+func (m *Manager) ensureRemoteAccountKey() (bool, error) {
 	path := filepath.Join(m.remoteDir, profileFileName)
 	var profile remoteProfile
 	if err := readJSONFile(path, &profile); err != nil {
@@ -399,7 +408,7 @@ func (m *Manager) ensureRemotePairingPublicKey() (bool, error) {
 	if profile.ID != m.profileID {
 		return false, fmt.Errorf("cloud profile does not match the active profile")
 	}
-	changed, err := ensureProfilePairingPublicKey(&profile, m.key)
+	changed, err := ensureProfileAccountKey(&profile, m.key)
 	if err != nil {
 		return false, err
 	}

@@ -568,3 +568,67 @@ func TestKeychainUnavailableErrorIsClassified(t *testing.T) {
 		t.Fatalf("wrapped error lost sentinel: %v", err)
 	}
 }
+
+// TestNewDeviceOpensTheProfileWithOnlyTheCloudAccount covers the account key:
+// a second device logs in without a passphrase, pairing or recovery key, and a
+// profile from before account keys gains one when an existing device logs in.
+func TestNewDeviceOpensTheProfileWithOnlyTheCloudAccount(t *testing.T) {
+	drive := t.TempDir()
+	t.Setenv("CCL_ICLOUD_DRIVE_DIR", drive)
+	firstHome, secondHome := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", firstHome)
+	first, err := LoginICloudLocalKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstKey, err := os.ReadFile(profileKeyPath(filepath.Join(firstHome, ".ccl"), currentProfileID(t, firstHome)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Strip the account key, as in a profile created by an older ccl.
+	remoteDir, err := defaultICloudDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(remoteDir, profileFileName)
+	var profile remoteProfile
+	if err := readJSONFile(profilePath, &profile); err != nil || profile.AccountKey == "" {
+		t.Fatalf("new profile has no account key: %+v, %v", profile, err)
+	}
+	profile.AccountKey = ""
+	if err := writeJSONAtomic(profilePath, profile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", secondHome)
+	if _, err := LoginICloudLocalKey(); err == nil || !strings.Contains(err.Error(), "ccl cloud push") {
+		t.Fatalf("login to a legacy profile from a new device: %v", err)
+	}
+
+	// The existing device logging in again stores the key in the profile.
+	t.Setenv("HOME", firstHome)
+	if _, err := LoginICloudLocalKey(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", secondHome)
+	second, err := LoginICloudLocalKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Existing || second.DeviceID == first.DeviceID {
+		t.Fatalf("second device login = %+v (first %+v)", second, first)
+	}
+	secondKey, err := os.ReadFile(profileKeyPath(filepath.Join(secondHome, ".ccl"), currentProfileID(t, secondHome)))
+	if err != nil || !bytes.Equal(secondKey, firstKey) {
+		t.Fatalf("second device key differs: %v", err)
+	}
+}
+
+func currentProfileID(t *testing.T, home string) string {
+	t.Helper()
+	var config localCloudConfig
+	if err := readJSONFile(filepath.Join(home, ".ccl", cloudConfigName), &config); err != nil {
+		t.Fatal(err)
+	}
+	return config.ProfileID
+}

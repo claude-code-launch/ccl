@@ -524,7 +524,6 @@ func TestCloudAndOAuthCommandTrees(t *testing.T) {
 		{"cloud", "remote", "ls", "--help"},
 		{"cloud", "status", "--help"},
 		{"cloud", "key", "export", "--help"},
-		{"cloud", "device", "--help"},
 		{"oauth", "--help"},
 		// root compatibility aliases
 		{"login", "--help"},
@@ -532,13 +531,18 @@ func TestCloudAndOAuthCommandTrees(t *testing.T) {
 		{"pull", "--help"},
 		{"status", "--help"},
 		{"key", "--help"},
-		{"device", "--help"},
 		{"logout", "--help"},
 		{"tag", "--help"},
 	} {
 		out, err := executeCommand(RootCmd(), args...)
 		if err != nil {
 			t.Fatalf("expected %v to be registered, got error: %v\n%s", args, err, out)
+		}
+	}
+	// Retired pairing commands fail instead of reaching Claude Code.
+	for _, args := range [][]string{{"cloud", "device", "request"}, {"device", "approve", "123-456"}} {
+		if _, err := executeCommand(RootCmd(), args...); err == nil || !contains(err.Error(), "ccl cloud login") {
+			t.Fatalf("%v: %v", args, err)
 		}
 	}
 }
@@ -569,7 +573,7 @@ func TestCloudLoginHelpDescribesPlatformsAndKeyModes(t *testing.T) {
 		"no OAuth JSON required",
 		"drive.appdata",
 		"appDataFolder",
-		"ccl cloud key export",
+		"only needs ccl cloud login",
 		"CCL_SYNC_PASSPHRASE",
 		"--passphrase",
 		"Examples:",

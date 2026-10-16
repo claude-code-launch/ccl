@@ -25,7 +25,6 @@ const (
 	profilesDirName     = "profiles"
 	remotesDirName      = "remotes"
 	operationsDirName   = "operations"
-	pairingDirName      = "pairing"
 	profileStateName    = "state.json"
 	remoteConfigName    = "remote.json"
 	remoteStateName     = "state.json"
@@ -37,20 +36,23 @@ const (
 	keyModeLocal        = "local"
 	keyModePassphrase   = "passphrase"
 	keyModeRecovery     = "recovery"
-	keyModePairing      = "pairing"
+	keyModePairing      = "pairing" // devices paired before pairing was removed
 	kdfScrypt           = "scrypt"
 	kdfMasterKey        = "master-key"
 )
 
 type remoteProfile struct {
-	Version          int    `json:"version"`
-	ID               string `json:"id"`
-	KDF              string `json:"kdf"`
-	N                int    `json:"n"`
-	R                int    `json:"r"`
-	P                int    `json:"p"`
-	Salt             string `json:"salt"`
-	PairingPublicKey string `json:"pairing_public_key,omitempty"`
+	Version int    `json:"version"`
+	ID      string `json:"id"`
+	KDF     string `json:"kdf"`
+	N       int    `json:"n"`
+	R       int    `json:"r"`
+	P       int    `json:"p"`
+	Salt    string `json:"salt"`
+	// AccountKey is the profile key itself: access to the cloud account
+	// (Google Drive appDataFolder or iCloud Drive) is what protects the
+	// data, so a new device needs nothing but a login.
+	AccountKey string `json:"account_key,omitempty"`
 }
 
 type localCloudConfig struct {
@@ -280,98 +282,6 @@ type LogoutResult struct {
 	RemoteDeleted bool
 	TokenRevoked  bool
 	LocalOnly     bool
-}
-
-type pairingRequestEnvelope struct {
-	Version            int       `json:"version"`
-	RequestID          string    `json:"request_id"`
-	ProfileID          string    `json:"profile_id"`
-	EphemeralPublicKey string    `json:"ephemeral_public_key"`
-	Nonce              string    `json:"nonce"`
-	Ciphertext         string    `json:"ciphertext"`
-	CreatedAt          time.Time `json:"created_at"`
-	ExpiresAt          time.Time `json:"expires_at"`
-}
-
-type pairingRequestPayload struct {
-	RequestID  string `json:"request_id"`
-	DeviceID   string `json:"device_id"`
-	DeviceName string `json:"device_name"`
-}
-
-type pairingResponseEnvelope struct {
-	Version    int       `json:"version"`
-	RequestID  string    `json:"request_id"`
-	ProfileID  string    `json:"profile_id"`
-	Nonce      string    `json:"nonce"`
-	Ciphertext string    `json:"ciphertext"`
-	CreatedAt  time.Time `json:"created_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
-}
-
-type pairingResponsePayload struct {
-	RequestID    string `json:"request_id"`
-	ProfileID    string `json:"profile_id"`
-	DeviceID     string `json:"device_id"`
-	MasterKey    string `json:"master_key"`
-	VerifierHash string `json:"verifier_hash"`
-}
-
-type pendingPairing struct {
-	Version             int                    `json:"version"`
-	Alias               string                 `json:"alias"`
-	Provider            string                 `json:"provider"`
-	RemoteID            string                 `json:"remote_id"`
-	RemoteDir           string                 `json:"remote_dir"`
-	RemoteLabel         string                 `json:"remote_label,omitempty"`
-	AuthPath            string                 `json:"auth_path,omitempty"`
-	Profile             remoteProfile          `json:"profile"`
-	DeviceID            string                 `json:"device_id"`
-	DeviceName          string                 `json:"device_name"`
-	EphemeralPrivateKey string                 `json:"ephemeral_private_key"`
-	Request             pairingRequestEnvelope `json:"request"`
-}
-
-type pendingRemoteConnection struct {
-	Version     int    `json:"version"`
-	Alias       string `json:"alias"`
-	Provider    string `json:"provider"`
-	RemoteID    string `json:"remote_id"`
-	RemoteDir   string `json:"remote_dir"`
-	RemoteLabel string `json:"remote_label,omitempty"`
-	AuthPath    string `json:"auth_path,omitempty"`
-}
-
-type PairingRequestResult struct {
-	Code      string
-	RequestID string
-	Alias     string
-	ExpiresAt time.Time
-}
-
-type PairingRequestInfo struct {
-	Code       string
-	RequestID  string
-	Alias      string
-	DeviceID   string
-	DeviceName string
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-}
-
-type PairingApproveResult struct {
-	Code       string
-	RequestID  string
-	DeviceID   string
-	DeviceName string
-	ExpiresAt  time.Time
-}
-
-type PairingCompleteResult struct {
-	Alias     string
-	ProfileID string
-	DeviceID  string
-	KeyMode   string
 }
 
 type Diagnostic struct {

@@ -21,7 +21,7 @@ go test ./cmd -run TestRunAuthGrokWithoutAliasDerivesName
 go test ./internal/oauthproxy ./internal/claude ./cmd
 ```
 
-Release binary (matches CI): `scripts/build-release.sh` with `GOOS`/`GOARCH`/`OUTPUT`/`VERSION`; uses `-trimpath -ldflags="-s -w -X github.com/claude-code-launch/ccl/cmd.Version=..."`. Optional `GOOGLE_OAUTH_CLIENT_SECRET` ldflag for cloud sync.
+Release binary (matches CI): `scripts/build-release.sh` with `GOOS`/`GOARCH`/`OUTPUT`/`VERSION`; uses `-trimpath -ldflags="-s -w -X github.com/claude-code-launch/ccl/cmd.Version=..."`. `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` inject the Google Drive Desktop client (required by the release workflow; dev builds use `CCL_GOOGLE_OAUTH_CLIENT_ID/_SECRET`).
 
 There is no Makefile or golangci-lint config.
 
@@ -87,7 +87,7 @@ User-facing Chinese lives in `cmd/` via `locale.T`. `internal/` must not contain
 
 ### Cloud sync
 
-`internal/cloudsync` encrypts `config.yaml` + `auth/*.json` to iCloud / Google Drive. Root `ccl login/push/pull/...` are aliases of `ccl cloud ...`. Google client secret may be ldflag-injected; PKCE is the real auth boundary. `--device` (default when `headlessHost()`: SSH, Cloud Shell, Linux without a display) uses the OAuth device flow with a terminal QR code (`internal/termqr`); it needs the separate "TVs and Limited Input devices" client injected as `cloudsync.googleDeviceClientID/Secret` (release secrets `GOOGLE_DEVICE_CLIENT_ID/_SECRET`, dev env `CCL_GOOGLE_DEVICE_CLIENT_ID/_SECRET`). Auth files record `client: device`, because a refresh token only refreshes with the client that issued it.
+`internal/cloudsync` encrypts `config.yaml` + `auth/*.json` to iCloud / Google Drive. Root `ccl login/push/pull/...` are aliases of `ccl cloud ...`. The Desktop OAuth client (Cloud project `93551281893`) is not in source: release ldflags inject `cloudsync.googleOAuthClientID/Secret`; PKCE is the real auth boundary. `appDataFolder` belongs to the Cloud project, so auth files record `client_id`; a token from another client is `errGoogleClientChanged`, and `ccl cloud login` reconnects that alias as a new remote of the same profile (uploading local state). The profile key is stored in the cloud `profile.json` (`account_key`), so a new device needs only a login; device pairing was removed (`ccl cloud device` / root `device` are retired stubs that fail instead of reaching Claude Code), and existing devices add `account_key` on their next login or push. `--no-browser` (default when `headlessHost()`: SSH, Cloud Shell, Linux without a display; hidden alias `--device`) prints the authorization URL and reads the redirected `127.0.0.1` address pasted back (`cloudsync.WithPastedRedirect`), still with the Desktop client + PKCE. Do not reintroduce the OAuth device flow: Google rejects `drive.appdata` there (`invalid_scope`) despite its docs, and `appDataFolder` is per Cloud project, so any other client would see different data.
 
 ## Product facts that affect code changes
 

@@ -101,7 +101,31 @@ func validateRemoteProfile(profile remoteProfile) error {
 	default:
 		return fmt.Errorf("unsupported cloud sync key type %q", profile.KDF)
 	}
-	return validatePairingPublicKey(profile.PairingPublicKey)
+	if profile.AccountKey != "" {
+		if key, err := base64.RawStdEncoding.DecodeString(profile.AccountKey); err != nil || len(key) != 32 {
+			return fmt.Errorf("invalid cloud sync account key")
+		}
+	}
+	return nil
+}
+
+// ensureProfileAccountKey records key in profile, so signing in to the cloud
+// account is enough to open the profile on another device.
+func ensureProfileAccountKey(profile *remoteProfile, key []byte) (bool, error) {
+	encoded := base64.RawStdEncoding.EncodeToString(key)
+	switch profile.AccountKey {
+	case encoded:
+		return false, nil
+	case "":
+		profile.AccountKey = encoded
+		return true, nil
+	}
+	return false, fmt.Errorf("cloud sync profile stores a different key")
+}
+
+func profileAccountKey(profile remoteProfile) ([]byte, bool) {
+	key, err := base64.RawStdEncoding.DecodeString(profile.AccountKey)
+	return key, err == nil && len(key) == 32
 }
 
 const recoveryKeyPrefix = "CCL1"

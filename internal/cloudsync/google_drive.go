@@ -11,7 +11,6 @@ import (
 	"net/textproto"
 	"net/url"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -36,12 +35,11 @@ type googleDriveFile struct {
 	Version string `json:"version"`
 }
 
-func newGoogleDriveRemote(ctx context.Context, token *oauth2.Token, authPath, client string) *googleDriveRemote {
-	config := googleOAuthConfigFor(client, "")
+func newGoogleDriveRemote(ctx context.Context, token *oauth2.Token, authPath string) *googleDriveRemote {
+	config := googleOAuthConfig("")
 	source := &savingTokenSource{
 		source:   config.TokenSource(ctx, token),
 		authPath: authPath,
-		client:   client,
 		last:     token,
 	}
 	return &googleDriveRemote{client: oauth2.NewClient(ctx, source)}
@@ -321,188 +319,6 @@ func (remote *googleDriveRemote) listApplicationFiles(ctx context.Context) ([]go
 		return nil, fmt.Errorf("decode Google Drive file list: %w", err)
 	}
 	return result.Files, nil
-}
-
-func (remote *googleDriveRemote) listApplicationObjects(
-	ctx context.Context,
-	prefix string,
-) ([]googleDriveFile, error) {
-	if prefix != "ccl-pair-request-" && prefix != "ccl-pair-response-" {
-		return nil, fmt.Errorf("invalid Google Drive application object prefix")
-	}
-	files, err := remote.listApplicationFiles(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var matches []googleDriveFile
-	for _, file := range files {
-		if strings.HasPrefix(file.Name, prefix) && validGooglePairingObjectName(file.Name) {
-			matches = append(matches, file)
-		}
-	}
-	sort.Slice(matches, func(i, j int) bool { return matches[i].Name < matches[j].Name })
-	return matches, nil
-}
-
-func (remote *googleDriveRemote) findApplicationObject(
-	ctx context.Context,
-	name string,
-) (googleDriveFile, bool, error) {
-	if !validGooglePairingObjectName(name) {
-		return googleDriveFile{}, false, fmt.Errorf("invalid Google Drive pairing object name")
-	}
-	prefix := "ccl-pair-request-"
-	if strings.HasPrefix(name, "ccl-pair-response-") {
-		prefix = "ccl-pair-response-"
-	}
-	files, err := remote.listApplicationObjects(ctx, prefix)
-	if err != nil {
-		return googleDriveFile{}, false, err
-	}
-	var matches []googleDriveFile
-	for _, file := range files {
-		if file.Name == name {
-			matches = append(matches, file)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return googleDriveFile{}, false, nil
-	case 1:
-		return matches[0], true, nil
-	default:
-		return googleDriveFile{}, false, fmt.Errorf("Google Drive contains duplicate pairing object %s", name)
-	}
-}
-
-func (remote *googleDriveRemote) downloadApplicationObject(
-	ctx context.Context,
-	file googleDriveFile,
-) ([]byte, error) {
-	if file.ID == "" || !validGooglePairingObjectName(file.Name) {
-		return nil, fmt.Errorf("invalid Google Drive pairing object")
-	}
-	request, err := http.NewRequestWithContext(
-		ctx, http.MethodGet,
-		googleDriveAPIBase+"/drive/v3/files/"+url.PathEscape(file.ID)+"?alt=media",
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	response, err := remote.client.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("download Google Drive pairing object: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, googleDriveResponseError("download pairing object", response)
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxPairingObjectSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxPairingObjectSize {
-		return nil, fmt.Errorf("Google Drive pairing object exceeds safety limit")
-	}
-	return data, nil
-}
-
-func (remote *googleDriveRemote) createApplicationObject(
-	ctx context.Context,
-	name string,
-	data []byte,
-) error {
-	if !validGooglePairingObjectName(name) || len(data) > maxPairingObjectSize {
-		return fmt.Errorf("invalid Google Drive pairing object")
-	}
-	if _, found, err := remote.findApplicationObject(ctx, name); err != nil {
-		return err
-	} else if found {
-		return fmt.Errorf("Google Drive pairing object %s already exists", name)
-	}
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	metadataHeader := make(textproto.MIMEHeader)
-	metadataHeader.Set("Content-Type", "application/json; charset=UTF-8")
-	metadataPart, err := writer.CreatePart(metadataHeader)
-	if err != nil {
-		return err
-	}
-	metadata := struct {
-		Name    string   `json:"name"`
-		Parents []string `json:"parents"`
-	}{Name: name, Parents: []string{"appDataFolder"}}
-	if err := json.NewEncoder(metadataPart).Encode(metadata); err != nil {
-		return err
-	}
-	mediaHeader := make(textproto.MIMEHeader)
-	mediaHeader.Set("Content-Type", "application/octet-stream")
-	mediaPart, err := writer.CreatePart(mediaHeader)
-	if err != nil {
-		return err
-	}
-	if _, err := mediaPart.Write(data); err != nil {
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(
-		ctx, http.MethodPost,
-		googleDriveUploadBase+"/upload/drive/v3/files?uploadType=multipart&fields=id",
-		&body,
-	)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "multipart/related; boundary="+writer.Boundary())
-	response, err := remote.client.Do(request)
-	if err != nil {
-		return fmt.Errorf("create Google Drive pairing object: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return googleDriveResponseError("create pairing object", response)
-	}
-	return nil
-}
-
-func (remote *googleDriveRemote) deleteApplicationObject(ctx context.Context, fileID string) error {
-	if strings.TrimSpace(fileID) == "" {
-		return fmt.Errorf("invalid Google Drive file id")
-	}
-	request, err := http.NewRequestWithContext(
-		ctx, http.MethodDelete,
-		googleDriveAPIBase+"/drive/v3/files/"+url.PathEscape(fileID),
-		nil,
-	)
-	if err != nil {
-		return err
-	}
-	response, err := remote.client.Do(request)
-	if err != nil {
-		return fmt.Errorf("delete Google Drive pairing object: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return googleDriveResponseError("delete pairing object", response)
-	}
-	return nil
-}
-
-func validGooglePairingObjectName(name string) bool {
-	const suffix = ".ccl"
-	var id string
-	switch {
-	case strings.HasPrefix(name, "ccl-pair-request-") && strings.HasSuffix(name, suffix):
-		id = strings.TrimSuffix(strings.TrimPrefix(name, "ccl-pair-request-"), suffix)
-	case strings.HasPrefix(name, "ccl-pair-response-") && strings.HasSuffix(name, suffix):
-		id = strings.TrimSuffix(strings.TrimPrefix(name, "ccl-pair-response-"), suffix)
-	default:
-		return false
-	}
-	return validIdentifier(id, 32)
 }
 
 func googleDriveResponseError(operation string, response *http.Response) error {
