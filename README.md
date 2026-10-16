@@ -36,6 +36,8 @@ ccl set deepseek
 ccl            # 用当前 provider 启动 Claude Code
 ```
 
+新安装默认 provider 加载为 off：尚未激活 provider 时，`ccl` 直接以 Claude Code 自身登录启动；`ccl oauth`、`ccl set` 选择 Save & Activate 或 `ccl use <name>` 激活 provider 后自动切换为 on。
+
 未知命令和参数会原样透传给 Claude Code（`ccl resume`、`ccl -p "hi"`），并启动真实会话。
 
 ### 常用命令
@@ -47,7 +49,7 @@ ccl            # 用当前 provider 启动 Claude Code
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | 映射模型槽位；`ccl map auto` 自动填充 |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | 订阅登录 / 清理未使用凭据 |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
-| `ccl provider on\|off` | 是否加载 provider（off = Claude Code 自身登录） |
+| `ccl provider on\|off` | 是否加载 provider（off = Claude Code 自身登录；新安装默认 off） |
 | `ccl proxy -p <name>` / `status` / `stop` | 后台代理，让直接运行的 `claude` 使用指定 provider |
 | `ccl acp [install]` | Agent Client Protocol（Xcode 27 等） |
 | `ccl cloud login\|push\|pull\|status\|key\|device\|remote` | 端到端加密云同步（iCloud / Google Drive） |
@@ -104,7 +106,7 @@ Claude Code 始终说 Anthropic Messages。Anthropic API-key 网关在普通启�
 
 ### 云同步
 
-`ccl cloud login icloud|google-drive` 之后 `push` / `pull`。同步 `config.yaml` 与 `auth/*.json`，gzip 后用 AES-256-GCM 加密；Google Drive 仅申请 `drive.appdata` 权限。新设备用 `ccl cloud key export/import` 的离线恢复密钥，或 `ccl cloud device request/approve/complete` 配对。恢复密钥丢失且无授权设备时无法解密。冲突时 push / pull 会停止，不会静默覆盖。
+`ccl cloud login`（默认 Google Drive；macOS 也可 `ccl cloud login icloud`）之后 `push` / `pull`。没有浏览器的环境（SSH、Cloud Shell、无图形界面的 Linux）会自动改用设备码登录：终端显示二维码和短代码，在手机或电脑上打开 `google.com/device` 输入即可；`--device` / `--device=false` 可强制选择。同步 `config.yaml` 与 `auth/*.json`，gzip 后用 AES-256-GCM 加密；Google Drive 仅申请 `drive.appdata` 权限。新设备用 `ccl cloud key export/import` 的离线恢复密钥，或 `ccl cloud device request/approve/complete` 配对。恢复密钥丢失且无授权设备时无法解密。冲突时 push / pull 会停止，不会静默覆盖。
 
 ### 开发
 
@@ -157,6 +159,8 @@ ccl set deepseek
 ccl            # launch Claude Code with the active provider
 ```
 
+On a fresh install provider loading is off: until a provider is activated, `ccl` starts Claude Code on its own login. `ccl oauth`, Save & Activate in `ccl set`, or `ccl use <name>` activates one and turns loading on.
+
 Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, `ccl -p "hi"`) and start a real session.
 
 ### Commands
@@ -168,7 +172,7 @@ Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, 
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | Map model slots; `ccl map auto` fills them |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | Subscription login / remove unused credentials |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |
-| `ccl provider on\|off` | Load the provider or not (off = Claude Code's own login) |
+| `ccl provider on\|off` | Load the provider or not (off = Claude Code's own login; off by default on a fresh install) |
 | `ccl proxy -p <name>` / `status` / `stop` | Background proxy so a plain `claude` uses the chosen provider |
 | `ccl acp [install]` | Agent Client Protocol (Xcode 27, …) |
 | `ccl cloud login\|push\|pull\|status\|key\|device\|remote` | End-to-end encrypted sync (iCloud / Google Drive) |
@@ -225,7 +229,7 @@ Claude Code always speaks Anthropic Messages. Anthropic API-key gateways are cal
 
 ### Cloud sync
 
-`ccl cloud login icloud|google-drive`, then `push` / `pull`. It syncs `config.yaml` and `auth/*.json`, gzip-compressed and encrypted with AES-256-GCM; Google Drive uses only the `drive.appdata` scope. Add a new device with the offline recovery key (`ccl cloud key export/import`) or by pairing (`ccl cloud device request/approve/complete`). If the recovery key is lost and no authorized device remains, data cannot be decrypted. On conflicts push / pull stop instead of overwriting.
+`ccl cloud login` (Google Drive by default; `ccl cloud login icloud` on macOS), then `push` / `pull`. Without a browser (SSH, Cloud Shell, Linux without a display) Google Drive login uses the device flow: the terminal shows a QR code and a short code to enter at `google.com/device` on a phone or another computer; `--device` / `--device=false` forces either way. It syncs `config.yaml` and `auth/*.json`, gzip-compressed and encrypted with AES-256-GCM; Google Drive uses only the `drive.appdata` scope. Add a new device with the offline recovery key (`ccl cloud key export/import`) or by pairing (`ccl cloud device request/approve/complete`). If the recovery key is lost and no authorized device remains, data cannot be decrypted. On conflicts push / pull stop instead of overwriting.
 
 ### Development
 
