@@ -16,18 +16,22 @@ import (
 func newCloudLoginCommand() *cobra.Command {
 	var passphraseFile string
 	var passphraseMode bool
+	var device bool
 	cmd := &cobra.Command{
-		Use:   "login <platform> [alias]",
+		Use:   "login [platform] [alias]",
 		Short: "Connect an encrypted cloud synchronization provider",
 		Long: `Connect ccl to a cloud sync provider, create or open an end-to-end encrypted
 profile, and register a local remote alias.
 
-Platforms:
+Platforms (default: google-drive):
 
   icloud         Uses the signed-in macOS iCloud Drive account (macOS only)
   google-drive   Opens a browser OAuth flow (aliases: google, drive)
                  Built-in Desktop OAuth client + PKCE; no OAuth JSON required
                  Tokens refresh automatically; only drive.appdata is requested
+                 --device shows a QR code and short code to approve on another
+                 device instead (default over SSH, in Cloud Shell, and on Linux
+                 without a display)
                  Encrypted bundle lives in the app-private appDataFolder
 
 Alias (optional second argument):
@@ -69,13 +73,19 @@ Related:
   ccl cloud remote ls
   ccl cloud logout [alias]
 `,
-		Example: `  ccl cloud login google-drive
+		Example: `  ccl cloud login                     # same as: ccl cloud login google-drive
   ccl cloud login google-drive personal
   ccl cloud login icloud
   ccl cloud login google-drive --passphrase
-  ccl cloud login google-drive --passphrase-file ~/.ccl-passphrase`,
-		Args: cobra.RangeArgs(1, 2),
+  ccl cloud login google-drive --passphrase-file ~/.ccl-passphrase
+  ccl cloud login google-drive --device     # approve on another device (QR code)`,
+		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Login failures are runtime errors; print them without the usage.
+			cmd.SilenceUsage = true
+			if len(args) == 0 {
+				args = []string{"google-drive"}
+			}
 			platform := strings.ToLower(strings.TrimSpace(args[0]))
 			switch platform {
 			case "icloud":
@@ -113,8 +123,13 @@ Related:
 				case "icloud":
 					result, err = cloudsync.LoginICloudNamed(alias, usePassphrase, passphrase)
 				case "google-drive":
+					useDevice := headlessHost() && cloudsync.DeviceAuthorizationAvailable()
+					if cmd.Flags().Changed("device") {
+						useDevice = device
+					}
+					ctx := cloudsync.WithDeviceAuthorization(cmd.Context(), useDevice)
 					result, err = cloudsync.LoginGoogleDriveNamed(
-						cmd.Context(), alias, usePassphrase, passphrase, cmd.ErrOrStderr(),
+						ctx, alias, usePassphrase, passphrase, cmd.ErrOrStderr(),
 					)
 				}
 			}
@@ -142,7 +157,18 @@ Related:
 		"Force passphrase-derived key mode (default on Linux/Windows; optional on macOS)")
 	cmd.Flags().StringVar(&passphraseFile, "passphrase-file", "",
 		"Read passphrase from a local file (also: CCL_SYNC_PASSPHRASE)")
+	cmd.Flags().BoolVar(&device, "device", false,
+		"Google Drive: approve on another device with a QR code and short code (default on SSH, Cloud Shell and Linux without a display)")
 	return cmd
+}
+
+// headlessHost reports a session that cannot open a local browser, where a
+// browser redirect to 127.0.0.1 could never reach this host.
+func headlessHost() bool {
+	if os.Getenv("CLOUD_SHELL") == "true" || os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" {
+		return true
+	}
+	return runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
 }
 
 func defaultCloudLoginAlias(providerName string) (string, error) {

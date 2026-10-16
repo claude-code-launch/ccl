@@ -36,11 +36,12 @@ type googleDriveFile struct {
 	Version string `json:"version"`
 }
 
-func newGoogleDriveRemote(ctx context.Context, token *oauth2.Token, authPath string) *googleDriveRemote {
-	config := googleOAuthConfig("")
+func newGoogleDriveRemote(ctx context.Context, token *oauth2.Token, authPath, client string) *googleDriveRemote {
+	config := googleOAuthConfigFor(client, "")
 	source := &savingTokenSource{
 		source:   config.TokenSource(ctx, token),
 		authPath: authPath,
+		client:   client,
 		last:     token,
 	}
 	return &googleDriveRemote{client: oauth2.NewClient(ctx, source)}

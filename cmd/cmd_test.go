@@ -574,6 +574,8 @@ func TestCloudLoginHelpDescribesPlatformsAndKeyModes(t *testing.T) {
 		"--passphrase",
 		"Examples:",
 		"ccl cloud login google-drive personal",
+		"default: google-drive",
+		"login [platform] [alias]",
 	} {
 		if !contains(out, want) {
 			t.Fatalf("expected cloud login help to contain %q, got:\n%s", want, out)

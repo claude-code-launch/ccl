@@ -17,5 +17,9 @@ LDFLAGS="-s -w -X github.com/claude-code-launch/ccl/cmd.Version=$VERSION"
 if [[ -n "${GOOGLE_OAUTH_CLIENT_SECRET:-}" ]]; then
   LDFLAGS="$LDFLAGS -X github.com/claude-code-launch/ccl/internal/cloudsync.googleOAuthClientSecret=$GOOGLE_OAUTH_CLIENT_SECRET"
 fi
+if [[ -n "${GOOGLE_DEVICE_CLIENT_ID:-}" ]]; then
+  LDFLAGS="$LDFLAGS -X github.com/claude-code-launch/ccl/internal/cloudsync.googleDeviceClientID=$GOOGLE_DEVICE_CLIENT_ID"
+  LDFLAGS="$LDFLAGS -X github.com/claude-code-launch/ccl/internal/cloudsync.googleDeviceClientSecret=${GOOGLE_DEVICE_CLIENT_SECRET:-}"
+fi
 mkdir -p "$(dirname "$OUTPUT")"
 go build -trimpath -ldflags="$LDFLAGS" -o "$OUTPUT" .

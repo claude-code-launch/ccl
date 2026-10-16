@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/browser"
+	"github.com/claude-code-launch/ccl/internal/termqr"
 	"golang.org/x/oauth2"
 )
 
@@ -51,11 +52,53 @@ var (
 	googleOAuthClientID     = decodeGoogleOAuthMaterial(googleOAuthClientIDMaterial)
 	googleOAuthClientSecret = decodeGoogleOAuthMaterial(googleOAuthClientSecretMaterial)
 	googleOAuthEndpoint     = oauth2.Endpoint{
-		AuthURL:  "https://accounts.google.com/o/oauth2/v2/auth",
-		TokenURL: "https://oauth2.googleapis.com/token",
+		AuthURL:       "https://accounts.google.com/o/oauth2/v2/auth",
+		TokenURL:      "https://oauth2.googleapis.com/token",
+		DeviceAuthURL: "https://oauth2.googleapis.com/device/code",
 	}
 	openBrowserURL = browser.Open
+
+	// The "TVs and Limited Input devices" client used by the device flow on
+	// hosts without a browser. Release builds inject it with -ldflags; local
+	// development may set CCL_GOOGLE_DEVICE_CLIENT_ID/_SECRET. Like the
+	// Desktop client it is public; the user's approval is the boundary.
+	googleDeviceClientID     = ""
+	googleDeviceClientSecret = ""
 )
+
+// googleClientDevice marks a token issued to the device-flow client. A
+// refresh token can only be refreshed by the client that obtained it.
+const googleClientDevice = "device"
+
+type deviceAuthorizationKey struct{}
+
+// WithDeviceAuthorization makes Google Drive login in ctx use the OAuth device
+// flow (a URL, QR code and short code to approve on another device) instead
+// of a local browser redirect.
+func WithDeviceAuthorization(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, deviceAuthorizationKey{}, enabled)
+}
+
+func deviceAuthorizationRequested(ctx context.Context) bool {
+	enabled, _ := ctx.Value(deviceAuthorizationKey{}).(bool)
+	return enabled
+}
+
+func googleDeviceClient() (string, string) {
+	id := strings.TrimSpace(os.Getenv("CCL_GOOGLE_DEVICE_CLIENT_ID"))
+	secret := strings.TrimSpace(os.Getenv("CCL_GOOGLE_DEVICE_CLIENT_SECRET"))
+	if id == "" {
+		id, secret = strings.TrimSpace(googleDeviceClientID), strings.TrimSpace(googleDeviceClientSecret)
+	}
+	return id, secret
+}
+
+// DeviceAuthorizationAvailable reports whether this build carries the
+// Google device-flow client.
+func DeviceAuthorizationAvailable() bool {
+	id, _ := googleDeviceClient()
+	return id != ""
+}
 
 func decodeGoogleOAuthMaterial(material []byte) string {
 	out := make([]byte, len(material))
@@ -68,6 +111,9 @@ func decodeGoogleOAuthMaterial(material []byte) string {
 type googleAuthFile struct {
 	Version int           `json:"version"`
 	Token   *oauth2.Token `json:"token"`
+	// Client is googleClientDevice for device-flow tokens, empty for the
+	// Desktop client.
+	Client string `json:"client,omitempty"`
 }
 
 func authorizeGoogleDriveWithNotice(ctx context.Context, notice io.Writer) (*googleDriveRemote, error) {
@@ -80,10 +126,13 @@ func authorizeGoogleDriveWithNotice(ctx context.Context, notice io.Writer) (*goo
 }
 
 func authorizeGoogleDriveAt(ctx context.Context, authPath string, notice io.Writer) (*googleDriveRemote, error) {
-	if token, loadErr := loadGoogleToken(authPath); loadErr == nil {
-		return newGoogleDriveRemote(ctx, token, authPath), nil
+	if stored, loadErr := loadGoogleAuth(authPath); loadErr == nil {
+		return newGoogleDriveRemote(ctx, stored.Token, authPath, stored.Client), nil
 	} else if !os.IsNotExist(loadErr) {
 		return nil, loadErr
+	}
+	if deviceAuthorizationRequested(ctx) {
+		return authorizeGoogleDriveDevice(ctx, authPath, notice)
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -190,7 +239,43 @@ func authorizeGoogleDriveAt(ctx context.Context, authPath string, notice io.Writ
 	if err := saveGoogleToken(authPath, token); err != nil {
 		return nil, err
 	}
-	return newGoogleDriveRemote(ctx, token, authPath), nil
+	return newGoogleDriveRemote(ctx, token, authPath, ""), nil
+}
+
+// authorizeGoogleDriveDevice runs the OAuth device flow: the user opens
+// Google's verification page on any device (the QR code points there) and
+// enters the short code; this host polls until it is approved.
+func authorizeGoogleDriveDevice(ctx context.Context, authPath string, notice io.Writer) (*googleDriveRemote, error) {
+	if !DeviceAuthorizationAvailable() {
+		return nil, fmt.Errorf("this ccl build has no Google device-flow client; run `ccl cloud login google-drive --device=false` on a host with a browser")
+	}
+	config := googleOAuthConfigFor(googleClientDevice, "")
+	device, err := config.DeviceAuth(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("start Google device authorization: %w", err)
+	}
+	if notice != nil {
+		link := device.VerificationURI
+		if device.VerificationURIComplete != "" {
+			link = device.VerificationURIComplete
+		}
+		fmt.Fprintf(notice, "Scan the QR code or open %s on any device, then enter the code: %s\n\n", device.VerificationURI, device.UserCode)
+		if err := termqr.Write(notice, link, "  "); err != nil {
+			return nil, err
+		}
+		fmt.Fprintln(notice, "\nWaiting for approval (Ctrl+C to cancel)...")
+	}
+	token, err := config.DeviceAccessToken(ctx, device)
+	if err != nil {
+		return nil, fmt.Errorf("Google device authorization was not completed: %w", err)
+	}
+	if token.RefreshToken == "" {
+		return nil, fmt.Errorf("Google did not return an offline refresh token; revoke CCL access in your Google account and try again")
+	}
+	if err := saveGoogleAuth(authPath, token, googleClientDevice); err != nil {
+		return nil, err
+	}
+	return newGoogleDriveRemote(ctx, token, authPath, googleClientDevice), nil
 }
 
 func loadAuthorizedGoogleDrive(ctx context.Context) (*googleDriveRemote, error) {
@@ -203,7 +288,7 @@ func loadAuthorizedGoogleDrive(ctx context.Context) (*googleDriveRemote, error) 
 }
 
 func loadAuthorizedGoogleDriveAt(ctx context.Context, authPath, alias string) (*googleDriveRemote, error) {
-	token, err := loadGoogleToken(authPath)
+	stored, err := loadGoogleAuth(authPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if alias != "" {
@@ -213,7 +298,21 @@ func loadAuthorizedGoogleDriveAt(ctx context.Context, authPath, alias string) (*
 		}
 		return nil, err
 	}
-	return newGoogleDriveRemote(ctx, token, authPath), nil
+	return newGoogleDriveRemote(ctx, stored.Token, authPath, stored.Client), nil
+}
+
+// googleOAuthConfigFor returns the config of the client that issued a token.
+func googleOAuthConfigFor(client, redirectURL string) *oauth2.Config {
+	if client != googleClientDevice {
+		return googleOAuthConfig(redirectURL)
+	}
+	id, secret := googleDeviceClient()
+	return &oauth2.Config{
+		ClientID:     id,
+		ClientSecret: secret,
+		Scopes:       []string{googleDriveScope},
+		Endpoint:     googleOAuthEndpoint,
+	}
 }
 
 func googleOAuthConfig(redirectURL string) *oauth2.Config {
@@ -235,22 +334,31 @@ func googleOAuthConfig(redirectURL string) *oauth2.Config {
 }
 
 func loadGoogleToken(path string) (*oauth2.Token, error) {
+	stored, err := loadGoogleAuth(path)
+	return stored.Token, err
+}
+
+func loadGoogleAuth(path string) (googleAuthFile, error) {
 	var stored googleAuthFile
 	if err := readJSONFile(path, &stored); err != nil {
-		return nil, err
+		return googleAuthFile{}, err
 	}
 	if stored.Version != formatVersion || stored.Token == nil ||
 		stored.Token.RefreshToken == "" {
-		return nil, fmt.Errorf("invalid Google Drive authorization; remove %s and run `ccl cloud login google-drive` again", path)
+		return googleAuthFile{}, fmt.Errorf("invalid Google Drive authorization; remove %s and run `ccl cloud login google-drive` again", path)
 	}
-	return stored.Token, nil
+	return stored, nil
 }
 
 func saveGoogleToken(path string, token *oauth2.Token) error {
+	return saveGoogleAuth(path, token, "")
+}
+
+func saveGoogleAuth(path string, token *oauth2.Token, client string) error {
 	if token == nil || token.RefreshToken == "" {
 		return fmt.Errorf("refuse to save incomplete Google Drive authorization")
 	}
-	if err := writeJSONAtomic(path, googleAuthFile{Version: formatVersion, Token: token}, 0o600); err != nil {
+	if err := writeJSONAtomic(path, googleAuthFile{Version: formatVersion, Token: token, Client: client}, 0o600); err != nil {
 		return fmt.Errorf("save Google Drive authorization: %w", err)
 	}
 	return nil
@@ -289,6 +397,7 @@ type savingTokenSource struct {
 	mu       sync.Mutex
 	source   oauth2.TokenSource
 	authPath string
+	client   string
 	last     *oauth2.Token
 }
 
@@ -304,7 +413,7 @@ func (source *savingTokenSource) Token() (*oauth2.Token, error) {
 		if token.RefreshToken == "" && source.last != nil {
 			token.RefreshToken = source.last.RefreshToken
 		}
-		if err := saveGoogleToken(source.authPath, token); err != nil {
+		if err := saveGoogleAuth(source.authPath, token, source.client); err != nil {
 			return nil, err
 		}
 		source.last = token

@@ -113,6 +113,9 @@ jobs:
           OUTPUT: dist/${{ matrix.asset }}
           # Optional rotation of the built-in public Desktop OAuth client.
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          # "TVs and Limited Input devices" client for ccl cloud login --device.
+          GOOGLE_DEVICE_CLIENT_ID: ${{ secrets.GOOGLE_DEVICE_CLIENT_ID }}
+          GOOGLE_DEVICE_CLIENT_SECRET: ${{ secrets.GOOGLE_DEVICE_CLIENT_SECRET }}
         run: bash scripts/build-release.sh
       # GitHub releases ship each binary gzip-compressed (~28 MB -> ~10 MB);
       # `ccl update` downloads <asset>.gz. -n drops the name and timestamp so
