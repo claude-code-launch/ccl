@@ -2,7 +2,6 @@ package cloudsync
 
 import (
 	"bytes"
-	"encoding/hex"
 	"os"
 	"path"
 	"path/filepath"
@@ -25,7 +24,7 @@ func TestSealAndOpenCompressedRoundTrip(t *testing.T) {
 	tampered := append([]byte(nil), sealed...)
 	tampered[len(tampered)-1] ^= 0xff
 	if _, err := openCompressed(key, tampered); err == nil ||
-		!strings.Contains(err.Error(), "wrong passphrase") {
+		!strings.Contains(err.Error(), "wrong key") {
 		t.Fatalf("tampered envelope error = %v", err)
 	}
 	if _, err := openCompressed(bytes.Repeat([]byte{0x2b}, 32), sealed); err == nil {
@@ -77,189 +76,35 @@ func TestOpenCompressedRejectsAnExpandedEnvelope(t *testing.T) {
 	}
 }
 
-func TestDeriveKeyValidations(t *testing.T) {
-	profile, err := newPassphraseProfile()
+func TestValidateRemoteProfile(t *testing.T) {
+	profile, key, err := newMasterKeyProfile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := deriveKey("too-short", profile); err == nil ||
-		!strings.Contains(err.Error(), "at least 12 characters") {
-		t.Fatalf("short passphrase error = %v", err)
+	if err := validateRemoteProfile(profile); err != nil {
+		t.Fatalf("new profile rejected: %v", err)
 	}
-	key, err := deriveKey("correct horse battery staple", profile)
-	if err != nil || len(key) != 32 {
-		t.Fatalf("deriveKey() = %d bytes, %v", len(key), err)
-	}
-	// The same passphrase and salt must derive the same key.
-	again, err := deriveKey("correct horse battery staple", profile)
-	if err != nil || !bytes.Equal(key, again) {
-		t.Fatalf("deriveKey() is not deterministic: %v", err)
-	}
-
-	masterKeyProfile, _, err := newMasterKeyProfile()
-	if err != nil {
+	if _, err := ensureProfileAccountKey(&profile, key); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := deriveKey("correct horse battery staple", masterKeyProfile); err == nil ||
-		!strings.Contains(err.Error(), "random recovery key") {
-		t.Fatalf("master-key profile error = %v", err)
-	}
-	for name, broken := range map[string]struct {
-		profile remoteProfile
-		want    string
-	}{
-		"wrong version": {profile: remoteProfile{Version: 99, ID: profile.ID, KDF: kdfScrypt, N: 1 << 15, R: 8, P: 1, Salt: profile.Salt}, want: "unsupported or unsafe cloud sync profile"},
-		"weak kdf":      {profile: remoteProfile{Version: formatVersion, ID: profile.ID, KDF: kdfScrypt, N: 1 << 10, R: 8, P: 1, Salt: profile.Salt}, want: "unsupported or unsafe cloud sync profile"},
-		"unknown kdf":   {profile: remoteProfile{Version: formatVersion, ID: profile.ID, KDF: "pbkdf2", N: 1 << 15, R: 8, P: 1, Salt: profile.Salt}, want: "unsupported or unsafe cloud sync profile"},
-		"bad salt":      {profile: remoteProfile{Version: formatVersion, ID: profile.ID, KDF: kdfScrypt, N: 1 << 15, R: 8, P: 1, Salt: "!!!"}, want: "invalid cloud sync salt"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := deriveKey("correct horse battery staple", broken.profile); err == nil ||
-				!strings.Contains(err.Error(), broken.want) {
-				t.Fatalf("deriveKey() error = %v, want %q", err, broken.want)
-			}
-		})
-	}
-	// A short salt decodes but is not the required 16 bytes.
-	short := profile
-	short.Salt = "AAAA"
-	if _, err := deriveKey("correct horse battery staple", short); err == nil ||
-		!strings.Contains(err.Error(), "invalid cloud sync salt") {
-		t.Fatalf("short salt error = %v", err)
-	}
-}
-
-func TestValidateRemoteProfileAcceptsBothKeyTypes(t *testing.T) {
-	passphraseProfile, err := newPassphraseProfile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateRemoteProfile(passphraseProfile); err != nil {
-		t.Fatalf("passphrase profile rejected: %v", err)
-	}
-	generated := passphraseProfile
-	if _, err := ensureProfileAccountKey(&generated, bytes.Repeat([]byte{9}, 32)); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateRemoteProfile(generated); err != nil {
+	if err := validateRemoteProfile(profile); err != nil {
 		t.Fatalf("profile with an account key rejected: %v", err)
 	}
-	if _, err := ensureProfileAccountKey(&generated, bytes.Repeat([]byte{8}, 32)); err == nil {
+	if _, err := ensureProfileAccountKey(&profile, bytes.Repeat([]byte{8}, 32)); err == nil {
 		t.Fatal("a profile's account key was replaced by another key")
 	}
-	masterKeyProfile, _, err := newMasterKeyProfile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateRemoteProfile(masterKeyProfile); err != nil {
-		t.Fatalf("master-key profile rejected: %v", err)
-	}
-
 	for name, broken := range map[string]remoteProfile{
-		"wrong version":    {Version: 99, ID: passphraseProfile.ID, KDF: kdfScrypt},
-		"short id":         {Version: formatVersion, ID: "abc", KDF: kdfScrypt},
-		"non-hex id":       {Version: formatVersion, ID: strings.Repeat("z", 32), KDF: kdfScrypt},
-		"weak kdf":         {Version: formatVersion, ID: passphraseProfile.ID, KDF: kdfScrypt, N: 2, R: 8, P: 1, Salt: passphraseProfile.Salt},
-		"unknown kdf":      {Version: formatVersion, ID: passphraseProfile.ID, KDF: "pbkdf2"},
-		"master key extra": {Version: formatVersion, ID: passphraseProfile.ID, KDF: kdfMasterKey, Salt: passphraseProfile.Salt},
+		"wrong version": {Version: 99, ID: profile.ID, KDF: kdfMasterKey},
+		"short id":      {Version: formatVersion, ID: "abc", KDF: kdfMasterKey},
+		"non-hex id":    {Version: formatVersion, ID: strings.Repeat("z", 32), KDF: kdfMasterKey},
+		"unknown kdf":   {Version: formatVersion, ID: profile.ID, KDF: "scrypt"},
+		"bad key":       {Version: formatVersion, ID: profile.ID, KDF: kdfMasterKey, AccountKey: "not-a-key"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateRemoteProfile(broken); err == nil {
 				t.Fatalf("validateRemoteProfile(%+v) accepted an invalid profile", broken)
 			}
 		})
-	}
-	badSalt := passphraseProfile
-	badSalt.Salt = "!!!"
-	if err := validateRemoteProfile(badSalt); err == nil ||
-		!strings.Contains(err.Error(), "invalid cloud sync salt") {
-		t.Fatalf("bad salt error = %v", err)
-	}
-	badAccountKey := passphraseProfile
-	badAccountKey.AccountKey = "not-a-key"
-	if err := validateRemoteProfile(badAccountKey); err == nil {
-		t.Fatal("an unusable account key was accepted")
-	}
-}
-
-func TestEncodeRecoveryKeyRejectsUnusableInputs(t *testing.T) {
-	profileID, err := randomHexIdentifier(16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := encodeRecoveryKey("not-hex", bytes.Repeat([]byte{1}, 32)); err == nil ||
-		!strings.Contains(err.Error(), "invalid profile or encryption key") {
-		t.Fatalf("bad profile id error = %v", err)
-	}
-	if _, err := encodeRecoveryKey(profileID, bytes.Repeat([]byte{1}, 16)); err == nil ||
-		!strings.Contains(err.Error(), "invalid profile or encryption key") {
-		t.Fatalf("short key error = %v", err)
-	}
-}
-
-func TestDecodeRecoveryKeyRejectsMalformedValues(t *testing.T) {
-	profileID, err := randomHexIdentifier(16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := encodeRecoveryKey(profileID, bytes.Repeat([]byte{7}, 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	groups := strings.Split(strings.TrimPrefix(encoded, recoveryKeyPrefix+"-"), "-")
-	if len(groups) == 0 {
-		t.Fatalf("encoded key has no groups: %q", encoded)
-	}
-
-	for name, value := range map[string]string{
-		"empty":           "",
-		"wrong prefix":    "CCL2-" + strings.Join(groups, "-"),
-		"not base32":      recoveryKeyPrefix + "-!!!" + strings.Join(groups[:1], ""),
-		"truncated":       recoveryKeyPrefix + "-" + strings.Join(groups[:len(groups)-1], "-"),
-		"payload version": recoveryKeyPrefix + "-" + strings.Join(groups, "-") + "A",
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, _, err := decodeRecoveryKey(value); err == nil {
-				t.Fatalf("decodeRecoveryKey(%q) accepted a malformed value", value)
-			}
-		})
-	}
-	// A single flipped character inside the payload must fail the checksum.
-	// (Position 0 would fail earlier: it is the payload version byte.)
-	tampered := []byte(strings.Join(groups, ""))
-	if tampered[10] == 'A' {
-		tampered[10] = 'B'
-	} else {
-		tampered[10] = 'A'
-	}
-	if _, _, err := decodeRecoveryKey(encoded); err != nil {
-		t.Fatalf("the untampered key was rejected: %v", err)
-	}
-	broken := recoveryKeyPrefix + "-" + string(tampered)
-	if _, _, err := decodeRecoveryKey(broken); err == nil ||
-		!strings.Contains(err.Error(), "checksum") {
-		t.Fatalf("tampered key error = %v", err)
-	}
-	// Lowercase and spaced input is the same key.
-	reformatted := strings.ToLower(recoveryKeyPrefix + " " + strings.Join(groups, " "))
-	gotID, gotKey, err := decodeRecoveryKey(reformatted)
-	if err != nil || gotID != profileID || !bytes.Equal(gotKey, bytes.Repeat([]byte{7}, 32)) {
-		t.Fatalf("reformatted key = %s, %d bytes, %v", gotID, len(gotKey), err)
-	}
-}
-
-// TestRecoveryKeyRoundTripsThroughAProfile ties the encoder to the decoder with
-// the identifiers the real login produces.
-func TestRecoveryKeyRoundTripsThroughAProfile(t *testing.T) {
-	profile, _, err := newMasterKeyProfile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(profile.ID) != 32 {
-		t.Fatalf("profile id = %q", profile.ID)
-	}
-	if _, err := hex.DecodeString(profile.ID); err != nil {
-		t.Fatalf("profile id is not hex: %v", err)
 	}
 }
 

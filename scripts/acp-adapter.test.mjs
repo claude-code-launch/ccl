@@ -90,7 +90,6 @@ async function fixture(t) {
     leases: new Map(),
     refuse: false,
     pause: false,
-    legacy: {},
   };
   const server = http.createServer(async (request, response) => {
     assert.equal(request.headers.authorization, "Bearer fixture-control");
@@ -102,9 +101,7 @@ async function fixture(t) {
       state.released.push(params.leaseId);
       state.leases.delete(params.leaseId);
       response.end("{}");
-    } else if (request.url === "/legacy")
-      response.end(JSON.stringify(state.legacy[params.sessionId] ?? {}));
-    else {
+    } else {
       state.acquired.push(params);
       if (state.pause) return;
       const options = {
@@ -425,22 +422,3 @@ test("cancel interrupts configuration preparation before a prompt is forwarded",
   f.state.pause = false;
 });
 
-test("old CCL ids load through upstream persistence and preserve client ids", async (t) => {
-  const f = await fixture(t);
-  f.state.legacy["old-ccl-id"] = {
-    sessionId: "real-claude-id",
-    cwd: f.directory,
-  };
-  const loaded = await f.call("session/load", {
-    sessionId: "old-ccl-id",
-    mcpServers: [],
-  });
-  assert.equal(loaded.result.sessionId, "old-ccl-id");
-  assert.equal(loaded.result.captured.sessionId, "real-claude-id");
-  assert.equal(f.notifications[0].params.sessionId, "old-ccl-id");
-  const prompt = await f.call("session/prompt", {
-    sessionId: "old-ccl-id",
-    prompt: [{ type: "text", text: "test" }],
-  });
-  assert.equal(prompt.result.captured.sessionId, "real-claude-id");
-});

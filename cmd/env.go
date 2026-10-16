@@ -12,8 +12,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var envCmd = newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]")
-
 // newEnvCommand manages a provider's extra environment variables.
 func newEnvCommand(use string) *cobra.Command {
 	// Per command, not package level: newEnvCommand is built twice, once for
@@ -256,8 +254,4 @@ func runEnvMove(oldArg, newArg string, force bool, target providerTarget) error 
 
 	fmt.Printf("✅ Renamed %s → %s\n", oldKey, newKey)
 	return nil
-}
-
-func init() {
-	rootCmd.AddCommand(deprecatedRootAlias(envCmd, "ccl provider env"))
 }

@@ -1,37 +1,12 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 
 	"github.com/claude-code-launch/ccl/internal/locale"
-	"github.com/claude-code-launch/ccl/internal/provider"
-	"github.com/spf13/cobra"
 )
-
-// newRetiredProviderToggleCommand keeps `ccl provider on|off` from older docs
-// working: off is `ccl use default`; on cannot know which provider to restore.
-func newRetiredProviderToggleCommand(use string) *cobra.Command {
-	return &cobra.Command{
-		Use:           use,
-		Short:         "Retired: use ccl use default / ccl use <name>",
-		Hidden:        true,
-		Args:          cobra.NoArgs,
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if cmd.Name() == "off" {
-				return runProviderUse(provider.DefaultProvider, false)
-			}
-			return errors.New(locale.T(
-				"ccl provider on 已移除：用 ccl use <name> 选择 provider（ccl use default 使用 Claude Code 自身配置）",
-				"ccl provider on was removed: choose a provider with ccl use <name> (ccl use default runs Claude Code's own configuration)",
-			))
-		},
-	}
-}
 
 // runClaudeWithoutProvider starts Claude Code exactly as its own
 // configuration stands (the "default" selector), apart from ccl's launcher

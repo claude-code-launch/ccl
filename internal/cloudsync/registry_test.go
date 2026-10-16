@@ -29,109 +29,6 @@ func writeSyncFixture(t *testing.T, home string) {
 	}
 }
 
-func TestLegacyRegistryMigrationIsLocalOnlyAndIdempotent(t *testing.T) {
-	home := t.TempDir()
-	drive := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CCL_ICLOUD_DRIVE_DIR", drive)
-	writeSyncFixture(t, home)
-
-	login, err := LoginICloudWithPassphrase("correct horse battery staple")
-	if err != nil {
-		t.Fatal(err)
-	}
-	localDir := filepath.Join(home, ".ccl")
-	remoteDir := filepath.Join(drive, remoteDirectory)
-	beforeProfile, err := os.ReadFile(filepath.Join(remoteDir, profileFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeVerifier, err := os.ReadFile(filepath.Join(remoteDir, verifierFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	registry, err := loadRegistry(localDir, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if registry.Version != registryVersion || registry.ActiveProfileID == "" ||
-		registry.PrimaryRemoteID == "" || registry.Device.ID != login.DeviceID {
-		t.Fatalf("migrated registry = %+v", registry)
-	}
-	if got := registry.Aliases["icloud"]; got != registry.PrimaryRemoteID {
-		t.Fatalf("migrated alias = %q, primary = %q", got, registry.PrimaryRemoteID)
-	}
-	for _, name := range []string{cloudConfigName, cloudKeyName} {
-		if _, err := os.Stat(filepath.Join(localDir, name+".v1.bak")); err != nil {
-			t.Fatalf("missing %s backup: %v", name, err)
-		}
-	}
-	key, err := os.ReadFile(profileKeyPath(localDir, registry.ActiveProfileID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(key) != 32 {
-		t.Fatalf("migrated profile key length = %d", len(key))
-	}
-
-	second, err := loadRegistry(localDir, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.PrimaryRemoteID != registry.PrimaryRemoteID ||
-		len(second.Aliases) != len(registry.Aliases) {
-		t.Fatalf("second migration changed registry: first=%+v second=%+v", registry, second)
-	}
-	afterProfile, err := os.ReadFile(filepath.Join(remoteDir, profileFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterVerifier, err := os.ReadFile(filepath.Join(remoteDir, verifierFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(beforeProfile, afterProfile) || !bytes.Equal(beforeVerifier, afterVerifier) {
-		t.Fatal("local migration modified remote profile data")
-	}
-}
-
-func TestLegacyMigrationDoesNotActivateAnInvalidKey(t *testing.T) {
-	home := t.TempDir()
-	drive := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CCL_ICLOUD_DRIVE_DIR", drive)
-	writeSyncFixture(t, home)
-	if _, err := LoginICloudWithPassphrase("correct horse battery staple"); err != nil {
-		t.Fatal(err)
-	}
-	localDir := filepath.Join(home, ".ccl")
-	remoteProfilePath := filepath.Join(drive, remoteDirectory, profileFileName)
-	before, err := os.ReadFile(remoteProfilePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(localDir, cloudKeyName), bytes.Repeat([]byte{0xA5}, 32), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(); err == nil ||
-		!strings.Contains(err.Error(), "verify legacy cloud key") {
-		t.Fatalf("invalid legacy key migration = %v", err)
-	}
-	if _, err := os.Stat(registryPath(localDir)); !os.IsNotExist(err) {
-		t.Fatalf("invalid key activated v2 registry: %v", err)
-	}
-	after, err := os.ReadFile(remoteProfilePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("failed migration modified the remote profile")
-	}
-}
-
 func TestMultipleRemotesReuseOneEncryptedSnapshot(t *testing.T) {
 	home := t.TempDir()
 	firstDrive := t.TempDir()
@@ -140,7 +37,7 @@ func TestMultipleRemotesReuseOneEncryptedSnapshot(t *testing.T) {
 	t.Setenv("CCL_ICLOUD_DRIVE_DIR", firstDrive)
 	writeSyncFixture(t, home)
 
-	first, err := LoginICloudNamed("personal", false, "")
+	first, err := LoginICloudNamed("personal")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +45,7 @@ func TestMultipleRemotesReuseOneEncryptedSnapshot(t *testing.T) {
 		t.Fatalf("first alias = %q", first.Alias)
 	}
 	t.Setenv("CCL_ICLOUD_DRIVE_DIR", secondDrive)
-	second, err := LoginICloudNamed("backup", false, "")
+	second, err := LoginICloudNamed("backup")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,11 +123,11 @@ func TestPartialPushJournalRetriesOnlyIncompleteRemote(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CCL_ICLOUD_DRIVE_DIR", firstDrive)
 	writeSyncFixture(t, home)
-	if _, err := LoginICloudNamed("first", false, ""); err != nil {
+	if _, err := LoginICloudNamed("first"); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CCL_ICLOUD_DRIVE_DIR", secondDrive)
-	if _, err := LoginICloudNamed("second", false, ""); err != nil {
+	if _, err := LoginICloudNamed("second"); err != nil {
 		t.Fatal(err)
 	}
 	firstManager, err := LoadRemote("first")
@@ -291,7 +188,7 @@ func TestCloudDoctorDetectsBroadKeyPermissions(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CCL_ICLOUD_DRIVE_DIR", t.TempDir())
 	writeSyncFixture(t, home)
-	if _, err := LoginICloudNamed("personal", false, ""); err != nil {
+	if _, err := LoginICloudNamed("personal"); err != nil {
 		t.Fatal(err)
 	}
 	report := DiagnoseLocal()
@@ -312,11 +209,11 @@ func TestCloudLoadRejectsSymlinkedProfileKey(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CCL_ICLOUD_DRIVE_DIR", t.TempDir())
 	writeSyncFixture(t, home)
-	if _, err := LoginICloudNamed("personal", false, ""); err != nil {
+	if _, err := LoginICloudNamed("personal"); err != nil {
 		t.Fatal(err)
 	}
 	localDir := filepath.Join(home, ".ccl")
-	registry, err := loadRegistry(localDir, false)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -61,10 +61,6 @@ func Execute() {
 		runStatusline()
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] == "acp-permission" {
-		fmt.Fprintln(os.Stderr, "acp-permission was removed; permissions are handled by claude-agent-acp")
-		os.Exit(1) // A stale MCP entry must never fall through to a Claude prompt.
-	}
 	if len(os.Args) > 1 && os.Args[1] == "acp" {
 		acpQuietErrors = true // Include flag/argument errors before PreRun.
 	}
@@ -72,12 +68,6 @@ func Execute() {
 	// the official installer left outside PATH.
 	localClaudeDir = useLocalClaudeInstall()
 
-	// Persist config migrations once, under the config lock, before any command
-	// reads it. Load itself never writes. A failure (read-only home, say) is not
-	// fatal: every Load still applies the migrations in memory.
-	if err := config.Migrate(); err != nil {
-		fmt.Fprintf(os.Stderr, "ccl: could not migrate ~/.ccl/config.yaml: %v\n", err)
-	}
 	configureLogging()
 	// ccl proxy start/stop recover under their own lifecycle lock; serve is
 	// the proxy itself.

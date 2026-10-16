@@ -51,13 +51,13 @@ ccl            # 用当前 provider 启动 Claude Code
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
 | `ccl proxy -p <name>` / `status` / `stop` | 后台代理，让直接运行的 `claude` 使用指定 provider |
 | `ccl acp [install]` | Agent Client Protocol（Xcode 27 等） |
-| `ccl cloud login\|push\|pull\|status\|key\|device\|remote` | 端到端加密云同步（iCloud / Google Drive） |
+| `ccl cloud login\|push\|pull\|status\|remote` | 加密云同步（iCloud / Google Drive） |
 | `ccl bypass [on\|off]` | 启动时附加 `--dangerously-skip-permissions`，仅在可信环境使用 |
 | `ccl log [on\|off] [--level debug]` | 会话日志（默认关闭，写入 `~/.ccl/logs/`） |
 | `ccl lang [zh\|zh-TW\|en]` | 界面语言（`CCL_LANG` > 配置 > 系统） |
 | `ccl doctor` / `update` / `version` / `completion` | 诊断 / 升级 / 版本 / 补全 |
 
-每个子命令都支持 `--help`。根级 `cp/mv/env/preview/models` 与 `login/push/pull/...` 是已隐藏的废弃别名，请用 `ccl provider ...` / `ccl cloud ...`。
+每个子命令都支持 `--help`。
 
 ### 后台代理
 
@@ -173,13 +173,13 @@ Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, 
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |
 | `ccl proxy -p <name>` / `status` / `stop` | Background proxy so a plain `claude` uses the chosen provider |
 | `ccl acp [install]` | Agent Client Protocol (Xcode 27, …) |
-| `ccl cloud login\|push\|pull\|status\|key\|device\|remote` | End-to-end encrypted sync (iCloud / Google Drive) |
+| `ccl cloud login\|push\|pull\|status\|remote` | Encrypted sync (iCloud / Google Drive) |
 | `ccl bypass [on\|off]` | Add `--dangerously-skip-permissions` on launch; trusted environments only |
 | `ccl log [on\|off] [--level debug]` | Per-session logs (off by default, in `~/.ccl/logs/`) |
 | `ccl lang [zh\|zh-TW\|en]` | UI language (`CCL_LANG` > config > system) |
 | `ccl doctor` / `update` / `version` / `completion` | Diagnose / upgrade / version / completions |
 
-Every subcommand supports `--help`. Root-level `cp/mv/env/preview/models` and `login/push/pull/...` are hidden deprecated aliases; use `ccl provider ...` / `ccl cloud ...`.
+Every subcommand supports `--help`.
 
 ### Background proxy
 

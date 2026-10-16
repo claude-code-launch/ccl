@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,7 +42,7 @@ func TestConfigurationServiceLeasesAndAuthentication(t *testing.T) {
 		lease := &fixtureLease{}
 		leases <- lease
 		return lease, nil
-	}, "", nil)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +84,7 @@ func TestConfigurationReleaseCancelsPendingPreparation(t *testing.T) {
 		<-ctx.Done()
 		close(stopped)
 		return nil, ctx.Err()
-	}, "", nil)
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,27 +105,6 @@ func TestConfigurationReleaseCancelsPendingPreparation(t *testing.T) {
 	configRequest(t, s, "/release", s.token, map[string]string{"leaseId": "cancelled-before-acquire"})
 	if status, _ := configRequest(t, s, "/acquire", s.token, map[string]string{"leaseId": "cancelled-before-acquire"}); status != 409 {
 		t.Fatalf("release-before-acquire status = %d", status)
-	}
-}
-
-func TestLegacyMappingIsReadOnlyAndRejectsTraversal(t *testing.T) {
-	dir, cwd := t.TempDir(), t.TempDir()
-	data, _ := json.Marshal(map[string]string{"sessionId": "old", "claudeSessionId": "real", "cwd": cwd})
-	file := filepath.Join(dir, "old.json")
-	if err := os.WriteFile(file, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if id, got := legacySession(dir, "old"); id != "real" || got != cwd {
-		t.Fatalf("legacy mapping = %q %q", id, got)
-	}
-	for _, invalid := range []string{"../old", `..\old`, "missing"} {
-		if id, _ := legacySession(dir, invalid); id != "" {
-			t.Fatalf("accepted invalid legacy id %q", invalid)
-		}
-	}
-	after, _ := os.ReadFile(file)
-	if !bytes.Equal(data, after) {
-		t.Fatal("legacy session mapping was modified")
 	}
 }
 

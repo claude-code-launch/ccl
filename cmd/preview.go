@@ -7,8 +7,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var previewCmd = newProviderPreviewCommand("preview")
-
 func newProviderPreviewCommand(use string) *cobra.Command {
 	target := &providerTarget{}
 	cmd := &cobra.Command{
@@ -33,8 +31,4 @@ func runPreview(target providerTarget) error {
 	}
 	fmt.Println(settings)
 	return nil
-}
-
-func init() {
-	rootCmd.AddCommand(deprecatedRootAlias(previewCmd, "ccl provider preview"))
 }

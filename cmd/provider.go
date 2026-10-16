@@ -38,9 +38,6 @@ Root shortcuts: ccl set / ccl ls / ccl use / ccl map.
 `,
 }
 
-var cpCmd = newProviderCopyCommand("cp <source> <target>")
-var mvCmd = newProviderMoveCommand("mv <source> <target>")
-
 func newProviderSetCommand(use string) *cobra.Command {
 	return &cobra.Command{
 		Use:   use,
@@ -516,14 +513,8 @@ func init() {
 		newMapCommand("map [provider-name]"),
 		newModelsCommand("models"),
 		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
-		newRetiredProviderToggleCommand("on"),
-		newRetiredProviderToggleCommand("off"),
 		newProviderEffortCommand(),
 		newProviderUltracodeCommand(),
 	)
-	// Root shortcuts for the less frequent provider commands are deprecated;
-	// `rm` is gone from the root because `claude rm` is a Claude Code command.
-	rootCmd.AddCommand(providerCmd,
-		deprecatedRootAlias(cpCmd, "ccl provider cp"),
-		deprecatedRootAlias(mvCmd, "ccl provider mv"))
+	rootCmd.AddCommand(providerCmd)
 }

@@ -16,7 +16,7 @@ func ListRemotes() ([]RemoteInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		if errors.Is(err, errRegistryNotConfigured) {
 			return nil, nil
@@ -54,7 +54,7 @@ func HasActiveProfile() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, err = loadRegistry(localDir, true)
+	_, err = loadRegistry(localDir)
 	if err == nil {
 		return true, nil
 	}
@@ -69,7 +69,7 @@ func SetPrimaryRemote(alias string) error {
 	if err != nil {
 		return err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func RenameRemote(alias, newAlias string) error {
 	if err != nil {
 		return err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func SetRemoteMirror(alias string, enabled bool) error {
 	if err != nil {
 		return err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		return err
 	}
@@ -146,35 +146,6 @@ func SetRemoteMirror(alias string, enabled bool) error {
 	}
 	remote.Mirror = enabled
 	return writeJSONAtomic(path, remote, 0o600)
-}
-
-// loginNamedFirstRemote runs the provider's legacy first login when no v2
-// registry exists, migrates the resulting configuration, and renames the
-// default alias to the requested one.
-func loginNamedFirstRemote(
-	normalized, localDir, provider string,
-	legacyLogin func() (LoginResult, error),
-) (LoginResult, error) {
-	result, loginErr := legacyLogin()
-	if loginErr != nil {
-		return LoginResult{}, loginErr
-	}
-	registry, err := loadRegistry(localDir, true)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	defaultAlias, _, resolveErr := resolveRemote(registry, "")
-	if resolveErr != nil {
-		return LoginResult{}, resolveErr
-	}
-	if defaultAlias != normalized {
-		if err := RenameRemote(defaultAlias, normalized); err != nil {
-			return LoginResult{}, err
-		}
-	}
-	result.Alias = normalized
-	result.Provider = provider
-	return result, nil
 }
 
 // loginExistingRemote reuses the already-configured remote under alias. It
@@ -218,51 +189,25 @@ func verifyActiveProfileBeforeAttach(registry cloudRegistry) error {
 	return nil
 }
 
-// LoginGoogleDriveNamed connects a Google account under a local alias. The
-// first login reuses the v1 implementation and immediately migrates it to v2;
-// later logins attach an independent OAuth token/cache to the active profile.
+// LoginGoogleDriveNamed connects a Google account under a local alias. On a
+// device without a profile it opens (or creates) the one stored in that
+// account; otherwise it attaches the account to the active profile.
 func LoginGoogleDriveNamed(
 	ctx context.Context,
 	alias string,
-	usePassphrase bool,
-	passphrase string,
 	notice interface{ Write([]byte) (int, error) },
 ) (LoginResult, error) {
-	normalized, err := normalizeRemoteAlias(alias)
+	normalized, localDir, registry, configured, err := prepareLogin(alias)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	localDir, err := cclDirectory()
-	if err != nil {
-		return LoginResult{}, err
+	if configured && registry.Aliases[normalized] != "" {
+		return loginExistingRemote(localDir, registry, normalized, providerGoogleDrive)
 	}
-	registry, err := loadRegistry(localDir, true)
-	if errors.Is(err, errRegistryNotConfigured) {
-		return loginNamedFirstRemote(normalized, localDir, providerGoogleDrive,
-			func() (LoginResult, error) {
-				return LoginGoogleDrive(ctx, usePassphrase, passphrase, notice)
-			},
-		)
-	}
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if remoteID := registry.Aliases[normalized]; remoteID != "" {
-		if _, tokenErr := loadGoogleToken(remoteAuthPath(localDir, remoteID)); !errors.Is(tokenErr, errGoogleClientChanged) {
-			return loginExistingRemote(localDir, registry, normalized, providerGoogleDrive)
-		}
-		// A previous OAuth client's Cloud project has its own appDataFolder,
-		// unreachable now: reconnect the alias as a new remote of the same
-		// profile, which uploads the local state.
-		if _, err := LogoutRemote(ctx, normalized, LogoutOptions{}); err != nil {
+	if configured {
+		if err := verifyActiveProfileBeforeAttach(registry); err != nil {
 			return LoginResult{}, err
 		}
-		if registry, err = loadRegistry(localDir, true); err != nil {
-			return LoginResult{}, err
-		}
-	}
-	if err := verifyActiveProfileBeforeAttach(registry); err != nil {
-		return LoginResult{}, err
 	}
 
 	remoteID, err := randomHexIdentifier(16)
@@ -279,8 +224,7 @@ func LoginGoogleDriveNamed(
 			_ = os.RemoveAll(localRemoteDir)
 		}
 	}()
-	authPath := remoteAuthPath(localDir, remoteID)
-	google, err := authorizeGoogleDriveAt(ctx, authPath, notice)
+	google, err := authorizeGoogleDriveAt(ctx, remoteAuthPath(localDir, remoteID), notice)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -288,10 +232,9 @@ func LoginGoogleDriveNamed(
 	if _, err := google.downloadBundle(cacheDir); err != nil {
 		return LoginResult{}, err
 	}
-	result, err := attachRemote(
-		localDir, registry, normalized, remoteID, providerGoogleDrive,
-		cacheDir, "Google Drive appDataFolder",
-		func() error { return google.uploadBundle(cacheDir) },
+	result, err := connectRemote(
+		localDir, registry, configured, normalized, remoteID, providerGoogleDrive,
+		cacheDir, googleDriveLabel, func() error { return google.uploadBundle(cacheDir) },
 	)
 	if err != nil {
 		return LoginResult{}, err
@@ -300,54 +243,146 @@ func LoginGoogleDriveNamed(
 	return result, nil
 }
 
-func LoginICloudNamed(alias string, usePassphrase bool, passphrase string) (LoginResult, error) {
-	normalized, err := normalizeRemoteAlias(alias)
+const googleDriveLabel = "Google Drive appDataFolder"
+
+func LoginICloudNamed(alias string) (LoginResult, error) {
+	normalized, localDir, registry, configured, err := prepareLogin(alias)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	localDir, err := cclDirectory()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	registry, err := loadRegistry(localDir, true)
-	if errors.Is(err, errRegistryNotConfigured) {
-		return loginNamedFirstRemote(normalized, localDir, providerICloud,
-			func() (LoginResult, error) {
-				if usePassphrase {
-					return LoginICloudWithPassphrase(passphrase)
-				}
-				return LoginICloudLocalKey()
-			},
-		)
-	}
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if registry.Aliases[normalized] != "" {
+	if configured && registry.Aliases[normalized] != "" {
 		return loginExistingRemote(localDir, registry, normalized, providerICloud)
-	}
-	if err := verifyActiveProfileBeforeAttach(registry); err != nil {
-		return LoginResult{}, err
 	}
 	remoteDir, err := defaultICloudDirectory()
 	if err != nil {
 		return LoginResult{}, err
 	}
-	for existingAlias, id := range registry.Aliases {
-		var existing localRemoteConfigV2
-		if readJSONFile(remoteConfigPath(localDir, id), &existing) == nil &&
-			existing.Provider == providerICloud && filepath.Clean(existing.RemoteDir) == filepath.Clean(remoteDir) {
-			return LoginResult{}, fmt.Errorf("iCloud directory is already connected as %q", existingAlias)
+	if configured {
+		if err := verifyActiveProfileBeforeAttach(registry); err != nil {
+			return LoginResult{}, err
+		}
+		for existingAlias, id := range registry.Aliases {
+			var existing localRemoteConfigV2
+			if readJSONFile(remoteConfigPath(localDir, id), &existing) == nil &&
+				existing.Provider == providerICloud && filepath.Clean(existing.RemoteDir) == filepath.Clean(remoteDir) {
+				return LoginResult{}, fmt.Errorf("iCloud directory is already connected as %q", existingAlias)
+			}
 		}
 	}
 	remoteID, err := randomHexIdentifier(16)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	return attachRemote(
-		localDir, registry, normalized, remoteID, providerICloud,
-		remoteDir, remoteDir, nil,
-	)
+	return connectRemote(localDir, registry, configured, normalized, remoteID, providerICloud, remoteDir, remoteDir, nil)
+}
+
+// prepareLogin normalizes alias and loads the registry; configured is false on
+// a device that has no cloud profile yet.
+func prepareLogin(alias string) (string, string, cloudRegistry, bool, error) {
+	normalized, err := normalizeRemoteAlias(alias)
+	if err != nil {
+		return "", "", cloudRegistry{}, false, err
+	}
+	localDir, err := cclDirectory()
+	if err != nil {
+		return "", "", cloudRegistry{}, false, err
+	}
+	registry, err := loadRegistry(localDir)
+	if errors.Is(err, errRegistryNotConfigured) {
+		return normalized, localDir, cloudRegistry{}, false, nil
+	}
+	return normalized, localDir, registry, err == nil, err
+}
+
+func connectRemote(
+	localDir string, registry cloudRegistry, configured bool,
+	alias, remoteID, provider, remoteDir, remoteLabel string, flush func() error,
+) (LoginResult, error) {
+	if configured {
+		return attachRemote(localDir, registry, alias, remoteID, provider, remoteDir, remoteLabel, flush)
+	}
+	return loginFirstRemote(localDir, alias, remoteID, provider, remoteDir, remoteLabel, flush)
+}
+
+// loginFirstRemote sets this device up from the profile at remoteDir. The key
+// stored in the cloud profile opens it, so the cloud account is all a new
+// device needs; a remote without a profile gets a new one.
+func loginFirstRemote(localDir, alias, remoteID, provider, remoteDir, remoteLabel string, flush func() error) (LoginResult, error) {
+	profile, key, existing, err := openRemoteProfile(remoteDir)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	deviceID, err := randomDeviceID()
+	if err != nil {
+		return LoginResult{}, err
+	}
+	profileDir := profileDirectory(localDir, profile.ID)
+	for _, dir := range []string{cloudRoot(localDir), filepath.Dir(profileDir), profileDir} {
+		if err := ensureLocalCloudDirectory(dir); err != nil {
+			return LoginResult{}, err
+		}
+	}
+	state := localProfileStateV2{Version: registryVersion, ProfileID: profile.ID, KeyMode: keyModeLocal}
+	if err := writeJSONAtomic(profileMetadataPath(localDir, profile.ID), profile, 0o600); err != nil {
+		return LoginResult{}, err
+	}
+	if err := writeJSONAtomic(profileStatePath(localDir, profile.ID), state, 0o600); err != nil {
+		return LoginResult{}, err
+	}
+	if err := writeAtomic(profileKeyPath(localDir, profile.ID), key, 0o600); err != nil {
+		return LoginResult{}, fmt.Errorf("save profile encryption key: %w", err)
+	}
+	registry := cloudRegistry{
+		Version: registryVersion, ActiveProfileID: profile.ID,
+		Device: localDevice{ID: deviceID}, Aliases: map[string]string{},
+	}
+	result, err := attachRemote(localDir, registry, alias, remoteID, provider, remoteDir, remoteLabel, flush)
+	if err != nil {
+		_ = os.RemoveAll(profileDir)
+		return LoginResult{}, err
+	}
+	result.Existing = existing
+	return result, nil
+}
+
+// openRemoteProfile reads the profile at remoteDir and the key stored in it,
+// or writes a new profile there when the remote holds none (or only an
+// unused one).
+func openRemoteProfile(remoteDir string) (remoteProfile, []byte, bool, error) {
+	var profile remoteProfile
+	err := readJSONFile(filepath.Join(remoteDir, profileFileName), &profile)
+	switch {
+	case err == nil:
+		if err := validateRemoteProfile(profile); err != nil {
+			return remoteProfile{}, nil, false, err
+		}
+		if key, ok := profileAccountKey(profile); ok {
+			return profile, key, true, nil
+		}
+		unused, err := isUninitializedRemoteProfile(remoteDir)
+		if err != nil {
+			return remoteProfile{}, nil, false, err
+		}
+		if !unused {
+			return remoteProfile{}, nil, false, fmt.Errorf("the cloud sync profile stores no key; delete ccl's cloud data (ccl cloud logout --delete-remote) and log in again")
+		}
+	case !os.IsNotExist(err):
+		return remoteProfile{}, nil, false, err
+	}
+	profile, key, err := newMasterKeyProfile()
+	if err != nil {
+		return remoteProfile{}, nil, false, err
+	}
+	if _, err := ensureProfileAccountKey(&profile, key); err != nil {
+		return remoteProfile{}, nil, false, err
+	}
+	if err := os.MkdirAll(filepath.Join(remoteDir, snapshotsDirectory), 0o700); err != nil {
+		return remoteProfile{}, nil, false, err
+	}
+	if err := writeJSONAtomic(filepath.Join(remoteDir, profileFileName), profile, 0o600); err != nil {
+		return remoteProfile{}, nil, false, fmt.Errorf("write cloud sync profile: %w", err)
+	}
+	return profile, key, false, nil
 }
 
 func attachRemote(
@@ -364,14 +399,7 @@ func attachRemote(
 	if err := readJSONFile(profileMetadataPath(localDir, registry.ActiveProfileID), &metadata); err != nil {
 		return LoginResult{}, err
 	}
-	var key []byte
-	var err error
-	switch profileState.KeyMode {
-	case keyModeKeychain:
-		key, err = platformKeyLoad(registry.ActiveProfileID)
-	default:
-		key, err = loadProfileKeyFile(localDir, registry.ActiveProfileID)
-	}
+	key, err := loadProfileKeyFile(localDir, registry.ActiveProfileID)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -480,7 +508,7 @@ func LogoutRemote(ctx context.Context, alias string, options LogoutOptions) (Log
 	if err != nil {
 		return LogoutResult{}, err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		return LogoutResult{}, err
 	}
@@ -635,7 +663,7 @@ func PrimaryRemoteAlias() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		return "", err
 	}
@@ -648,7 +676,7 @@ func remoteAliasesForPush(all bool, alias string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		return nil, err
 	}

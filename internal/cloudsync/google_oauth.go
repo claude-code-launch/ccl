@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -62,23 +61,6 @@ func requireGoogleDesktopClient() error {
 type googleAuthFile struct {
 	Version int           `json:"version"`
 	Token   *oauth2.Token `json:"token"`
-	// ClientID is the OAuth client that issued Token. A refresh token only
-	// refreshes with that client; files without it predate the move to the
-	// current Cloud project.
-	ClientID string `json:"client_id,omitempty"`
-}
-
-// errGoogleClientChanged marks an authorization issued to another OAuth
-// client (the previous Cloud project), which can no longer be refreshed.
-var errGoogleClientChanged = errors.New("Google Drive authorization was issued to a previous ccl OAuth client")
-
-func authorizeGoogleDriveWithNotice(ctx context.Context, notice io.Writer) (*googleDriveRemote, error) {
-	localDir, err := cclDirectory()
-	if err != nil {
-		return nil, err
-	}
-	authPath := filepath.Join(localDir, googleAuthName)
-	return authorizeGoogleDriveAt(ctx, authPath, notice)
 }
 
 type pastedRedirectKey struct{}
@@ -146,7 +128,7 @@ func readPastedGoogleRedirect(in io.Reader, state string, notice io.Writer, resu
 func authorizeGoogleDriveAt(ctx context.Context, authPath string, notice io.Writer) (*googleDriveRemote, error) {
 	if token, loadErr := loadGoogleToken(authPath); loadErr == nil {
 		return newGoogleDriveRemote(ctx, token, authPath), nil
-	} else if !os.IsNotExist(loadErr) && !errors.Is(loadErr, errGoogleClientChanged) {
+	} else if !os.IsNotExist(loadErr) {
 		return nil, loadErr
 	}
 	if err := requireGoogleDesktopClient(); err != nil {
@@ -259,15 +241,6 @@ func authorizeGoogleDriveAt(ctx context.Context, authPath string, notice io.Writ
 	return newGoogleDriveRemote(ctx, token, authPath), nil
 }
 
-func loadAuthorizedGoogleDrive(ctx context.Context) (*googleDriveRemote, error) {
-	localDir, err := cclDirectory()
-	if err != nil {
-		return nil, err
-	}
-	authPath := filepath.Join(localDir, googleAuthName)
-	return loadAuthorizedGoogleDriveAt(ctx, authPath, "")
-}
-
 func loadAuthorizedGoogleDriveAt(ctx context.Context, authPath, alias string) (*googleDriveRemote, error) {
 	token, err := loadGoogleToken(authPath)
 	if err != nil {
@@ -276,9 +249,6 @@ func loadAuthorizedGoogleDriveAt(ctx context.Context, authPath, alias string) (*
 				return nil, fmt.Errorf("not logged in to Google Drive remote %q; run `ccl cloud login google-drive %s` first", alias, alias)
 			}
 			return nil, fmt.Errorf("not logged in to Google Drive; run `ccl cloud login google-drive` first")
-		}
-		if errors.Is(err, errGoogleClientChanged) {
-			return nil, fmt.Errorf("%w; run `ccl cloud login google-drive %s` to authorize again", err, alias)
 		}
 		return nil, err
 	}
@@ -298,51 +268,36 @@ func googleOAuthConfig(redirectURL string) *oauth2.Config {
 	}
 }
 
-// loadGoogleToken returns a stored token this build can refresh, or
-// errGoogleClientChanged when another OAuth client issued it.
 func loadGoogleToken(path string) (*oauth2.Token, error) {
-	stored, err := readGoogleAuth(path)
-	if err != nil {
-		return nil, err
-	}
-	if id, _ := googleDesktopClient(); stored.ClientID != id {
-		return nil, errGoogleClientChanged
-	}
-	return stored.Token, nil
-}
-
-func readGoogleAuth(path string) (googleAuthFile, error) {
 	var stored googleAuthFile
 	if err := readJSONFile(path, &stored); err != nil {
-		return googleAuthFile{}, err
+		return nil, err
 	}
 	if stored.Version != formatVersion || stored.Token == nil ||
 		stored.Token.RefreshToken == "" {
-		return googleAuthFile{}, fmt.Errorf("invalid Google Drive authorization; remove %s and run `ccl cloud login google-drive` again", path)
+		return nil, fmt.Errorf("invalid Google Drive authorization; remove %s and run `ccl cloud login google-drive` again", path)
 	}
-	return stored, nil
+	return stored.Token, nil
 }
 
 func saveGoogleToken(path string, token *oauth2.Token) error {
 	if token == nil || token.RefreshToken == "" {
 		return fmt.Errorf("refuse to save incomplete Google Drive authorization")
 	}
-	clientID, _ := googleDesktopClient()
-	if err := writeJSONAtomic(path, googleAuthFile{Version: formatVersion, Token: token, ClientID: clientID}, 0o600); err != nil {
+	if err := writeJSONAtomic(path, googleAuthFile{Version: formatVersion, Token: token}, 0o600); err != nil {
 		return fmt.Errorf("save Google Drive authorization: %w", err)
 	}
 	return nil
 }
 
 func revokeGoogleAuthorization(ctx context.Context, authPath string) error {
-	// Revocation needs no client, so it also works for a previous client.
-	stored, err := readGoogleAuth(authPath)
+	token, err := loadGoogleToken(authPath)
 	if err != nil {
 		return err
 	}
-	value := stored.Token.RefreshToken
+	value := token.RefreshToken
 	if value == "" {
-		value = stored.Token.AccessToken
+		value = token.AccessToken
 	}
 	form := url.Values{"token": []string{value}}
 	request, err := http.NewRequestWithContext(

@@ -29,13 +29,12 @@ type configurationService struct {
 	token    string
 	acquire  func(context.Context) (LaunchLease, error)
 	observe  func(json.RawMessage)
-	legacy   string
 	mu       sync.Mutex
 	entries  map[string]*configurationEntry
 	closed   bool
 }
 
-func startConfigurationService(acquire func(context.Context) (LaunchLease, error), legacy string, observe func(json.RawMessage)) (*configurationService, error) {
+func startConfigurationService(acquire func(context.Context) (LaunchLease, error), observe func(json.RawMessage)) (*configurationService, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -46,7 +45,7 @@ func startConfigurationService(acquire func(context.Context) (LaunchLease, error
 		return nil, err
 	}
 	s := &configurationService{listener: listener, token: hex.EncodeToString(token[:]),
-		acquire: acquire, legacy: legacy, observe: observe, entries: make(map[string]*configurationEntry)}
+		acquire: acquire, observe: observe, entries: make(map[string]*configurationEntry)}
 	s.server = &http.Server{Handler: http.HandlerFunc(s.handle), ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout: 15 * time.Second}
 	go func() { _ = s.server.Serve(listener) }()
@@ -119,11 +118,6 @@ func (s *configurationService) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if r.URL.Path == "/legacy" {
-		id, cwd := legacySession(s.legacy, request.SessionID)
-		_ = json.NewEncoder(w).Encode(map[string]string{"sessionId": id, "cwd": cwd})
-		return
-	}
 	if request.LeaseID == "" || len(request.LeaseID) > 128 {
 		http.Error(w, "invalid configuration lease id", http.StatusBadRequest)
 		return

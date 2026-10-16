@@ -90,53 +90,6 @@ func TestRunAuthIgnoresLegacyProtocolOverrideInConfigMigration(t *testing.T) {
 	}
 }
 
-func TestRunAuthCreatesGPTProviderAlongsideLegacyCodexEntry(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	originalLogin := oauthLogin
-	oauthLogin = func(_ context.Context, target string, _ oauthproxy.LoginOptions) (oauthproxy.LoginResult, error) {
-		return oauthproxy.LoginResult{
-			Provider: target,
-			Backend:  "codex",
-			Path:     filepath.Join(home, ".ccl", "auth", "codex-test.json"),
-		}, nil
-	}
-	t.Cleanup(func() { oauthLogin = originalLogin })
-
-	initial := &provider.Config{
-		Providers: map[string]provider.Provider{
-			"codex": {Name: "codex", OAuthProvider: "codex", EffortLevel: "high", CustomModelID: "gpt-test"},
-		},
-	}
-	if err := config.Save(initial); err != nil {
-		t.Fatalf("save initial config: %v", err)
-	}
-
-	var out bytes.Buffer
-	if err := runAuth(context.Background(), &out, []string{"gpt"}, authOptions{}); err != nil {
-		t.Fatalf("runAuth() error: %v", err)
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	p := cfg.Providers["gpt-test"]
-	if cfg.ActiveProvider != "gpt-test" {
-		t.Fatalf("active provider = %q", cfg.ActiveProvider)
-	}
-	// A provider keyed "codex" is just another provider now: Load has already
-	// folded its oauthProvider into gpt, and a new login does not consume it.
-	if legacy, exists := cfg.Providers["codex"]; !exists || legacy.OAuthProvider != "gpt" {
-		t.Fatalf("codex-keyed provider = %+v (exists=%t)", legacy, exists)
-	}
-	if p.Type != "openai_responses" || p.Endpoint != "oauth://codex" || p.OAuthProvider != "gpt" {
-		t.Fatalf("OAuth provider = %+v", p)
-	}
-	if p.OAuthAccountCredential != "codex-test.json" {
-		t.Fatalf("credential binding = %q, want codex-test.json", p.OAuthAccountCredential)
-	}
-}
-
 func TestRunAuthRejectsPublicCodexAlias(t *testing.T) {
 	called := false
 	originalLogin := oauthLogin

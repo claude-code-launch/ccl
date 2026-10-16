@@ -69,7 +69,7 @@ func TestGooglePastedRedirectCompletesLoginWithoutABrowser(t *testing.T) {
 	}()
 
 	ctx := WithPastedRedirect(context.Background(), in)
-	authPath := filepath.Join(t.TempDir(), googleAuthName)
+	authPath := filepath.Join(t.TempDir(), "auth.json")
 	if _, err := authorizeGoogleDriveAt(ctx, authPath, notice); err != nil {
 		t.Fatal(err)
 	}

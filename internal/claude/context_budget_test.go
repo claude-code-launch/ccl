@@ -180,26 +180,6 @@ func TestSettingsKeepSupportedBalancedContextTriplets(t *testing.T) {
 	}
 }
 
-func TestBuildEnvDropsCclDirectives(t *testing.T) {
-	p := provider.Provider{
-		Name:     "manual-gpt",
-		Type:     "openai_responses",
-		Endpoint: "https://example.test/v1",
-		APIKey:   "sk-test",
-		Env: map[string]string{
-			provider.EnvContextBudgetMode: "manual",
-			provider.EnvMaxContextTokens:  "1050000",
-		},
-	}
-	env := buildEnv(p, "https://example.test", false)
-	if _, present := env[provider.EnvContextBudgetMode]; present {
-		t.Errorf("%s is a ccl directive and must not reach Claude Code", provider.EnvContextBudgetMode)
-	}
-	if env[provider.EnvMaxContextTokens] != "1050000" {
-		t.Errorf("configured context override was lost: %q", env[provider.EnvMaxContextTokens])
-	}
-}
-
 func TestBuildProcessEnvDropsInheritedSettingsKeys(t *testing.T) {
 	// Default writes no context env, so ambient values must not silently replace it.
 	settings := settingsJSON{Env: map[string]string{

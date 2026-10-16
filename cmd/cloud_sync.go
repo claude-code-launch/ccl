@@ -14,8 +14,6 @@ import (
 )
 
 func newCloudLoginCommand() *cobra.Command {
-	var passphraseFile string
-	var passphraseMode bool
 	var noBrowser bool
 	cmd := &cobra.Command{
 		Use:   "login [platform] [alias]",
@@ -26,7 +24,7 @@ and register a local remote alias.
 Platforms (default: google-drive):
 
   icloud         Uses the signed-in macOS iCloud Drive account (macOS only)
-  google-drive   Opens a browser OAuth flow (aliases: google, drive)
+  google-drive   Opens a browser OAuth flow
                  Built-in Desktop OAuth client + PKCE; no OAuth JSON required
                  Tokens refresh automatically; only drive.appdata is requested
                  --no-browser prints the URL to open on any device and reads
@@ -47,7 +45,6 @@ Examples:
   ccl cloud login google-drive
   ccl cloud login google-drive personal
   ccl cloud login google-drive work
-  ccl login google-drive              # root compatibility alias
 
 Encryption key:
 
@@ -56,11 +53,6 @@ Encryption key:
   a new device only needs ccl cloud login with the same account. Anyone who
   controls that account (or a ccl token for it) can read the synced
   provider credentials.
-
-  --passphrase      derive the key of a new profile from a passphrase instead
-  --passphrase-file read passphrase from a local file
-  CCL_SYNC_PASSPHRASE
-                    non-interactive passphrase from the environment
 
 Related:
 
@@ -71,8 +63,6 @@ Related:
 		Example: `  ccl cloud login                     # same as: ccl cloud login google-drive
   ccl cloud login google-drive personal
   ccl cloud login icloud
-  ccl cloud login google-drive --passphrase
-  ccl cloud login google-drive --passphrase-file ~/.ccl-passphrase
   ccl cloud login google-drive --no-browser # approve in a browser on another machine`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -84,8 +74,7 @@ Related:
 			platform := strings.ToLower(strings.TrimSpace(args[0]))
 			switch platform {
 			case "icloud":
-			case "google-drive", "google", "drive":
-				platform = "google-drive"
+			case "google-drive":
 			default:
 				return fmt.Errorf("unsupported cloud provider %q; use icloud or google-drive", args[0])
 			}
@@ -100,36 +89,22 @@ Related:
 				}
 			}
 			var (
-				result     cloudsync.LoginResult
-				err        error
-				passphrase string
+				result cloudsync.LoginResult
+				err    error
 			)
-			hasProfile, profileErr := cloudsync.HasActiveProfile()
-			if profileErr != nil {
-				return profileErr
-			}
-			usePassphrase := !hasProfile &&
-				(passphraseMode || strings.TrimSpace(passphraseFile) != "")
-			if usePassphrase {
-				passphrase, err = readSyncPassphrase(cmd.InOrStdin(), cmd.ErrOrStderr(), passphraseFile)
-			}
-			if err == nil {
-				switch platform {
-				case "icloud":
-					result, err = cloudsync.LoginICloudNamed(alias, usePassphrase, passphrase)
-				case "google-drive":
-					ctx := cmd.Context()
-					paste := headlessHost()
-					if cmd.Flags().Changed("no-browser") || cmd.Flags().Changed("device") {
-						paste = noBrowser
-					}
-					if paste {
-						ctx = cloudsync.WithPastedRedirect(ctx, cmd.InOrStdin())
-					}
-					result, err = cloudsync.LoginGoogleDriveNamed(
-						ctx, alias, usePassphrase, passphrase, cmd.ErrOrStderr(),
-					)
+			switch platform {
+			case "icloud":
+				result, err = cloudsync.LoginICloudNamed(alias)
+			case "google-drive":
+				ctx := cmd.Context()
+				paste := headlessHost()
+				if cmd.Flags().Changed("no-browser") {
+					paste = noBrowser
 				}
+				if paste {
+					ctx = cloudsync.WithPastedRedirect(ctx, cmd.InOrStdin())
+				}
+				result, err = cloudsync.LoginGoogleDriveNamed(ctx, alias, cmd.ErrOrStderr())
 			}
 			if err != nil {
 				return err
@@ -142,21 +117,11 @@ Related:
 			if !result.Existing {
 				fmt.Fprintln(cmd.OutOrStdout(), "A new encrypted sync profile was created.")
 			}
-			if result.Migrated {
-				fmt.Fprintln(cmd.OutOrStdout(), "The existing encryption key was migrated to the selected local key mode.")
-			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&passphraseMode, "passphrase", false,
-		"Derive the key of a new profile from a passphrase")
-	cmd.Flags().StringVar(&passphraseFile, "passphrase-file", "",
-		"Read passphrase from a local file (also: CCL_SYNC_PASSPHRASE)")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false,
 		"Google Drive: print the URL instead of opening a browser and paste back the redirected address (default on SSH, Cloud Shell and Linux without a display)")
-	// v1.5.23 called this --device (Google's device flow rejects drive.appdata).
-	cmd.Flags().BoolVar(&noBrowser, "device", false, "")
-	_ = cmd.Flags().MarkHidden("device")
 	return cmd
 }
 
@@ -191,39 +156,6 @@ func defaultCloudLoginAlias(providerName string) (string, error) {
 			providerName, providerName, matches[0],
 		)
 	}
-}
-
-func readSyncPassphrase(in io.Reader, errOut io.Writer, passphraseFile string) (string, error) {
-	if path := strings.TrimSpace(passphraseFile); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("read passphrase file: %w", err)
-		}
-		return strings.TrimSpace(string(data)), nil
-	}
-	if value := os.Getenv("CCL_SYNC_PASSPHRASE"); value != "" {
-		return value, nil
-	}
-	file, ok := in.(*os.File)
-	if !ok || !term.IsTerminal(file.Fd()) {
-		return "", fmt.Errorf("a terminal is required for the passphrase prompt; use --passphrase-file or CCL_SYNC_PASSPHRASE")
-	}
-	fmt.Fprint(errOut, "Cloud sync passphrase: ")
-	first, err := term.ReadPassword(file.Fd())
-	fmt.Fprintln(errOut)
-	if err != nil {
-		return "", err
-	}
-	fmt.Fprint(errOut, "Confirm passphrase: ")
-	second, err := term.ReadPassword(file.Fd())
-	fmt.Fprintln(errOut)
-	if err != nil {
-		return "", err
-	}
-	if string(first) != string(second) {
-		return "", fmt.Errorf("passphrases do not match")
-	}
-	return string(first), nil
 }
 
 func newCloudPushCommand() *cobra.Command {
@@ -411,126 +343,6 @@ func writeCloudStatus(out io.Writer, status cloudsync.Status) {
 	}
 }
 
-func newCloudKeyCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "key",
-		Short: "Export or import the cloud synchronization recovery key",
-		Args:  cobra.NoArgs,
-	}
-	cmd.AddCommand(newCloudKeyExportCommand(), newCloudKeyImportCommand())
-	return cmd
-}
-
-func newCloudKeyExportCommand() *cobra.Command {
-	var outputPath string
-	var force bool
-	cmd := &cobra.Command{
-		Use:   "export",
-		Short: "Export an offline recovery key for the current sync profile",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := cloudsync.ExportRecoveryKey()
-			if err != nil {
-				return err
-			}
-			if path := strings.TrimSpace(outputPath); path != "" {
-				flags := os.O_WRONLY | os.O_CREATE
-				if force {
-					flags |= os.O_TRUNC
-				} else {
-					flags |= os.O_EXCL
-				}
-				file, openErr := os.OpenFile(path, flags, 0o600)
-				if openErr != nil {
-					return fmt.Errorf("create recovery key file: %w", openErr)
-				}
-				if chmodErr := file.Chmod(0o600); chmodErr != nil {
-					_ = file.Close()
-					return fmt.Errorf("secure recovery key file: %w", chmodErr)
-				}
-				if _, writeErr := fmt.Fprintln(file, result.RecoveryKey); writeErr != nil {
-					_ = file.Close()
-					return fmt.Errorf("write recovery key file: %w", writeErr)
-				}
-				if closeErr := file.Close(); closeErr != nil {
-					return fmt.Errorf("close recovery key file: %w", closeErr)
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Recovery key exported to %s\n", path)
-				return nil
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), result.RecoveryKey)
-			fmt.Fprintln(cmd.ErrOrStderr(), "Keep this recovery key offline. Anyone who has it can decrypt your ccl sync data.")
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Write the recovery key to a new 0600 file")
-	cmd.Flags().BoolVar(&force, "force", false, "Replace an existing output file")
-	return cmd
-}
-
-func newCloudKeyImportCommand() *cobra.Command {
-	var inputPath string
-	var providerName string
-	cmd := &cobra.Command{
-		Use:   "import [recovery-key]",
-		Short: "Restore sync access on a new device",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			value, err := readRecoveryKey(cmd.InOrStdin(), cmd.ErrOrStderr(), args, inputPath)
-			if err != nil {
-				return err
-			}
-			result, err := cloudsync.ImportRecoveryKeyForProvider(value, providerName)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Recovery key imported and verified.")
-			fmt.Fprintf(cmd.OutOrStdout(), "Device: %s\n", result.DeviceID)
-			fmt.Fprintf(cmd.OutOrStdout(), "Unlock: %s\n", cloudsync.KeyModeDescription(result.KeyMode))
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&inputPath, "file", "f", "", "Read the recovery key from a file")
-	cmd.Flags().StringVar(&providerName, "provider", "", "Cloud provider to restore (icloud or google-drive; default: auto)")
-	return cmd
-}
-
-func readRecoveryKey(in io.Reader, errOut io.Writer, args []string, inputPath string) (string, error) {
-	if len(args) == 1 {
-		return strings.TrimSpace(args[0]), nil
-	}
-	if path := strings.TrimSpace(inputPath); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("read recovery key file: %w", err)
-		}
-		return strings.TrimSpace(string(data)), nil
-	}
-	if value := strings.TrimSpace(os.Getenv("CCL_SYNC_RECOVERY_KEY")); value != "" {
-		return value, nil
-	}
-	if file, ok := in.(*os.File); ok && term.IsTerminal(file.Fd()) {
-		fmt.Fprint(errOut, "Recovery key: ")
-		value, err := term.ReadPassword(file.Fd())
-		fmt.Fprintln(errOut)
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimSpace(string(value)), nil
-	}
-	data, err := io.ReadAll(io.LimitReader(in, 4097))
-	if err != nil {
-		return "", fmt.Errorf("read recovery key: %w", err)
-	}
-	if len(data) > 4096 {
-		return "", fmt.Errorf("recovery key input is too large")
-	}
-	if value := strings.TrimSpace(string(data)); value != "" {
-		return value, nil
-	}
-	return "", fmt.Errorf("a recovery key is required as an argument, --file, CCL_SYNC_RECOVERY_KEY, or stdin")
-}
-
 func shortSyncID(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) > 12 {
@@ -542,25 +354,20 @@ func shortSyncID(value string) string {
 	return value
 }
 
-// newCloudCommand is the canonical cloud-sync command tree.
-// Root-level login/push/pull/... remain registered as compatibility aliases.
+// newCloudCommand is the cloud-sync command tree.
 func newCloudCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cloud",
 		Short: "Manage encrypted cloud synchronization",
 		Long: `Encrypted multi-remote cloud synchronization.
 
-Preferred forms:
+Common commands:
 
-  ccl cloud login icloud
+  ccl cloud login
   ccl cloud push
   ccl cloud pull
   ccl cloud status
-  ccl cloud key export
   ccl cloud remote ls
-
-Root-level login/push/pull/status/key/logout/tag remain available as
-compatibility aliases for the same subcommands.
 `,
 		Args: cobra.NoArgs,
 	}
@@ -571,8 +378,6 @@ compatibility aliases for the same subcommands.
 		newCloudPullCommand(),
 		newCloudTagCommand(),
 		newCloudStatusCommand(),
-		newCloudKeyCommand(),
-		newCloudDeviceCommand(),
 		newCloudRemoteCommand(),
 	)
 	return cmd
@@ -778,38 +583,6 @@ func confirmCloudRemoteDeletion(in io.Reader, errOut io.Writer, alias string, ye
 	return nil
 }
 
-// newCloudDeviceCommand keeps the retired pairing commands from falling
-// through to Claude Code as a prompt: a new device now only needs a login.
-func newCloudDeviceCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:                "device",
-		Short:              "Retired: a new device only needs ccl cloud login",
-		Hidden:             true,
-		DisableFlagParsing: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.SilenceUsage = true
-			return fmt.Errorf("device pairing was removed; on a new device run `ccl cloud login` with the same cloud account")
-		},
-	}
-}
-
 func init() {
-	// Canonical tree.
 	rootCmd.AddCommand(newCloudCommand())
-	// Root compatibility aliases (same command objects would double-register;
-	// construct fresh instances so cobra parent pointers stay unique). They are
-	// deprecated: `ccl status` and `ccl login` read as provider status and
-	// provider login, and every root name can hide a Claude Code subcommand.
-	for _, alias := range []*cobra.Command{
-		newCloudLoginCommand(),
-		newCloudLogoutCommand(),
-		newCloudPushCommand(),
-		newCloudPullCommand(),
-		newCloudTagCommand(),
-		newCloudStatusCommand(),
-		newCloudKeyCommand(),
-		newCloudDeviceCommand(),
-	} {
-		rootCmd.AddCommand(deprecatedRootAlias(alias, "ccl cloud "+alias.Name()))
-	}
 }

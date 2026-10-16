@@ -83,80 +83,6 @@ func TestUpdateErrorLeavesTheFileUntouched(t *testing.T) {
 	}
 }
 
-// TestLegacyGrokDefaultsMigrateOnce pins S13: an older ccl's generated Grok
-// defaults move to today's once; a user who then picks grok-4.5 keeps it.
-func TestLegacyGrokDefaultsMigrateOnce(t *testing.T) {
-	writeRawConfig(t, `providers:
-  grok:
-    name: grok
-    type: openai_responses
-    oauthProvider: grok
-    endpoint: oauth://grok
-    opusModel: grok-4.5
-    sonnetModel: grok-4.3
-    haikuModel: grok-3-mini
-`)
-	if err := Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	cfg, _ := Load()
-	if got := cfg.Providers["grok"]; got.OpusModel != "grok-4.6" || got.SonnetModel != "grok-4.5" || got.HaikuModel != "grok-4.5" {
-		t.Fatalf("legacy defaults were not migrated: %+v", got)
-	}
-
-	if err := Update(func(cfg *provider.Config) error {
-		p := cfg.Providers["grok"]
-		p.OpusModel = "grok-4.5"
-		cfg.Providers["grok"] = p
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	cfg, _ = Load()
-	if got := cfg.Providers["grok"].OpusModel; got != "grok-4.5" {
-		t.Fatalf("a deliberate grok-4.5 choice was migrated again: %q", got)
-	}
-}
-
-func TestLoadNormalizesTypesAndContextPreset(t *testing.T) {
-	writeRawConfig(t, `providers:
-  gw:
-    name: gw
-    type: openai-responses
-    endpoint: https://gw.example/v1
-    env:
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "500000"
-      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "500000"
-      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "80"
-      CCL_CONTEXT_BUDGET: manual
-      KEEP: "1"
-  chat:
-    name: chat
-    type: openai(chat)
-    endpoint: https://chat.example/v1
-`)
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	gw := cfg.Providers["gw"]
-	if gw.Type != "openai_responses" || cfg.Providers["chat"].Type != "openai" {
-		t.Fatalf("types = %q / %q", gw.Type, cfg.Providers["chat"].Type)
-	}
-	if gw.ContextPreset != provider.ContextPresetNameBalanced500K {
-		t.Fatalf("legacy Balanced triplet -> preset %q", gw.ContextPreset)
-	}
-	if len(gw.Env) != 1 || gw.Env["KEEP"] != "1" {
-		t.Fatalf("env after normalization = %+v", gw.Env)
-	}
-	if got := provider.ContextPresetEnv(gw)[provider.EnvAutoCompactPct]; got != provider.Balanced500KAutoCompactPct {
-		t.Fatalf("preset launches with pct %q", got)
-	}
-}
-
 // TestOAuthTypeIsDerivedNotPersisted pins S3: a subscription's type is not
 // stored, Load fills it from the backend, and a clean file is not rewritten
 // on every startup.
@@ -179,20 +105,6 @@ func TestOAuthTypeIsDerivedNotPersisted(t *testing.T) {
 		t.Fatalf("loaded OAuth type = %q", cfg.Providers["g"].Type)
 	}
 
-	info, _ := os.Stat(path)
-	if err := Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := os.Stat(path)
-	if !after.ModTime().Equal(info.ModTime()) {
-		t.Fatal("Migrate rewrote an already-current file")
-	}
-
-	// A stale persisted type (from an older ccl) is a real change.
-	writeRawConfig(t, "config_version: 2\nproviders:\n  g:\n    name: g\n    oauthProvider: grok\n    type: openai\n")
-	if _, changed, err := read(); err != nil || !changed {
-		t.Fatalf("stale OAuth type not reported as a change: %t, %v", changed, err)
-	}
 }
 
 // A fresh install has no provider yet, so normal and ACP launches use Claude
@@ -214,28 +126,5 @@ func TestFreshInstallSelectsDefault(t *testing.T) {
 	writeRawConfig(t, "active_provider: a\nproviders:\n  a:\n    type: openai\n    endpoint: https://example.com/v1\n")
 	if cfg, _ := Load(); cfg.ActiveProvider != "a" {
 		t.Fatalf("an existing config lost its provider: %q", cfg.ActiveProvider)
-	}
-}
-
-// provider_off became the default selector. ACP kept its provider while off,
-// so it is pinned there; a provider that was itself named default is renamed.
-func TestProviderOffAndADefaultNamedProviderMigrate(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	writeRawConfig(t, "active_provider: a\nprovider_off: true\nproviders:\n  a:\n    type: openai\n    endpoint: https://example.com/v1\n")
-	cfg, err := Load()
-	if err != nil || cfg.ActiveProvider != provider.DefaultProvider || cfg.ACPProvider != "a" || cfg.ProviderOff {
-		t.Fatalf("migrated off: active=%q acp=%q off=%v err=%v", cfg.ActiveProvider, cfg.ACPProvider, cfg.ProviderOff, err)
-	}
-
-	writeRawConfig(t, "active_provider: default\nacp_provider: default\nproviders:\n  default:\n    type: openai\n    endpoint: https://example.com/v1\n")
-	cfg, err = Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, kept := cfg.Providers[provider.DefaultProvider]; kept || cfg.ActiveProvider != "default-provider" ||
-		cfg.ACPProvider != "default-provider" || cfg.Providers["default-provider"].Endpoint != "https://example.com/v1" {
-		t.Fatalf("renamed provider: active=%q acp=%q providers=%v", cfg.ActiveProvider, cfg.ACPProvider, cfg.Providers)
 	}
 }

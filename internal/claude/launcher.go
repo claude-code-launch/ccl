@@ -269,7 +269,6 @@ func buildEnvWithModelNames(p provider.Provider, baseURL string, useProxy bool, 
 	maps.Copy(env, provider.ContextPresetEnv(p))
 	// A retired ccl directive is not a Claude Code variable. Load already drops
 	// it; this guards providers that did not come through Load.
-	removeEnvKey(env, provider.EnvContextBudgetMode)
 	// Advanced provider env can contain legacy technical model IDs. Normalize
 	// every request-bearing model variable after applying those overrides so a
 	// Qoder ID cannot leak back into Claude's title or /model UI.

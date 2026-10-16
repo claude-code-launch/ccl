@@ -1,10 +1,8 @@
 package cloudsync
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 // DiagnoseLocal runs the local cloud-sync health checks in fixed order.
@@ -28,7 +26,7 @@ func DiagnoseLocal() DiagnosticReport {
 }
 
 // diagnoseRegistry verifies the registry file exists, is safe to read, and
-// loads it. It reports "not configured" (or legacy v1) when absent.
+// loads it. It reports "not configured" when absent.
 func diagnoseRegistry(report *DiagnosticReport, localDir string) (cloudRegistry, bool) {
 	registryInfo, err := os.Lstat(registryPath(localDir))
 	if err != nil {
@@ -36,7 +34,7 @@ func diagnoseRegistry(report *DiagnosticReport, localDir string) (cloudRegistry,
 			report.add("error", fmt.Sprintf("cannot inspect cloud registry: %v", err))
 			return cloudRegistry{}, false
 		}
-		diagnoseLegacyConfig(report, localDir)
+		report.add("info", "not configured")
 		return cloudRegistry{}, false
 	}
 	report.Configured = true
@@ -47,7 +45,7 @@ func diagnoseRegistry(report *DiagnosticReport, localDir string) (cloudRegistry,
 	if insecurePermissions(registryInfo.Mode()) {
 		report.add("error", fmt.Sprintf("cloud registry permissions are too broad: %o", registryInfo.Mode().Perm()))
 	}
-	registry, err := loadRegistry(localDir, false)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		report.add("error", err.Error())
 		return cloudRegistry{}, false
@@ -66,16 +64,6 @@ func diagnoseRegistry(report *DiagnosticReport, localDir string) (cloudRegistry,
 	return registry, true
 }
 
-func diagnoseLegacyConfig(report *DiagnosticReport, localDir string) {
-	if _, legacyErr := os.Stat(filepath.Join(localDir, cloudConfigName)); legacyErr == nil {
-		report.add("warning", "legacy cloud sync v1 is configured and will migrate on the next cloud command")
-	} else if !os.IsNotExist(legacyErr) {
-		report.add("error", fmt.Sprintf("cannot inspect legacy cloud configuration: %v", legacyErr))
-	} else {
-		report.add("info", "not configured")
-	}
-}
-
 func diagnoseProfile(report *DiagnosticReport, localDir string, registry cloudRegistry) {
 	var profile localProfileStateV2
 	if err := readJSONFile(profileStatePath(localDir, registry.ActiveProfileID), &profile); err != nil {
@@ -86,24 +74,10 @@ func diagnoseProfile(report *DiagnosticReport, localDir string, registry cloudRe
 		report, profileStatePath(localDir, registry.ActiveProfileID),
 		"profile state", false,
 	)
-	if profile.KeyMode == keyModeKeychain {
-		report.add("info", "profile key uses the legacy macOS Keychain mode")
-		return
-	}
 	keyPath := profileKeyPath(localDir, registry.ActiveProfileID)
 	checkSecureFile(report, keyPath, "profile key", false)
 	if key, err := readRegularFile(keyPath, 32); err == nil && len(key) != 32 {
 		report.add("error", fmt.Sprintf("profile key has invalid length %d", len(key)))
-	}
-	diagnoseLegacyKey(report, localDir)
-}
-
-func diagnoseLegacyKey(report *DiagnosticReport, localDir string) {
-	rootKey := filepath.Join(localDir, cloudKeyName)
-	if _, err := os.Stat(rootKey); err == nil {
-		report.add("warning", "legacy ~/.ccl/cloud.key still present; profile key is authoritative — safe to remove after backup")
-	} else if !os.IsNotExist(err) {
-		report.add("warning", fmt.Sprintf("cannot stat legacy cloud.key: %v", err))
 	}
 }
 
@@ -148,9 +122,7 @@ func diagnoseRemoteProvider(report *DiagnosticReport, localDir, alias, id string
 	case providerGoogleDrive:
 		authPath := remoteAuthPath(localDir, id)
 		checkSecureFile(report, authPath, alias+" OAuth token", false)
-		if _, err := loadGoogleToken(authPath); errors.Is(err, errGoogleClientChanged) {
-			report.add("error", fmt.Sprintf("%s: %v; run `ccl cloud login google-drive %s`", alias, err, alias))
-		} else if err != nil {
+		if _, err := loadGoogleToken(authPath); err != nil {
 			report.add("error", fmt.Sprintf("%s: invalid Google authorization: %v", alias, err))
 		}
 		checkSecureDirectory(report, remote.RemoteDir, alias+" cache")

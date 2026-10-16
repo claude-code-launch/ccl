@@ -109,13 +109,8 @@ func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter stri
 		}
 	}
 	env = prependPath(env, filepath.Dir(nodePath))
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
 	return acp.Serve(ctx, in, out, acp.Config{
 		NodePath: nodePath, AdapterPath: adapterPath, Args: args, Env: env, Stderr: errw,
-		LegacyStore: filepath.Join(home, ".ccl", "acp", "sessions"),
 		AcquireLaunch: func(ctx context.Context) (acp.LaunchLease, error) {
 			return manager.acquireContext(ctx)
 		},

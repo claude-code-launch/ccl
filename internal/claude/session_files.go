@@ -18,9 +18,10 @@ import (
 // gone.
 const (
 	settingsFileSuffix = "_settings.json"
-	// legacyTempSettingsAge is how old a settings file in the system temp
-	// directory (where ccl used to write them) must be before it is swept.
-	legacyTempSettingsAge = 24 * time.Hour
+	// tempSettingsAge is how old a settings file in the system temp
+	// directory (the fallback when ~/.ccl/run is unusable) must be before it
+	// is swept.
+	tempSettingsAge = 24 * time.Hour
 )
 
 // runDirectory is var so tests can redirect it.
@@ -49,7 +50,7 @@ func sessionSettingsPath(session string) string {
 }
 
 // sweepStaleSessionFiles removes settings files left by ccl processes that no
-// longer run, plus legacy ones from the temp directory. Best effort: it never
+// longer run, plus old ones in the temp directory fallback. Best effort: it never
 // fails a launch.
 func sweepStaleSessionFiles() {
 	if dir, err := runDirectory(); err == nil {
@@ -59,7 +60,7 @@ func sweepStaleSessionFiles() {
 	}
 	sweepSettingsDir(os.TempDir(), func(path string, _ int) bool {
 		info, err := os.Lstat(path)
-		return err == nil && info.Mode().IsRegular() && time.Since(info.ModTime()) > legacyTempSettingsAge
+		return err == nil && info.Mode().IsRegular() && time.Since(info.ModTime()) > tempSettingsAge
 	})
 }
 
@@ -83,7 +84,7 @@ func sweepSettingsDir(dir string, stale func(path string, pid int) bool) {
 }
 
 // settingsFilePID extracts the owning process ID from
-// claude_<id>-<pid>_settings.json; legacy names without one return 0.
+// claude_<id>-<pid>_settings.json; a name without one returns 0.
 func settingsFilePID(name string) int {
 	stem := strings.TrimSuffix(name, settingsFileSuffix)
 	dash := strings.LastIndexByte(stem, '-')

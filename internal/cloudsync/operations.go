@@ -27,7 +27,7 @@ func operationSnapshotPath(localDir, operationID string) string {
 }
 
 func targetRemoteIDs(localDir string, aliases []string) ([]string, error) {
-	registry, err := loadRegistry(localDir, false)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		return nil, err
 	}

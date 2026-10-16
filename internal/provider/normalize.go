@@ -34,7 +34,7 @@ func SetProviderContextPreset(p *Provider, preset ContextPreset) {
 	default:
 		p.ContextPreset = ""
 	}
-	for _, key := range append(ManagedContextEnvKeys(), EnvContextBudgetMode) {
+	for _, key := range ManagedContextEnvKeys() {
 		delete(p.Env, key)
 	}
 	if len(p.Env) == 0 {
@@ -71,104 +71,21 @@ func EffectiveType(p Provider) string {
 	return p.Type
 }
 
-var canonicalTypes = map[string]string{
-	"openai-responses":  "openai_responses",
-	"responses":         "openai_responses",
-	"openai(responses)": "openai_responses",
-	"openai(agent)":     "openai_responses",
-	"openai-chat":       "openai",
-	"openai(chat)":      "openai",
-}
-
-// NormalizeProvider brings one provider entry to the current schema and reports
-// whether it changed. name is its key in the providers map. legacySlots also
-// moves slot values an older ccl generated as defaults; that runs once per
-// config (it cannot tell a generated value from a user's identical choice).
-func NormalizeProvider(p *Provider, name string, legacySlots bool) bool {
+// NormalizeProvider derives the fields of one provider entry that are not
+// persisted and reports whether a stored value had to change.
+func NormalizeProvider(p *Provider) bool {
 	changed := false
-	set := func(field *string, value string) {
-		if *field != value {
-			*field = value
-			changed = true
-		}
-	}
-
-	// oauthProvider: infer it for configs written before it was persisted, and
-	// fold the retired chatgpt/codex names into gpt.
-	if p.OAuthProvider == "" {
-		inferred := InferOAuthProvider(name, p.Endpoint)
-		// AutoClaw has an HTTP-shaped endpoint, but its dedicated type is
-		// unambiguous.
-		if inferred == "" && IsAutoClawType(p.Type) {
-			inferred = "autoclaw"
-		}
-		set(&p.OAuthProvider, inferred)
-	}
-	switch strings.ToLower(strings.TrimSpace(p.OAuthProvider)) {
-	case "chatgpt", "codex":
-		set(&p.OAuthProvider, "gpt")
-	}
 
 	// type: an OAuth backend's is derived (EffectiveType) and not persisted,
-	// so filling it in is not a change; a stale persisted value is. Manual
-	// gateways use one canonical spelling per protocol.
+	// so filling it in is not a change; a stale persisted value is.
 	if fixed, ok := OAuthRuntimeType(p.OAuthProvider); ok {
 		if p.Type != "" && p.Type != fixed {
 			changed = true
 		}
 		p.Type = fixed
-	} else if canonical, ok := canonicalTypes[strings.ToLower(strings.TrimSpace(p.Type))]; ok {
-		set(&p.Type, canonical)
-	}
-
-	// Context: the retired ccl directive goes away; an env triplet that matches
-	// a Balanced tier (including the pre-85% values) becomes the typed field.
-	if _, ok := p.Env[EnvContextBudgetMode]; ok {
-		delete(p.Env, EnvContextBudgetMode)
-		changed = true
-	}
-	if p.ContextPreset == "" {
-		if preset := ContextPresetFromEnv(p.Env); preset != ContextPresetDefault {
-			SetProviderContextPreset(p, preset)
-			changed = true
-		}
 	}
 	if len(p.Env) == 0 && p.Env != nil {
 		p.Env = nil
-	}
-
-	if legacySlots && migrateLegacyOAuthSlots(p) {
-		changed = true
-	}
-	return changed
-}
-
-// migrateLegacyOAuthSlots replaces Grok slot values that an older ccl wrote as
-// defaults with today's defaults.
-func migrateLegacyOAuthSlots(p *Provider) bool {
-	if !strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "grok") {
-		return false
-	}
-	custom, opus, sonnet, haiku, fable, ok := PreferredOAuthSlotDefaults(p.OAuthProvider)
-	if !ok {
-		return false
-	}
-	changed := false
-	for _, slot := range []struct {
-		value     *string
-		legacy    string
-		preferred string
-	}{
-		{&p.CustomModelID, "grok-4.5", custom},
-		{&p.OpusModel, "grok-4.5", opus},
-		{&p.FableModel, "grok-4.5", fable},
-		{&p.SonnetModel, "grok-4.3", sonnet},
-		{&p.HaikuModel, "grok-3-mini", haiku},
-	} {
-		if isPreferredDefault(*slot.value, slot.legacy) && !isPreferredDefault(*slot.value, slot.preferred) {
-			*slot.value = slot.preferred
-			changed = true
-		}
 	}
 	return changed
 }

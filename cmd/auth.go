@@ -170,21 +170,6 @@ func activateProvider(target, alias string, result oauthproxy.LoginResult) (stri
 	var p provider.Provider
 	err := config.Update(func(cfg *provider.Config) error {
 		p = cfg.Providers[providerName]
-		if alias == "" && target == oauthproxy.ProviderChatGPT {
-			// Re-login moves an old filename-derived entry without losing its
-			// mappings or ACP selection. Explicit aliases remain independent.
-			previousName := derivedCredentialProviderName(target, result.Path)
-			previous, exists := cfg.Providers[previousName]
-			_, nameExists := cfg.Providers[providerName]
-			if exists && !nameExists && previousName != providerName &&
-				previous.OAuthProvider == target && previous.OAuthAccountCredential == credentialFile {
-				p = previous
-				delete(cfg.Providers, previousName)
-				if cfg.ACPProvider == previousName {
-					cfg.ACPProvider = providerName
-				}
-			}
-		}
 		p = configureOAuthProvider(p, providerName, target, credentialFile)
 		cfg.Providers[providerName] = p
 		cfg.ActiveProvider = providerName
@@ -238,7 +223,7 @@ func oauthRuntimeType(providerName string) string {
 func isReservedProviderName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case provider.DefaultProvider,
-		oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy, oauthproxy.ProviderCodex,
+		oauthproxy.ProviderChatGPT, oauthproxy.ProviderCodex,
 		oauthproxy.ProviderGemini, "antigravity",
 		oauthproxy.ProviderGrok, "xai",
 		oauthproxy.ProviderQoder,

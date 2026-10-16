@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,146 +33,6 @@ type Manager struct {
 
 var errRemoteVerifierMissing = errors.New("cloud sync profile has no encrypted verifier")
 
-func LoginICloudWithPassphrase(passphrase string) (LoginResult, error) {
-	remoteDir, err := defaultICloudDirectory()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	return loginPassphraseAt(remoteDir, passphrase)
-}
-
-func loginPassphraseAt(remoteDir, passphrase string) (LoginResult, error) {
-	return loginPassphraseAtProvider(remoteDir, passphrase, providerICloud, remoteDir)
-}
-
-func loginPassphraseAtProvider(remoteDir, passphrase, provider, remoteLabel string) (LoginResult, error) {
-	if err := os.MkdirAll(filepath.Join(remoteDir, snapshotsDirectory), 0o700); err != nil {
-		return LoginResult{}, fmt.Errorf("create sync directory: %w", err)
-	}
-
-	profilePath := filepath.Join(remoteDir, profileFileName)
-	var profile remoteProfile
-	existing := true
-	if err := readJSONFile(profilePath, &profile); err != nil {
-		if !os.IsNotExist(err) {
-			return LoginResult{}, err
-		}
-		existing = false
-		profile, err = newPassphraseProfile()
-		if err != nil {
-			return LoginResult{}, err
-		}
-	} else if err := validateRemoteProfile(profile); err != nil {
-		return LoginResult{}, err
-	}
-	key, err := deriveKey(passphrase, profile)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if !existing {
-		if err := writeJSONAtomic(profilePath, profile, 0o600); err != nil {
-			return LoginResult{}, fmt.Errorf("write cloud sync profile: %w", err)
-		}
-	}
-	return finishLoginForProvider(
-		remoteDir, profile, key, existing, keyModePassphrase, false,
-		provider, remoteLabel,
-	)
-}
-
-// LoginICloudLocalKey is the default macOS mode. It uses a random 256-bit
-// master key stored under ~/.ccl/cloud/profiles/<id>/key (with a temporary
-// ~/.ccl/cloud.key only until the v2 registry is created), and migrates the
-// short-lived Keychain mode used by earlier ccl builds.
-func LoginICloudLocalKey() (LoginResult, error) {
-	remoteDir, err := defaultICloudDirectory()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	return loginLocalKeyAt(remoteDir)
-}
-
-func loginLocalKeyAt(remoteDir string) (LoginResult, error) {
-	return loginLocalKeyAtProvider(remoteDir, providerICloud, remoteDir)
-}
-
-func loginLocalKeyAtProvider(remoteDir, provider, remoteLabel string) (LoginResult, error) {
-	if err := os.MkdirAll(filepath.Join(remoteDir, snapshotsDirectory), 0o700); err != nil {
-		return LoginResult{}, fmt.Errorf("create sync directory: %w", err)
-	}
-
-	profilePath := filepath.Join(remoteDir, profileFileName)
-	var profile remoteProfile
-	if err := readJSONFile(profilePath, &profile); err != nil {
-		if !os.IsNotExist(err) {
-			return LoginResult{}, err
-		}
-		profile, key, createErr := newMasterKeyProfile()
-		if createErr != nil {
-			return LoginResult{}, createErr
-		}
-		if writeErr := writeJSONAtomic(profilePath, profile, 0o600); writeErr != nil {
-			return LoginResult{}, fmt.Errorf("write cloud sync profile: %w", writeErr)
-		}
-		return finishLoginForProvider(
-			remoteDir, profile, key, false, keyModeLocal, false,
-			provider, remoteLabel,
-		)
-	}
-	if err := validateRemoteProfile(profile); err != nil {
-		return LoginResult{}, err
-	}
-
-	if key, localErr := existingLocalProfileKey(profile.ID); localErr == nil {
-		return finishLoginForProvider(
-			remoteDir, profile, key, true, keyModeLocal, false,
-			provider, remoteLabel,
-		)
-	} else if !errors.Is(localErr, os.ErrNotExist) {
-		return LoginResult{}, localErr
-	}
-
-	// Migrate the previous macOS Keychain mode without rotating the encryption
-	// key or changing the remote profile.
-	localDir, err := cclDirectory()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	var previous localCloudConfig
-	if provider == providerICloud &&
-		readJSONFile(filepath.Join(localDir, cloudConfigName), &previous) == nil &&
-		previous.ProfileID == profile.ID && previous.KeyMode == keyModeKeychain {
-		key, loadErr := platformKeyLoad(profile.ID)
-		if loadErr != nil {
-			return LoginResult{}, keychainLoginError(loadErr)
-		}
-		probe := &Manager{localDir: localDir, remoteDir: remoteDir, profileID: profile.ID, key: key}
-		if err := probe.verifyOrCreateProfileKey(profile.ID, false); err != nil {
-			return LoginResult{}, fmt.Errorf("verify legacy Keychain sync key: %w", err)
-		}
-		return finishLoginForProvider(
-			remoteDir, profile, key, true, keyModeLocal, true,
-			provider, remoteLabel,
-		)
-	}
-
-	if key, ok := profileAccountKey(profile); ok {
-		return finishLoginForProvider(
-			remoteDir, profile, key, true, keyModeLocal, false,
-			provider, remoteLabel,
-		)
-	}
-
-	uninitialized, err := isUninitializedRemoteProfile(remoteDir)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if uninitialized {
-		return replaceUninitializedProfileLocalForProvider(remoteDir, provider, remoteLabel)
-	}
-	return LoginResult{}, fmt.Errorf("this cloud sync profile predates keys stored in the cloud; run `ccl cloud push` once on a device that already syncs it, then log in again (or use `ccl cloud key import`)")
-}
-
 func isUninitializedRemoteProfile(remoteDir string) (bool, error) {
 	for _, name := range []string{verifierFileName, indexFileName} {
 		if _, err := os.Lstat(filepath.Join(remoteDir, name)); err == nil {
@@ -190,149 +49,6 @@ func isUninitializedRemoteProfile(remoteDir string) (bool, error) {
 		return false, err
 	}
 	return len(entries) == 0, nil
-}
-
-func replaceUninitializedProfileLocalForProvider(remoteDir, provider, remoteLabel string) (LoginResult, error) {
-	profile, key, err := newMasterKeyProfile()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if err := writeJSONAtomic(filepath.Join(remoteDir, profileFileName), profile, 0o600); err != nil {
-		return LoginResult{}, fmt.Errorf("replace uninitialized cloud sync profile: %w", err)
-	}
-	return finishLoginForProvider(
-		remoteDir, profile, key, false, keyModeLocal, false,
-		provider, remoteLabel,
-	)
-}
-
-func finishLoginForProvider(
-	remoteDir string,
-	profile remoteProfile,
-	key []byte,
-	existing bool,
-	keyMode string,
-	migrated bool,
-	provider string,
-	remoteLabel string,
-) (LoginResult, error) {
-	if len(key) != 32 {
-		return LoginResult{}, fmt.Errorf("invalid sync encryption key")
-	}
-
-	localDir, err := cclDirectory()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	deviceID := ""
-	var previous localCloudConfig
-	if readJSONFile(filepath.Join(localDir, cloudConfigName), &previous) == nil &&
-		previous.ProfileID == profile.ID && previous.DeviceID != "" {
-		deviceID = previous.DeviceID
-	}
-	if deviceID == "" {
-		deviceID, err = randomDeviceID()
-		if err != nil {
-			return LoginResult{}, err
-		}
-	}
-	manager := &Manager{
-		localDir: localDir, remoteDir: remoteDir, remoteLabel: remoteLabel,
-		provider: provider, deviceID: deviceID,
-		profileID: profile.ID, keyMode: keyMode, key: key,
-	}
-	if err := manager.verifyOrCreateProfileKey(profile.ID, !existing); err != nil {
-		return LoginResult{}, fmt.Errorf("verify cloud login: %w", err)
-	}
-	if changed, err := ensureProfileAccountKey(&profile, key); err != nil {
-		return LoginResult{}, err
-	} else if changed {
-		if err := writeJSONAtomic(filepath.Join(remoteDir, profileFileName), profile, 0o600); err != nil {
-			return LoginResult{}, fmt.Errorf("store the key in the cloud profile: %w", err)
-		}
-	}
-	localConfig := localCloudConfig{
-		Version: formatVersion, Provider: provider,
-		RemoteDir: remoteDir, DeviceID: deviceID, ProfileID: profile.ID,
-		KeyMode: keyMode, RemoteLabel: remoteLabel,
-	}
-	if previous.ProfileID != "" && previous.ProfileID != profile.ID {
-		if err := os.Remove(filepath.Join(localDir, cloudStateName)); err != nil && !os.IsNotExist(err) {
-			return LoginResult{}, fmt.Errorf("reset local sync state: %w", err)
-		}
-	}
-	if err := writeJSONAtomic(filepath.Join(localDir, cloudConfigName), localConfig, 0o600); err != nil {
-		return LoginResult{}, fmt.Errorf("save local cloud configuration: %w", err)
-	}
-	// Persist the active key under the v2 profile path. Keep root cloud.key only
-	// as a short-lived legacy handoff for migration; remove it once the profile
-	// key is in place so Load/Export never disagree with finishLogin.
-	keyPath := filepath.Join(localDir, cloudKeyName)
-	if keyMode == keyModeKeychain {
-		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
-			return LoginResult{}, fmt.Errorf("remove migrated local encryption key: %w", err)
-		}
-	} else {
-		if err := ensureLocalCloudDirectory(profileDirectory(localDir, profile.ID)); err != nil {
-			return LoginResult{}, err
-		}
-		if err := writeAtomic(profileKeyPath(localDir, profile.ID), key, 0o600); err != nil {
-			return LoginResult{}, fmt.Errorf("save profile encryption key: %w", err)
-		}
-		// Root cloud.key remains only for first-load migration of bare v1 state.
-		// When a registry already exists, drop the root copy to avoid dual-key drift.
-		if _, regErr := os.Stat(registryPath(localDir)); regErr == nil {
-			_ = os.Remove(keyPath)
-		} else if err := writeAtomic(keyPath, key, 0o600); err != nil {
-			return LoginResult{}, fmt.Errorf("save local encryption key: %w", err)
-		}
-	}
-	return LoginResult{
-		RemoteDir: remoteDir, DeviceID: deviceID, Existing: existing,
-		Alias: defaultRemoteAlias(provider), Provider: provider,
-		KeyMode: keyMode, Migrated: migrated,
-	}, nil
-}
-
-// LoginGoogleDrive starts the native browser OAuth flow, downloads the
-// application-private sync bundle, then opens or creates its encrypted profile.
-// The OAuth client identity is built into ccl; callers never supply a JSON file.
-func LoginGoogleDrive(
-	ctx context.Context,
-	usePassphrase bool,
-	passphrase string,
-	notice io.Writer,
-) (LoginResult, error) {
-	remote, err := authorizeGoogleDriveWithNotice(ctx, notice)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	cacheDir, err := googleCacheDirectory()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if _, err := remote.downloadBundle(cacheDir); err != nil {
-		return LoginResult{}, err
-	}
-	const label = "Google Drive appDataFolder"
-	var result LoginResult
-	if usePassphrase {
-		result, err = loginPassphraseAtProvider(
-			cacheDir, passphrase, providerGoogleDrive, label,
-		)
-	} else {
-		result, err = loginLocalKeyAtProvider(
-			cacheDir, providerGoogleDrive, label,
-		)
-	}
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if err := remote.uploadBundle(cacheDir); err != nil {
-		return LoginResult{}, err
-	}
-	result.RemoteDir = label
-	return result, nil
 }
 
 func (m *Manager) verifyOrCreateProfileKey(profileID string, create bool) error {
@@ -433,14 +149,13 @@ func Load() (*Manager, error) {
 	return LoadRemote("")
 }
 
-// LoadRemote loads a selected v2 cloud remote. An empty alias selects the
-// primary remote. A legacy v1 configuration is migrated locally before use.
+// LoadRemote loads a cloud remote. An empty alias selects the primary remote.
 func LoadRemote(alias string) (*Manager, error) {
 	localDir, err := cclDirectory()
 	if err != nil {
 		return nil, err
 	}
-	registry, err := loadRegistry(localDir, true)
+	registry, err := loadRegistry(localDir)
 	if err != nil {
 		if errors.Is(err, errRegistryNotConfigured) {
 			return nil, fmt.Errorf("not logged in; run `ccl cloud login icloud` or `ccl cloud login google-drive` first")
@@ -481,23 +196,12 @@ func LoadRemote(alias string) (*Manager, error) {
 		}
 	}
 	keyMode := profileState.KeyMode
-	var key []byte
-	switch keyMode {
-	case keyModeKeychain:
-		key, err = platformKeyLoad(registry.ActiveProfileID)
-		if err != nil {
-			return nil, keychainLoginError(err)
+	key, err := loadProfileKeyFile(localDir, registry.ActiveProfileID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("local encryption key is missing; run `ccl cloud logout` and `ccl cloud login` again")
 		}
-	case keyModeLocal, keyModePassphrase, keyModeRecovery, keyModePairing:
-		key, err = loadProfileKeyFile(localDir, registry.ActiveProfileID)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("local encryption key is missing; log in with `--passphrase` or run `ccl cloud key import`")
-			}
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("unsupported local sync key mode %q", keyMode)
+		return nil, err
 	}
 	manager := &Manager{
 		localDir: localDir, remoteDir: cfg.RemoteDir,
@@ -514,191 +218,6 @@ func LoadRemote(alias string) (*Manager, error) {
 		return nil, fmt.Errorf("verify cloud profile for remote %q: %w", resolvedAlias, err)
 	}
 	return manager, nil
-}
-
-func existingLocalProfileKey(profileID string) ([]byte, error) {
-	localDir, err := cclDirectory()
-	if err != nil {
-		return nil, err
-	}
-	if registry, registryErr := loadRegistry(localDir, false); registryErr == nil {
-		if registry.ActiveProfileID != profileID {
-			return nil, os.ErrNotExist
-		}
-		return loadProfileKeyFile(localDir, profileID)
-	} else if !errors.Is(registryErr, errRegistryNotConfigured) {
-		return nil, registryErr
-	}
-	var cfg localCloudConfig
-	if err := readJSONFile(filepath.Join(localDir, cloudConfigName), &cfg); err != nil {
-		return nil, err
-	}
-	if cfg.ProfileID != profileID {
-		return nil, os.ErrNotExist
-	}
-	return loadLocalKeyFile(localDir)
-}
-
-func keychainLoginError(err error) error {
-	switch {
-	case errors.Is(err, ErrKeychainItemMissing):
-		return fmt.Errorf("this device has no Keychain key for the iCloud sync profile; run `ccl cloud key import` or `ccl cloud login icloud --passphrase` for a passphrase profile")
-	case errors.Is(err, ErrKeychainUnavailable):
-		return fmt.Errorf("macOS Keychain is unavailable: %w; use `ccl cloud login icloud --passphrase` if Keychain access is not possible", err)
-	default:
-		return err
-	}
-}
-
-func ExportRecoveryKey() (KeyExportResult, error) {
-	localDir, err := cclDirectory()
-	if err != nil {
-		return KeyExportResult{}, err
-	}
-	registry, err := loadRegistry(localDir, true)
-	if err != nil {
-		return KeyExportResult{}, err
-	}
-	var profile localProfileStateV2
-	if err := readJSONFile(
-		profileStatePath(localDir, registry.ActiveProfileID), &profile,
-	); err != nil {
-		return KeyExportResult{}, err
-	}
-	var key []byte
-	switch profile.KeyMode {
-	case keyModeKeychain:
-		key, err = platformKeyLoad(registry.ActiveProfileID)
-	default:
-		key, err = loadProfileKeyFile(localDir, registry.ActiveProfileID)
-	}
-	if err != nil {
-		return KeyExportResult{}, err
-	}
-	recoveryKey, err := encodeRecoveryKey(registry.ActiveProfileID, key)
-	if err != nil {
-		return KeyExportResult{}, err
-	}
-	return KeyExportResult{
-		ProfileID:   registry.ActiveProfileID,
-		RecoveryKey: recoveryKey, KeyMode: profile.KeyMode,
-	}, nil
-}
-
-// ImportRecoveryKeyForProvider restores a profile after its cloud provider has
-// been authorized. An empty provider uses the active cloud configuration, then
-// falls back to a saved Google authorization and finally iCloud.
-func ImportRecoveryKeyForProvider(value, requestedProvider string) (KeyImportResult, error) {
-	profileID, key, err := decodeRecoveryKey(value)
-	if err != nil {
-		return KeyImportResult{}, err
-	}
-	provider, err := recoveryProvider(requestedProvider)
-	if err != nil {
-		return KeyImportResult{}, err
-	}
-	var (
-		remoteDir   string
-		remoteLabel string
-		flushRemote func() error
-	)
-	switch provider {
-	case providerICloud:
-		remoteDir, err = defaultICloudDirectory()
-		remoteLabel = remoteDir
-	case providerGoogleDrive:
-		var remote *googleDriveRemote
-		remote, err = loadAuthorizedGoogleDrive(context.Background())
-		if err == nil {
-			remoteDir, err = googleCacheDirectory()
-		}
-		if err == nil {
-			_, err = remote.downloadBundle(remoteDir)
-		}
-		if err == nil {
-			remoteLabel = "Google Drive appDataFolder"
-			flushRemote = func() error { return remote.uploadBundle(remoteDir) }
-		}
-	}
-	if err != nil {
-		return KeyImportResult{}, err
-	}
-	var profile remoteProfile
-	if err := readJSONFile(filepath.Join(remoteDir, profileFileName), &profile); err != nil {
-		if os.IsNotExist(err) {
-			return KeyImportResult{}, fmt.Errorf("no ccl sync profile exists in %s", provider)
-		}
-		return KeyImportResult{}, err
-	}
-	if err := validateRemoteProfile(profile); err != nil {
-		return KeyImportResult{}, err
-	}
-	if profile.ID != profileID {
-		return KeyImportResult{}, fmt.Errorf("recovery key belongs to a different %s sync profile", provider)
-	}
-	if _, verifierErr := os.Stat(filepath.Join(remoteDir, verifierFileName)); os.IsNotExist(verifierErr) {
-		if _, indexErr := os.Stat(filepath.Join(remoteDir, indexFileName)); os.IsNotExist(indexErr) {
-			return KeyImportResult{}, fmt.Errorf("cloud sync profile has no encrypted verifier; log in on the original device before importing its recovery key")
-		} else if indexErr != nil {
-			return KeyImportResult{}, indexErr
-		}
-	} else if verifierErr != nil {
-		return KeyImportResult{}, verifierErr
-	}
-
-	localDir, err := cclDirectory()
-	if err != nil {
-		return KeyImportResult{}, err
-	}
-	probe := &Manager{localDir: localDir, remoteDir: remoteDir, profileID: profile.ID, key: key}
-	if err := probe.verifyOrCreateProfileKey(profile.ID, false); err != nil {
-		return KeyImportResult{}, fmt.Errorf("verify recovery key: %w", err)
-	}
-
-	mode := keyModeRecovery
-	result, err := finishLoginForProvider(
-		remoteDir, profile, key, true, mode, false, provider, remoteLabel,
-	)
-	if err != nil {
-		return KeyImportResult{}, err
-	}
-	if flushRemote != nil {
-		if err := flushRemote(); err != nil {
-			return KeyImportResult{}, fmt.Errorf("publish recovered Google Drive sync profile: %w", err)
-		}
-	}
-	return KeyImportResult{
-		RemoteDir: result.RemoteDir, DeviceID: result.DeviceID, KeyMode: result.KeyMode,
-	}, nil
-}
-
-func recoveryProvider(value string) (string, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "", "auto":
-		localDir, err := cclDirectory()
-		if err != nil {
-			return "", err
-		}
-		var cfg localCloudConfig
-		if readJSONFile(filepath.Join(localDir, cloudConfigName), &cfg) == nil &&
-			(cfg.Provider == providerICloud ||
-				cfg.Provider == providerGoogleDrive) {
-			return cfg.Provider, nil
-		}
-		if _, err := os.Stat(filepath.Join(localDir, googleAuthName)); err == nil {
-			return providerGoogleDrive, nil
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		return providerICloud, nil
-	case "icloud":
-		return providerICloud, nil
-	case "google-drive", "google", "drive":
-		return providerGoogleDrive, nil
-	default:
-		return "", fmt.Errorf("unsupported cloud provider %q; use icloud or google-drive", value)
-	}
 }
 
 func randomDeviceID() (string, error) {
@@ -718,68 +237,57 @@ func randomHexIdentifier(size int) (string, error) {
 }
 
 func (m *Manager) loadState() (localSyncState, error) {
-	if m.profileStateFile != "" && m.remoteStateFile != "" {
-		var profile localProfileStateV2
-		if err := readJSONFile(m.profileStateFile, &profile); err != nil {
+	var profile localProfileStateV2
+	if err := readJSONFile(m.profileStateFile, &profile); err != nil {
+		return localSyncState{}, err
+	}
+	var remote localRemoteStateV2
+	if err := readJSONFile(m.remoteStateFile, &remote); err != nil {
+		if !os.IsNotExist(err) {
 			return localSyncState{}, err
 		}
-		var remote localRemoteStateV2
-		if err := readJSONFile(m.remoteStateFile, &remote); err != nil {
-			if !os.IsNotExist(err) {
-				return localSyncState{}, err
-			}
-			remote = localRemoteStateV2{Version: registryVersion}
-		}
-		return localSyncState{
-			LastRemoteID: remote.LastRemoteID, LastLocalHash: remote.LastLocalHash,
-			LastRemoteCreatedAt: remote.LastRemoteCreatedAt,
-			PendingTag:          profile.PendingTag, PendingHash: profile.PendingHash,
-			ExplicitTag:   profile.ExplicitTag,
-			LastOperation: remote.LastOperation, LastSyncAt: remote.LastSyncAt,
-		}, nil
+		remote = localRemoteStateV2{Version: registryVersion}
 	}
-	var state localSyncState
-	err := readJSONFile(filepath.Join(m.localDir, cloudStateName), &state)
-	if os.IsNotExist(err) {
-		return state, nil
-	}
-	return state, err
+	return localSyncState{
+		LastRemoteID: remote.LastRemoteID, LastLocalHash: remote.LastLocalHash,
+		LastRemoteCreatedAt: remote.LastRemoteCreatedAt,
+		PendingTag:          profile.PendingTag, PendingHash: profile.PendingHash,
+		ExplicitTag:   profile.ExplicitTag,
+		LastOperation: remote.LastOperation, LastSyncAt: remote.LastSyncAt,
+	}, nil
 }
 
 func (m *Manager) saveState(state localSyncState) error {
-	if m.profileStateFile != "" && m.remoteStateFile != "" {
-		var profile localProfileStateV2
-		if err := readJSONFile(m.profileStateFile, &profile); err != nil {
-			return err
-		}
-		profile.PendingTag = state.PendingTag
-		profile.PendingHash = state.PendingHash
-		profile.ExplicitTag = state.ExplicitTag
-		profile.LastOperation = state.LastOperation
-		profile.LastSyncAt = state.LastSyncAt
-		if err := writeJSONAtomic(m.profileStateFile, profile, 0o600); err != nil {
-			return err
-		}
-		var remote localRemoteStateV2
-		if err := readJSONFile(m.remoteStateFile, &remote); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		remote.Version = registryVersion
-		remote.LastSeenRemoteID = state.LastRemoteID
-		remote.LastRemoteID = state.LastRemoteID
-		remote.LastLocalHash = state.LastLocalHash
-		remote.LastRemoteCreatedAt = state.LastRemoteCreatedAt
-		remote.LastOperation = state.LastOperation
-		remote.LastSyncAt = state.LastSyncAt
-		switch state.LastOperation {
-		case "push":
-			remote.LastPushedSnapshotID = state.LastRemoteID
-		case "pull":
-			remote.LastPulledSnapshotID = state.LastRemoteID
-		}
-		return writeJSONAtomic(m.remoteStateFile, remote, 0o600)
+	var profile localProfileStateV2
+	if err := readJSONFile(m.profileStateFile, &profile); err != nil {
+		return err
 	}
-	return writeJSONAtomic(filepath.Join(m.localDir, cloudStateName), state, 0o600)
+	profile.PendingTag = state.PendingTag
+	profile.PendingHash = state.PendingHash
+	profile.ExplicitTag = state.ExplicitTag
+	profile.LastOperation = state.LastOperation
+	profile.LastSyncAt = state.LastSyncAt
+	if err := writeJSONAtomic(m.profileStateFile, profile, 0o600); err != nil {
+		return err
+	}
+	var remote localRemoteStateV2
+	if err := readJSONFile(m.remoteStateFile, &remote); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	remote.Version = registryVersion
+	remote.LastSeenRemoteID = state.LastRemoteID
+	remote.LastRemoteID = state.LastRemoteID
+	remote.LastLocalHash = state.LastLocalHash
+	remote.LastRemoteCreatedAt = state.LastRemoteCreatedAt
+	remote.LastOperation = state.LastOperation
+	remote.LastSyncAt = state.LastSyncAt
+	switch state.LastOperation {
+	case "push":
+		remote.LastPushedSnapshotID = state.LastRemoteID
+	case "pull":
+		remote.LastPulledSnapshotID = state.LastRemoteID
+	}
+	return writeJSONAtomic(m.remoteStateFile, remote, 0o600)
 }
 
 func emptyRemoteIndex() remoteIndex {

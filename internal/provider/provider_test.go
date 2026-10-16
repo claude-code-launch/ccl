@@ -132,39 +132,6 @@ func TestIsModelsDevType(t *testing.T) {
 	}
 }
 
-func TestInferOAuthProvider(t *testing.T) {
-	tests := []struct {
-		name         string
-		providerName string
-		endpoint     string
-		want         string
-	}{
-		{name: "ChatGPT Codex backend", providerName: "chatgpt", endpoint: "oauth://codex", want: "gpt"},
-		{name: "renamed GPT provider", providerName: "my-account", endpoint: "oauth://codex", want: "gpt"},
-		{name: "legacy Codex provider", providerName: "codex", endpoint: "oauth://codex", want: "gpt"},
-		{name: "Gemini Antigravity backend", providerName: "gemini", endpoint: "oauth://antigravity", want: "gemini"},
-		{name: "Gemini public backend", providerName: "google-account", endpoint: "oauth://gemini", want: "gemini"},
-		{name: "Grok xAI backend", providerName: "grok", endpoint: "oauth://xai", want: "grok"},
-		{name: "Grok renamed provider", providerName: "my-account", endpoint: "oauth://xai", want: "grok"},
-		{name: "Copilot backend", providerName: "copilot", endpoint: "oauth://copilot", want: "copilot"},
-		{name: "Zed backend", providerName: "zed-work", endpoint: "oauth://zed", want: "zed"},
-		{name: "Qoder backend", providerName: "qoder-work", endpoint: "oauth://qoder", want: "qoder"},
-		{name: "Kimi backend", providerName: "kimi", endpoint: "oauth://kimi", want: "kimi"},
-		{name: "Kiro backend", providerName: "kiro-work", endpoint: "oauth://kiro", want: "kiro"},
-		{name: "WorkBuddy backend", providerName: "work-account", endpoint: "oauth://workbuddy", want: "workbuddy"},
-		{name: "ordinary HTTP provider", providerName: "chatgpt", endpoint: "https://example.test/v1", want: ""},
-		{name: "unknown OAuth backend", providerName: "other", endpoint: "oauth://other", want: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := provider.InferOAuthProvider(tt.providerName, tt.endpoint); got != tt.want {
-				t.Fatalf("InferOAuthProvider(%q, %q) = %q, want %q", tt.providerName, tt.endpoint, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsOpenAIResponsesType(t *testing.T) {
 	for _, v := range []string{"openai_responses", "openai-responses", "responses", "OPENAI_RESPONSES", "openai(responses)", "openai(agent)"} {
 		if !provider.IsOpenAIResponsesType(v) {
@@ -230,9 +197,8 @@ func TestOAuthRuntimeType(t *testing.T) {
 	if !ok || got != "openai_responses" {
 		t.Fatalf("gpt = %q %v", got, ok)
 	}
-	got, ok = provider.OAuthRuntimeType("chatgpt")
-	if !ok || got != "openai_responses" {
-		t.Fatalf("chatgpt = %q %v", got, ok)
+	if _, ok := provider.OAuthRuntimeType("chatgpt"); ok {
+		t.Fatal("the retired chatgpt name is still accepted")
 	}
 	got, ok = provider.OAuthRuntimeType("qoder")
 	if !ok || got != "anthropic" {

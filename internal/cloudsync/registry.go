@@ -1,11 +1,8 @@
 package cloudsync
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,31 +55,12 @@ func remoteCachePath(localDir, remoteID string) string {
 	return filepath.Join(remoteDirectoryPath(localDir, remoteID), remoteCacheName)
 }
 
-func loadRegistry(localDir string, migrate bool) (cloudRegistry, error) {
+func loadRegistry(localDir string) (cloudRegistry, error) {
 	var registry cloudRegistry
-	err := readJSONFile(registryPath(localDir), &registry)
-	if err == nil {
-		if validateErr := validateRegistry(localDir, registry); validateErr != nil {
-			return cloudRegistry{}, validateErr
-		}
-		return registry, nil
-	}
-	if !os.IsNotExist(err) {
-		return cloudRegistry{}, err
-	}
-	if !migrate {
-		return cloudRegistry{}, errRegistryNotConfigured
-	}
-	if _, statErr := os.Stat(filepath.Join(localDir, cloudConfigName)); statErr != nil {
-		if os.IsNotExist(statErr) {
+	if err := readJSONFile(registryPath(localDir), &registry); err != nil {
+		if os.IsNotExist(err) {
 			return cloudRegistry{}, errRegistryNotConfigured
 		}
-		return cloudRegistry{}, statErr
-	}
-	if err := migrateLegacyRegistry(localDir); err != nil {
-		return cloudRegistry{}, err
-	}
-	if err := readJSONFile(registryPath(localDir), &registry); err != nil {
 		return cloudRegistry{}, err
 	}
 	if err := validateRegistry(localDir, registry); err != nil {
@@ -160,7 +138,7 @@ func validateRemoteConfig(remote localRemoteConfigV2, expectedID, expectedAlias,
 
 func validKeyMode(mode string) bool {
 	switch mode {
-	case keyModeKeychain, keyModeLocal, keyModePassphrase, keyModeRecovery, keyModePairing:
+	case keyModeLocal:
 		return true
 	default:
 		return false
@@ -208,209 +186,6 @@ func defaultRemoteAlias(provider string) string {
 	default:
 		return providerICloud
 	}
-}
-
-func deterministicLegacyRemoteID(cfg localCloudConfig) string {
-	sum := sha256.Sum256([]byte("ccl-cloud-v1\x00" + cfg.ProfileID + "\x00" + cfg.Provider + "\x00" + cfg.RemoteDir))
-	return hex.EncodeToString(sum[:16])
-}
-
-func migrateLegacyRegistry(localDir string) error {
-	var cfg localCloudConfig
-	if err := readJSONFile(filepath.Join(localDir, cloudConfigName), &cfg); err != nil {
-		return err
-	}
-	if cfg.Version != formatVersion || !validIdentifier(cfg.ProfileID, 32) ||
-		!validIdentifier(cfg.DeviceID, 32) || !filepath.IsAbs(cfg.RemoteDir) ||
-		(cfg.Provider != providerICloud && cfg.Provider != providerGoogleDrive) {
-		return fmt.Errorf("cannot migrate invalid legacy cloud configuration")
-	}
-	keyMode := cfg.KeyMode
-	if keyMode == "" {
-		keyMode = keyModePassphrase
-	}
-	if !validKeyMode(keyMode) {
-		return fmt.Errorf("cannot migrate unsupported legacy key mode %q", keyMode)
-	}
-
-	var metadata remoteProfile
-	if err := readJSONFile(filepath.Join(cfg.RemoteDir, profileFileName), &metadata); err != nil {
-		return fmt.Errorf("read legacy cloud profile: %w", err)
-	}
-	if err := validateRemoteProfile(metadata); err != nil {
-		return err
-	}
-	if metadata.ID != cfg.ProfileID {
-		return fmt.Errorf("legacy local and remote cloud profile IDs do not match")
-	}
-
-	var legacyState localSyncState
-	if err := readJSONFile(filepath.Join(localDir, cloudStateName), &legacyState); err != nil &&
-		!os.IsNotExist(err) {
-		return err
-	}
-	remoteID := deterministicLegacyRemoteID(cfg)
-	alias := defaultRemoteAlias(cfg.Provider)
-	newCache := cfg.RemoteDir
-	if cfg.Provider == providerGoogleDrive {
-		newCache = remoteCachePath(localDir, remoteID)
-		bundle, err := createCloudBundle(cfg.RemoteDir, filepath.Base(cfg.RemoteDir))
-		if err != nil {
-			return fmt.Errorf("copy legacy Google Drive cache: %w", err)
-		}
-		if err := replaceCloudCache(newCache, remoteCacheName, bundle); err != nil {
-			return fmt.Errorf("activate migrated Google Drive cache: %w", err)
-		}
-		if err := copyRegularFileReplace(
-			filepath.Join(localDir, googleAuthName),
-			remoteAuthPath(localDir, remoteID),
-		); err != nil {
-			return fmt.Errorf("copy legacy Google Drive authorization: %w", err)
-		}
-	}
-
-	if err := writeJSONAtomic(profileMetadataPath(localDir, cfg.ProfileID), metadata, 0o600); err != nil {
-		return err
-	}
-	if keyMode != keyModeKeychain {
-		if err := copyRegularFileReplace(
-			filepath.Join(localDir, cloudKeyName),
-			profileKeyPath(localDir, cfg.ProfileID),
-		); err != nil {
-			return fmt.Errorf("copy legacy cloud key: %w", err)
-		}
-	}
-	profileState := localProfileStateV2{
-		Version: registryVersion, ProfileID: cfg.ProfileID, KeyMode: keyMode,
-		PendingTag: legacyState.PendingTag, PendingHash: legacyState.PendingHash,
-		ExplicitTag:   legacyState.ExplicitTag,
-		LastOperation: legacyState.LastOperation, LastSyncAt: legacyState.LastSyncAt,
-	}
-	if err := writeJSONAtomic(profileStatePath(localDir, cfg.ProfileID), profileState, 0o600); err != nil {
-		return err
-	}
-	remote := localRemoteConfigV2{
-		Version: registryVersion, ID: remoteID, Alias: alias,
-		Provider: cfg.Provider, ProfileID: cfg.ProfileID,
-		RemoteDir: newCache, RemoteLabel: cfg.RemoteLabel,
-		Enabled: true, Mirror: true,
-	}
-	if err := writeJSONAtomic(remoteConfigPath(localDir, remoteID), remote, 0o600); err != nil {
-		return err
-	}
-	remoteState := localRemoteStateV2{
-		Version:          registryVersion,
-		LastSeenRemoteID: legacyState.LastRemoteID,
-		LastRemoteID:     legacyState.LastRemoteID,
-		LastLocalHash:    legacyState.LastLocalHash,
-		LastOperation:    legacyState.LastOperation,
-		LastSyncAt:       legacyState.LastSyncAt,
-	}
-	switch legacyState.LastOperation {
-	case "push":
-		remoteState.LastPushedSnapshotID = legacyState.LastRemoteID
-	case "pull":
-		remoteState.LastPulledSnapshotID = legacyState.LastRemoteID
-	}
-	if err := writeJSONAtomic(remoteStatePath(localDir, remoteID), remoteState, 0o600); err != nil {
-		return err
-	}
-	var (
-		key    []byte
-		keyErr error
-	)
-	if keyMode == keyModeKeychain {
-		key, keyErr = platformKeyLoad(cfg.ProfileID)
-		if keyErr != nil {
-			return keychainLoginError(keyErr)
-		}
-	} else {
-		key, keyErr = loadProfileKeyFile(localDir, cfg.ProfileID)
-		if keyErr != nil {
-			return keyErr
-		}
-	}
-	probe := &Manager{
-		localDir: localDir, remoteDir: newCache,
-		profileID: cfg.ProfileID, key: key,
-	}
-	if err := probe.verifyProfileKey(cfg.ProfileID); err != nil {
-		return fmt.Errorf("verify legacy cloud key before migration: %w", err)
-	}
-
-	for _, legacyPath := range []string{
-		filepath.Join(localDir, cloudConfigName),
-		filepath.Join(localDir, cloudStateName),
-		filepath.Join(localDir, cloudKeyName),
-		filepath.Join(localDir, googleAuthName),
-	} {
-		if _, err := os.Stat(legacyPath); err == nil {
-			if err := copyRegularFile(legacyPath, legacyPath+".v1.bak", true); err != nil {
-				return fmt.Errorf("back up legacy cloud file: %w", err)
-			}
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-	}
-	// Drop the live root cloud.key after a successful profile-key copy so v2
-	// has a single authoritative key path. The .v1.bak remains for recovery.
-	if keyMode != keyModeKeychain {
-		if err := os.Remove(filepath.Join(localDir, cloudKeyName)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove legacy cloud key after migration: %w", err)
-		}
-	}
-
-	registry := cloudRegistry{
-		Version: registryVersion, ActiveProfileID: cfg.ProfileID,
-		PrimaryRemoteID:  remoteID,
-		Device:           localDevice{ID: cfg.DeviceID},
-		Aliases:          map[string]string{alias: remoteID},
-		RemoteOrder:      []string{remoteID},
-		MigratedFromV1At: nowUTC(),
-	}
-	if err := writeJSONAtomic(registryPath(localDir), registry, 0o600); err != nil {
-		return err
-	}
-	return nil
-}
-
-func copyRegularFile(source, destination string, allowExisting bool) error {
-	info, err := os.Lstat(source)
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("refuse to copy non-regular file %s", source)
-	}
-	input, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-	data, err := io.ReadAll(io.LimitReader(input, maxEncryptedSize+1))
-	if err != nil {
-		return err
-	}
-	if len(data) > maxEncryptedSize {
-		return fmt.Errorf("file %s exceeds safety limit", source)
-	}
-	if existing, err := readRegularFile(destination, maxEncryptedSize); err == nil {
-		if allowExisting && string(existing) == string(data) {
-			return nil
-		}
-		return fmt.Errorf("destination already exists: %s", destination)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return writeAtomic(destination, data, 0o600)
-}
-
-func copyRegularFileReplace(source, destination string) error {
-	data, err := readRegularFile(source, maxEncryptedSize)
-	if err != nil {
-		return err
-	}
-	return writeAtomic(destination, data, 0o600)
 }
 
 func saveRegistry(localDir string, registry cloudRegistry) error {

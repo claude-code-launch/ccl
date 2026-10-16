@@ -11,7 +11,7 @@ import (
 // presumed alive until it is a day old.
 func processAlive(_ int, path string) bool {
 	info, err := os.Stat(path)
-	return err == nil && time.Since(info.ModTime()) < legacyTempSettingsAge
+	return err == nil && time.Since(info.ModTime()) < tempSettingsAge
 }
 
 // On Windows only Ctrl+C reaches ccl; Claude Code receives it from the console

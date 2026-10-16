@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -306,12 +305,8 @@ func releaseDownloadURL(version, asset string) string {
 	return fmt.Sprintf("https://github.com/claude-code-launch/ccl/releases/latest/download/%s", asset)
 }
 
-var legacyNpmRelease = regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$`)
-
 func canonicalReleaseTag(version string) string {
-	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
-	version = legacyNpmRelease.ReplaceAllString(version, "$1.$2")
-	return "v" + version
+	return "v" + strings.TrimPrefix(strings.TrimSpace(version), "v")
 }
 
 // downloadReleaseBinary streams the gzip-compressed release asset at url into

@@ -26,11 +26,11 @@ func newCloudDoctorFixture(t *testing.T) cloudDoctorFixture {
 	t.Setenv("HOME", home)
 	t.Setenv("CCL_ICLOUD_DRIVE_DIR", drive)
 	writeSyncFixture(t, home)
-	if _, err := LoginICloudNamed("personal", false, ""); err != nil {
+	if _, err := LoginICloudNamed("personal"); err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	local := filepath.Join(home, ".ccl")
-	registry, err := loadRegistry(local, false)
+	registry, err := loadRegistry(local)
 	if err != nil {
 		t.Fatalf("load registry: %v", err)
 	}
@@ -70,9 +70,8 @@ func TestCloudDoctorReportsAHealthyInstallation(t *testing.T) {
 	reportHas(t, report, "ok", "registry v2")
 }
 
-// TestCloudDoctorReportsAnUnconfiguredInstallation covers both shapes of "no
-// cloud sync here": nothing at all, and a leftover v1 configuration that the
-// next cloud command would migrate.
+// TestCloudDoctorReportsAnUnconfiguredInstallation covers a home without
+// cloud sync.
 func TestCloudDoctorReportsAnUnconfiguredInstallation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -85,23 +84,6 @@ func TestCloudDoctorReportsAnUnconfiguredInstallation(t *testing.T) {
 		t.Fatalf("fresh installation checks = %+v", report.Checks)
 	}
 
-	if err := os.MkdirAll(filepath.Join(home, ".ccl"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(home, ".ccl", cloudConfigName),
-		[]byte(`{"version":1}`), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	report = DiagnoseLocal()
-	if report.Configured || IsNotConfiguredDiagnostic(report) {
-		t.Fatalf("legacy installation report = %+v", report)
-	}
-	reportHas(t, report, "warning", "legacy cloud sync v1")
-	if HasDiagnosticErrors(report) {
-		t.Fatalf("a migratable legacy config must not be an error: %+v", report)
-	}
 }
 
 // TestCloudDoctorDetectsAnUnusableRegistry walks the registry failures a user
@@ -166,33 +148,11 @@ func TestCloudDoctorDetectsAProfileThatCannotUnlock(t *testing.T) {
 		_ = os.WriteFile(keyPath, keyBytes, 0o600)
 	})
 
-	var state localProfileStateV2
-	if err := readJSONFile(statePath, &state); err != nil {
-		t.Fatal(err)
-	}
-	state.KeyMode = keyModeKeychain
-	if err := writeJSONAtomic(statePath, state, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	report := DiagnoseLocal()
-	reportHas(t, report, "info", "legacy macOS Keychain mode")
-
-	if err := os.WriteFile(statePath, stateBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(keyPath, keyBytes[:16], 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report = DiagnoseLocal()
+	report := DiagnoseLocal()
 	reportHas(t, report, "error", "invalid length 16")
-
-	legacy := filepath.Join(fixture.local, cloudKeyName)
-	if err := os.WriteFile(legacy, keyBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(legacy) })
-	report = DiagnoseLocal()
-	reportHas(t, report, "warning", "cloud.key still present")
 }
 
 // TestCloudDoctorDetectsRemoteProblems covers both remote providers: an iCloud
@@ -228,7 +188,7 @@ func TestCloudDoctorDetectsRemoteProblems(t *testing.T) {
 	if err := readJSONFile(configPath, &remote); err != nil {
 		t.Fatal(err)
 	}
-	cacheDir := filepath.Join(fixture.local, googleCacheName)
+	cacheDir := filepath.Join(fixture.local, "cache")
 	remote.Provider = providerGoogleDrive
 	remote.RemoteDir = cacheDir
 	if err := writeJSONAtomic(configPath, remote, 0o600); err != nil {
@@ -249,14 +209,6 @@ func TestCloudDoctorDetectsRemoteProblems(t *testing.T) {
 
 	if err := os.WriteFile(authPath, []byte(
 		`{"version":1,"token":{"access_token":"a","refresh_token":"r","token_type":"Bearer"}}`,
-	), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	report = DiagnoseLocal()
-	reportHas(t, report, "error", "ccl cloud login google-drive personal")
-
-	if err := os.WriteFile(authPath, []byte(
-		`{"version":1,"token":{"access_token":"a","refresh_token":"r","token_type":"Bearer"},"client_id":"`+googleOAuthClientID+`"}`,
 	), 0o600); err != nil {
 		t.Fatal(err)
 	}

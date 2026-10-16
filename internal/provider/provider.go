@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"net/url"
 	"sort"
 	"strings"
 
@@ -18,10 +17,6 @@ const (
 	// auto-compact threshold. EnvAutoCompactPct selects the percentage of it.
 	EnvAutoCompactWindow = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 
-	// EnvContextBudgetMode is a retired ccl directive kept only so old provider
-	// env maps can remove it instead of forwarding it to Claude Code.
-	EnvContextBudgetMode = "CCL_CONTEXT_BUDGET"
-
 	// EnvAutoCompactPct is Claude Code's percentage-based auto-compact threshold.
 	// It only ever lowers the trigger point, and Claude Code has repeatedly
 	// ignored it when it arrives through the settings file, so ccl also exports it
@@ -34,10 +29,6 @@ const (
 	Balanced800KMaxContextTokens  = "800000"
 	Balanced800KAutoCompactWindow = "800000"
 	Balanced800KAutoCompactPct    = "85"
-	// LegacyBalancedAutoCompactPct is the threshold both Balanced tiers wrote
-	// before 2026-09-15. Configs saved then still carry it; they read as the
-	// same tier and launch with the current values instead of being dropped.
-	LegacyBalancedAutoCompactPct = "80"
 
 	// BalancedMaxContextTokens and companions retain the original 500K names for
 	// callers that do not need to distinguish the two supported Balanced tiers.
@@ -63,7 +54,7 @@ func ManagedContextEnvKeys() []string {
 }
 
 // ContextPresetFromEnv recognizes the exact provider-wide context triplets that
-// ccl supports. Missing, partial, legacy, and hand-written combinations resolve
+// ccl supports. Missing, partial, and hand-written combinations resolve
 // to Default; HasManagedContextEnv distinguishes those unsupported overrides
 // from a genuinely empty Default configuration.
 func ContextPresetFromEnv(env map[string]string) ContextPreset {
@@ -73,11 +64,11 @@ func ContextPresetFromEnv(env map[string]string) ContextPreset {
 	switch {
 	case maxContext == Balanced500KMaxContextTokens &&
 		compactWindow == Balanced500KAutoCompactWindow &&
-		(compactPct == Balanced500KAutoCompactPct || compactPct == LegacyBalancedAutoCompactPct):
+		compactPct == Balanced500KAutoCompactPct:
 		return ContextPresetBalanced500K
 	case maxContext == Balanced800KMaxContextTokens &&
 		compactWindow == Balanced800KAutoCompactWindow &&
-		(compactPct == Balanced800KAutoCompactPct || compactPct == LegacyBalancedAutoCompactPct):
+		compactPct == Balanced800KAutoCompactPct:
 		return ContextPresetBalanced800K
 	default:
 		return ContextPresetDefault
@@ -225,19 +216,12 @@ type Config struct {
 	// Code for every ccl-launched session. It is a global launcher setting.
 	BypassMode bool `yaml:"bypass_mode,omitempty"`
 	// ConfigVersion is the schema the file was last written with; see
-	// config.CurrentVersion. Absent means a file from before versioning.
+	// config.CurrentVersion.
 	ConfigVersion int `yaml:"config_version,omitempty"`
-	// ProviderOff is read only to migrate configurations from before the
-	// "default" selector replaced `ccl provider off`.
-	ProviderOff bool `yaml:"provider_off,omitempty"`
 	// LogLevel is the threshold for ccl's per-session slog files: debug, info,
 	// warn, error, or off. Config loading normalizes an omitted value to off.
-	LogLevel string `yaml:"log_level,omitempty"`
-	// DebugMode and DebugVerbose remain readable only to migrate configurations
-	// written before `ccl debug` was renamed to `ccl log`.
-	DebugMode    bool                `yaml:"debug_mode,omitempty"`
-	DebugVerbose bool                `yaml:"debug_verbose,omitempty"`
-	Providers    map[string]Provider `yaml:"providers"`
+	LogLevel  string              `yaml:"log_level,omitempty"`
+	Providers map[string]Provider `yaml:"providers"`
 }
 
 // OAuthRuntimeType returns the internal compatibility type ccl persists for an
@@ -246,7 +230,7 @@ type Config struct {
 // false when the backend is empty or unknown.
 func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
-	case "gpt", "chatgpt", "codex", "grok", "zed":
+	case "gpt", "grok", "zed":
 		return "openai_responses", true
 	case "gemini", "kimi", "workbuddy":
 		return "openai", true
@@ -256,42 +240,6 @@ func OAuthRuntimeType(oauthProvider string) (string, bool) {
 		return "autoclaw", true
 	default:
 		return "", false
-	}
-}
-
-// InferOAuthProvider restores the public OAuth provider name for configs
-// written before oauthProvider was persisted. The oauth:// endpoint is an
-// internal backend marker, so ordinary HTTP providers are never inferred.
-func InferOAuthProvider(providerName, endpoint string) string {
-	u, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || !strings.EqualFold(u.Scheme, "oauth") {
-		return ""
-	}
-
-	backend := strings.ToLower(strings.TrimSpace(u.Host))
-	switch backend {
-	case "codex", "chatgpt", "gpt":
-		return "gpt"
-	case "antigravity", "gemini":
-		return "gemini"
-	case "copilot":
-		// Preserve the legacy marker so the runtime reports removed support
-		// rather than treating oauth://copilot as a manual API-key endpoint.
-		return "copilot"
-	case "qoder":
-		return "qoder"
-	case "xai", "grok":
-		return "grok"
-	case "kimi":
-		return "kimi"
-	case "kiro":
-		return "kiro"
-	case "workbuddy":
-		return "workbuddy"
-	case "zed":
-		return "zed"
-	default:
-		return ""
 	}
 }
 

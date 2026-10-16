@@ -913,7 +913,7 @@ func (a *codexOAuthAuthorizer) load() (*codexOAuthCredential, error) {
 		return nil, fmt.Errorf("decode Codex credential %s: %w", filepath.Base(a.path), err)
 	}
 	credentialType := strings.ToLower(strings.TrimSpace(stringValue(metadata["type"])))
-	if credentialType != ProviderCodex && credentialType != ProviderChatGPT && credentialType != ProviderChatGPTLegacy {
+	if credentialType != ProviderCodex && credentialType != ProviderChatGPT {
 		return nil, fmt.Errorf("credential %s is type %q, not Codex", filepath.Base(a.path), credentialType)
 	}
 	expiresAt := parseCodexExpiry(firstMetadataString(metadata, "expired", "expires_at", "expiry"))

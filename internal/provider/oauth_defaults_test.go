@@ -153,22 +153,3 @@ func TestLaunchNeverMovesAUserGrokChoice(t *testing.T) {
 		t.Fatalf("launch moved user choices: %+v", p)
 	}
 }
-
-func TestNormalizeProviderMigratesLegacyGrokDefaultsOnlyWhenAsked(t *testing.T) {
-	legacy := func() provider.Provider {
-		return provider.Provider{OAuthProvider: "grok", Type: "openai_responses",
-			CustomModelID: "grok-4.5", OpusModel: "grok-4.5", SonnetModel: "grok-4.3", HaikuModel: "grok-3-mini"}
-	}
-	p := legacy()
-	provider.NormalizeProvider(&p, "grok", false)
-	if p.OpusModel != "grok-4.5" {
-		t.Fatal("slots migrated without legacySlots")
-	}
-	p = legacy()
-	if !provider.NormalizeProvider(&p, "grok", true) {
-		t.Fatal("legacy migration reported no change")
-	}
-	if p.CustomModelID != "grok-4.6" || p.OpusModel != "grok-4.6" || p.SonnetModel != "grok-4.5" || p.HaikuModel != "grok-4.5" {
-		t.Fatalf("legacy defaults = %+v", p)
-	}
-}

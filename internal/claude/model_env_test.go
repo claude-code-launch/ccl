@@ -73,33 +73,6 @@ func TestExplicitAnthropicModelEnvStillWins(t *testing.T) {
 	}
 }
 
-// TestLegacyBalancedPresetLaunchesWithCurrentValues covers configs saved
-// before 2026-09-15, when both Balanced tiers used an 80% threshold: they used
-// to be dropped silently at every launch. They now launch as the same tier with
-// today's values.
-func TestLegacyBalancedPresetLaunchesWithCurrentValues(t *testing.T) {
-	for _, tier := range []struct{ window, wantPct string }{
-		{provider.Balanced500KMaxContextTokens, provider.Balanced500KAutoCompactPct},
-		{provider.Balanced800KMaxContextTokens, provider.Balanced800KAutoCompactPct},
-	} {
-		env := map[string]string{
-			provider.EnvMaxContextTokens:  tier.window,
-			provider.EnvAutoCompactWindow: tier.window,
-			provider.EnvAutoCompactPct:    provider.LegacyBalancedAutoCompactPct,
-		}
-		if provider.ContextPresetFromEnv(env) == provider.ContextPresetDefault {
-			t.Fatalf("legacy %s triplet is not recognized as Balanced", tier.window)
-		}
-		if dropped := applyContextPolicy(env); dropped {
-			t.Fatalf("legacy %s triplet was dropped", tier.window)
-		}
-		if env[provider.EnvMaxContextTokens] != tier.window || env[provider.EnvAutoCompactWindow] != tier.window ||
-			env[provider.EnvAutoCompactPct] != tier.wantPct {
-			t.Fatalf("legacy %s triplet launched as %v", tier.window, env)
-		}
-	}
-}
-
 func TestUnsupportedContextOverrideIsDroppedAndReported(t *testing.T) {
 	p := provider.Provider{
 		Type: "openai", Model: "a",

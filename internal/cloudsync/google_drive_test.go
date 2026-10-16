@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -70,7 +69,8 @@ func TestGoogleOAuthUsesBuiltInClientAndBrowserPKCE(t *testing.T) {
 		return nil
 	}
 
-	if _, err := authorizeGoogleDrive(context.Background()); err != nil {
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if _, err := authorizeGoogleDriveAt(context.Background(), authPath, nil); err != nil {
 		t.Fatal(err)
 	}
 	if tokenClientID == "" {
@@ -95,7 +95,6 @@ func TestGoogleOAuthUsesBuiltInClientAndBrowserPKCE(t *testing.T) {
 	if tokenRequest.Get("code_verifier") == "" {
 		t.Fatal("token exchange has no PKCE verifier")
 	}
-	authPath := filepath.Join(os.Getenv("HOME"), ".ccl", googleAuthName)
 	info, err := os.Stat(authPath)
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +158,7 @@ func TestGoogleDriveBundleCreateUpdateAndDownload(t *testing.T) {
 	})
 
 	remote := &googleDriveRemote{client: server.Client()}
-	cache := filepath.Join(t.TempDir(), googleCacheName)
+	cache := filepath.Join(t.TempDir(), "cache")
 	if err := os.MkdirAll(filepath.Join(cache, snapshotsDirectory), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +179,7 @@ func TestGoogleDriveBundleCreateUpdateAndDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	target := filepath.Join(t.TempDir(), googleCacheName)
+	target := filepath.Join(t.TempDir(), "cache")
 	found, err := remote.downloadBundle(target)
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +209,7 @@ func TestGoogleBundleRejectsTraversal(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(t.TempDir(), googleCacheName)
+	target := filepath.Join(t.TempDir(), "cache")
 	if err := replaceGoogleCache(target, output.Bytes()); err == nil ||
 		!strings.Contains(err.Error(), "unsupported path") {
 		t.Fatalf("traversal bundle error = %v", err)
@@ -238,7 +237,7 @@ func multipartParts(t *testing.T, body []byte, boundary string) [][]byte {
 }
 
 func TestSavingTokenSourceKeepsRefreshToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), googleAuthName)
+	path := filepath.Join(t.TempDir(), "auth.json")
 	previous := &oauth2.Token{AccessToken: "old", RefreshToken: "refresh", Expiry: time.Now().Add(-time.Hour)}
 	source := &savingTokenSource{
 		source: oauth2.StaticTokenSource(&oauth2.Token{
@@ -284,32 +283,9 @@ func TestGoogleOAuthClientIsInjectedAtBuildOrDevelopmentTime(t *testing.T) {
 	// A build without a client refuses to start a login.
 	googleOAuthClientID = ""
 	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_ID", "")
-	if _, err := authorizeGoogleDriveAt(context.Background(), filepath.Join(t.TempDir(), googleAuthName), nil); err == nil ||
+	if _, err := authorizeGoogleDriveAt(context.Background(), filepath.Join(t.TempDir(), "auth.json"), nil); err == nil ||
 		!strings.Contains(err.Error(), "no Google OAuth client") {
 		t.Fatalf("login without a client: %v", err)
-	}
-}
-
-func TestGoogleTokenFromAPreviousClientIsNotRefreshed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), googleAuthName)
-	token := &oauth2.Token{AccessToken: "a", RefreshToken: "r"}
-	// Files written before client_id was recorded came from the previous
-	// Cloud project's client.
-	if err := writeJSONAtomic(path, googleAuthFile{Version: formatVersion, Token: token}, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadGoogleToken(path); !errors.Is(err, errGoogleClientChanged) {
-		t.Fatalf("legacy token: %v", err)
-	}
-	if _, err := loadAuthorizedGoogleDriveAt(context.Background(), path, "google-drive"); err == nil ||
-		!strings.Contains(err.Error(), "ccl cloud login google-drive google-drive") {
-		t.Fatalf("push with a legacy token: %v", err)
-	}
-	if err := saveGoogleToken(path, token); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadGoogleToken(path); err != nil {
-		t.Fatalf("token of the current client: %v", err)
 	}
 }
 

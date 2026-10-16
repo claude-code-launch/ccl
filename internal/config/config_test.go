@@ -23,7 +23,7 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 				Endpoint:      "https://example.test/v1",
 				APIKey:        "secret",
 				Model:         "model-a",
-				OAuthProvider: "codex",
+				OAuthProvider: "gpt",
 				SubagentModel: "model-subagent",
 			},
 		},
@@ -54,47 +54,6 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 		got.Providers["gateway"].OAuthProvider != "gpt" ||
 		got.Providers["gateway"].SubagentModel != "model-subagent" {
 		t.Fatalf("loaded config = %+v, want %+v", got, want)
-	}
-}
-
-func TestLoadMigratesLegacyConfigAndSecuresPermissions(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	legacyDir := filepath.Join(home, ".cc")
-	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
-		t.Fatalf("create legacy dir: %v", err)
-	}
-	legacyPath := filepath.Join(legacyDir, "config.yaml")
-	legacyData := []byte("active_provider: legacy\nproviders:\n  legacy:\n    name: legacy\n    type: openai\n    endpoint: https://example.test/v1\n    apikey: secret\n")
-	if err := os.WriteFile(legacyPath, legacyData, 0o644); err != nil {
-		t.Fatalf("write legacy config: %v", err)
-	}
-
-	got, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if got.ActiveProvider != "legacy" || got.EffectiveACPProvider() != "legacy" || got.Providers["legacy"].Endpoint != "https://example.test/v1" {
-		t.Fatalf("legacy config was not loaded: %+v", got)
-	}
-	// Load is read-only: the legacy file stays where it is until Migrate.
-	if _, err := os.Stat(legacyPath); err != nil {
-		t.Fatalf("Load moved the legacy config: %v", err)
-	}
-	if err := Migrate(); err != nil {
-		t.Fatalf("Migrate() error: %v", err)
-	}
-
-	path := filepath.Join(home, ".ccl", "config.yaml")
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat migrated config: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("migrated config permissions = %o, want 600", got)
-	}
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatalf("legacy config should be moved, stat err=%v", err)
 	}
 }
 
@@ -129,40 +88,6 @@ func TestLoadLeavesACPFollowingTheActiveProvider(t *testing.T) {
 	}
 }
 
-func TestLoadMigratesLegacyDebugConfigToLogLevel(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	configDir := filepath.Join(home, ".ccl")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(configDir, "config.yaml")
-	if err := os.WriteFile(path, []byte("debug_mode: true\ndebug_verbose: true\nproviders: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.LogLevel != "debug" || cfg.DebugMode || cfg.DebugVerbose {
-		t.Fatalf("migrated config = level:%q mode:%t verbose:%t", cfg.LogLevel, cfg.DebugMode, cfg.DebugVerbose)
-	}
-	if untouched, _ := os.ReadFile(path); !strings.Contains(string(untouched), "debug_mode") {
-		t.Fatalf("Load rewrote the file:\n%s", untouched)
-	}
-	if err := Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "log_level: debug") || strings.Contains(string(data), "debug_mode") || strings.Contains(string(data), "debug_verbose") {
-		t.Fatalf("legacy fields were not rewritten:\n%s", data)
-	}
-}
-
 func TestLoadDefaultsLogLevelToOff(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -175,103 +100,12 @@ func TestLoadDefaultsLogLevelToOff(t *testing.T) {
 	}
 }
 
-func TestLoadInfersOAuthProviderForLegacyAuthEndpoints(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	configDir := filepath.Join(home, ".ccl")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatalf("create config dir: %v", err)
-	}
-	data := []byte(`providers:
-  chatgpt:
-    name: chatgpt
-    type: openai_responses
-    endpoint: oauth://codex
-    model: gpt-5.4-mini
-  codex:
-    name: codex
-    type: openai_responses
-    endpoint: oauth://codex
-    model: gpt-5.4-mini
-  gemini:
-    name: gemini
-    type: openai
-    endpoint: oauth://antigravity
-    model: gemini-test
-  regular:
-    name: regular
-    type: openai
-    endpoint: https://example.test/v1
-    model: gpt-test
-`)
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), data, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	// The retired chatgpt / codex names fold into gpt.
-	if got := cfg.Providers["chatgpt"].OAuthProvider; got != "gpt" {
-		t.Fatalf("chatgpt OAuth provider = %q", got)
-	}
-	if got := cfg.Providers["codex"].OAuthProvider; got != "gpt" {
-		t.Fatalf("legacy Codex OAuth provider = %q", got)
-	}
-	if got := cfg.Providers["gemini"].OAuthProvider; got != "gemini" {
-		t.Fatalf("Gemini OAuth provider = %q", got)
-	}
-	if got := cfg.Providers["regular"].OAuthProvider; got != "" {
-		t.Fatalf("ordinary provider inferred as OAuth: %q", got)
-	}
-}
-
-func TestLoadInfersAutoClawProviderFromDedicatedType(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	configDir := filepath.Join(home, ".ccl")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatalf("create config dir: %v", err)
-	}
-	data := []byte(`providers:
-  autoclaw:
-    name: autoclaw
-    type: autoclaw
-    endpoint: https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw
-    model: zai_auto
-`)
-	path := filepath.Join(configDir, "config.yaml")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	p := cfg.Providers["autoclaw"]
-	if p.OAuthProvider != "autoclaw" || p.Type != "autoclaw" {
-		t.Fatalf("AutoClaw provider migration = %+v", p)
-	}
-	if err := Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	rewritten, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read rewritten config: %v", err)
-	}
-	if !strings.Contains(string(rewritten), "oauthProvider: autoclaw") {
-		t.Fatalf("AutoClaw OAuth provider was not persisted:\n%s", rewritten)
-	}
-}
-
-func TestLoadMigratesMismatchedOAuthProtocol(t *testing.T) {
+func TestLoadDerivesTheOAuthProtocol(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	cfg := &provider.Config{
 		Providers: map[string]provider.Provider{
-			"chatgpt": {Name: "chatgpt", Type: "openai", OAuthProvider: "chatgpt", Endpoint: "oauth://codex"},
+			"chatgpt": {Name: "chatgpt", Type: "openai", OAuthProvider: "gpt", Endpoint: "oauth://codex"},
 			"gemini":  {Name: "gemini", Type: "openai_responses", OAuthProvider: "gemini", Endpoint: "oauth://antigravity"},
 		},
 	}

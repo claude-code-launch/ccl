@@ -223,15 +223,6 @@ for (const name of [
       let base = { ...old?.params, ...params };
       let clientID = params.sessionId;
       let backendID = connection.aliases.get(clientID) ?? clientID;
-      if (name === "loadSession" || name === "resumeSession") {
-        const legacy = await configuration("legacy", { sessionId: clientID });
-        if (legacy.sessionId) {
-          backendID = legacy.sessionId;
-          base = { ...base, cwd: base.cwd || legacy.cwd };
-          connection.aliases.set(clientID, backendID);
-          connection.reverse.set(backendID, clientID);
-        }
-      }
       const lease = await acquire(base.cwd);
       try {
         const forwarded = await inject(base, lease.options);

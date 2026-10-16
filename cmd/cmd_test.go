@@ -58,8 +58,7 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
 	}
-	// Deprecated root shortcuts still run but are not advertised; removed ones
-	// are gone entirely.
+	// Old root shortcuts are gone entirely.
 	for _, unwanted := range []string{"\n  conf", "\n  list", "\n  run", "\n  settings", "acp-permission",
 		"\n  cp ", "\n  mv ", "\n  rm ", "\n  preview", "\n  login", "\n  push", "\n  pull", "\n  tag ", "\n  status",
 		"\n  import", "\n  auth", "\n  debug"} {
@@ -523,26 +522,17 @@ func TestCloudAndOAuthCommandTrees(t *testing.T) {
 		{"cloud", "login", "--help"},
 		{"cloud", "remote", "ls", "--help"},
 		{"cloud", "status", "--help"},
-		{"cloud", "key", "export", "--help"},
 		{"oauth", "--help"},
-		// root compatibility aliases
-		{"login", "--help"},
-		{"push", "--help"},
-		{"pull", "--help"},
-		{"status", "--help"},
-		{"key", "--help"},
-		{"logout", "--help"},
-		{"tag", "--help"},
 	} {
 		out, err := executeCommand(RootCmd(), args...)
 		if err != nil {
 			t.Fatalf("expected %v to be registered, got error: %v\n%s", args, err, out)
 		}
 	}
-	// Retired pairing commands fail instead of reaching Claude Code.
-	for _, args := range [][]string{{"cloud", "device", "request"}, {"device", "approve", "123-456"}} {
-		if _, err := executeCommand(RootCmd(), args...); err == nil || !contains(err.Error(), "ccl cloud login") {
-			t.Fatalf("%v: %v", args, err)
+	// The former root shortcuts are gone, so they are not ccl commands.
+	for _, name := range []string{"cp", "mv", "env", "preview", "models", "login", "push", "pull", "status", "key", "logout", "tag", "device"} {
+		if isCclCommand(name) {
+			t.Fatalf("root shortcut %q is still registered", name)
 		}
 	}
 }
@@ -574,8 +564,6 @@ func TestCloudLoginHelpDescribesPlatformsAndKeyModes(t *testing.T) {
 		"drive.appdata",
 		"appDataFolder",
 		"only needs ccl cloud login",
-		"CCL_SYNC_PASSPHRASE",
-		"--passphrase",
 		"Examples:",
 		"ccl cloud login google-drive personal",
 		"default: google-drive",
@@ -584,14 +572,6 @@ func TestCloudLoginHelpDescribesPlatformsAndKeyModes(t *testing.T) {
 		if !contains(out, want) {
 			t.Fatalf("expected cloud login help to contain %q, got:\n%s", want, out)
 		}
-	}
-	// Root compatibility alias should share the same command help.
-	rootOut, err := executeCommand(RootCmd(), "login", "--help")
-	if err != nil {
-		t.Fatalf("login --help: %v", err)
-	}
-	if !contains(rootOut, "google-drive") || !contains(rootOut, "Built-in Desktop OAuth") {
-		t.Fatalf("root login --help should describe google-drive login, got:\n%s", rootOut)
 	}
 }
 

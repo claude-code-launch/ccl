@@ -122,21 +122,6 @@ func TestUseDefaultForNormalAndACP(t *testing.T) {
 	}
 }
 
-func TestRetiredProviderToggle(t *testing.T) {
-	saveToggleFixture(t, &provider.Config{ActiveProvider: "a", Providers: map[string]provider.Provider{
-		"a": {Name: "a", Type: "openai", Endpoint: "https://example.com/v1", Model: "m"},
-	}})
-	if _, err := executeCommand(RootCmd(), "provider", "off"); err != nil {
-		t.Fatal(err)
-	}
-	if cfg := loadToggleConfig(t); cfg.ActiveProvider != provider.DefaultProvider {
-		t.Fatalf("provider off did not select default: %q", cfg.ActiveProvider)
-	}
-	if _, err := executeCommand(RootCmd(), "provider", "on"); err == nil || !strings.Contains(err.Error(), "ccl use <name>") {
-		t.Fatalf("provider on: %v", err)
-	}
-}
-
 func TestListShowsTheDefaultRow(t *testing.T) {
 	cfg := &provider.Config{
 		ActiveProvider: provider.DefaultProvider, ACPProvider: "a",

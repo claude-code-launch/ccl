@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,71 +133,39 @@ func (fake *fakeGoogleProjects) profile(t *testing.T, project string) remoteProf
 	return remoteProfile{}
 }
 
-// TestGoogleLoginMovesAProfileToANewOAuthClient covers the switch to another
-// Cloud project: the old token cannot refresh and the old appDataFolder is out
-// of reach, so login reconnects the alias and uploads the same profile, which
-// a new device then opens with nothing but its own login.
-func TestGoogleLoginMovesAProfileToANewOAuthClient(t *testing.T) {
+// TestGoogleLoginOpensTheAccountsProfileOnANewDevice covers the whole Google
+// flow: the first device creates the profile in the account's appDataFolder,
+// and a second device opens it with nothing but its own login.
+func TestGoogleLoginOpensTheAccountsProfileOnANewDevice(t *testing.T) {
 	fake := newFakeGoogleProjects(t)
-	originalID := googleOAuthClientID
-	t.Cleanup(func() { googleOAuthClientID = originalID })
 	ctx := context.Background()
+	project := googleOAuthClientID
 
-	first := t.TempDir()
-	t.Setenv("HOME", first)
-	googleOAuthClientID = "old-project"
-	if _, err := LoginGoogleDriveNamed(ctx, "google-drive", false, "", nil); err != nil {
-		t.Fatal(err)
-	}
-	// Auth files from before client_id was recorded belong to the old client.
-	localDir := filepath.Join(first, ".ccl")
-	registry, err := loadRegistry(localDir, true)
+	t.Setenv("HOME", t.TempDir())
+	first, err := LoginGoogleDriveNamed(ctx, "google-drive", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authPath := remoteAuthPath(localDir, registry.Aliases["google-drive"])
-	stored, err := readGoogleAuth(authPath)
-	if err != nil || stored.ClientID != "old-project" {
-		t.Fatalf("stored auth = %+v, %v", stored, err)
+	if first.Existing || first.RemoteDir != googleDriveLabel {
+		t.Fatalf("first login = %+v", first)
 	}
-	stored.ClientID = ""
-	if err := writeJSONAtomic(authPath, stored, 0o600); err != nil {
-		t.Fatal(err)
+	profile := fake.profile(t, project)
+	if profile.AccountKey == "" {
+		t.Fatalf("uploaded profile has no key: %+v", profile)
 	}
-	oldProfile := fake.profile(t, "old-project")
+	if _, err := LoginGoogleDriveNamed(ctx, "google-drive", nil); err != nil {
+		t.Fatalf("repeated login: %v", err)
+	}
 
-	googleOAuthClientID = "new-project"
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ccl cloud login google-drive google-drive") {
-		t.Fatalf("push with the old client's token: %v", err)
-	}
-	moved, err := LoginGoogleDriveNamed(ctx, "google-drive", false, "", nil)
+	t.Setenv("HOME", t.TempDir())
+	joined, err := LoginGoogleDriveNamed(ctx, "google-drive", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if moved.Alias != "google-drive" {
-		t.Fatalf("moved login = %+v", moved)
-	}
-	newProfile := fake.profile(t, "new-project")
-	if newProfile.ID != oldProfile.ID || newProfile.AccountKey == "" {
-		t.Fatalf("new project profile = %+v, old %+v", newProfile, oldProfile)
-	}
-	if _, err := Load(); err != nil {
-		t.Fatalf("load after moving: %v", err)
-	}
-
-	second := t.TempDir()
-	t.Setenv("HOME", second)
-	joined, err := LoginGoogleDriveNamed(ctx, "google-drive", false, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !joined.Existing || joined.RemoteDir != "Google Drive appDataFolder" {
+	if !joined.Existing || joined.RemoteDir != googleDriveLabel {
 		t.Fatalf("new device login = %+v", joined)
 	}
-	if manager, err := Load(); err != nil || manager.profileID != oldProfile.ID {
+	if manager, err := Load(); err != nil || manager.profileID != profile.ID {
 		t.Fatalf("new device profile = %v, %v", manager, err)
-	}
-	if _, err := os.Stat(filepath.Join(second, ".ccl", "cloud")); err != nil {
-		t.Fatal(err)
 	}
 }

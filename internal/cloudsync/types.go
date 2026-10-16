@@ -13,11 +13,6 @@ const (
 	verifierFileName    = "verifier.ccl"
 	indexFileName       = "index.ccl"
 	snapshotsDirectory  = "snapshots"
-	cloudConfigName     = "cloud.json"
-	cloudKeyName        = "cloud.key"
-	cloudStateName      = "cloud-state.json"
-	googleAuthName      = "google-drive-auth.json"
-	googleCacheName     = "google-drive-cache"
 	googleBundleName    = "ccl-sync.bundle"
 	backupsDirectory    = "backups"
 	cloudDirectoryName  = "cloud"
@@ -32,12 +27,7 @@ const (
 	remoteCacheName     = "cache"
 	maxEncryptedSize    = 64 << 20
 	maxBundleSize       = 240 << 20
-	keyModeKeychain     = "keychain"
 	keyModeLocal        = "local"
-	keyModePassphrase   = "passphrase"
-	keyModeRecovery     = "recovery"
-	keyModePairing      = "pairing" // devices paired before pairing was removed
-	kdfScrypt           = "scrypt"
 	kdfMasterKey        = "master-key"
 )
 
@@ -45,24 +35,10 @@ type remoteProfile struct {
 	Version int    `json:"version"`
 	ID      string `json:"id"`
 	KDF     string `json:"kdf"`
-	N       int    `json:"n"`
-	R       int    `json:"r"`
-	P       int    `json:"p"`
-	Salt    string `json:"salt"`
 	// AccountKey is the profile key itself: access to the cloud account
 	// (Google Drive appDataFolder or iCloud Drive) is what protects the
 	// data, so a new device needs nothing but a login.
 	AccountKey string `json:"account_key,omitempty"`
-}
-
-type localCloudConfig struct {
-	Version     int    `json:"version"`
-	Provider    string `json:"provider"`
-	RemoteDir   string `json:"remote_dir"`
-	RemoteLabel string `json:"remote_label,omitempty"`
-	DeviceID    string `json:"device_id"`
-	ProfileID   string `json:"profile_id"`
-	KeyMode     string `json:"key_mode,omitempty"`
 }
 
 type localSyncState struct {
@@ -82,13 +58,12 @@ type localDevice struct {
 }
 
 type cloudRegistry struct {
-	Version          int               `json:"version"`
-	ActiveProfileID  string            `json:"active_profile_id"`
-	PrimaryRemoteID  string            `json:"primary_remote_id,omitempty"`
-	Device           localDevice       `json:"device"`
-	Aliases          map[string]string `json:"aliases"`
-	RemoteOrder      []string          `json:"remote_order"`
-	MigratedFromV1At time.Time         `json:"migrated_from_v1_at,omitempty"`
+	Version         int               `json:"version"`
+	ActiveProfileID string            `json:"active_profile_id"`
+	PrimaryRemoteID string            `json:"primary_remote_id,omitempty"`
+	Device          localDevice       `json:"device"`
+	Aliases         map[string]string `json:"aliases"`
+	RemoteOrder     []string          `json:"remote_order"`
 }
 
 type localProfileStateV2 struct {
@@ -167,19 +142,6 @@ type LoginResult struct {
 	Alias     string
 	Provider  string
 	Existing  bool
-	KeyMode   string
-	Migrated  bool
-}
-
-type KeyExportResult struct {
-	ProfileID   string
-	RecoveryKey string
-	KeyMode     string
-}
-
-type KeyImportResult struct {
-	RemoteDir string
-	DeviceID  string
 	KeyMode   string
 }
 

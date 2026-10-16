@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
-	"path/filepath"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -43,14 +42,6 @@ func newGoogleDriveRemote(ctx context.Context, token *oauth2.Token, authPath str
 		last:     token,
 	}
 	return &googleDriveRemote{client: oauth2.NewClient(ctx, source)}
-}
-
-func googleCacheDirectory() (string, error) {
-	localDir, err := cclDirectory()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(localDir, googleCacheName), nil
 }
 
 func (remote *googleDriveRemote) downloadBundle(cacheDir string) (bool, error) {

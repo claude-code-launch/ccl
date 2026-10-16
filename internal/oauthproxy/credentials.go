@@ -141,7 +141,7 @@ func credentialQuotaExceeded(metadata map[string]any) bool {
 
 func normalizeCredentialBackend(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy:
+	case ProviderCodex, ProviderChatGPT:
 		return ProviderCodex, nil
 	case ProviderQoder:
 		return ProviderQoder, nil

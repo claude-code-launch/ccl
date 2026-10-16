@@ -30,7 +30,6 @@ type Config struct {
 	Args          []string
 	Env           []string
 	AcquireLaunch func(context.Context) (LaunchLease, error)
-	LegacyStore   string
 	Stderr        io.Writer
 }
 
@@ -45,7 +44,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, cfg Config) error {
 	}
 	logs := newCredentialLog(cfg.Stderr, cfg.Env)
 	defer logs.flush()
-	control, err := startConfigurationService(cfg.AcquireLaunch, cfg.LegacyStore, logs.options)
+	control, err := startConfigurationService(cfg.AcquireLaunch, logs.options)
 	if err != nil {
 		return err
 	}

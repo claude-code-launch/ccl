@@ -9,17 +9,14 @@ import (
 )
 
 const (
-	ProviderCodex   = "codex"
-	ProviderGemini  = "gemini"
-	ProviderChatGPT = "gpt"
-	// ProviderChatGPTLegacy is a value read from older configs and credential
-	// files; login no longer accepts it as an alias for gpt.
-	ProviderChatGPTLegacy = "chatgpt"
-	ProviderGrok          = "grok"
-	ProviderQoder         = "qoder"
-	ProviderKimi          = "kimi"
-	ProviderKiro          = "kiro"
-	ProviderWorkBuddy     = "workbuddy"
+	ProviderCodex     = "codex"
+	ProviderGemini    = "gemini"
+	ProviderChatGPT   = "gpt"
+	ProviderGrok      = "grok"
+	ProviderQoder     = "qoder"
+	ProviderKimi      = "kimi"
+	ProviderKiro      = "kiro"
+	ProviderWorkBuddy = "workbuddy"
 	// ProviderAutoClaw is the AutoClaw Code (ZCode coding plan) backend. CCL
 	// performs browser OAuth, refreshes the resulting session locally, and owns
 	// the Anthropic-to-OpenAI Chat adapter used to reach the managed proxy.
@@ -134,10 +131,8 @@ func ValidateLoginProvider(providerName string) (string, error) {
 
 func BackendProvider(providerName string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case ProviderCodex, ProviderChatGPT, ProviderChatGPTLegacy:
+	case ProviderCodex, ProviderChatGPT:
 		return ProviderCodex, nil
-	case "copilot":
-		return "", fmt.Errorf("GitHub Copilot OAuth support has been removed; select another provider")
 	case ProviderQoder:
 		return ProviderQoder, nil
 	case ProviderGemini:

@@ -9,8 +9,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var modelsCmd = newModelsCommand("models")
-
 func newModelsCommand(use string) *cobra.Command {
 	var showAll, probe bool
 	target := &providerTarget{}
@@ -133,8 +131,4 @@ func indexModelInfos(infos []protocol.ModelInfo) map[string]protocol.ModelInfo {
 		}
 	}
 	return indexed
-}
-
-func init() {
-	rootCmd.AddCommand(deprecatedRootAlias(modelsCmd, "ccl provider models"))
 }

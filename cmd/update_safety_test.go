@@ -70,17 +70,6 @@ func TestUpdatePreservesPreviousExecutable(t *testing.T) {
 	}
 }
 
-func TestLegacyNpmTagMapping(t *testing.T) {
-	for input, want := range map[string]string{"1.2.3-4": "v1.2.3.4", "v1.2.3.4": "v1.2.3.4", "v1.2.3": "v1.2.3", "1.2.3-beta.1": "v1.2.3-beta.1"} {
-		if got := canonicalReleaseTag(input); got != want {
-			t.Fatalf("%s => %s want %s", input, got, want)
-		}
-	}
-	if got := releaseDownloadURL("v1.2.3-4", "asset"); got != cclRepoReleases+"/v1.2.3.4/asset" {
-		t.Fatal(got)
-	}
-}
-
 func TestPreviewReturnsSetupError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg, err := config.Load()

@@ -50,11 +50,10 @@ func TestApplyCompactConfigDefaultClearsEveryContextOverride(t *testing.T) {
 	p := provider.Provider{
 		OpusModel: "gpt-5.5[1m]",
 		Env: map[string]string{
-			maxContextTokensEnv:           "1050000",
-			autoCompactWindowEnv:          "840000",
-			autoCompactPctEnv:             "82",
-			provider.EnvContextBudgetMode: "manual",
-			"KEEP_ME":                     "1",
+			maxContextTokensEnv:  "1050000",
+			autoCompactWindowEnv: "840000",
+			autoCompactPctEnv:    "82",
+			"KEEP_ME":            "1",
 		},
 	}
 	applyCompactConfig(&p, map[string]bool{"opus": true}, compactPresetDefault)
@@ -62,7 +61,7 @@ func TestApplyCompactConfigDefaultClearsEveryContextOverride(t *testing.T) {
 	if p.OpusModel != "gpt-5.5[1m]" {
 		t.Fatalf("Default removed the per-slot marker: %q", p.OpusModel)
 	}
-	for _, key := range append(provider.ManagedContextEnvKeys(), provider.EnvContextBudgetMode) {
+	for _, key := range provider.ManagedContextEnvKeys() {
 		if value, ok := p.Env[key]; ok {
 			t.Fatalf("Default left %s=%q", key, value)
 		}
