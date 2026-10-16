@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/acp"
@@ -20,7 +21,7 @@ import (
 var acpQuietErrors bool
 
 var acpCmd = &cobra.Command{
-	Use:   "acp [-- adapter-options]",
+	Use:   "acp [--model <model>] [--effort <level>] [-- adapter-options]",
 	Short: locale.T("为 claude-agent-acp 注入 CCL 配置，并透传 ACP", "Wrap claude-agent-acp with CCL configuration and pass through ACP"),
 	Long: locale.T(`ACP 协议由 claude-agent-acp 完整实现；CCL 只处理 provider、模型、环境和代理配置。
 
@@ -36,6 +37,9 @@ Xcode 27 配置（Settings → Intelligence → Agents → Add an Agent）：
   Interpreter: 留空
 
 先运行 ccl use --acp <name>，让 ACP 直接使用同一份 Provider 配置；无需维护 ACP 专用副本。
+--model / --effort 指定这个 Agent 的会话从哪个模型和 effort 开始（模型可写 opus、sonnet 等槽位别名或完整模型 ID；
+effort 为 low、medium、high、xhigh、max）。客户端不显示模型选择时（如 Xcode 27），可添加多个参数不同的 Agent，
+例如 Arguments 填 acp --model opus --effort max，在 Agent 下拉框里切换。
 运行中修改该配置，会在下一条空闲 prompt 前通过上游 session/resume 更新，无需重启 Agent。
 模型、模式、工具、权限、终端、MCP、会话恢复及扩展以适配器和客户端协商的能力为准。
 用 --adapter <绝对路径> 或 CCL_ACP_ADAPTER 指定 GUI 可访问的适配器入口；-- 后的选项透传上游。
@@ -53,6 +57,9 @@ Xcode 27 setup (Settings → Intelligence → Agents → Add an Agent):
   Interpreter: leave blank
 
 Select a shared provider configuration with ccl use --acp <name>; ACP does not keep a separate provider copy.
+--model / --effort set the model and effort this agent's sessions start at (a model is a slot alias such as opus or
+sonnet, or a full model ID; effort is low, medium, high, xhigh or max). When a client shows no model picker (Xcode 27),
+add several agents with different arguments, such as acp --model opus --effort max, and switch in its Agent menu.
 Configuration changes take effect through upstream session/resume before the next idle prompt; restarting the agent is not required.
 Models, modes, tools, permissions, terminals, MCP, session history and extensions are negotiated by the adapter and client.
 Use --adapter <absolute-path> or CCL_ACP_ADAPTER for a GUI-accessible adapter entry. Options after -- are passed to the adapter.
@@ -71,11 +78,29 @@ stdout is upstream ACP only; logs go to stderr.`),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		acpQuietErrors = true
 		adapter, _ := cmd.Flags().GetString("adapter")
-		return runACP(cmd.Context(), os.Stdin, os.Stdout, os.Stderr, adapter, args)
+		model, _ := cmd.Flags().GetString("model")
+		effort, _ := cmd.Flags().GetString("effort")
+		choices, err := parseACPSessionChoices(model, effort)
+		if err != nil {
+			return err
+		}
+		return runACP(cmd.Context(), os.Stdin, os.Stdout, os.Stderr, adapter, choices, args)
 	},
 }
 
-func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter string, args []string) error {
+// acpEffortLevels are the adapter SDK's named effort levels; unlike the
+// persisted effortLevel setting, a session option may also be max.
+var acpEffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+func parseACPSessionChoices(model, effort string) (acpSessionChoices, error) {
+	choices := acpSessionChoices{Model: strings.TrimSpace(model), Effort: strings.ToLower(strings.TrimSpace(effort))}
+	if choices.Effort != "" && !slices.Contains(acpEffortLevels, choices.Effort) {
+		return acpSessionChoices{}, fmt.Errorf("--effort: expected one of %s, got %q", strings.Join(acpEffortLevels, ", "), effort)
+	}
+	return choices, nil
+}
+
+func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter string, choices acpSessionChoices, args []string) error {
 	// stdin/stdout belong to the ACP client, so nothing is installed here:
 	// the errors name the terminal command that installs what is missing.
 	adapterPath, err := resolveACPAdapter(adapter)
@@ -89,6 +114,7 @@ func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter stri
 	ctx, stop := process.SignalContext(ctx)
 	defer stop()
 	manager := newACPLaunchManager()
+	manager.choices = choices
 	defer manager.Close()
 	initial, err := manager.acquireContext(ctx)
 	if err != nil {
@@ -134,5 +160,7 @@ func prependPath(env []string, dir string) []string {
 func init() {
 	acpCmd.AddCommand(newACPInstallCommand())
 	acpCmd.Flags().String("adapter", "", locale.T("claude-agent-acp 入口的路径", "Path to the claude-agent-acp entry"))
+	acpCmd.Flags().String("model", "", locale.T("会话开始时使用的模型（槽位别名或模型 ID）", "Model sessions start on (slot alias or model ID)"))
+	acpCmd.Flags().String("effort", "", locale.T("会话开始时的 effort：low|medium|high|xhigh|max", "Effort sessions start at: low|medium|high|xhigh|max"))
 	rootCmd.AddCommand(acpCmd)
 }

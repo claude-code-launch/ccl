@@ -126,6 +126,9 @@ async function inject(params, configured) {
   for (const key of ["outputStyle", "language", "statusLine", "modelPicker"]) {
     if (clientSettings[key] != null) settings[key] = clientSettings[key];
   }
+  // `ccl acp --model` is selected through upstream's configuration interface
+  // (selectChosenModel), so a model a provider refuses never reaches the SDK.
+  const { model: _chosen, ...sdkOptions } = configured;
   return {
     ...params,
     _meta: {
@@ -134,7 +137,7 @@ async function inject(params, configured) {
         ...params._meta?.claudeCode,
         options: {
           ...options,
-          ...configured,
+          ...sdkOptions,
           settings,
           env: mergeEnv(options.env, configured.env),
         },
@@ -200,6 +203,27 @@ function boundSession(connection, id) {
   );
 }
 
+// `ccl acp --model` is selected through the upstream configuration interface,
+// so the session runs it and clients show it; a loaded transcript would keep
+// its own. A model upstream refuses leaves the session on its own model.
+async function selectChosenModel(agent, sessionId, lease, result) {
+  const value = lease.options.model;
+  if (!value) return result;
+  try {
+    const selected = await originals.setSessionConfigOption.call(agent, {
+      sessionId,
+      configId: "model",
+      value,
+    });
+    return selected?.configOptions && result.configOptions
+      ? { ...result, configOptions: selected.configOptions }
+      : result;
+  } catch (error) {
+    console.error(`ccl acp --model ${value}: ${error?.message ?? error}`);
+    return result;
+  }
+}
+
 for (const name of [
   "newSession",
   "loadSession",
@@ -227,11 +251,12 @@ for (const name of [
       try {
         const forwarded = await inject(base, lease.options);
         if (backendID) forwarded.sessionId = backendID;
-        const result = await original.call(this, forwarded);
+        let result = await original.call(this, forwarded);
         if (name === "newSession" || name === "unstable_forkSession") {
           clientID = result.sessionId;
           backendID = result.sessionId;
         }
+        result = await selectChosenModel(this, backendID, lease, result);
         const previous = name === "unstable_forkSession" ? undefined : old;
         const previousLease = previous?.lease;
         const bound = previous ?? {
@@ -307,7 +332,11 @@ prototype.startTurn = async function (params, events) {
               candidate.options.settings?.model ||
               candidate.options.env?.ANTHROPIC_MODEL ||
               "sonnet";
-            selectedDefault = configured._meta.claudeCode.options.model;
+            // The chosen model first; the new provider's default if refused.
+            selectedDefault = [
+              candidate.options.model,
+              configured._meta.claudeCode.options.model,
+            ].filter(Boolean);
           }
           // Upstream resume refreshes a query without replaying its transcript.
           // Keep the old runtime lease until that query has been replaced.
@@ -326,11 +355,22 @@ prototype.startTurn = async function (params, events) {
     if (session.pendingModel) {
       // Claude restores the transcript's model on resume. Use the upstream
       // configuration interface to apply a changed CCL default explicitly.
-      await originals.setSessionConfigOption.call(this, {
-        sessionId: session.backendID,
-        configId: "model",
-        value: session.pendingModel,
-      });
+      const [value, ...fallbacks] = session.pendingModel;
+      try {
+        await originals.setSessionConfigOption.call(this, {
+          sessionId: session.backendID,
+          configId: "model",
+          value,
+        });
+      } catch (error) {
+        if (!fallbacks.length) throw error;
+        console.error(`ccl acp --model ${value}: ${error?.message ?? error}`);
+        await originals.setSessionConfigOption.call(this, {
+          sessionId: session.backendID,
+          configId: "model",
+          value: fallbacks[0],
+        });
+      }
       session.pendingModel = undefined;
     }
     session.preparing.delete(abort);

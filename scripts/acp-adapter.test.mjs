@@ -18,21 +18,21 @@ const wrapper = fileURLToPath(
 const library = `
 export class ClaudeAcpAgent {
   constructor(client) { this.client = client; this.sessions = new Map(); this.sequence = 0; this.resumes = 0; this.held = new Map(); }
-  async newSession(params) { const sessionId = 'session-' + ++this.sequence; this.sessions.set(sessionId, params); return { sessionId, captured: params, controlLeaked: !!process.env.CCL_ACP_CONTROL_TOKEN, argv: process.argv.slice(2) }; }
-  async loadSession(params) { this.sessions.set(params.sessionId, params); await this.client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'upstream-replay' } } }); return { sessionId: params.sessionId, captured: params }; }
+  async newSession(params) { const sessionId = 'session-' + ++this.sequence; this.sessions.set(sessionId, params); return { sessionId, captured: params, controlLeaked: !!process.env.CCL_ACP_CONTROL_TOKEN, argv: process.argv.slice(2), configOptions: [{ id: 'model', currentValue: 'fixture-default' }] }; }
+  async loadSession(params) { this.sessions.set(params.sessionId, params); await this.client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'upstream-replay' } } }); return { sessionId: params.sessionId, captured: params, configOptions: [{ id: 'model', currentValue: 'transcript' }] }; }
   async resumeSession(params) { if (params._meta.claudeCode.options.env.REFUSE === '1') throw new Error('upstream-reload-failed'); this.resumes++; this.sessions.set(params.sessionId, params); return { sessionId: params.sessionId }; }
   async prompt(params) { let resolve, reject; const outcome = new Promise((a, b) => { resolve = a; reject = b; }); await this.startTurn(params, { inserted() {}, ended: resolve, failed: reject }); return outcome; }
   async startTurn(params, events) {
     const state = this.sessions.get(params.sessionId);
     if (params.prompt?.[0]?.text === 'hold') { await this.client.sessionUpdate({ sessionId: params.sessionId, update: { sessionUpdate: 'fixture-held' } }); this.held.set(params.sessionId, events.ended); return; }
-    events.ended({ stopReason: 'upstream-only', captured: params, options: state._meta.claudeCode.options, resumes: this.resumes });
+    events.ended({ stopReason: 'upstream-only', captured: params, options: state._meta.claudeCode.options, resumes: this.resumes, selected: this.selected });
   }
   async cancel(params) { this.held.get(params.sessionId)?.({ stopReason: 'cancelled' }); this.held.delete(params.sessionId); }
   async closeSession(params) { this.sessions.delete(params.sessionId); return { upstreamClose: true }; }
   async deleteSession(params) { this.sessions.delete(params.sessionId); return { upstreamDelete: true }; }
   async archiveSession(params) { this.sessions.delete(params.sessionId); return { upstreamArchive: true }; }
   async setSessionMode(params) { return { modeFromUpstream: params }; }
-  async setSessionConfigOption(params) { return { configFromUpstream: params }; }
+  async setSessionConfigOption(params) { this.selected = [...(this.selected ?? []), params]; if (params.value === 'refused') throw new Error('Invalid value for config option model'); return { configFromUpstream: params, configOptions: [{ id: params.configId, currentValue: params.value }] }; }
 }
 `;
 
@@ -90,6 +90,7 @@ async function fixture(t) {
     leases: new Map(),
     refuse: false,
     pause: false,
+    choices: {},
   };
   const server = http.createServer(async (request, response) => {
     assert.equal(request.headers.authorization, "Bearer fixture-control");
@@ -105,6 +106,7 @@ async function fixture(t) {
       state.acquired.push(params);
       if (state.pause) return;
       const options = {
+        ...state.choices,
         env: {
           ANTHROPIC_AUTH_TOKEN: "fake-" + state.generation,
           GENERATION: String(state.generation),
@@ -331,6 +333,60 @@ test("provider refresh uses upstream resume, preserves running turns and release
   const closed = await f.call("session/close", { sessionId });
   assert.deepEqual(closed.result, { upstreamClose: true });
   assert.equal(f.state.leases.size, 0);
+});
+
+test("ccl acp --model and --effort reach SDK options and the session's model", async (t) => {
+  const f = await fixture(t);
+  f.state.choices = { model: "opus", effort: "max" };
+  const created = await f.call("session/new", {
+    cwd: f.directory,
+    mcpServers: [],
+  });
+  assert.ifError(created.error);
+  const options = created.result.captured._meta.claudeCode.options;
+  assert.equal(options.model, undefined);
+  assert.equal(options.effort, "max");
+  assert.deepEqual(created.result.configOptions, [
+    { id: "model", currentValue: "opus" },
+  ]);
+  const sessionId = created.result.sessionId;
+  // A loaded transcript keeps its own model unless it is selected again.
+  const loaded = await f.call("session/load", {
+    sessionId,
+    cwd: f.directory,
+    mcpServers: [],
+  });
+  assert.deepEqual(loaded.result.configOptions, [
+    { id: "model", currentValue: "opus" },
+  ]);
+  // A provider change keeps the chosen model, not the provider's default.
+  f.state.generation = 2;
+  const turn = await f.call("session/prompt", {
+    sessionId,
+    prompt: [{ type: "text", text: "test" }],
+  });
+  assert.equal(turn.result.options.model, "model-2");
+  assert.deepEqual(
+    turn.result.selected.map(({ configId, value }) => [configId, value]),
+    [
+      ["model", "opus"],
+      ["model", "opus"],
+      ["model", "opus"],
+    ],
+  );
+});
+
+test("a chosen model upstream refuses leaves the session on its own model", async (t) => {
+  const f = await fixture(t);
+  f.state.choices = { model: "refused" };
+  const created = await f.call("session/new", {
+    cwd: f.directory,
+    mcpServers: [],
+  });
+  assert.ifError(created.error);
+  assert.deepEqual(created.result.configOptions, [
+    { id: "model", currentValue: "fixture-default" },
+  ]);
 });
 
 test("failed refresh keeps the previous lease and can be retried", async (t) => {

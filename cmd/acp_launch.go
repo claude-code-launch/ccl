@@ -50,8 +50,38 @@ type acpLaunchGeneration struct {
 	closed   bool
 }
 
+// acpSessionChoices are one ccl acp process's --model and --effort. They are
+// the adapter's documented SDK options, so every session of that agent starts
+// on them whichever provider is selected; the wrapper also selects the model
+// through upstream's configuration interface so clients show it.
+type acpSessionChoices struct {
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+}
+
+func (c acpSessionChoices) apply(options json.RawMessage) (json.RawMessage, error) {
+	if c == (acpSessionChoices{}) {
+		return options, nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(options, &object); err != nil {
+		return nil, err
+	}
+	for key, value := range map[string]string{"model": c.Model, "effort": c.Effort} {
+		if value != "" {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			object[key] = encoded
+		}
+	}
+	return json.Marshal(object)
+}
+
 type acpLaunchManager struct {
 	mu             sync.Mutex
+	choices        acpSessionChoices
 	resolve        func() (acpProviderSnapshot, error)
 	prepareContext func(context.Context, provider.Provider) (acpPreparedLaunch, error)
 	current        *acpLaunchGeneration
@@ -215,7 +245,11 @@ func (l *acpLaunchLease) Options(cwd string) (json.RawMessage, error) {
 	if l == nil || l.generation == nil || l.generation.launch == nil {
 		return nil, fmt.Errorf("ACP launch is not available")
 	}
-	return l.generation.launch.Options(cwd)
+	options, err := l.generation.launch.Options(cwd)
+	if err != nil {
+		return nil, err
+	}
+	return l.manager.choices.apply(options)
 }
 
 func (l *acpLaunchLease) Release() {
