@@ -120,3 +120,23 @@ func AgentProcessEnv(options json.RawMessage) ([]string, error) {
 	env = append(env, "ANTHROPIC_API_KEY="+transport["ANTHROPIC_API_KEY"])
 	return env, nil
 }
+
+// DefaultAgentLaunch runs ACP sessions on Claude Code's own configuration
+// (the "default" selector) exactly as it stands, including a running ccl
+// proxy's overlay: no provider runtime, no settings, and every routing key the
+// adapter's long-lived process may hold from another provider is put back to
+// ccl's own environment, as a plain Claude Code launch would see it.
+type DefaultAgentLaunch struct{}
+
+func (DefaultAgentLaunch) Close() {}
+
+func (DefaultAgentLaunch) Options(cwd string) (json.RawMessage, error) {
+	env := completeAgentEnv(settingsJSON{Env: map[string]string{}}, false)
+	for key := range env {
+		env[key] = os.Getenv(key)
+	}
+	return json.Marshal(struct {
+		Env      map[string]string          `json:"env"`
+		Settings map[string]json.RawMessage `json:"settings"`
+	}{env, map[string]json.RawMessage{}})
+}

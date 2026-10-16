@@ -62,9 +62,18 @@ same provider entry is pinned for ccl acp; no provider settings are copied or
 maintained separately. Until pinned, ACP follows the normal-mode provider;
 --acp --follow removes the pin again.
 
+default is always available: it runs Claude Code with its own configuration
+(your claude.ai subscription and ~/.claude settings), loading no provider. A
+fresh install starts on default. The environment is passed to Claude Code
+unchanged and no ccl settings, proxy, or status line are added. Normal mode
+cannot switch to default while ccl proxy is running (stop it first), and on
+default ccl proxy needs an explicit provider name.
+
 Examples:
   ccl use cc
+  ccl use default
   ccl use --acp cc
+  ccl use --acp default
   ccl use --acp --follow`,
 		// Parse the tiny grammar without retaining mutable flag state between
 		// invocations of the reusable Cobra root used by embedders and tests.
@@ -124,6 +133,7 @@ func newProviderCopyCommand(use string) *cobra.Command {
 		Short: "Copy a provider configuration",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return runProviderCopy(args[0], args[1], yes)
 		},
 	}
@@ -158,6 +168,7 @@ func newProviderMoveCommand(use string) *cobra.Command {
 		Short: "Rename a provider configuration",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return runProviderMove(args[0], args[1], yes)
 		},
 	}
@@ -184,13 +195,12 @@ func runProviderUse(name string, forACP bool) error {
 		}
 	}
 
-	if _, exists := cfg.Providers[target]; !exists {
+	isDefault := provider.IsDefaultProvider(target)
+	if _, exists := cfg.Providers[target]; !exists && !isDefault {
 		return fmt.Errorf(locale.T("未找到 Provider %q。请先用 'ccl set' 添加，或用 'ccl ls' 检查拼写", "provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'"), target)
 	}
-
-	reenabled := false
 	err = config.Update(func(c *provider.Config) error {
-		if _, exists := c.Providers[target]; !exists {
+		if _, exists := c.Providers[target]; !exists && !isDefault {
 			return fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found in configuration"), target)
 		}
 		if forACP {
@@ -198,22 +208,27 @@ func runProviderUse(name string, forACP bool) error {
 			return nil
 		}
 		c.ActiveProvider = target
-		// Choosing a provider means wanting it: turn provider loading back on.
-		reenabled = c.ProviderOff
-		c.ProviderOff = false
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	if forACP {
+	switch {
+	case isDefault && forACP:
+		fmt.Println(locale.T(
+			"ACP 已切换为 default：使用 Claude Code 自身配置（claude.ai 订阅）",
+			"ACP now uses default: Claude Code's own configuration (claude.ai subscription)",
+		))
+	case isDefault:
+		fmt.Println(locale.T(
+			"已切换到 default：ccl 以 Claude Code 自身配置启动（claude.ai 订阅）",
+			"Switched to default: ccl starts Claude Code with its own configuration (claude.ai subscription)",
+		))
+	case forACP:
 		fmt.Printf(locale.T("ACP 已切换为使用 Provider 配置：%s\n", "ACP now uses provider configuration: %s\n"), target)
-	} else {
+	default:
 		fmt.Printf(locale.T("已切换到激活 Provider：%s\n", "Switched to active provider: %s\n"), target)
-		if reenabled {
-			fmt.Println(locale.T("Provider 加载已重新打开（之前为 off）", "Provider loading is back on (it was off)"))
-		}
 	}
 	return nil
 }
@@ -241,14 +256,18 @@ func runACPFollow() error {
 // list `ccl set` shows (but without the create-new entry — use only switches
 // between existing providers). It returns "" when the user cancels.
 func selectProviderToUse(cfg *provider.Config, forACP bool) (string, error) {
-	names := make([]string, 0, len(cfg.Providers))
+	names := make([]string, 0, len(cfg.Providers)+1)
 	for name := range cfg.Providers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	if len(names) == 0 {
-		return "", fmt.Errorf("%s", locale.T("没有可用的 Provider，请先用 'ccl set' 添加", "no providers configured. Add one first using 'ccl set'"))
+		return "", fmt.Errorf("%s", locale.T(
+			"没有可用的 Provider，请先用 'ccl set' 添加（ccl use default 使用 Claude Code 自身配置）",
+			"no providers configured. Add one first using 'ccl set' (ccl use default runs Claude Code's own configuration)",
+		))
 	}
+	names = append([]string{provider.DefaultProvider}, names...)
 	selected := cfg.ActiveProvider
 	if forACP {
 		selected = cfg.EffectiveACPProvider()
@@ -305,6 +324,12 @@ func runProviderCopy(sourceName, targetName string, force bool) error {
 
 	if source == "" || target == "" {
 		return fmt.Errorf("%s", locale.T("请提供源和目标名称，例如: ccl provider cp <source> <target>", "please provide both source and target names, e.g.: ccl provider cp <source> <target>"))
+	}
+	if provider.IsDefaultProvider(target) {
+		return fmt.Errorf(locale.T(
+			"%q 是保留名（Claude Code 自身配置），请换一个名称",
+			"%q is reserved for Claude Code's own configuration; choose another name",
+		), target)
 	}
 	if source == target {
 		return fmt.Errorf("%s", locale.T("源和目标名称不能相同", "source and target must be different"))
@@ -431,6 +456,12 @@ func runProviderMove(sourceName, targetName string, force bool) error {
 	if source == "" || target == "" {
 		return fmt.Errorf("%s", locale.T("请提供旧名称和新名称，例如: ccl provider mv <source> <target>", "please provide both source and target names, e.g.: ccl provider mv <source> <target>"))
 	}
+	if provider.IsDefaultProvider(target) {
+		return fmt.Errorf(locale.T(
+			"%q 是保留名（Claude Code 自身配置），请换一个名称",
+			"%q is reserved for Claude Code's own configuration; choose another name",
+		), target)
+	}
 	if source == target {
 		fmt.Println(locale.T("源和目标名称相同，无需操作。", "Source and target are the same, nothing to do."))
 		return nil
@@ -485,8 +516,8 @@ func init() {
 		newMapCommand("map [provider-name]"),
 		newModelsCommand("models"),
 		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
-		newProviderToggleCommand("on"),
-		newProviderToggleCommand("off"),
+		newRetiredProviderToggleCommand("on"),
+		newRetiredProviderToggleCommand("off"),
 		newProviderEffortCommand(),
 		newProviderUltracodeCommand(),
 	)

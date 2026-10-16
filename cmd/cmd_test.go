@@ -104,7 +104,7 @@ func TestProviderSubcommandAliasesExist(t *testing.T) {
 // selected, keys exported in the shell for other tools must not become an
 // implicit, billed Claude Code provider.
 func TestResolveProviderIgnoresShellCredentials(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	saveToggleFixture(t, &provider.Config{})
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "bearer-token")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://token.sensenova.cn/v1")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-other-tool")
@@ -114,7 +114,7 @@ func TestResolveProviderIgnoresShellCredentials(t *testing.T) {
 	if err == nil {
 		t.Fatalf("resolveProvider() built a provider from the shell: %+v", p)
 	}
-	if !strings.Contains(err.Error(), "ccl provider off") {
+	if !strings.Contains(err.Error(), "ccl use default") {
 		t.Fatalf("error does not offer the subscription path: %v", err)
 	}
 }

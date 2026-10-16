@@ -228,7 +228,6 @@ func RunProviderSet(args []string) error {
 		latest.Providers[p.Name] = p
 		if updatedModel.IsActiveChosen {
 			latest.ActiveProvider = p.Name
-			latest.ProviderOff = false
 		}
 		return nil
 	})
@@ -303,10 +302,10 @@ func randomProviderName(existing map[string]provider.Provider) string {
 // under. Keeping its own name is always fine; a name the page assigned that now
 // belongs to another provider gets a free suffix instead (collided=true).
 func providerSaveName(existing map[string]provider.Provider, openedAs, name string) (string, bool) {
-	if name == openedAs {
+	if name == openedAs && !provider.IsDefaultProvider(name) {
 		return name, false
 	}
-	if _, taken := existing[name]; !taken {
+	if _, taken := existing[name]; !taken && !provider.IsDefaultProvider(name) {
 		return name, false
 	}
 	return uniqueProviderName(existing, name), true
@@ -315,7 +314,7 @@ func providerSaveName(existing map[string]provider.Provider, openedAs, name stri
 // uniqueProviderName returns base, or base-2, base-3, ... — the first name not
 // already configured.
 func uniqueProviderName(existing map[string]provider.Provider, base string) string {
-	if _, taken := existing[base]; !taken {
+	if _, taken := existing[base]; !taken && !provider.IsDefaultProvider(base) {
 		return base
 	}
 	for i := 2; ; i++ {

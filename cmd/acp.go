@@ -100,9 +100,13 @@ func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter stri
 	if err != nil {
 		return err
 	}
-	env, err := claude.AgentProcessEnv(options)
-	if err != nil {
-		return err
+	// Claude Code's own configuration keeps the client's environment as is;
+	// a provider supplies the adapter's initial authentication.
+	env := os.Environ()
+	if !initial.Default() {
+		if env, err = claude.AgentProcessEnv(options); err != nil {
+			return err
+		}
 	}
 	env = prependPath(env, filepath.Dir(nodePath))
 	home, err := os.UserHomeDir()

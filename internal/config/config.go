@@ -70,10 +70,9 @@ func read() (*provider.Config, bool, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg.LogLevel = "off"
-			// A fresh install runs Claude Code on its own login until a provider
-			// is activated (ccl set / ccl oauth / ccl use turn loading on). An
-			// existing file without provider_off keeps meaning on.
-			cfg.ProviderOff = true
+			// A fresh install runs Claude Code on its own login (the "default"
+			// selector) for normal and ACP launches until a provider is chosen.
+			cfg.ActiveProvider = provider.DefaultProvider
 			return cfg, false, nil
 		}
 		return cfg, false, err
@@ -216,6 +215,9 @@ func normalize(cfg *provider.Config) bool {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]provider.Provider)
 	}
+	if migrateDefaultSelector(cfg) {
+		changed = true
+	}
 
 	legacySlots := cfg.ConfigVersion < CurrentVersion
 	for name, p := range cfg.Providers {
@@ -229,4 +231,39 @@ func normalize(cfg *provider.Config) bool {
 
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return fsutil.WriteFileAtomic(path, data, mode)
+}
+
+// migrateDefaultSelector frees the reserved "default" name and turns the
+// retired provider_off switch into the "default" selector. ACP kept its
+// provider while loading was off, so it stays pinned to that provider.
+func migrateDefaultSelector(cfg *provider.Config) bool {
+	changed := false
+	if p, ok := cfg.Providers[provider.DefaultProvider]; ok {
+		renamed := provider.DefaultProvider + "-provider"
+		for i := 2; ; i++ {
+			if _, taken := cfg.Providers[renamed]; !taken {
+				break
+			}
+			renamed = fmt.Sprintf("%s-provider-%d", provider.DefaultProvider, i)
+		}
+		delete(cfg.Providers, provider.DefaultProvider)
+		p.Name = renamed
+		cfg.Providers[renamed] = p
+		if provider.IsDefaultProvider(cfg.ActiveProvider) {
+			cfg.ActiveProvider = renamed
+		}
+		if provider.IsDefaultProvider(cfg.ACPProvider) {
+			cfg.ACPProvider = renamed
+		}
+		changed = true
+	}
+	if cfg.ProviderOff {
+		if strings.TrimSpace(cfg.ACPProvider) == "" && strings.TrimSpace(cfg.ActiveProvider) != "" {
+			cfg.ACPProvider = cfg.ActiveProvider
+		}
+		cfg.ActiveProvider = provider.DefaultProvider
+		cfg.ProviderOff = false
+		changed = true
+	}
+	return changed
 }

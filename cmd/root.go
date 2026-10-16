@@ -22,10 +22,9 @@ var rootCmd = &cobra.Command{
 Common commands:
   ccl                         Start Claude Code with the active provider
   ccl ls                      List providers and normal/ACP selections
-  ccl use [name]              Switch the normal-mode provider
+  ccl use [name]              Switch the normal-mode provider; ccl use default
+                              runs Claude Code's own configuration (claude.ai)
   ccl use --acp [name]        Select a shared provider configuration for ACP
-  ccl provider on|off         Load the active provider, or run Claude Code with
-                              its own configuration (claude.ai subscription)
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
   ccl proxy -p <name>         Connect direct claude invocations to a background proxy
   ccl oauth <gpt|grok|workbuddy|...>
@@ -69,7 +68,7 @@ func Execute() {
 	if len(os.Args) > 1 && os.Args[1] == "acp" {
 		acpQuietErrors = true // Include flag/argument errors before PreRun.
 	}
-	// Every claude lookup (launch, provider off, doctor) must see an install
+	// Every claude lookup (launch, default, doctor) must see an install
 	// the official installer left outside PATH.
 	localClaudeDir = useLocalClaudeInstall()
 
@@ -171,7 +170,7 @@ func runClaude(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load ccl config for launcher options: %w", err)
 	}
-	if cfg.ProviderOff {
+	if provider.IsDefaultProvider(cfg.ActiveProvider) {
 		return runClaudeWithoutProvider(applyBypassMode(args, cfg.BypassMode))
 	}
 	p, err := resolveProvider()
@@ -196,7 +195,7 @@ func runClaude(args []string) error {
 // implicit provider from OPENAI_API_KEY / ANTHROPIC_API_KEY in the shell: a key
 // exported for another tool would quietly bill a Claude Code session. Without
 // a selection, the user picks one, or runs Claude Code on its own login with
-// `ccl provider off`.
+// `ccl use default`.
 func resolveProvider() (provider.Provider, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -204,8 +203,8 @@ func resolveProvider() (provider.Provider, error) {
 	}
 	if cfg.ActiveProvider == "" {
 		return provider.Provider{}, errors.New(locale.T(
-			"未选择 Provider。用 ccl set 添加、ccl use <name> 选择，或用 ccl provider off 直接以 Claude Code 自身登录启动",
-			"no provider selected. Add one with ccl set, choose one with ccl use <name>, or run Claude Code on its own login with ccl provider off",
+			"未选择 Provider。用 ccl set 添加、ccl use <name> 选择，或用 ccl use default 直接以 Claude Code 自身登录启动",
+			"no provider selected. Add one with ccl set, choose one with ccl use <name>, or run Claude Code on its own login with ccl use default",
 		))
 	}
 	p, ok := cfg.Providers[cfg.ActiveProvider]

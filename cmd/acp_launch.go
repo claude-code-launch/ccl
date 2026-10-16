@@ -23,8 +23,11 @@ func resolveACPProvider() (acpProviderSnapshot, error) {
 		return acpProviderSnapshot{}, fmt.Errorf("failed to load config: %w", err)
 	}
 	name := cfg.EffectiveACPProvider()
+	if provider.IsDefaultProvider(name) {
+		return acpProviderSnapshot{name: provider.DefaultProvider, provider: provider.Provider{Name: provider.DefaultProvider}}, nil
+	}
 	if name == "" {
-		return acpProviderSnapshot{}, fmt.Errorf("no provider selected for ACP. Use 'ccl use --acp <name>', or 'ccl use <name>' (ACP follows it unless pinned)")
+		return acpProviderSnapshot{}, fmt.Errorf("no provider selected for ACP. Use 'ccl use --acp <name>' ('default' runs Claude Code's own configuration), or 'ccl use <name>' (ACP follows it unless pinned)")
 	}
 	p, ok := cfg.Providers[name]
 	if !ok {
@@ -59,6 +62,9 @@ type acpLaunchManager struct {
 
 func newACPLaunchManager() *acpLaunchManager {
 	return newACPLaunchManagerWithContext(resolveACPProvider, func(ctx context.Context, p provider.Provider) (acpPreparedLaunch, error) {
+		if provider.IsDefaultProvider(p.Name) {
+			return claude.DefaultAgentLaunch{}, nil
+		}
 		return claude.PrepareAgentContext(ctx, p)
 	})
 }
@@ -198,6 +204,11 @@ func (l *acpLaunchLease) Generation() uint64 {
 		return 0
 	}
 	return l.generation.id
+}
+
+// Default reports whether the lease runs Claude Code's own configuration.
+func (l *acpLaunchLease) Default() bool {
+	return l != nil && l.generation != nil && provider.IsDefaultProvider(l.generation.snapshot.name)
 }
 
 func (l *acpLaunchLease) Options(cwd string) (json.RawMessage, error) {

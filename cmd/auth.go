@@ -188,7 +188,6 @@ func activateProvider(target, alias string, result oauthproxy.LoginResult) (stri
 		p = configureOAuthProvider(p, providerName, target, credentialFile)
 		cfg.Providers[providerName] = p
 		cfg.ActiveProvider = providerName
-		cfg.ProviderOff = false
 		return nil
 	})
 	if err != nil {
@@ -238,7 +237,8 @@ func oauthRuntimeType(providerName string) string {
 // provider names or SDK backend keys.
 func isReservedProviderName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy, oauthproxy.ProviderCodex,
+	case provider.DefaultProvider,
+		oauthproxy.ProviderChatGPT, oauthproxy.ProviderChatGPTLegacy, oauthproxy.ProviderCodex,
 		oauthproxy.ProviderGemini, "antigravity",
 		oauthproxy.ProviderGrok, "xai",
 		oauthproxy.ProviderQoder,

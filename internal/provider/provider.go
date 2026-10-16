@@ -191,6 +191,17 @@ func ModelsDevCatalogID(p Provider) string {
 	return strings.TrimSpace(p.Name)
 }
 
+// DefaultProvider is the reserved selector for Claude Code's own
+// configuration: its claude.ai login and ~/.claude settings. Selecting it
+// loads no provider; it is never a key of Config.Providers.
+const DefaultProvider = "default"
+
+// IsDefaultProvider reports whether name selects Claude Code's own
+// configuration.
+func IsDefaultProvider(name string) bool {
+	return strings.TrimSpace(name) == DefaultProvider
+}
+
 // EffectiveACPProvider is the provider name ACP sessions use: the explicit
 // `ccl use --acp` choice, or the normal-mode provider when none is pinned.
 func (c *Config) EffectiveACPProvider() string {
@@ -216,9 +227,8 @@ type Config struct {
 	// ConfigVersion is the schema the file was last written with; see
 	// config.CurrentVersion. Absent means a file from before versioning.
 	ConfigVersion int `yaml:"config_version,omitempty"`
-	// ProviderOff makes plain `ccl` launches skip provider loading and run
-	// Claude Code with its own configuration (the user's claude.ai login). The
-	// process environment is passed through untouched. ACP keeps acp_provider.
+	// ProviderOff is read only to migrate configurations from before the
+	// "default" selector replaced `ccl provider off`.
 	ProviderOff bool `yaml:"provider_off,omitempty"`
 	// LogLevel is the threshold for ccl's per-session slog files: debug, info,
 	// warn, error, or off. Config loading normalizes an omitted value to off.

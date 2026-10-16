@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -85,14 +84,10 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		// Off means no provider is selected for ccl, so the proxy needs an
-		// explicit choice, as ccl use does.
-		if cfg.ProviderOff {
-			return errors.New(locale.T(
-				"Provider 加载为 off：请显式指定 provider，例如 ccl proxy start <name>",
-				"provider loading is off: name the provider, e.g. ccl proxy start <name>",
-			))
-		}
+		name = cfg.ActiveProvider
+	}
+	if provider.IsDefaultProvider(name) {
+		return runProxyDefault(cmd)
 	}
 	p, err := proxyProvider(name)
 	if err != nil {
@@ -122,14 +117,46 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runProxyDefault handles the "default" selector: Claude Code's own
+// subscription needs no proxy, so starting it switches a running proxy off
+// (restoring Claude's settings) and otherwise only says so.
+func runProxyDefault(cmd *cobra.Command) error {
+	m, err := proxymanager.Default()
+	if err != nil {
+		return err
+	}
+	s, err := m.Read()
+	if err != nil {
+		return err
+	}
+	if s == nil {
+		fmt.Fprintln(cmd.OutOrStdout(), locale.T(
+			"default 即 Claude Code 自身配置（claude.ai 订阅），无需代理；直接运行 claude 即可",
+			"default is Claude Code's own configuration (claude.ai subscription) and needs no proxy; run claude directly",
+		))
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+	if err := m.Stop(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), locale.T(
+		"已停止 %s 的代理，Claude Code 恢复使用自身配置（claude.ai 订阅）\n",
+		"Stopped the proxy for %s; Claude Code is back on its own configuration (claude.ai subscription)\n",
+	), s.Provider)
+	return nil
+}
+
 func newProxyCommand() *cobra.Command {
 	command := &cobra.Command{Use: "proxy [provider]", Short: "Run a background provider proxy for direct Claude Code use", Args: cobra.MaximumNArgs(1), RunE: runProxyStart,
 		Long: `Start a background CCL proxy and connect direct claude invocations to it.
 
   ccl proxy -p provider1        Start with a named provider
   ccl proxy start provider1     Equivalent explicit command
-  ccl proxy                    Start with the active provider (a name is
-                               required while ccl provider off is set)
+  ccl proxy                    Start with the active provider
+  ccl proxy start default      Claude Code's own subscription needs no proxy:
+                               stops a running one (also on the default selector)
   ccl proxy status             Show the running provider and local endpoint
   ccl proxy stop               Stop and restore previous Claude settings
 

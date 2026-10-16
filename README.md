@@ -36,7 +36,7 @@ ccl set deepseek
 ccl            # 用当前 provider 启动 Claude Code
 ```
 
-新安装默认 provider 加载为 off：尚未激活 provider 时，`ccl` 直接以 Claude Code 自身登录启动；`ccl oauth`、`ccl set` 选择 Save & Activate 或 `ccl use <name>` 激活 provider 后自动切换为 on。
+新安装默认使用 `default`，即 Claude Code 自身配置（claude.ai 订阅与 `~/.claude` 设置）：`ccl` 与 `ccl acp` 都直接以它启动。`ccl oauth`、`ccl set` 选择 Save & Activate 或 `ccl use <name>` 切换到 provider，`ccl use default` / `ccl use --acp default` 切回。`ccl proxy` 运行时，`default` 看到的就是代理写入的配置。
 
 未知命令和参数会原样透传给 Claude Code（`ccl resume`、`ccl -p "hi"`），并启动真实会话。
 
@@ -45,11 +45,10 @@ ccl            # 用当前 provider 启动 Claude Code
 | 命令 | 作用 |
 |---|---|
 | `ccl set [name]` | 新增 / 修改 provider（TUI） |
-| `ccl ls [-a]` / `ccl use <name>` | 列出 / 切换 provider |
+| `ccl ls [-a]` / `ccl use <name>` | 列出 / 切换 provider；`ccl use default` = Claude Code 自身配置 |
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | 映射模型槽位；`ccl map auto` 自动填充 |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | 订阅登录 / 清理未使用凭据 |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
-| `ccl provider on\|off` | 是否加载 provider（off = Claude Code 自身登录；新安装默认 off） |
 | `ccl proxy -p <name>` / `status` / `stop` | 后台代理，让直接运行的 `claude` 使用指定 provider |
 | `ccl acp [install]` | Agent Client Protocol（Xcode 27 等） |
 | `ccl cloud login\|push\|pull\|status\|key\|device\|remote` | 端到端加密云同步（iCloud / Google Drive） |
@@ -98,7 +97,7 @@ Claude Code 始终说 Anthropic Messages。Anthropic API-key 网关在普通启�
 
 ### 配置
 
-- `~/.ccl/config.yaml`：`active_provider`、`acp_provider`（空 = 跟随）、`provider_off`、`lang`、`bypass_mode`、`log_level`、`providers`。**含明文 API Key，勿提交或外传。**
+- `~/.ccl/config.yaml`：`active_provider`、`acp_provider`（空 = 跟随；`default` = Claude Code 自身配置）、`lang`、`bypass_mode`、`log_level`、`providers`。**含明文 API Key，勿提交或外传。**
 - `~/.ccl/auth/*.json`：OAuth 凭据（0600）。
 - `provider.type`：`openai`（Chat）/ `openai_responses` / `anthropic`，由用户显式选择，不按 URL 猜测；Anthropic 直连的 `endpoint` 用裸域名（不带 `/v1`），Bearer 鉴权设 `anthropicAuth: bearer`。
 - `--settings` 优先级高于用户设置，因此 `outputStyle` / `language` / `statusLine` / `modelPicker` 仅在你自己没设置时由 ccl 提供。启动时会丢弃 shell 里继承的 `CLAUDE_CODE_USE_*`、`ANTHROPIC_*MODEL` 等变量；需要的值写进 provider（`ccl map` / `ccl provider env`）。
@@ -159,7 +158,7 @@ ccl set deepseek
 ccl            # launch Claude Code with the active provider
 ```
 
-On a fresh install provider loading is off: until a provider is activated, `ccl` starts Claude Code on its own login. `ccl oauth`, Save & Activate in `ccl set`, or `ccl use <name>` activates one and turns loading on.
+A fresh install uses `default`, Claude Code's own configuration (claude.ai subscription and `~/.claude` settings), for both `ccl` and `ccl acp`. `ccl oauth`, Save & Activate in `ccl set`, or `ccl use <name>` switches to a provider; `ccl use default` / `ccl use --acp default` switches back. While `ccl proxy` runs, `default` sees the configuration the proxy wrote.
 
 Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, `ccl -p "hi"`) and start a real session.
 
@@ -168,11 +167,10 @@ Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, 
 | Command | Purpose |
 |---|---|
 | `ccl set [name]` | Add / edit a provider (TUI) |
-| `ccl ls [-a]` / `ccl use <name>` | List / switch providers |
+| `ccl ls [-a]` / `ccl use <name>` | List / switch providers; `ccl use default` = Claude Code's own configuration |
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | Map model slots; `ccl map auto` fills them |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | Subscription login / remove unused credentials |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |
-| `ccl provider on\|off` | Load the provider or not (off = Claude Code's own login; off by default on a fresh install) |
 | `ccl proxy -p <name>` / `status` / `stop` | Background proxy so a plain `claude` uses the chosen provider |
 | `ccl acp [install]` | Agent Client Protocol (Xcode 27, …) |
 | `ccl cloud login\|push\|pull\|status\|key\|device\|remote` | End-to-end encrypted sync (iCloud / Google Drive) |
@@ -221,7 +219,7 @@ Claude Code always speaks Anthropic Messages. Anthropic API-key gateways are cal
 
 ### Configuration
 
-- `~/.ccl/config.yaml`: `active_provider`, `acp_provider` (empty = follow), `provider_off`, `lang`, `bypass_mode`, `log_level`, `providers`. **Contains plaintext API keys — never commit or share it.**
+- `~/.ccl/config.yaml`: `active_provider`, `acp_provider` (empty = follow; `default` = Claude Code's own configuration), `lang`, `bypass_mode`, `log_level`, `providers`. **Contains plaintext API keys — never commit or share it.**
 - `~/.ccl/auth/*.json`: OAuth credentials (0600).
 - `provider.type`: `openai` (Chat) / `openai_responses` / `anthropic`, chosen explicitly, never guessed from the URL. For direct Anthropic gateways use a bare-domain `endpoint` (no `/v1`) and set `anthropicAuth: bearer` for Bearer auth.
 - `--settings` outranks user settings, so `outputStyle` / `language` / `statusLine` / `modelPicker` are provided by ccl only when you have not set them yourself. Inherited shell variables such as `CLAUDE_CODE_USE_*` and `ANTHROPIC_*MODEL` are dropped at launch; put needed values in the provider (`ccl map` / `ccl provider env`).

@@ -38,24 +38,28 @@ func TestProxyRejectsAmbiguousProviderSelection(t *testing.T) {
 	}
 }
 
-func TestProxyNeedsAnExplicitProviderWhileProviderOff(t *testing.T) {
-	saveToggleFixture(t, &provider.Config{ActiveProvider: "a", ProviderOff: true, Providers: map[string]provider.Provider{
+// default is Claude Code's own subscription: starting the proxy for it, by
+// name or as the active selection, starts nothing and needs no provider.
+func TestProxyStartOnDefaultStartsNothing(t *testing.T) {
+	saveToggleFixture(t, &provider.Config{ActiveProvider: provider.DefaultProvider, Providers: map[string]provider.Provider{
 		"a": {Name: "a", Type: "openai", Endpoint: "https://example.com/v1", Model: "m"},
 	}})
 	// A regression would start a real proxy: keep its settings overlay away
 	// from the developer's own Claude configuration.
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), ".claude"))
-	for _, args := range [][]string{{}, {"start"}, {"start", " "}} {
+	for _, args := range [][]string{{}, {"start"}, {"start", " "}, {"start", "default"}} {
 		cmd := newProxyCommand()
 		cmd.SetArgs(args)
-		cmd.SetOut(&bytes.Buffer{})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
 		cmd.SetErr(&bytes.Buffer{})
-		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "ccl proxy start <name>") {
-			t.Fatalf("args %q: error = %v", args, err)
+		if err := cmd.Execute(); err != nil || !strings.Contains(out.String(), "needs no proxy") {
+			t.Fatalf("args %q: out=%q err=%v", args, out.String(), err)
 		}
 	}
-	// An explicit name passes the off check; a missing one stops before any
-	// proxy is started.
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("Claude settings were touched: %v", err)
+	}
 	cmd := newProxyCommand()
 	cmd.SetArgs([]string{"start", "missing"})
 	cmd.SetOut(&bytes.Buffer{})

@@ -141,3 +141,33 @@ func TestAgentRuntimeOutlivesPreparationRequest(t *testing.T) {
 		t.Fatalf("leased runtime models status = %d", response.StatusCode)
 	}
 }
+
+// The default selector gives ACP sessions Claude Code's own configuration:
+// no settings, and routing keys put back to ccl's own environment so a value
+// left in the adapter process by an earlier provider cannot leak in.
+func TestDefaultAgentLaunchRestoresTheOriginalEnvironment(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "user-own-key")
+	raw, err := DefaultAgentLaunch{}.Options(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var options struct {
+		Env      map[string]string          `json:"env"`
+		Settings map[string]json.RawMessage `json:"settings"`
+	}
+	if err := json.Unmarshal(raw, &options); err != nil {
+		t.Fatal(err)
+	}
+	if len(options.Settings) != 0 {
+		t.Fatalf("default carries settings: %s", raw)
+	}
+	for key, want := range map[string]string{
+		"ANTHROPIC_BASE_URL": "", "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": "user-own-key",
+	} {
+		if got, ok := options.Env[key]; !ok || got != want {
+			t.Fatalf("%s = %q (set %v), want %q: %s", key, got, ok, want, raw)
+		}
+	}
+}

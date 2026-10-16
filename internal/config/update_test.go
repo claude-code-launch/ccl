@@ -195,36 +195,47 @@ func TestOAuthTypeIsDerivedNotPersisted(t *testing.T) {
 	}
 }
 
-// A fresh install has no provider yet, so plain launches use Claude Code's own
-// login. Existing configs never stored provider_off while on and keep it on.
-func TestProviderLoadingDefaultsOffOnlyWithoutAConfig(t *testing.T) {
+// A fresh install has no provider yet, so normal and ACP launches use Claude
+// Code's own configuration: the "default" selector.
+func TestFreshInstallSelectsDefault(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	cfg, err := Load()
-	if err != nil || !cfg.ProviderOff {
-		t.Fatalf("fresh install: ProviderOff=%v, err=%v", cfg.ProviderOff, err)
+	if err != nil || cfg.ActiveProvider != provider.DefaultProvider || cfg.EffectiveACPProvider() != provider.DefaultProvider {
+		t.Fatalf("fresh install: active=%q acp=%q err=%v", cfg.ActiveProvider, cfg.EffectiveACPProvider(), err)
 	}
-	// The default is persisted with the first write, and activation clears it.
 	if err := Update(func(c *provider.Config) error { c.Lang = "en"; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, _ := Load(); !cfg.ProviderOff {
-		t.Fatal("first write dropped the off default")
+	if cfg, _ := Load(); cfg.ActiveProvider != provider.DefaultProvider {
+		t.Fatalf("first write dropped default: %q", cfg.ActiveProvider)
 	}
-	if err := Update(func(c *provider.Config) error {
-		c.Providers["a"] = provider.Provider{Name: "a", Type: "openai", Endpoint: "https://example.com/v1"}
-		c.ActiveProvider, c.ProviderOff = "a", false
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	writeRawConfig(t, "active_provider: a\nproviders:\n  a:\n    type: openai\n    endpoint: https://example.com/v1\n")
+	if cfg, _ := Load(); cfg.ActiveProvider != "a" {
+		t.Fatalf("an existing config lost its provider: %q", cfg.ActiveProvider)
 	}
-	if cfg, _ := Load(); cfg.ProviderOff {
-		t.Fatal("activating a provider left loading off")
+}
+
+// provider_off became the default selector. ACP kept its provider while off,
+// so it is pinned there; a provider that was itself named default is renamed.
+func TestProviderOffAndADefaultNamedProviderMigrate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	writeRawConfig(t, "active_provider: a\nprovider_off: true\nproviders:\n  a:\n    type: openai\n    endpoint: https://example.com/v1\n")
+	cfg, err := Load()
+	if err != nil || cfg.ActiveProvider != provider.DefaultProvider || cfg.ACPProvider != "a" || cfg.ProviderOff {
+		t.Fatalf("migrated off: active=%q acp=%q off=%v err=%v", cfg.ActiveProvider, cfg.ACPProvider, cfg.ProviderOff, err)
 	}
 
-	writeRawConfig(t, "active_provider: a\nproviders:\n  a:\n    type: openai\n    endpoint: https://example.com/v1\n")
-	if cfg, _ := Load(); cfg.ProviderOff {
-		t.Fatal("an existing config without provider_off turned off")
+	writeRawConfig(t, "active_provider: default\nacp_provider: default\nproviders:\n  default:\n    type: openai\n    endpoint: https://example.com/v1\n")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := cfg.Providers[provider.DefaultProvider]; kept || cfg.ActiveProvider != "default-provider" ||
+		cfg.ACPProvider != "default-provider" || cfg.Providers["default-provider"].Endpoint != "https://example.com/v1" {
+		t.Fatalf("renamed provider: active=%q acp=%q providers=%v", cfg.ActiveProvider, cfg.ACPProvider, cfg.Providers)
 	}
 }

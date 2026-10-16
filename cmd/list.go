@@ -22,7 +22,8 @@ func newProviderListCommand(use string) *cobra.Command {
 		Use:   use,
 		Short: "List registered providers",
 		Long: `List providers from ~/.ccl/config.yaml. The USED BY column shows which
-entry is selected by normal mode, ACP mode and a running ccl proxy.
+entry is selected by normal mode, ACP mode and a running ccl proxy. The first
+row, default, is Claude Code's own configuration (ccl use default).
 
 -a/--all switches the table to a detailed view with full model pools and slot
 details.
@@ -46,19 +47,13 @@ Examples:
 }
 
 func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMessage, heading string) error {
-	if len(cfg.Providers) == 0 {
-		fmt.Fprintln(out, emptyMessage)
-		return nil
-	}
-
 	var names []string
 	for name := range cfg.Providers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	if len(names) == 0 {
-		fmt.Fprintln(out, emptyMessage)
-		return nil
+		defer fmt.Fprintln(out, "\n"+emptyMessage)
 	}
 
 	fmt.Fprintln(out, heading)
@@ -66,18 +61,20 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	if !running {
 		proxyName = ""
 	}
-	if cfg.ProviderOff {
-		defer fmt.Fprintln(out, locale.T(
-			"\nProvider 加载为 off：ccl 以 Claude Code 自身配置启动（claude.ai 订阅）；ccl provider on 可恢复",
-			"\nProvider loading is off: ccl starts Claude Code with its own configuration (claude.ai subscription); ccl provider on restores it",
-		))
-	}
 	if showAll {
+		fmt.Fprintln(out, provider.DefaultProvider)
+		fmt.Fprintf(out, "    Used By  : %s\n", providerUsageSummary(cfg, provider.DefaultProvider, proxyName))
+		fmt.Fprintf(out, "    Type     : %s\n", defaultProviderDescription())
+		if len(names) > 0 {
+			fmt.Fprintln(out)
+		}
 		return printProviderDetails(out, cfg, names, proxyName)
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tUSED BY\tTYPE/AUTH\tMODELS")
+	fmt.Fprintf(tw, "%s\t%s\t%s\t-\n", provider.DefaultProvider,
+		providerUsageSummary(cfg, provider.DefaultProvider, proxyName), "claude-code/own-config")
 	for _, name := range names {
 		p := cfg.Providers[name]
 		fmt.Fprintf(
@@ -124,11 +121,7 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string, p
 func providerUsageSummary(cfg *provider.Config, name, proxyName string) string {
 	usedBy := make([]string, 0, 3)
 	if name == cfg.ActiveProvider {
-		if cfg.ProviderOff {
-			usedBy = append(usedBy, "normal(off)")
-		} else {
-			usedBy = append(usedBy, "normal")
-		}
+		usedBy = append(usedBy, "normal")
 	}
 	if name == cfg.EffectiveACPProvider() {
 		usedBy = append(usedBy, "ACP")
@@ -192,4 +185,11 @@ func compactSlotParts(p provider.Provider) []string {
 
 func init() {
 	rootCmd.AddCommand(lsCmd)
+}
+
+func defaultProviderDescription() string {
+	return locale.T(
+		"Claude Code 自身配置（claude.ai 登录与 ~/.claude 设置；ccl proxy 运行时含其设置）",
+		"Claude Code's own configuration (claude.ai login and ~/.claude settings, including a running ccl proxy's)",
+	)
 }

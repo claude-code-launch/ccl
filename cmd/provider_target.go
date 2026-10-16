@@ -42,6 +42,12 @@ func (t providerTarget) resolve(cfg *provider.Config) (string, error) {
 			"no provider selected. Choose one with ccl use <name>, or pass --provider <name>",
 		))
 	}
+	if provider.IsDefaultProvider(name) {
+		return "", errors.New(locale.T(
+			"default 使用 Claude Code 自身配置，没有可修改的 ccl 设置；请加 --provider <name>",
+			"default uses Claude Code's own configuration and has no ccl settings to change; pass --provider <name>",
+		))
+	}
 	if _, ok := cfg.Providers[name]; !ok {
 		return "", fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found in configuration"), name)
 	}
