@@ -10,6 +10,37 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// Claude Code sends system turns in the message list as a string or as text
+// blocks, including a reminder after a tool result as the last message.
+func TestGeminiForwardsSystemTurnsInsideTheConversationAsUserText(t *testing.T) {
+	request := `{"model":"gemini","messages":[
+		{"role":"user","content":"run echo hi"},
+		{"role":"system","content":"# Environment"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hi"}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"hi"}]},
+		{"role":"system","content":[{"type":"text","text":"<total_tokens>1 tokens left</total_tokens>"},{"type":"text","text":"  "}]}
+	],"tools":[{"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]}`
+	c, err := convertAnthropicToGemini([]byte(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := gjson.GetBytes(c.geminiBody, "contents").Array()
+	var roles []string
+	for _, content := range contents {
+		roles = append(roles, content.Get("role").String())
+	}
+	if got := strings.Join(roles, ","); got != "user,user,model,user,user" {
+		t.Fatalf("roles = %s\n%s", got, c.geminiBody)
+	}
+	if got := contents[1].Get("parts.0.text").String(); got != "# Environment" {
+		t.Fatalf("string system turn = %q", got)
+	}
+	last := contents[len(contents)-1].Get("parts").Array()
+	if len(last) != 1 || last[0].Get("text").String() != "<total_tokens>1 tokens left</total_tokens>" {
+		t.Fatalf("text-block system turn = %s", contents[len(contents)-1].Raw)
+	}
+}
+
 func TestGeminiGenerationLimitsPreserved(t *testing.T) {
 	for _, maxTokens := range []int{17, 32000} {
 		request := fmt.Sprintf(`{"model":"gemini","max_tokens":%d,"stop_sequences":["END","STOP"],"messages":[{"role":"user","content":"hi"}]}`, maxTokens)

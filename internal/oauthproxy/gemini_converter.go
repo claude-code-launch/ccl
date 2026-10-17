@@ -174,10 +174,25 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 		var partItems []string
 		content := message.Get("content")
 		if role == "system" {
-			// A mid-conversation system message carries a reminder. Forward only a
-			// plain-text reminder; skip structured content to keep it simple.
-			if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
-				partItems = append(partItems, `{"text":`+jsonStringValue(content.String())+`}`)
+			// A system message in the list carries instructions or a reminder, as a
+			// string or as text blocks; it is forwarded as user text.
+			var texts []string
+			if content.IsArray() {
+				content.ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "text" {
+						texts = append(texts, block.Get("text").String())
+					}
+					return true
+				})
+			} else if content.Type == gjson.String {
+				texts = append(texts, content.String())
+			}
+			for _, text := range texts {
+				if strings.TrimSpace(text) != "" {
+					partItems = append(partItems, `{"text":`+jsonStringValue(text)+`}`)
+				}
+			}
+			if len(partItems) > 0 {
 				contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
 			}
 			return true
