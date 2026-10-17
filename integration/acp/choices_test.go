@@ -31,6 +31,22 @@ func TestUpstreamACPSessionChoices(t *testing.T) {
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Registered first, so it runs after ccl acp has exited: the SDK's Claude
+	// may still flush session files for a moment (see TestUpstreamACPConfiguration).
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := os.RemoveAll(home)
+			if err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("files still written 5s after ccl acp exited: %v", err)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "config"))
@@ -40,13 +56,18 @@ func TestUpstreamACPSessionChoices(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var request struct {
-			Model    string          `json:"model"`
-			Thinking json.RawMessage `json:"thinking"`
+			Model string            `json:"model"`
+			Tools []json.RawMessage `json:"tools"`
 		}
 		_ = json.Unmarshal(body, &request)
-		t.Logf("fixture %s model=%s thinking=%s", r.URL.Path, request.Model, request.Thinking)
-		if len(body) > 0 && strings.Contains(r.URL.Path, "/v1/messages") {
-			requests <- request.Model
+		t.Logf("local fixture %s model=%s tools=%d", r.URL.Path, request.Model, len(request.Tools))
+		// Only agent turns carry tools; side requests such as the session
+		// title may use another model.
+		if strings.HasSuffix(r.URL.Path, "/v1/messages") && len(request.Tools) > 0 {
+			select {
+			case requests <- request.Model:
+			default:
+			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, event := range []struct{ name, data string }{
@@ -127,8 +148,7 @@ func TestUpstreamACPSessionChoices(t *testing.T) {
 				}
 			case <-deadline:
 				data, _ := os.ReadFile(stderrPath)
-				t.Fatalf("timeout on %s", method)
-				_ = data
+				t.Fatalf("timeout on %s: %s", method, data)
 			}
 		}
 	}
@@ -150,21 +170,14 @@ func TestUpstreamACPSessionChoices(t *testing.T) {
 	}
 	var sessionID string
 	_ = json.Unmarshal(created["sessionId"], &sessionID)
-	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-		"params": map[string]any{"sessionId": sessionID, "prompt": []map[string]string{{"type": "text", "text": "hi"}}}}); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.After(60 * time.Second)
-	for {
-		select {
-		case model := <-requests:
-			if model != "fixture-other" {
-				t.Fatalf("first turn hit %q, want fixture-other", model)
-			}
-			_ = stdin.Close()
-			return
-		case <-deadline:
-			t.Fatal("no model request before timeout")
+	call(3, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": []map[string]string{{"type": "text", "text": "hi"}}})
+	select {
+	case model := <-requests:
+		if model != "fixture-other" {
+			t.Fatalf("first turn hit %q, want fixture-other", model)
 		}
+	default:
+		t.Fatal("the turn sent no model request")
 	}
+	call(4, "session/close", map[string]any{"sessionId": sessionID})
 }

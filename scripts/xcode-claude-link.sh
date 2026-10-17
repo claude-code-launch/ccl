@@ -30,6 +30,10 @@ if [ -z "$claude_bin" ] || [ ! -x "$claude_bin" ]; then
     echo "claude binary not found; pass its path: $0 /path/to/claude" >&2
     exit 1
 fi
+case "$claude_bin" in
+/*) ;;
+*) claude_bin="$PWD/$claude_bin" ;; # a relative link would resolve from the agent directory
+esac
 # The path is linked as given: /opt/homebrew/bin/claude is itself a symlink
 # that keeps working across claude updates, and re-running the script is
 # idempotent against exactly that path.
@@ -37,8 +41,7 @@ fi
 latest=$(
     find "$agents_root" -maxdepth 1 -type d | while IFS= read -r dir; do
         basename "$dir"
-    done | grep -E '^[0-9]+([.][0-9]+)*$' |
-        awk -F. '{ printf "%06d %06d %06d %06d %s\n", $1, $2, $3, $4, $0 }' |
+    done | awk -F. '/^[0-9]+([.][0-9]+)*$/ { printf "%06d %06d %06d %06d %s\n", $1, $2, $3, $4, $0 }' |
         sort -r | awk 'NR==1 { print $5 }'
 )
 if [ -z "$latest" ]; then
@@ -52,12 +55,14 @@ if [ -L "$target" ] && [ "$(readlink "$target")" = "$claude_bin" ]; then
     echo "Already linked: $target -> $claude_bin"
     exit 0
 fi
+kept=""
 if [ -f "$target" ] && [ ! -L "$target" ]; then
     mv -f "$target" "$dir/claude.apple"
+    kept=" (Apple binary kept as $dir/claude.apple)"
 fi
 ln -sfn "$claude_bin" "$target"
 if "$target" --version >/dev/null 2>&1; then
-    echo "Linked: $target -> $claude_bin (Apple binary kept as $dir/claude.apple)"
+    echo "Linked: $target -> $claude_bin$kept"
 else
     echo "Linked $target -> $claude_bin, but the binary failed to run" >&2
     exit 1
