@@ -371,6 +371,36 @@ func TestQoderTransformMessagesAcceptsGatewaySystemRole(t *testing.T) {
 	}
 }
 
+// Claude Code 2.1.296 sends this shape: system turns after the first user
+// message and after a tool result, as the last message. GLM behind Qoder
+// rejects a system message there with 1214 "messages 参数非法".
+func TestQoderTransformMessagesSendsSystemTurnsInsideTheConversationAsUser(t *testing.T) {
+	messages := []anthropicMessage{
+		{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"run echo hi"}]`)},
+		{Role: "system", Content: json.RawMessage(`"# Environment"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hi"}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"toolu_01","content":"hi"}]`)},
+		{Role: "system", Content: json.RawMessage(`[{"type":"text","text":"<total_tokens>1 tokens left</total_tokens>"}]`)},
+	}
+	transformed, lastUser, err := qoderTransformMessages(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roles []string
+	for _, message := range transformed {
+		roles = append(roles, message.(map[string]any)["role"].(string))
+	}
+	if strings.Join(roles, ",") != "user,user,assistant,tool,user" {
+		t.Fatalf("roles = %v", roles)
+	}
+	if last := transformed[4].(map[string]any); last["content"] != "<total_tokens>1 tokens left</total_tokens>" {
+		t.Fatalf("reminder = %+v", last)
+	}
+	if lastUser != "run echo hi" {
+		t.Fatalf("last user = %q; a reminder must not become the chat prompt", lastUser)
+	}
+}
+
 func TestQoderSelectModelAcceptsDisplayAlias(t *testing.T) {
 	catalog := []qoderModel{{ID: "dfmodel", Name: "DeepSeek-V4-Flash"}}
 	selected, ok := qoderSelectModel("DeepSeek-V4-Flash[1m]", catalog)

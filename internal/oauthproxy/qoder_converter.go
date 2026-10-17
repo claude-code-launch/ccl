@@ -222,18 +222,26 @@ func qoderTransformTools(tools []anthropicTool) ([]any, error) {
 func qoderTransformMessages(messages []anthropicMessage) ([]any, string, error) {
 	transformed := make([]any, 0, len(messages)+2)
 	lastUser := ""
+	started := false
 	for _, message := range messages {
 		switch strings.ToLower(strings.TrimSpace(message.Role)) {
 		case "system":
-			// Claude Code's gateway-compatible Messages requests can carry the
-			// system prompt as a message instead of the Anthropic top-level
-			// `system` field. Qoder uses an OpenAI-style message list, so keep
-			// that role rather than rejecting the request locally.
+			// Claude Code's gateway-compatible Messages requests carry system
+			// turns in the message list: instructions before the conversation and
+			// reminders inside it, even after a tool result as the last message.
+			// GLM behind Qoder rejects a system message there (code 1214), so a
+			// reminder surfaces as a user message, as in the Chat converter.
 			content := extractKiroSystem(message.Content)
-			if content != "" {
-				transformed = append(transformed, map[string]any{"role": "system", "content": content})
+			if content == "" {
+				continue
 			}
+			role := "system"
+			if started {
+				role = "user"
+			}
+			transformed = append(transformed, map[string]any{"role": role, "content": content})
 		case "user":
+			started = true
 			mapped, userText, err := qoderTransformUserMessage(message.Content)
 			if err != nil {
 				return nil, "", err
@@ -243,6 +251,7 @@ func qoderTransformMessages(messages []anthropicMessage) ([]any, string, error) 
 				lastUser = userText
 			}
 		case "assistant":
+			started = true
 			mapped, err := qoderTransformAssistantMessage(message.Content)
 			if err != nil {
 				return nil, "", err
