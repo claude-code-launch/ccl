@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 const (
@@ -33,6 +34,9 @@ type Runtime struct {
 	started    chan struct{}
 	models     []string
 	modelNames map[string]string
+	// modelDetails carries catalog metadata a backend can expose for UI rows
+	// (currently the per-model rate multiplier), keyed by lower-case model ID.
+	modelDetails map[string]protocol.ModelInfo
 	// catalogFallback marks models as a built-in compatibility list rather than
 	// what the account actually reports. A backend sets it when discovery fails,
 	// so callers can keep the catalog they already had instead of overwriting it
@@ -74,6 +78,17 @@ func (r *Runtime) ModelDisplayNames() map[string]string {
 	names := make(map[string]string, len(r.modelNames))
 	maps.Copy(names, r.modelNames)
 	return names
+}
+
+// ModelDetails returns catalog metadata the backend captured for its models,
+// keyed by model ID. It is a copy. A runtime that has none returns nil.
+func (r *Runtime) ModelDetails() map[string]protocol.ModelInfo {
+	if r == nil || len(r.modelDetails) == 0 {
+		return nil
+	}
+	details := make(map[string]protocol.ModelInfo, len(r.modelDetails))
+	maps.Copy(details, r.modelDetails)
+	return details
 }
 
 // ModelCatalogIsFallback reports whether Models is a built-in compatibility list
@@ -184,8 +199,8 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if backend == ProviderCodex {
 		return startCodexOAuth(parent, modelSpec, credentialFile)
 	}
-	if backend == ProviderWorkBuddy {
-		return startWorkBuddyOAuth(parent, modelSpec, credentialFile)
+	if backend == ProviderWorkBuddy || backend == ProviderWorkBuddyCN {
+		return startWorkBuddyOAuth(parent, providerName, modelSpec, credentialFile)
 	}
 	if backend == backendXAI {
 		return startXaiOAuth(parent, modelSpec, credentialFile)

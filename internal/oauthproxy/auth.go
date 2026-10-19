@@ -17,6 +17,11 @@ const (
 	ProviderKimi      = "kimi"
 	ProviderKiro      = "kiro"
 	ProviderWorkBuddy = "workbuddy"
+	// ProviderWorkBuddyCN is the mainland-China WorkBuddy deployment
+	// (www.workbuddy.cn). It runs the same plugin API and chat protocol as
+	// ProviderWorkBuddy, so both share one implementation and differ only in
+	// origin and in the credential `type` ccl persists.
+	ProviderWorkBuddyCN = "workbuddycn"
 	// ProviderAutoClaw is the AutoClaw Code (ZCode coding plan) backend. CCL
 	// performs browser OAuth, refreshes the resulting session locally, and owns
 	// the Anthropic-to-OpenAI Chat adapter used to reach the managed proxy.
@@ -78,8 +83,8 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 		return loginKiro(ctx, authDir, opts)
 	case ProviderQoder:
 		return loginQoder(ctx, authDir, opts)
-	case ProviderWorkBuddy:
-		return loginWorkBuddy(ctx, authDir, opts)
+	case ProviderWorkBuddy, ProviderWorkBuddyCN:
+		return loginWorkBuddy(ctx, authDir, target, opts)
 	case ProviderChatGPT:
 		return loginCodex(ctx, authDir, opts)
 	case ProviderGemini:
@@ -122,10 +127,10 @@ func ImportCredential(ctx context.Context, providerName string) (LoginResult, er
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw, ProviderZed:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, qoder, kimi, kiro, workbuddy, autoclaw, or zed)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, qoder, kimi, kiro, workbuddy, workbuddycn, autoclaw, or zed)", providerName)
 	}
 }
 
@@ -145,6 +150,8 @@ func BackendProvider(providerName string) (string, error) {
 		return ProviderKiro, nil
 	case ProviderWorkBuddy:
 		return ProviderWorkBuddy, nil
+	case ProviderWorkBuddyCN:
+		return ProviderWorkBuddyCN, nil
 	case ProviderAutoClaw:
 		return ProviderAutoClaw, nil
 	case ProviderZed:

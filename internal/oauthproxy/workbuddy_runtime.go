@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/google/uuid"
 )
 
@@ -50,13 +52,15 @@ func (c *workbuddyCredential) account() workbuddyAccount {
 }
 
 type workbuddyCredentialStore struct {
+	deployment     workbuddyDeployment
 	authDir        string
 	credentialFile string
 	client         *http.Client
 }
 
-func newWorkBuddyCredentialStore(authDir, credentialFile string) *workbuddyCredentialStore {
+func newWorkBuddyCredentialStore(deployment workbuddyDeployment, authDir, credentialFile string) *workbuddyCredentialStore {
 	return &workbuddyCredentialStore{
+		deployment:     deployment,
 		authDir:        authDir,
 		credentialFile: filepath.Base(strings.TrimSpace(credentialFile)),
 		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
@@ -71,7 +75,7 @@ func (s *workbuddyCredentialStore) load() (*workbuddyCredential, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("no WorkBuddy credential %s; run `ccl oauth workbuddy` again", s.credentialFile)
+			return nil, fmt.Errorf("no WorkBuddy credential %s; run `ccl oauth %s` again", s.credentialFile, s.deployment.provider)
 		}
 		return nil, fmt.Errorf("read WorkBuddy credential %s: %w", s.credentialFile, err)
 	}
@@ -80,8 +84,10 @@ func (s *workbuddyCredentialStore) load() (*workbuddyCredential, error) {
 		return nil, fmt.Errorf("decode WorkBuddy credential %s: %w", s.credentialFile, err)
 	}
 	credentialType, _ := metadata["type"].(string)
-	if !strings.EqualFold(strings.TrimSpace(credentialType), ProviderWorkBuddy) {
-		return nil, fmt.Errorf("credential %s belongs to %q, not WorkBuddy", s.credentialFile, credentialType)
+	// A credential minted by the other deployment is a different account store:
+	// refuse it rather than send its token to this origin.
+	if !strings.EqualFold(strings.TrimSpace(credentialType), s.deployment.provider) {
+		return nil, fmt.Errorf("credential %s belongs to %q, not %s", s.credentialFile, credentialType, s.deployment.provider)
 	}
 	disabled, _ := metadata["disabled"].(bool)
 	credential := &workbuddyCredential{path: path, fileName: s.credentialFile, metadata: metadata, disabled: disabled}
@@ -110,10 +116,10 @@ func (s *workbuddyCredentialStore) authorize(ctx context.Context, forceRefresh b
 		return credential, nil
 	}
 	if strings.TrimSpace(token.RefreshToken) == "" {
-		return nil, fmt.Errorf("WorkBuddy credential %s has expired and has no refresh token; run `ccl oauth workbuddy` again", credential.fileName)
+		return nil, fmt.Errorf("WorkBuddy credential %s has expired and has no refresh token; run `ccl oauth %s` again", credential.fileName, s.deployment.provider)
 	}
-	refreshURL := strings.TrimRight(workbuddyBaseURL, "/") + "/v2/plugin/auth/token/refresh"
-	headers := workbuddyAuthenticatedHeaders(token, credential.account())
+	refreshURL := strings.TrimRight(s.deployment.baseURL, "/") + "/v2/plugin/auth/token/refresh"
+	headers := s.deployment.authenticatedHeaders(token, credential.account())
 	headers.Set("X-Refresh-Token", token.RefreshToken)
 	headers.Set("X-Auth-Refresh-Source", "plugin")
 	LogDebugEvent("token_refresh_start", "component", "workbuddy", "credential", credential.fileName, "forced", forceRefresh)
@@ -174,7 +180,7 @@ func (s *workbuddyCredentialStore) listAuths() []*AuthInfo {
 	}
 	return []*AuthInfo{{
 		ID:       credential.fileName,
-		Provider: ProviderWorkBuddy,
+		Provider: s.deployment.provider,
 		FileName: credential.path,
 		Label:    firstMetadataString(credential.metadata, "nickname", "email", "user_id"),
 		Status:   status,
@@ -352,7 +358,7 @@ func (g *workbuddyGateway) do(ctx context.Context, path, rawQuery string, header
 }
 
 func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, headers http.Header, body []byte, credential *workbuddyCredential) (*http.Response, error) {
-	target := strings.TrimRight(workbuddyBaseURL, "/") + path
+	target := strings.TrimRight(g.store.deployment.baseURL, "/") + path
 	if rawQuery != "" {
 		target += "?" + rawQuery
 	}
@@ -366,7 +372,7 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 	}
 	token := credential.token()
 	account := credential.account()
-	for name, values := range workbuddyAuthenticatedHeaders(token, account) {
+	for name, values := range g.store.deployment.authenticatedHeaders(token, account) {
 		request.Header.Del(name)
 		for _, value := range values {
 			request.Header.Add(name, value)
@@ -459,17 +465,17 @@ func (g *workbuddyGateway) discoverModels(ctx context.Context) ([]workbuddyModel
 	if err != nil {
 		return nil, err
 	}
-	endpoint := strings.TrimRight(workbuddyBaseURL, "/") + "/v3/config"
+	endpoint := strings.TrimRight(g.store.deployment.baseURL, "/") + "/v3/config"
 	started := time.Now()
 	envelope, err := workbuddyJSON[workbuddyProductConfig](ctx, g.store.client, http.MethodGet, endpoint, nil,
-		workbuddyAuthenticatedHeaders(credential.token(), credential.account()))
+		g.store.deployment.authenticatedHeaders(credential.token(), credential.account()))
 	var apiErr *workbuddyAPIError
 	if errors.As(err, &apiErr) && (apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden) {
 		refreshed, refreshErr := g.store.authorize(withRejectedOAuthToken(ctx, credential.token().AccessToken), true)
 		if refreshErr == nil {
 			credential = refreshed
 			envelope, err = workbuddyJSON[workbuddyProductConfig](ctx, g.store.client, http.MethodGet, endpoint, nil,
-				workbuddyAuthenticatedHeaders(credential.token(), credential.account()))
+				g.store.deployment.authenticatedHeaders(credential.token(), credential.account()))
 		} else {
 			LogWarnEvent("model_discovery_auth_refresh_failed", "component", "workbuddy",
 				"credential", credential.fileName, "status", apiErr.Status, "error", refreshErr)
@@ -501,11 +507,15 @@ func (g *workbuddyGateway) discoverModels(ctx context.Context) ([]workbuddyModel
 	return models, nil
 }
 
-func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtimeModelRoute, []string, map[string]string, error) {
+// buildWorkBuddyRoutes maps the account catalog and the configured pool onto
+// runtime routes. details carries the catalog's per-model credit multiplier so
+// the model picker can show what each model costs.
+func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtimeModelRoute, []string, map[string]string, map[string]protocol.ModelInfo, error) {
 	lookup := make(map[string]workbuddyModel, len(catalog))
 	routes := make([]runtimeModelRoute, 0, len(catalog)+len(runtimeModelRoutes(modelSpec)))
 	models := make([]string, 0, len(catalog))
 	names := make(map[string]string)
+	details := make(map[string]protocol.ModelInfo)
 	seenRoutes := make(map[string]bool)
 	add := func(name, alias string) {
 		key := strings.ToLower(name) + "\x00" + strings.ToLower(alias)
@@ -521,27 +531,55 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 		if strings.TrimSpace(model.Name) != "" {
 			names[model.ID] = strings.TrimSpace(model.Name)
 		}
+		if multiplier := workbuddyCreditMultiplier(model.Credits); multiplier != nil {
+			details[strings.ToLower(model.ID)] = protocol.ModelInfo{
+				ID:             model.ID,
+				RateMultiplier: multiplier,
+				RateUnit:       "credits",
+			}
+		}
 		add(model.ID, model.ID)
 	}
 	for _, route := range runtimeModelRoutes(modelSpec) {
 		model, ok := lookup[strings.ToLower(route.Name)]
 		if !ok {
-			return nil, nil, nil, fmt.Errorf("configured WorkBuddy model %q is not present in the upstream catalog", route.Name)
+			return nil, nil, nil, nil, fmt.Errorf("configured WorkBuddy model %q is not present in the upstream catalog", route.Name)
 		}
 		add(model.ID, route.Alias)
 	}
-	return routes, models, names, nil
+	return routes, models, names, details, nil
 }
 
-func startWorkBuddyOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
+// workbuddyCreditMultiplier reads the catalog's `credits` field, which is a
+// string like "x0.29" (or "x0.00" for a free model). Absent or unrecognizable
+// values mean the catalog publishes no rate, so no marker is shown.
+func workbuddyCreditMultiplier(credits any) *float64 {
+	text, ok := credits.(string)
+	if !ok {
+		return nil
+	}
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(strings.TrimPrefix(text, "x"), "X")
+	multiplier, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+	if err != nil || multiplier < 0 {
+		return nil
+	}
+	return &multiplier
+}
+
+func startWorkBuddyOAuth(parent context.Context, providerName, modelSpec, credentialFile string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
+	}
+	deployment, err := workbuddyDeploymentFor(providerName)
+	if err != nil {
+		return nil, err
 	}
 	authDir, err := ensureAuthDir()
 	if err != nil {
 		return nil, err
 	}
-	store := newWorkBuddyCredentialStore(authDir, credentialFile)
+	store := newWorkBuddyCredentialStore(deployment, authDir, credentialFile)
 	if _, err := store.authorize(parent, false); err != nil {
 		return nil, err
 	}
@@ -559,7 +597,7 @@ func startWorkBuddyOAuth(parent context.Context, modelSpec, credentialFile strin
 	if err != nil {
 		return nil, err
 	}
-	routes, models, names, err := buildWorkBuddyRoutes(modelSpec, catalog)
+	routes, models, names, details, err := buildWorkBuddyRoutes(modelSpec, catalog)
 	if err != nil {
 		return nil, err
 	}
@@ -574,7 +612,8 @@ func startWorkBuddyOAuth(parent context.Context, modelSpec, credentialFile strin
 	proxyRuntime.listAuths = store.listAuths
 	proxyRuntime.models = append([]string(nil), models...)
 	proxyRuntime.modelNames = names
-	LogInfof("runtime start oauth provider=workbuddy backend=workbuddy protocol=openai_chat local_endpoint=%q credential_file=%s models=%d auth_owner=ccl catalog_owner=ccl data_plane=ccl",
-		SafeLogEndpoint(proxyRuntime.endpoint), filepath.Base(credentialFile), len(models))
+	proxyRuntime.modelDetails = details
+	LogInfof("runtime start oauth provider=%s backend=%s protocol=openai_chat local_endpoint=%q credential_file=%s models=%d auth_owner=ccl catalog_owner=ccl data_plane=ccl",
+		deployment.provider, deployment.provider, SafeLogEndpoint(proxyRuntime.endpoint), filepath.Base(credentialFile), len(models))
 	return proxyRuntime, nil
 }

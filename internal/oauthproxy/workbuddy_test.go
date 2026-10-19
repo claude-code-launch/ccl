@@ -81,7 +81,7 @@ func TestLoginWorkBuddyPollsAndPersistsBoundCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := loginWorkBuddy(context.Background(), authDir, LoginOptions{})
+	result, err := loginWorkBuddy(context.Background(), authDir, ProviderWorkBuddy, LoginOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +121,7 @@ func TestWorkBuddyRuntimeUsesCCLChatAdapterAndRefreshesOnce(t *testing.T) {
 			}
 			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"models": []map[string]any{{
 				"id": "wb-chat", "name": "WorkBuddy Chat", "supportsToolCall": true, "supportsReasoning": true,
+				"credits": "x0.29",
 			}}}})
 		case "/v2/plugin/auth/token/refresh":
 			refreshes.Add(1)
@@ -175,6 +176,9 @@ func TestWorkBuddyRuntimeUsesCCLChatAdapterAndRefreshesOnce(t *testing.T) {
 	if runtime.ModelDisplayNames()["wb-chat"] != "WorkBuddy Chat" {
 		t.Fatalf("display names = %+v", runtime.ModelDisplayNames())
 	}
+	if details := runtime.ModelDetails(); details["wb-chat"].RateMultiplier == nil || *details["wb-chat"].RateMultiplier != 0.29 || details["wb-chat"].RateUnit != "credits" {
+		t.Fatalf("model details = %+v", details)
+	}
 	responseBody := postClaudeMessage(t, context.Background(), runtime, "wb-chat[1m]")
 	if !strings.Contains(responseBody, "hello from WorkBuddy") || !strings.Contains(responseBody, `"type":"message_stop"`) {
 		t.Fatalf("Messages response = %s", responseBody)
@@ -221,7 +225,7 @@ func TestWorkBuddyGatewayPreservesProviderErrors(t *testing.T) {
 
 			authDir := t.TempDir()
 			writeWorkBuddyTestCredential(t, authDir, "workbuddy-test.json", "token", "refresh", time.Now().Add(time.Hour))
-			store := newWorkBuddyCredentialStore(authDir, "workbuddy-test.json")
+			store := newWorkBuddyCredentialStore(workbuddyTestDeployment(t, ProviderWorkBuddy), authDir, "workbuddy-test.json")
 			gateway, err := startWorkBuddyGateway(context.Background(), store)
 			if err != nil {
 				t.Fatal(err)
@@ -318,11 +322,26 @@ func testWorkBuddyRuntimeProviderError(t *testing.T, upstreamStatus int) {
 	}
 }
 
+func workbuddyTestDeployment(t *testing.T, provider string) workbuddyDeployment {
+	t.Helper()
+	deployment, err := workbuddyDeploymentFor(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return deployment
+}
+
 func writeWorkBuddyTestCredential(t *testing.T, authDir, name, accessToken, refreshToken string, expiresAt time.Time) {
 	t.Helper()
+	writeWorkBuddyTestCredentialFor(t, ProviderWorkBuddy, authDir, name, accessToken, refreshToken, expiresAt)
+}
+
+func writeWorkBuddyTestCredentialFor(t *testing.T, provider, authDir, name, accessToken, refreshToken string, expiresAt time.Time) {
+	t.Helper()
+	deployment := workbuddyTestDeployment(t, provider)
 	raw, err := json.Marshal(map[string]any{
-		"type": ProviderWorkBuddy, "access_token": accessToken, "refresh_token": refreshToken,
-		"expires_at": expiresAt.UnixMilli(), "domain": workbuddyDomain(), "user_id": "user-1", "nickname": "Alice",
+		"type": deployment.provider, "access_token": accessToken, "refresh_token": refreshToken,
+		"expires_at": expiresAt.UnixMilli(), "domain": deployment.domain(), "user_id": "user-1", "nickname": "Alice",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -334,14 +353,23 @@ func writeWorkBuddyTestCredential(t *testing.T, authDir, name, accessToken, refr
 
 func restoreWorkBuddyTestGlobals(t *testing.T, baseURL string) {
 	t.Helper()
-	previousBaseURL := workbuddyBaseURL
+	restoreWorkBuddyTestBaseURL(t, ProviderWorkBuddy, baseURL)
+}
+
+func restoreWorkBuddyTestBaseURL(t *testing.T, provider, baseURL string) {
+	t.Helper()
+	previousBaseURL, hadPreviousBaseURL := workbuddyBaseURLs[provider]
 	previousBrowserOpener := workbuddyBrowserOpener
 	previousPollInterval := workbuddyPollInterval
 	previousLoginTimeout := workbuddyLoginTimeout
 	previousHTTPTimeout := workbuddyHTTPTimeout
-	workbuddyBaseURL = baseURL
+	workbuddyBaseURLs[provider] = baseURL
 	t.Cleanup(func() {
-		workbuddyBaseURL = previousBaseURL
+		if hadPreviousBaseURL {
+			workbuddyBaseURLs[provider] = previousBaseURL
+		} else {
+			delete(workbuddyBaseURLs, provider)
+		}
 		workbuddyBrowserOpener = previousBrowserOpener
 		workbuddyPollInterval = previousPollInterval
 		workbuddyLoginTimeout = previousLoginTimeout
@@ -359,4 +387,106 @@ func swapWorkBuddyFastRetry(t *testing.T) {
 	t.Cleanup(func() {
 		upstreamFastRetryBackoff = previous
 	})
+}
+
+// TestWorkBuddyChinaDeploymentIsSeparateAccountStore covers the second
+// WorkBuddy deployment (www.workbuddy.cn) end to end: login talks to the .cn
+// origin and types the credential workbuddycn, a credential minted by the
+// other deployment is refused rather than sent to this origin, and the runtime
+// serves the .cn account from that same origin.
+func TestWorkBuddyChinaDeploymentIsSeparateAccountStore(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("X-Domain") != request.Host {
+			t.Fatalf("%s X-Domain = %q, want %q", request.URL.Path, request.Header.Get("X-Domain"), request.Host)
+		}
+		switch request.URL.Path {
+		case "/v2/plugin/auth/state":
+			if request.URL.Query().Get("platform") != workbuddyPlatform {
+				t.Fatalf("state platform = %q", request.URL.Query().Get("platform"))
+			}
+			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{
+				"state": "cn-state", "authUrl": serverURL(request) + "/login?platform=workbuddy&state=cn-state",
+			}})
+		case "/v2/plugin/auth/token":
+			if request.URL.Query().Get("state") != "cn-state" {
+				t.Fatalf("token state = %q", request.URL.Query().Get("state"))
+			}
+			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{
+				"accessToken": "cn-access", "refreshToken": "cn-refresh", "expiresIn": 3600, "domain": request.Host,
+			}})
+		case "/v2/plugin/login/account":
+			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"uid": "cn-user", "nickname": "China"}})
+		case "/v2/plugin/accounts":
+			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"accounts": []map[string]any{{
+				"uid": "cn-user", "nickname": "China", "email": "china@example.cn",
+			}}}})
+		case "/v3/config":
+			if request.Header.Get("Authorization") != "Bearer cn-access" {
+				t.Fatalf("config authorization = %q", request.Header.Get("Authorization"))
+			}
+			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"models": []map[string]any{{
+				"id": "cn-chat", "name": "WorkBuddy CN",
+			}}}})
+		case "/v2/chat/completions":
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(writer, "data: {\"id\":\"chatcmpl-cn\",\"object\":\"chat.completion.chunk\",\"model\":\"cn-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello from workbuddy.cn\"},\"finish_reason\":null}]}\n\n")
+			_, _ = fmt.Fprint(writer, "data: {\"id\":\"chatcmpl-cn\",\"object\":\"chat.completion.chunk\",\"model\":\"cn-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+			_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	restoreWorkBuddyTestBaseURL(t, ProviderWorkBuddyCN, server.URL)
+	workbuddyBrowserOpener = func(string) error { return nil }
+	workbuddyPollInterval = time.Millisecond
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := loginWorkBuddy(context.Background(), authDir, ProviderWorkBuddyCN, LoginOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Provider != ProviderWorkBuddyCN || result.Backend != ProviderWorkBuddyCN {
+		t.Fatalf("login result = %+v", result)
+	}
+	raw, err := os.ReadFile(result.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["type"] != ProviderWorkBuddyCN || metadata["user_id"] != "cn-user" {
+		t.Fatalf("cn credential metadata = %+v", metadata)
+	}
+
+	// The two deployments keep separate account stores: a .ai credential must
+	// never have its token sent to the .cn origin.
+	writeWorkBuddyTestCredential(t, authDir, "workbuddy-user-1.json", "ai-token", "ai-refresh", time.Now().Add(time.Hour))
+	foreign := newWorkBuddyCredentialStore(workbuddyTestDeployment(t, ProviderWorkBuddyCN), authDir, "workbuddy-user-1.json")
+	if _, err := foreign.load(); err == nil || !strings.Contains(err.Error(), ProviderWorkBuddyCN) {
+		t.Fatalf("foreign credential error = %v", err)
+	}
+
+	runtime, err := StartOAuth(context.Background(), ProviderWorkBuddyCN, "cn-chat", filepath.Base(result.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	if got := strings.Join(runtime.Models(), ","); got != "cn-chat" {
+		t.Fatalf("runtime models = %q", got)
+	}
+	if body := postClaudeMessage(t, context.Background(), runtime, "cn-chat"); !strings.Contains(body, "hello from workbuddy.cn") {
+		t.Fatalf("Messages response = %s", body)
+	}
+	if auths := runtime.ListAuths(); len(auths) != 1 || auths[0].Provider != ProviderWorkBuddyCN {
+		t.Fatalf("runtime auths = %+v", auths)
+	}
 }

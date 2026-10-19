@@ -275,6 +275,29 @@ func TestGetOpenAIModelInfosAcceptsTopLevelContextWindow(t *testing.T) {
 	}
 }
 
+func TestGetOpenAIModelInfosKeepsRateMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"priced","rate_multiplier":0.29,"rate_unit":"credits","is_new":true,"promotion_available":true},{"id":"plain"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	infos, err := protocol.GetOpenAIModelInfos(server.URL, "key")
+	if err != nil {
+		t.Fatalf("GetOpenAIModelInfos: %v", err)
+	}
+	byID := map[string]protocol.ModelInfo{}
+	for _, info := range infos {
+		byID[info.ID] = info
+	}
+	priced := byID["priced"]
+	if priced.RateMultiplier == nil || *priced.RateMultiplier != 0.29 || priced.RateUnit != "credits" || !priced.IsNew || !priced.PromotionAvailable {
+		t.Fatalf("priced metadata = %+v", priced)
+	}
+	if plain := byID["plain"]; plain.RateMultiplier != nil || plain.RateUnit != "" {
+		t.Fatalf("unpriced metadata = %+v", plain)
+	}
+}
+
 func TestGetCodexClientModelInfosRequiresClientVersion(t *testing.T) {
 	var sawClientVersion bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

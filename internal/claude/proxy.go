@@ -27,7 +27,7 @@ func PrepareProxy(ctx context.Context, p provider.Provider) (*Proxy, error) {
 		return nil, err
 	}
 	c := &providerContext{provider: session.Provider, baseURL: session.BaseURL, useProxy: true, session: session,
-		modelNames: session.Runtime.ModelDisplayNames()}
+		modelNames: session.Runtime.ModelDisplayNames(), modelDetails: session.Runtime.ModelDetails()}
 	if err := c.resolveModel(ctx); err != nil {
 		session.Close()
 		return nil, err

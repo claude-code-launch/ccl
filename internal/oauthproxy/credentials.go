@@ -155,6 +155,8 @@ func normalizeCredentialBackend(value string) (string, error) {
 		return ProviderKiro, nil
 	case ProviderWorkBuddy:
 		return ProviderWorkBuddy, nil
+	case ProviderWorkBuddyCN:
+		return ProviderWorkBuddyCN, nil
 	case ProviderAutoClaw:
 		return ProviderAutoClaw, nil
 	case ProviderZed:

@@ -224,6 +224,10 @@ func TestOAuthRuntimeType(t *testing.T) {
 	if !ok || got != "openai" {
 		t.Fatalf("workbuddy = %q %v", got, ok)
 	}
+	got, ok = provider.OAuthRuntimeType("workbuddycn")
+	if !ok || got != "openai" {
+		t.Fatalf("workbuddycn = %q %v", got, ok)
+	}
 	if _, ok := provider.OAuthRuntimeType(""); ok {
 		t.Fatal("empty should not fix")
 	}

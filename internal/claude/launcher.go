@@ -526,6 +526,9 @@ type providerContext struct {
 	// modelNames carries provider catalog labels used by Claude Code's UI and
 	// request aliases; the direct adapter resolves aliases to technical IDs.
 	modelNames map[string]string
+	// modelDetails carries catalog metadata (rate multiplier and freshness)
+	// for the same models, keyed by model ID, so the picker can show cost.
+	modelDetails map[string]protocol.ModelInfo
 	// droppedContextOverride records that an unsupported context combination was
 	// removed from this session's env.
 	droppedContextOverride bool
@@ -549,6 +552,7 @@ func setupProvider(ctx context.Context, p provider.Provider) (*providerContext, 
 	}
 	if session.Runtime != nil {
 		prepared.modelNames = session.Runtime.ModelDisplayNames()
+		prepared.modelDetails = session.Runtime.ModelDetails()
 	}
 
 	if err := prepared.resolveModel(ctx); err != nil {
@@ -621,7 +625,7 @@ func (c *providerContext) settingsForCWD(cwd string) settingsJSON {
 		}
 	}
 	if !userKeys["modelPicker"] {
-		settings.ModelPicker = providerModelPicker(c.provider, c.modelNames)
+		settings.ModelPicker = providerModelPicker(c.provider, c.modelNames, c.modelDetails)
 	}
 	applyStandaloneDefaults(&settings, userKeys, c.useProxy)
 	return settings

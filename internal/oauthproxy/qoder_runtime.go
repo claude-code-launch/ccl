@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 type qoderService struct {
@@ -126,10 +128,20 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 	}
 	modelIDs := make([]string, 0, len(service.models))
 	modelNames := make(map[string]string, len(service.models))
+	modelDetails := make(map[string]protocol.ModelInfo, len(service.models))
 	for _, model := range service.models {
 		modelIDs = append(modelIDs, model.ID)
 		if name := strings.TrimSpace(model.Name); name != "" {
 			modelNames[model.ID] = name
+		}
+		if model.PriceFactor != nil {
+			modelDetails[strings.ToLower(model.ID)] = protocol.ModelInfo{
+				ID:                 model.ID,
+				RateMultiplier:     model.PriceFactor,
+				RateUnit:           "credits",
+				IsNew:              model.IsNew,
+				PromotionAvailable: model.PromotionAvailable,
+			}
 		}
 	}
 	started := make(chan struct{})
@@ -145,6 +157,8 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 		started:    started,
 		models:     modelIDs,
 		modelNames: modelNames,
+		// The account catalog's PriceFactor is the credit rate the picker shows.
+		modelDetails: modelDetails,
 		// A silent substitution is what let a credential that had simply expired
 		// shrink the saved catalog from 17 models to 5: `ccl set` adopted the
 		// compatibility list as if it were the account's. Recording it lets the

@@ -56,7 +56,13 @@ type ModelResponse struct {
 		Status        string `json:"status,omitempty"`
 		Version       string `json:"version"`
 		ContextWindow int    `json:"context_window,omitempty"`
-		Modalities    struct {
+		// Anthropic-shaped extensions some Anthropic-compatible gateways and
+		// CCL runtimes publish alongside the OpenAI list fields.
+		RateMultiplier     *float64 `json:"rate_multiplier,omitempty"`
+		RateUnit           string   `json:"rate_unit,omitempty"`
+		IsNew              bool     `json:"is_new,omitempty"`
+		PromotionAvailable bool     `json:"promotion_available,omitempty"`
+		Modalities         struct {
 			InputModalities  []string `json:"input_modalities,omitempty"`
 			OutputModalities []string `json:"output_modalities,omitempty"`
 		} `json:"modalities,omitempty"`
@@ -143,9 +149,13 @@ func GetOpenAIModelInfosContext(ctx context.Context, baseURL, apiKey string) ([]
 			window = m.ContextWindow
 		}
 		models = append(models, ModelInfo{
-			ID:            m.Id,
-			DisplayName:   strings.TrimSpace(m.Name),
-			ContextWindow: window,
+			ID:                 m.Id,
+			DisplayName:        strings.TrimSpace(m.Name),
+			ContextWindow:      window,
+			RateMultiplier:     m.RateMultiplier,
+			RateUnit:           strings.TrimSpace(m.RateUnit),
+			IsNew:              m.IsNew,
+			PromotionAvailable: m.PromotionAvailable,
 		})
 	}
 	return models, nil

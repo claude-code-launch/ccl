@@ -28,7 +28,7 @@ ccl doctor     # 只读体检；加 --probe 才会逐个测模型（计费）
 
 ```bash
 # A. 订阅账号（任选其一；加别名可多账号：ccl oauth gpt work）
-ccl oauth gpt | gemini | grok | qoder | kimi | kiro | workbuddy | autoclaw | zed
+ccl oauth gpt | gemini | grok | qoder | kimi | kiro | workbuddy | workbuddycn | autoclaw | zed
 
 # B. API Key / 第三方网关：单页 TUI，填 Endpoint 与 Key → Auto Configure → Save & Activate
 ccl set deepseek
@@ -150,7 +150,7 @@ Claude Code must be installed (`claude --version`). If it is missing, running `c
 
 ```bash
 # A. Subscription login (pick one; add an alias for multiple accounts: ccl oauth gpt work)
-ccl oauth gpt | gemini | grok | qoder | kimi | kiro | workbuddy | autoclaw | zed
+ccl oauth gpt | gemini | grok | qoder | kimi | kiro | workbuddy | workbuddycn | autoclaw | zed
 
 # B. API key / third-party gateway: single-page TUI — Endpoint + Key → Auto Configure → Save & Activate
 ccl set deepseek

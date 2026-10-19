@@ -16,9 +16,14 @@ import (
 
 const (
 	workbuddyDefaultBaseURL = "https://www.workbuddy.ai"
+	// workbuddyChinaDefaultBaseURL is the mainland-China deployment of the same
+	// WorkBuddy service. It runs the identical plugin API, login page and chat
+	// gateway as www.workbuddy.ai; only the origin differs, so one
+	// implementation serves both (see workbuddyDeployment).
+	workbuddyChinaDefaultBaseURL = "https://www.workbuddy.cn"
 	// workbuddyPlatform is the OAuth `platform` query parameter passed to
 	// /v2/plugin/auth/state and embedded in the login URL. It selects the login
-	// page brand; www.workbuddy.ai accepts "workbuddy" (the desktop WorkBuddy
+	// page brand; both deployments accept "workbuddy" (the desktop WorkBuddy
 	// app's platform). The Keycloak token is minted by the "console" client no
 	// matter what value is used here — that is expected and harmless: the chat
 	// gateway does not gate on the token's azp, only on the request fingerprint
@@ -32,6 +37,8 @@ const (
 	// X-IDE-Type/X-IDE-Name. The chat gateway rejects unrecognized channels with
 	// code 11128 ("unapproved channel"); the real desktop client reports
 	// "WorkBuddy" here (a product channel, distinct from the login platform).
+	// Both deployments accept it: workbuddy.cn chat works with this same value,
+	// so the channel is not part of what separates the two deployments.
 	workbuddyChatChannel = "WorkBuddy"
 	// workbuddyCLIVersion is the trailing "CLI/<ver>" token in the User-Agent,
 	// matching the desktop client's dual-token UA shape
@@ -43,13 +50,49 @@ const (
 	workbuddyMaxJSONBytes   = int64(16 << 20)
 )
 
+// workbuddyDeployment is one public WorkBuddy deployment. Both deployments
+// speak the same plugin API and chat protocol, so every request builder below
+// is shared; a deployment carries only the origin its requests go to, the
+// public OAuth provider name (which is also the credential `type` ccl
+// persists), and the X-Domain identity derived from that origin.
+type workbuddyDeployment struct {
+	provider string
+	baseURL  string
+}
+
+// domain is the X-Domain / token `domain` value for this deployment.
+func (d workbuddyDeployment) domain() string {
+	parsed, err := url.Parse(d.baseURL)
+	if err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	return strings.TrimSpace(d.baseURL)
+}
+
 var (
-	workbuddyBaseURL       = workbuddyDefaultBaseURL
+	// workbuddyBaseURLs maps a public OAuth provider name to its deployment
+	// origin. A var rather than a constant table so tests can point either
+	// deployment at an httptest server without disturbing the other.
+	workbuddyBaseURLs = map[string]string{
+		ProviderWorkBuddy:   workbuddyDefaultBaseURL,
+		ProviderWorkBuddyCN: workbuddyChinaDefaultBaseURL,
+	}
 	workbuddyBrowserOpener = openBrowser
 	workbuddyPollInterval  = time.Second
 	workbuddyLoginTimeout  = 5 * time.Minute
 	workbuddyHTTPTimeout   = 30 * time.Second
 )
+
+// workbuddyDeploymentFor resolves the deployment behind a public OAuth
+// provider name.
+func workbuddyDeploymentFor(providerName string) (workbuddyDeployment, error) {
+	provider := strings.ToLower(strings.TrimSpace(providerName))
+	baseURL, ok := workbuddyBaseURLs[provider]
+	if !ok {
+		return workbuddyDeployment{}, fmt.Errorf("unsupported WorkBuddy deployment %q", providerName)
+	}
+	return workbuddyDeployment{provider: provider, baseURL: baseURL}, nil
+}
 
 type workbuddyAPIError struct {
 	Status    int
@@ -116,16 +159,20 @@ type workbuddyAccountsData struct {
 	Accounts []workbuddyAccount `json:"accounts"`
 }
 
-func loginWorkBuddy(ctx context.Context, authDir string, opts LoginOptions) (LoginResult, error) {
+func loginWorkBuddy(ctx context.Context, authDir, providerName string, opts LoginOptions) (LoginResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	deployment, err := workbuddyDeploymentFor(providerName)
+	if err != nil {
+		return LoginResult{}, err
 	}
 	loginCtx, cancel := context.WithTimeout(ctx, workbuddyLoginTimeout)
 	defer cancel()
 	client := &http.Client{Timeout: workbuddyHTTPTimeout}
 
-	stateURL := strings.TrimRight(workbuddyBaseURL, "/") + "/v2/plugin/auth/state?platform=" + url.QueryEscape(workbuddyPlatform)
-	stateEnvelope, err := workbuddyJSON[workbuddyAuthState](loginCtx, client, http.MethodPost, stateURL, []byte(`{}`), workbuddyAnonymousHeaders())
+	stateURL := strings.TrimRight(deployment.baseURL, "/") + "/v2/plugin/auth/state?platform=" + url.QueryEscape(workbuddyPlatform)
+	stateEnvelope, err := workbuddyJSON[workbuddyAuthState](loginCtx, client, http.MethodPost, stateURL, []byte(`{}`), deployment.anonymousHeaders())
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("start WorkBuddy authorization: %w", err)
 	}
@@ -149,16 +196,16 @@ func loginWorkBuddy(ctx context.Context, authDir string, opts LoginOptions) (Log
 		}
 	}
 
-	token, err := pollWorkBuddyToken(loginCtx, client, state.State)
+	token, err := pollWorkBuddyToken(loginCtx, client, deployment, state.State)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	account, err := pollWorkBuddyAccount(loginCtx, client, state.State, token)
+	account, err := pollWorkBuddyAccount(loginCtx, client, deployment, state.State, token)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	accountsURL := strings.TrimRight(workbuddyBaseURL, "/") + "/v2/plugin/accounts"
-	accountsEnvelope, err := workbuddyJSON[workbuddyAccountsData](loginCtx, client, http.MethodGet, accountsURL, nil, workbuddyAuthenticatedHeaders(token, account))
+	accountsURL := strings.TrimRight(deployment.baseURL, "/") + "/v2/plugin/accounts"
+	accountsEnvelope, err := workbuddyJSON[workbuddyAccountsData](loginCtx, client, http.MethodGet, accountsURL, nil, deployment.authenticatedHeaders(token, account))
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("fetch WorkBuddy accounts: %w", err)
 	}
@@ -174,11 +221,11 @@ func loginWorkBuddy(ctx context.Context, authDir string, opts LoginOptions) (Log
 		token.RefreshExpiresAt = now.Add(time.Duration(token.RefreshExpiresIn) * time.Second).UnixMilli()
 	}
 	if strings.TrimSpace(token.Domain) == "" {
-		token.Domain = workbuddyDomain()
+		token.Domain = deployment.domain()
 	}
 
 	metadata := map[string]any{
-		"type":                 ProviderWorkBuddy,
+		"type":                 deployment.provider,
 		"access_token":         token.AccessToken,
 		"refresh_token":        token.RefreshToken,
 		"token_type":           token.TokenType,
@@ -199,20 +246,20 @@ func loginWorkBuddy(ctx context.Context, authDir string, opts LoginOptions) (Log
 	}
 	raw = append(raw, '\n')
 	identity := credentialIdentity(metadata, raw)
-	credentialPath := filepath.Join(authDir, ProviderWorkBuddy+"-"+identity+".json")
+	credentialPath := filepath.Join(authDir, deployment.provider+"-"+identity+".json")
 	if err := writeCredentialAtomic(credentialPath, raw); err != nil {
 		return LoginResult{}, fmt.Errorf("persist WorkBuddy credential: %w", err)
 	}
-	return LoginResult{Provider: ProviderWorkBuddy, Backend: ProviderWorkBuddy, Path: credentialPath}, nil
+	return LoginResult{Provider: deployment.provider, Backend: deployment.provider, Path: credentialPath}, nil
 }
 
-func pollWorkBuddyToken(ctx context.Context, client *http.Client, state string) (workbuddyToken, error) {
-	endpoint := strings.TrimRight(workbuddyBaseURL, "/") + "/v2/plugin/auth/token?state=" + url.QueryEscape(state)
+func pollWorkBuddyToken(ctx context.Context, client *http.Client, deployment workbuddyDeployment, state string) (workbuddyToken, error) {
+	endpoint := strings.TrimRight(deployment.baseURL, "/") + "/v2/plugin/auth/token?state=" + url.QueryEscape(state)
 	for {
 		if err := waitWorkBuddyPoll(ctx); err != nil {
 			return workbuddyToken{}, fmt.Errorf("WorkBuddy authorization: %w", err)
 		}
-		envelope, err := workbuddyJSON[workbuddyToken](ctx, client, http.MethodGet, endpoint, nil, workbuddyAnonymousHeaders())
+		envelope, err := workbuddyJSON[workbuddyToken](ctx, client, http.MethodGet, endpoint, nil, deployment.anonymousHeaders())
 		if err != nil {
 			var apiErr *workbuddyAPIError
 			if errors.As(err, &apiErr) && apiErr.Code == workbuddyPendingToken {
@@ -227,14 +274,14 @@ func pollWorkBuddyToken(ctx context.Context, client *http.Client, state string) 
 	}
 }
 
-func pollWorkBuddyAccount(ctx context.Context, client *http.Client, state string, token workbuddyToken) (workbuddyAccount, error) {
-	endpoint := strings.TrimRight(workbuddyBaseURL, "/") + "/v2/plugin/login/account?state=" + url.QueryEscape(state)
+func pollWorkBuddyAccount(ctx context.Context, client *http.Client, deployment workbuddyDeployment, state string, token workbuddyToken) (workbuddyAccount, error) {
+	endpoint := strings.TrimRight(deployment.baseURL, "/") + "/v2/plugin/login/account?state=" + url.QueryEscape(state)
 	authFailures := 0
 	for {
 		if err := waitWorkBuddyPoll(ctx); err != nil {
 			return workbuddyAccount{}, fmt.Errorf("WorkBuddy authorization: %w", err)
 		}
-		envelope, err := workbuddyJSON[workbuddyAccount](ctx, client, http.MethodGet, endpoint, nil, workbuddyAuthenticatedHeaders(token, workbuddyAccount{}))
+		envelope, err := workbuddyJSON[workbuddyAccount](ctx, client, http.MethodGet, endpoint, nil, deployment.authenticatedHeaders(token, workbuddyAccount{}))
 		if err != nil {
 			var apiErr *workbuddyAPIError
 			if errors.As(err, &apiErr) {
@@ -294,8 +341,8 @@ func mergeWorkBuddyAccount(current workbuddyAccount, accounts []workbuddyAccount
 	return current
 }
 
-func workbuddyAnonymousHeaders() http.Header {
-	headers := workbuddyClientHeaders()
+func (d workbuddyDeployment) anonymousHeaders() http.Header {
+	headers := d.clientHeaders()
 	headers.Set("X-No-Authorization", "true")
 	headers.Set("X-No-User-Id", "true")
 	headers.Set("X-No-Enterprise-Id", "true")
@@ -303,8 +350,8 @@ func workbuddyAnonymousHeaders() http.Header {
 	return headers
 }
 
-func workbuddyAuthenticatedHeaders(token workbuddyToken, account workbuddyAccount) http.Header {
-	headers := workbuddyClientHeaders()
+func (d workbuddyDeployment) authenticatedHeaders(token workbuddyToken, account workbuddyAccount) http.Header {
+	headers := d.clientHeaders()
 	if token.AccessToken != "" {
 		headers.Set("Authorization", "Bearer "+token.AccessToken)
 	}
@@ -324,22 +371,14 @@ func workbuddyAuthenticatedHeaders(token workbuddyToken, account workbuddyAccoun
 	return headers
 }
 
-func workbuddyClientHeaders() http.Header {
+func (d workbuddyDeployment) clientHeaders() http.Header {
 	headers := make(http.Header)
 	headers.Set("Accept", "application/json")
 	headers.Set("Content-Type", "application/json")
 	headers.Set("User-Agent", "WorkBuddy/"+workbuddyClientVersion+" WorkBuddy/"+workbuddyClientVersion+" CLI/"+workbuddyCLIVersion)
 	headers.Set("X-Product", "SaaS")
-	headers.Set("X-Domain", workbuddyDomain())
+	headers.Set("X-Domain", d.domain())
 	return headers
-}
-
-func workbuddyDomain() string {
-	parsed, err := url.Parse(workbuddyBaseURL)
-	if err == nil && parsed.Host != "" {
-		return parsed.Host
-	}
-	return "www.workbuddy.ai"
 }
 
 func workbuddyJSON[T any](ctx context.Context, client *http.Client, method, endpoint string, body []byte, headers http.Header) (workbuddyEnvelope[T], error) {

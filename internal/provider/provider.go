@@ -126,7 +126,8 @@ type Provider struct {
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
 	// values are gpt, gemini, grok, qoder, kimi, kiro, workbuddy,
-	// autoclaw, and zed. Load folds the retired chatgpt and codex values into gpt.
+	// workbuddycn, autoclaw, and zed. Load folds the retired chatgpt and
+	// codex values into gpt.
 	OAuthProvider string `yaml:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
 	// (basename of the JSON under ~/.ccl/auth). Subscription runtimes require
@@ -232,7 +233,7 @@ func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
 	case "gpt", "grok", "zed":
 		return "openai_responses", true
-	case "gemini", "kimi", "workbuddy":
+	case "gemini", "kimi", "workbuddy", "workbuddycn":
 		return "openai", true
 	case "kiro", "qoder":
 		return "anthropic", true

@@ -39,6 +39,9 @@ func TestBackendProviderAliases(t *testing.T) {
 		"kimi":      "kimi",
 		"kiro":      "kiro",
 		"workbuddy": "workbuddy",
+		// The China deployment is its own backend so a credential minted there
+		// is never confused with the www.workbuddy.ai account store.
+		"workbuddycn": "workbuddycn",
 	}
 	for input, want := range tests {
 		got, err := BackendProvider(input)
@@ -52,7 +55,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderAutoClaw, ProviderZed} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}

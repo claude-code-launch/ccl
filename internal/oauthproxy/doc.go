@@ -53,7 +53,11 @@
 //     CCL owns the official external-link login polling, credential refresh,
 //     /v3/config model catalog, WorkBuddy identity/session headers, and the
 //     Anthropic Messages <-> OpenAI Chat Completions conversion (via the shared
-//     chatCompletionsService).
+//     chatCompletionsService). WorkBuddy has two public deployments that run
+//     the same plugin API and chat protocol — www.workbuddy.ai (workbuddy) and
+//     www.workbuddy.cn (workbuddycn). One implementation serves both; a
+//     workbuddyDeployment carries the origin, and the public OAuth provider
+//     name is also the credential `type`, so the two account stores never mix.
 //
 //  5. Native Messages passthrough (anthropic_passthrough.go)
 //     The anthropicPassthroughService serves native Anthropic models for

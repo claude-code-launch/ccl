@@ -93,6 +93,6 @@ User-facing Chinese lives in `cmd/` via `locale.T`. `internal/` must not contain
 
 ccl is a launcher + protocol proxy, not a fork of Claude Code. Extra CLI args after a non-ccl command are passed through.
 
-OAuth public names: `gpt` `gemini` `grok` `qoder` `kimi` `kiro` `workbuddy` `autoclaw` `zed`. Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch).
+OAuth public names: `gpt` `gemini` `grok` `qoder` `kimi` `kiro` `workbuddy` `workbuddycn` `autoclaw` `zed`. `workbuddy` is www.workbuddy.ai and `workbuddycn` is www.workbuddy.cn: same plugin API and chat protocol, different origin and credential `type` (see `workbuddyDeployment`). Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch).
 
 `bypass` injects `--dangerously-skip-permissions`, except when `--permission-mode` is given or the first arg is a Claude Code subcommand. Provider management lives under `ccl provider` and sync under `ccl cloud`; there are no root shortcuts for them. `ccl doctor` is read-only and bills nothing without `--probe`. `ccl update` verifies the `.gz` asset against `SHA256SUMS`; `--method self|npm|go` is required off a TTY.

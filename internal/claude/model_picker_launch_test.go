@@ -156,7 +156,7 @@ func TestProviderModelPickerCatalogNames(t *testing.T) {
 		"technical-pro": "Provider Pro", "technical-flash": "Provider Flash",
 		"technical-custom": "Provider Custom", "technical-other": "Provider \u6a21\u578b",
 	}
-	picker := providerModelPicker(p, names)
+	picker := providerModelPicker(p, names, nil)
 	want := []modelPickerOption{
 		{Model: "opus", Label: "Opus \u00b7 Provider Pro (1M)", Description: "Opus tier \u2192 Provider Pro[1m]"},
 		{Model: "sonnet", Label: "Sonnet \u00b7 Provider Pro", Description: "Sonnet tier \u2192 Provider Pro"},

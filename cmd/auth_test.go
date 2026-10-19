@@ -28,6 +28,7 @@ func TestOAuthRuntimeTypeDefaults(t *testing.T) {
 		{oauthproxy.ProviderQoder, "anthropic"},
 		{oauthproxy.ProviderZed, "openai_responses"},
 		{oauthproxy.ProviderWorkBuddy, "openai"},
+		{oauthproxy.ProviderWorkBuddyCN, "openai"},
 	}
 	for _, test := range tests {
 		got := oauthRuntimeType(test.provider)

@@ -34,7 +34,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "oauth <gpt|gemini|grok|qoder|kimi|kiro|workbuddy|autoclaw|zed> [alias]",
+		Use:   "oauth <gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed> [alias]",
 		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
 
@@ -42,9 +42,11 @@ Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
 
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|autoclaw|zed
+  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed
 
 Notes:
+  - WorkBuddy has two deployments with separate accounts and credentials:
+    workbuddy is www.workbuddy.ai, workbuddycn is www.workbuddy.cn
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
   - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
@@ -230,6 +232,7 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderKimi,
 		oauthproxy.ProviderKiro,
 		oauthproxy.ProviderWorkBuddy,
+		oauthproxy.ProviderWorkBuddyCN,
 		oauthproxy.ProviderAutoClaw,
 		oauthproxy.ProviderZed:
 		return true

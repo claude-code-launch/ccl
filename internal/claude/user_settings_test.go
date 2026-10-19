@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -82,6 +83,45 @@ func TestSettingsFastEffortAndUltracode(t *testing.T) {
 	}
 }
 
+func TestProviderModelPickerShowsCatalogRate(t *testing.T) {
+	multiplier := 0.29
+	free := 0.0
+	details := map[string]protocol.ModelInfo{
+		"m-pro":   {ID: "m-pro", RateMultiplier: &multiplier},
+		"m-flash": {ID: "m-flash", RateMultiplier: &multiplier},
+		"m-other": {ID: "m-other", RateMultiplier: &multiplier},
+		"m-free":  {ID: "m-free", RateMultiplier: &free},
+	}
+	picker := providerModelPicker(provider.Provider{
+		Model:         "m-pro,m-other[1m],m-free,m-unknown",
+		OpusModel:     "m-pro",
+		CustomModelID: "m-flash",
+	}, nil, details)
+	if picker == nil {
+		t.Fatal("no picker")
+	}
+	labels := map[string]string{}
+	for _, option := range picker.Options {
+		labels[option.Model] = option.Label
+	}
+	if labels["opus"] != "Opus · m-pro · 0.29x" {
+		t.Fatalf("opus label = %q", labels["opus"])
+	}
+	if labels["m-flash"] != "Custom · m-flash · 0.29x" {
+		t.Fatalf("custom label = %q", labels["m-flash"])
+	}
+	// The [1m] marker must not hide the base model's rate.
+	if labels["m-other[1m]"] != "m-other (1M) · 0.29x" {
+		t.Fatalf("[1m] label = %q", labels["m-other[1m]"])
+	}
+	if labels["m-free"] != "m-free · free" {
+		t.Fatalf("free label = %q", labels["m-free"])
+	}
+	if labels["m-unknown"] != "m-unknown" {
+		t.Fatalf("unpriced label = %q", labels["m-unknown"])
+	}
+}
+
 func TestProviderModelPickerListsTiersCustomAndPool(t *testing.T) {
 	p := provider.Provider{
 		Model:         "m-pro,m-flash[1m],m-chat",
@@ -89,7 +129,7 @@ func TestProviderModelPickerListsTiersCustomAndPool(t *testing.T) {
 		HaikuModel:    "m-flash",
 		CustomModelID: "m-chat",
 	}
-	picker := providerModelPicker(p, nil)
+	picker := providerModelPicker(p, nil, nil)
 	if picker == nil || !picker.ReplaceBuiltInOptions {
 		t.Fatalf("picker = %+v", picker)
 	}
@@ -114,7 +154,7 @@ func TestProviderModelPickerListsTiersCustomAndPool(t *testing.T) {
 		SonnetModel:   "m-chat",
 		FableModel:    "m-pro",
 		CustomModelID: "m-pro",
-	}, nil)
+	}, nil, nil)
 	models = models[:0]
 	for _, option := range same.Options {
 		models = append(models, option.Model)
@@ -123,7 +163,7 @@ func TestProviderModelPickerListsTiersCustomAndPool(t *testing.T) {
 		t.Fatalf("picker rows = %s", got)
 	}
 
-	if providerModelPicker(provider.Provider{}, nil) != nil {
+	if providerModelPicker(provider.Provider{}, nil, nil) != nil {
 		t.Fatal("an empty provider produced a lineup")
 	}
 
@@ -131,7 +171,7 @@ func TestProviderModelPickerListsTiersCustomAndPool(t *testing.T) {
 	for i := range 200 {
 		many = append(many, "model-"+string(rune('a'+i%26))+strings.Repeat("x", i))
 	}
-	if got := len(providerModelPicker(provider.Provider{Model: strings.Join(many, ",")}, nil).Options); got != len(many) {
+	if got := len(providerModelPicker(provider.Provider{Model: strings.Join(many, ",")}, nil, nil).Options); got != len(many) {
 		t.Fatalf("picker rows = %d, want every unmapped model (%d)", got, len(many))
 	}
 }
