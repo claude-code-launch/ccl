@@ -1,0 +1,98 @@
+# AGENTS.md
+
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+
+## Common Development Commands
+
+Go 1.26 (see `go.mod`). CI (`.github/workflows/ci.yml`) is the source of truth:
+
+```bash
+gofmt -l .                 # must be empty
+go test -race ./...
+go vet ./...
+go build ./...
+```
+
+Local / targeted:
+
+```bash
+go build -o /tmp/ccl-verify .
+go test ./cmd -run TestRunAuthGrokWithoutAliasDerivesName
+go test ./internal/oauthproxy ./internal/claude ./cmd
+```
+
+Release binary (matches CI): `scripts/build-release.sh` with `GOOS`/`GOARCH`/`OUTPUT`/`VERSION`; uses `-trimpath -ldflags="-s -w -X github.com/claude-code-launch/ccl/cmd.Version=..."`. `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` inject the Google Drive Desktop client (required by the release workflow; dev builds use `CCL_GOOGLE_OAUTH_CLIENT_ID/_SECRET`).
+
+There is no Makefile or golangci-lint config.
+
+### Do not run the `ccl` binary as a test harness
+
+Unknown first args are **not** errors: `cmd/root.go` forwards them to Claude Code and starts a billed session (`ccl resume`, `ccl -p "..."`, a quoted typo like `./ccl "provider --help"`). Prefer `go test` and `--help` with unquoted subcommand args. `ccl statusline` is intercepted before config load.
+
+Bare `ccl lang` is interactive; use `ccl lang zh` / `ccl lang en`. Do not run `set` / `map` / `use` / `oauth` / `cloud` / `provider` (mutating subcommands) against the developer's real `~/.ccl/` unless asked.
+
+`~/.ccl/config.yaml` stores plaintext API keys — do not dump it.
+
+## High-Level Architecture
+
+`ccl` launches Anthropic's Claude Code CLI against other model sources. Claude Code always speaks Anthropic Messages; ccl either points it at a real Anthropic-compatible gateway or starts a **127.0.0.1** loopback runtime that translates.
+
+Data flow:
+
+`main.go` → `cmd/` (Cobra + TUI) → `internal/config` + `internal/provider` → `internal/providersession.Prepare` → `internal/claude` (temp `settings.json`, env cleanup, `claude --settings ...`) → `internal/oauthproxy` when a proxy is required.
+
+`ccl acp` wraps **`@agentclientprotocol/claude-agent-acp`** (Node.js >=22; CI pins 0.90.0). The upstream CLI owns ACP framing, protocol versions, capabilities, tools, permissions, terminal integration and SDK persistence. `internal/acp/adapter.mjs` decorates the public `ClaudeAcpAgent` configuration lifecycle, then imports the actual CLI with its original stdio. Do not add an ACP parser, capability filter, permission MCP bridge, or alternate built-in ACP implementation. `internal/claude/agent.go` prepares provider runtimes and documented `_meta.claudeCode.options.{settings,env}` without locating a separate Claude CLI or writing temporary settings files; the upstream SDK supplies Claude. Client metadata, MCP servers, hooks and non-routing preferences are preserved.
+
+Each ACP session holds a reference-counted provider generation. `ccl use --acp <name>` pins `acp_provider`; empty follows `active_provider` (`EffectiveACPProvider`), and `--follow` unpins. Both selectors refer to the same `providers` map; `ccl ls` shows them in `USED BY`. Before an idle turn, the wrapper checks the full provider snapshot and calls upstream `resumeSession` to refresh changed configuration without replaying history; changed model defaults use upstream `setSessionConfigOption`. Both upstream v1 and v2 use the decorated `startTurn` boundary. Running and queued turns retain their generation. Retired runtimes close after the final lease, and successful runtime preparation outlives the configuration HTTP request. A private, token-authenticated loopback HTTP service carries only configuration and lease operations; its credentials are removed before loading upstream code. ACP stdout is untouched; stderr credentials are redacted. Session ids and transcripts belong to upstream. Adapter lookup: `--adapter` / `CCL_ACP_ADAPTER`, then the `ccl acp install` prefix `~/.ccl/acp-adapter` (pinned version, records its `node` path for GUI clients), then `claude-agent-acp` on PATH; Node.js must be >=22. `ccl acp` never installs anything itself (stdio belongs to the ACP client). `ccl bypass` does not apply to ACP.
+
+Verify wrapper contracts with `node --test scripts/acp-adapter.test.mjs`. Real-adapter tests in `integration/acp` require `CCL_TEST_BINARY` and `CCL_TEST_AGENT_ACP`, use isolated HOME / USERPROFILE / CLAUDE_CONFIG_DIR and local fake providers, and run on Linux/macOS/Windows in CI. Never test ACP against a real user profile or paid model.
+
+`providersession.Session` is a **copy** of the persisted provider. `UseProxy` is true for OpenAI-compatible types, `modelsdev`, or any non-empty `OAuthProvider` (including AutoClaw). Direct Anthropic API-key providers skip the proxy; Claude Code talks upstream with `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` (`anthropicAuth: bearer`).
+
+Loopback runtimes bind `127.0.0.1` and a random per-session key that is never written back to config. Upstream OAuth secrets live in `~/.ccl/auth/*.json` (0600), bound by `oauthAccountCredential`.
+
+`ccl proxy [-p name]` / `ccl proxy start [name]` runs a detached standalone runtime; `stop` / `status` manage it via a separately authenticated loopback control endpoint. `internal/proxymanager` serializes starts/stops and journals a field-level Claude user-settings overlay in `~/.ccl/proxy/state.json` before applying it. Shutdown or crash recovery restores only unchanged owned values. Native Anthropic gateways use the passthrough in this mode (`providersession.PrepareProxy`), preserving x-api-key vs bearer auth. `internal/claude/standalone_overlay.go` makes normal/ACP launches override the standalone settings. The `default` selector does not undo that overlay: it is Claude Code's configuration as it stands, so it uses the proxy's provider while one runs; `ccl proxy start` on `default` starts nothing and stops a running proxy. Never exercise proxy start/stop on a real home during tests.
+
+### Protocol ownership (`internal/oauthproxy`)
+
+Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external provider process (no qodercli, no Codex CLI).
+
+| Ingress | Runtime | Notes |
+|---|---|---|
+| Anthropic API key | none (direct) | Claude Code hits `/v1/messages`; `ccl set` still needs `/v1/models` to auto-detect |
+| OpenAI Chat API key / Kimi / WorkBuddy | `openai_chat_*.go` | Messages ↔ Chat Completions |
+| Codex Responses API key / GPT OAuth | `codex_responses_*.go` + `internal/codexidentity` | All `openai_responses` gateways get CCL-owned Codex identity (`Originator: codex_cli_rs`, UA, `stream=true`, `store=false`). Protocol is `type`, not guessed from `/codex` in the URL |
+| Grok OAuth | `xai_*.go` + `codex_responses_*.go` | cli-chat-proxy Responses; Grok Build identity headers; live `/models` catalog with 4.6/4.5 fallback |
+| Gemini OAuth | `gemini_*.go` | Antigravity conversion |
+| Zed | `zed_*.go` | zed.dev native-app login (RSA-encrypted loopback callback) → LLM token; per-model dispatch by catalog `provider` (anthropic→passthrough, open_ai→Responses, x_ai→Chat, google→`zedGeminiService`) behind an inner `zedGateway` that owns the `{provider,model,provider_request}` envelope; persisted `type` is only `openai_responses` for local dispatch |
+| Kiro | `kiro_*.go` | Portal PKCE (default) or `--kiro-auth builder`; Amazon Q + EventStream |
+| Qoder | `qoder_*.go` | Browser OAuth, COSY, WAF; `session_type=qodercli` is a wire field only |
+| models.dev mixed | `mixed_runtime.go` + `anthropic_passthrough.go` | `ModelProtocols` map per model |
+| AutoClaw / ZCode | `autoclaw_*.go` | CCL-owned Anthropic-to-OpenAI Chat adapter to `{origin}/autoclaw-proxy/proxy/autoclaw`; `ccl oauth autoclaw` runs the Google browser login (importing the encrypted desktop `auth.json` is optional), refreshes the session, and sends desktop-compatible managed-proxy headers without starting AutoClaw |
+
+Shared 429/5xx fast retry is `retry.go` (500ms + 1s, then relay status/body/`Retry-After` untouched). Per-backend 401 refresh happens **inside** one attempt. Kiro has its own 1/2/4s loop; WorkBuddy/Zed inner gateways must not wrap the outer retry (would 3×3).
+
+`ccl set` Auto Configure only GETs `/models` metadata for generic gateways. OAuth subscriptions have no Auto Configure row at all: `configureOAuthRuntime` copies the catalog straight from the loopback runtime (`runtime.Models()`), so a subscription is never probed as a generic endpoint. Per-slot `[1m]` markers live in `live().oneMSlots`; a slot that kept its model keeps its marker, so re-detection cannot re-open a window the user closed.
+
+### Config, launch, TUI
+
+- `internal/config`: `~/.ccl/config.yaml`. `Load` is read-only and normalizes in memory; every write goes through `config.Update(fn)` (file lock, re-read, apply, atomic 0600 write) — cmd code uses `updateProvider` / `replaceProvider`. There are no config migrations: old formats are not read. An OAuth provider's `type` is derived (`provider.EffectiveType`), not persisted; context sizing is the typed `contextPreset` field.
+- Global fields: `active_provider`, `acp_provider` (both are name selectors into one `providers` map; empty `acp_provider` follows `active_provider`), the reserved selector `default` (`provider.DefaultProvider`, never a `providers` key) for Claude Code's own configuration — plain `claude` with the environment unchanged for normal mode, `claude.DefaultAgentLaunch` (no settings, routing env restored to ccl's own) for ACP; a fresh install selects it, `lang`, `bypass_mode` (not `auto_mode`), `log_level` (`off` default; `ccl log`). With no provider selected ccl errors; it never builds one from shell `OPENAI_API_KEY` / `ANTHROPIC_*`.
+- `internal/claude`: `--settings` outranks the user's own settings, so `outputStyle: Concise`, `language` (from `ccl lang`), `statusLine` (`ccl statusline`; per-provider `statuslineDisabled` opts out) and `modelPicker` (provider slots + pool) are written only when the user's `$CLAUDE_CONFIG_DIR/settings.json` or the project's `.claude/settings{,.local}.json` does not define that key (`user_settings.go`). `effortLevel` / `ultracode` come from `ccl provider effort|ultracode`; `CLAUDE_CODE_EFFORT_LEVEL` is never exported (it pins `/effort`), and `fastMode` is omitted unless on (writing `false` would undo `/fast`). Proxy sessions default `CLAUDE_CODE_ATTRIBUTION_HEADER=0` and `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`; Fast is sent as `X-Ccl-Fast-Mode` via `ANTHROPIC_CUSTOM_HEADERS`, and runtimes strip the hint headers before forwarding. `inheritedEnvToDrop` removes shell `CLAUDE_CODE_USE_*`, model vars, nested-session markers, and the unused credential/custom-header var. Context presets Default / Balanced 500K / 800K are also exported as env because Claude Code has ignored settings-only auto-compact. Provider `Env` overrides defaults except proxy transport keys. Settings files live in `~/.ccl/run` (PID-named, stale ones swept).
+- TUI (`cmd/advanced_config*.go` — state, `_view`, `_input`, `_results`, `_async`, `_connection`; `github.com/grindlemire/go-tui`): components implement `Render` / `KeyMap` / `HandleMouse` / `Watchers`; use `tui.WithDisplay(tui.DisplayFlex)`. Single-page set wizard.
+
+### i18n layering
+
+User-facing Chinese lives in `cmd/` via `locale.T`. `internal/` must not contain Chinese string literals (`internal/protocol/no_chinese_strings_test.go`); `internal/locale` is the exception.
+
+### Cloud sync
+
+`internal/cloudsync` encrypts `config.yaml` + `auth/*.json` to iCloud / Google Drive under `ccl cloud ...` only (registry v2 in `~/.ccl/cloud`; no v1 layout, passphrase, Keychain, recovery-key or pairing modes). The Desktop OAuth client (Cloud project `93551281893`) is not in source: release ldflags inject `cloudsync.googleOAuthClientID/Secret`; PKCE is the real auth boundary; `appDataFolder` belongs to the Cloud project. The random profile key is stored in the cloud `profile.json` (`account_key`), so `loginFirstRemote` on a new device opens the account's profile (or creates one) with nothing but a login. `--no-browser` (default when `headlessHost()`: SSH, Cloud Shell, Linux without a display) prints the authorization URL and reads the redirected `127.0.0.1` address pasted back (`cloudsync.WithPastedRedirect`), still with the Desktop client + PKCE. Do not reintroduce the OAuth device flow: Google rejects `drive.appdata` there (`invalid_scope`) despite its docs, and `appDataFolder` is per Cloud project, so any other client would see different data.
+
+## Product facts that affect code changes
+
+ccl is a launcher + protocol proxy, not a fork of Claude Code. Extra CLI args after a non-ccl command are passed through.
+
+OAuth public names: `gpt` `gemini` `grok` `qoder` `kimi` `kiro` `workbuddy` `workbuddycn` `autoclaw` `zed`. `workbuddy` is www.workbuddy.ai and `workbuddycn` is www.workbuddy.cn: same plugin API and chat protocol, different origin and credential `type` (see `workbuddyDeployment`). Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch).
+
+`bypass` injects `--dangerously-skip-permissions`, except when `--permission-mode` is given or the first arg is a Claude Code subcommand. Provider management lives under `ccl provider` and sync under `ccl cloud`; there are no root shortcuts for them. `ccl doctor` is read-only and bills nothing without `--probe`. `ccl update` verifies the `.gz` asset against `SHA256SUMS`; `--method self|npm|go` is required off a TTY.
