@@ -7,6 +7,8 @@ ccl.prof
 *.exe
 *.test
 *.prof
+# npm launcher placeholder (text; postinstall swaps in the binary)
+!/bin/ccl.exe
 
 # IDEs
 .idea/

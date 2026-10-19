@@ -1,0 +1,19 @@
+# Placeholder for the native ccl binary; bin/install.js replaces it at
+# postinstall. No shebang: npm's Windows shim then executes the binary
+# directly, and Unix shells run this file with sh when it is still in place.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+dir=$(dirname "$self")
+if command -v node >/dev/null 2>&1; then
+  exec node "$dir/wrapper.js" "$@"
+fi
+echo "Error: the ccl native binary is not installed and Node.js is not on PATH." >&2
+echo "Run the postinstall step: node $dir/install.js" >&2
+echo "or reinstall @claudecodelaunch/ccl without --ignore-scripts / --omit=optional." >&2
+exit 1

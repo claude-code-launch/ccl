@@ -6,6 +6,8 @@ const path = require('path');
 const zlib = require('zlib');
 const { platforms } = require('../bin/platforms');
 
+const launcherFiles = ['ccl.exe', 'install.js', 'wrapper.js', 'platforms.js'];
+
 function releaseVersion(value) {
   const match = /^v?(\d+\.\d+\.\d+)(?:\.(\d+))?$/.exec(value || '');
   if (!match) throw new Error('Expected vMAJOR.MINOR.PATCH (or a legacy fourth component)');
@@ -36,17 +38,20 @@ function buildPackages(options) {
   });
   const main = path.join(output, 'main');
   fs.mkdirSync(path.join(main, 'bin'), { recursive: true });
-  ['wrapper.js', 'platforms.js'].forEach(file => fs.copyFileSync(path.join(root, 'bin', file), path.join(main, 'bin', file)));
-  fs.chmodSync(path.join(main, 'bin', 'wrapper.js'), 0o755);
+  // bin/ccl.exe is the placeholder that bin/install.js replaces with the
+  // native binary, so the installed command needs no Node.js on PATH.
+  launcherFiles.forEach(file => fs.copyFileSync(path.join(root, 'bin', file), path.join(main, 'bin', file)));
+  ['ccl.exe', 'wrapper.js', 'install.js'].forEach(file => fs.chmodSync(path.join(main, 'bin', file), 0o755));
   ['README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'].forEach(file => fs.copyFileSync(path.join(root, file), path.join(main, file)));
   fs.writeFileSync(path.join(main, 'package.json'), JSON.stringify({
     ...sourcePackage, version, description: 'Multi-provider launcher for Claude Code', optionalDependencies,
-    files: ['bin/wrapper.js', 'bin/platforms.js', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'],
+    scripts: { postinstall: 'node bin/install.js' },
+    files: [...launcherFiles.map(file => 'bin/' + file), 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'],
   }, null, 2) + '\n');
   return { main, output, version };
 }
 
-module.exports = { buildPackages, releaseVersion };
+module.exports = { buildPackages, releaseVersion, launcherFiles };
 if (require.main === module) {
   try { const built = buildPackages({ version: process.argv[2] }); console.log('Prepared npm packages for ' + built.version); }
   catch (err) { console.error(err.message); process.exit(1); }

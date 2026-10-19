@@ -11,7 +11,9 @@ The launcher package remains `@claudecodelaunch/ccl`. Its exact-version optional
 | `win32-x64` | `ccl-win32-x64.exe.gz` |
 | `win32-arm64` | `ccl-win32-arm64.exe.gz` |
 
-Each suffix is prefixed with `@claudecodelaunch/ccl-`. The launcher contains the wrapper and documentation, with no native binaries. Older bundled installations are still recognized by the wrapper.
+Each suffix is prefixed with `@claudecodelaunch/ccl-`. The launcher contains no native binaries: its `ccl` command is the `bin/ccl.exe` placeholder, which the `bin/install.js` postinstall replaces with a hard link to (or copy of) the platform binary, as Claude Code's npm package does. The installed command therefore runs without Node.js, which GUI clients need: Xcode starts ACP agents with a PATH that does not contain `node`, so a `#!/usr/bin/env node` launcher exits before answering `initialize`.
+
+The placeholder has no shebang, so npm's Windows shim executes the placed binary directly. When postinstall did not run (`--ignore-scripts`, pnpm or bun without trusted scripts, `--omit=optional`), Unix shells run the placeholder with `sh`, which hands off to `node bin/wrapper.js`; `node bin/install.js` places the binary afterwards. Older bundled installations are still recognized by the wrapper.
 
 ## First release setup
 
@@ -39,4 +41,4 @@ This bootstrap was completed on 2026-10-15: each platform package has a `0.0.0` 
 
 `node scripts/publish-npm-packages.js dist/npm` checks each exact version, skips existing versions, publishes all six platform packages, then publishes the launcher. A failure prevents publishing a launcher whose required native package versions are unavailable. Reruns safely continue from already-published platform versions.
 
-`node --test scripts/npm-packages.test.js` checks the package layout, supported targets, binary resolution, legacy installs, CLI argument forwarding and exit codes. Packaging checks do not publish anything or require registry credentials.
+`node --test scripts/npm-packages.test.js` checks the package layout, supported targets, binary resolution, postinstall placement, the placeholder fallback, legacy installs, CLI argument forwarding and exit codes. Packaging checks do not publish anything or require registry credentials.
