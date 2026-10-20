@@ -32,7 +32,9 @@ test('release packages contain one binary each and a small launcher', t => {
   assert.equal(main.version, '2.0.1');
   assert.equal(Object.keys(main.optionalDependencies).length, 6);
   assert.deepEqual(fs.readdirSync(path.join(built.main, 'bin')).sort(), [...launcherFiles].sort());
-  assert.equal(main.bin.ccl, './bin/ccl.exe');
+  // npm rewrites a "./"-prefixed bin target and warns on every publish, so the
+  // generated manifest already carries npm's normalized form.
+  assert.equal(main.bin.ccl, 'bin/ccl.exe');
   assert.equal(main.scripts.postinstall, 'node bin/install.js');
   // No shebang: npm's Windows shim must execute the placed binary directly.
   assert.ok(!fs.readFileSync(path.join(built.main, 'bin', 'ccl.exe'), 'utf8').startsWith('#!'));

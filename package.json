@@ -7,7 +7,7 @@
     "url": "git+https://github.com/claude-code-launch/ccl.git"
   },
   "bin": {
-    "ccl": "./bin/ccl.exe"
+    "ccl": "bin/ccl.exe"
   },
   "files": [
     "bin/",

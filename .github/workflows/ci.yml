@@ -68,7 +68,7 @@ jobs:
         run: go test -race ./cmd -run 'Test(ConfigAllRows|PickersFollow|CJKCancel|ProviderSelectionFits|OAuthAndMapping|TooSmallTerminal|Proxy)'
       - name: Test Claude model picker labels and process launch
         run: go test -race -v ./internal/claude -run 'Test(Agent|ModelPicker|ProviderModelPicker|BuildEnvUsesProviderCatalogDisplayNames|CatalogModelOverrides|ModelDisplayName|SettingsRespectTheUsersOwnPreferences|ProcessEnv)'
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Test npm packaging and ACP configuration decorators

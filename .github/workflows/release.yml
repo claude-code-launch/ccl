@@ -97,7 +97,7 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Cache target dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/go/pkg/mod
@@ -129,7 +129,7 @@ jobs:
         run: gzip -9 -n "dist/${{ matrix.asset }}"
       - name: Upload binary
         if: github.ref_type == 'tag'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}.gz
@@ -147,7 +147,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: ccl-*
           path: dist
@@ -193,13 +193,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: ccl-*
           path: dist
           merge-multiple: true
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'

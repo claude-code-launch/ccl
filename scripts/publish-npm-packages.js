@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { execFile, spawnSync } = require('child_process');
 const { platforms } = require('../bin/platforms');
 
 const registry = 'https://registry.npmjs.org/';
@@ -31,16 +31,54 @@ function responseDetails(response) {
   return fields.join(' ');
 }
 
-// Existence and installability are different: never republish an existing
-// version, but do not mistake npm view's answer for a downloadable package.
-function published(name, version) {
-  const result = spawnSync('npm', ['view', name + '@' + version, 'version', '--json', '--prefer-online'], {
-    encoding: 'utf8', timeout: 60000,
+// The registry serves packument metadata with `cache-control: max-age=300`
+// and its CDN ignores our `cache-control: no-cache` request header, so a fresh
+// publish stays invisible behind a HIT for up to five minutes. A unique query
+// parameter turns the lookup into an origin MISS. `write=true` would also
+// bypass the cache, but it is rejected with 406 for install-v1 metadata.
+let cacheBuster = 0;
+
+function fresh(url) {
+  const copy = new URL(url);
+  copy.searchParams.set('ccl-check', Date.now().toString(36) + '-' + (++cacheBuster));
+  return copy;
+}
+
+async function catalog(name, request, origin) {
+  const response = await request(fresh(new URL(name.replace('/', '%2f'), origin)), {
+    headers: { accept: 'application/json', 'cache-control': 'no-cache', pragma: 'no-cache' },
+    signal: AbortSignal.timeout(15000), redirect: 'error',
   });
-  if (result.error) throw result.error;
-  if (result.status === 0) return JSON.parse(result.stdout) === version;
-  if ((result.stderr || '').includes('E404')) return false;
-  throw new Error('Cannot check ' + name + '@' + version + ': ' + result.stderr);
+  return response;
+}
+
+// Existence and installability are different: never republish an existing
+// version, but do not mistake a version in the catalog for a downloadable
+// package. Reads the origin directly so a re-run after a publish does not see
+// a stale "not published" and attempt a doomed second upload.
+async function published(name, version, options = {}) {
+  const response = await catalog(name, options.fetch || fetch, options.registry || registry);
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error('Cannot check ' + name + '@' + version + ': HTTP ' + response.status);
+  const body = JSON.parse((await bodyBytes(response, 32 << 20)).toString('utf8'));
+  return Boolean(body.versions && typeof body.versions[version] === 'object');
+}
+
+// Async so the six platform checks and uploads overlap instead of serialising
+// on a blocked event loop. Output is captured per package so concurrent
+// publishes do not interleave into unreadable logs.
+function npm(args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile('npm', args, { encoding: 'utf8', maxBuffer: 8 << 20, ...options }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 
 async function bodyBytes(response, limit) {
@@ -69,7 +107,7 @@ async function installable(name, version, options = {}) {
       stage = accept === installAccept ? 'install-v1 metadata' : 'full metadata';
       started = Date.now();
       details = '';
-      const response = await request(metadataURL, {
+      const response = await request(fresh(metadataURL), {
         headers: { accept, 'cache-control': 'no-cache', pragma: 'no-cache' },
         signal: AbortSignal.timeout(15000), redirect: 'error',
       });
@@ -192,10 +230,13 @@ async function publishPackages(root, options = {}) {
   const log = options.log || logPublish;
   const started = Date.now();
   const exists = options.published || published;
-  const publish = options.publish || (cwd => {
-    const result = spawnSync('npm', ['publish', '--provenance', '--access', 'public'], { cwd, stdio: 'inherit', timeout: 180000 });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error('npm publish failed in ' + cwd);
+  const publish = options.publish || (async cwd => {
+    try {
+      await npm(['publish', '--provenance', '--access', 'public'], { cwd, timeout: 180000 });
+    } catch (err) {
+      if (err.stderr) log('[publish] ' + cwd + ' npm output:\n' + err.stderr.trim());
+      throw new Error('npm publish failed in ' + cwd + (err.message ? ': ' + err.message : ''));
+    }
   });
   const launcher = path.join(root, 'main');
   const launcherPkg = JSON.parse(fs.readFileSync(path.join(launcher, 'package.json'), 'utf8'));
@@ -222,8 +263,10 @@ async function publishPackages(root, options = {}) {
         '; installability is not yet confirmed');
     }
   }
-  log('[phase] publishing ' + packages.length + ' platform packages');
-  for (const pkg of packages) await publishOne(pkg);
+  // npm accepts independent publishes in parallel; serialising them only made
+  // the registry's own indexing lag visible, one package at a time.
+  log('[phase] publishing ' + packages.length + ' platform packages in parallel');
+  await Promise.all(packages.map(publishOne));
   // Both npm metadata representations and every archive must be usable before
   // the launcher referencing those exact platform versions can be published.
   log('[phase] verifying platform availability');
@@ -236,8 +279,8 @@ async function publishPackages(root, options = {}) {
 }
 
 if (require.main === module) {
-  const npm = spawnSync('npm', ['--version'], { encoding: 'utf8', timeout: 10000 });
-  logPublish('[environment] node=' + process.version + ' npm=' + (npm.status === 0 ? npm.stdout.trim() : 'unknown'));
+  const version = spawnSync('npm', ['--version'], { encoding: 'utf8', timeout: 10000 });
+  logPublish('[environment] node=' + process.version + ' npm=' + (version.status === 0 ? version.stdout.trim() : 'unknown'));
   publishPackages(path.resolve(process.argv[2] || 'dist/npm')).catch(err => {
     logPublish('[failed] ' + err.message);
     process.exit(1);
