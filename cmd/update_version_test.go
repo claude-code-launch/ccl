@@ -3,6 +3,8 @@ package cmd
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -110,5 +112,36 @@ func TestUpdateChoicesDropNpmUntilPublished(t *testing.T) {
 	with := updateChoices(true)
 	if len(with) != 3 || with[1].method != "npm" {
 		t.Fatalf("choices with npm = %+v", with)
+	}
+}
+
+func TestVerifyNpmInstallRejectsAnotherVersion(t *testing.T) {
+	// A fake ccl that answers `version` with a fixed string, standing in for
+	// either a working install or one that still runs the old release.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ccl")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'ccl version v1.6.5'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := verifyNpmInstall("v1.6.6"); err == nil {
+		t.Fatal("an old version was accepted as the new install")
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'ccl version v1.6.6'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyNpmInstall("1.6.6"); err != nil {
+		t.Fatalf("matching version rejected: %v", err)
+	}
+}
+
+func TestVerifyNpmInstallRejectsAMissingBinary(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ccl"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	if err := verifyNpmInstall("v1.6.6"); err == nil {
+		t.Fatal("a broken ccl was accepted")
 	}
 }

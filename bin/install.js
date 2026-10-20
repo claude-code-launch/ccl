@@ -33,7 +33,7 @@ function install(binDir, os, arch) {
     try { source = resolveBinary(binDir, os, arch); }
     catch (err) {
         console.error('[@claudecodelaunch/ccl postinstall] ' + err.message);
-        console.error('  ccl will run through Node.js: node ' + path.join(binDir, 'wrapper.js'));
+        console.error('  Without the platform package ccl cannot run natively.');
         return false;
     }
     placeBinary(source, path.join(binDir, 'ccl.exe'));
@@ -42,9 +42,13 @@ function install(binDir, os, arch) {
 
 module.exports = { install: install, placeBinary: placeBinary };
 if (require.main === module) {
-    try { install(__dirname, process.platform, process.arch); }
+    var placed;
+    try { placed = install(__dirname, process.platform, process.arch); }
     catch (err) {
         console.error('[@claudecodelaunch/ccl postinstall] Failed to place binary: ' + err.message);
         process.exitCode = 1;
     }
+    // A failed postinstall must fail the install: exiting 0 here leaves a ccl
+    // command that only reports a missing binary on first use.
+    if (placed === false) process.exitCode = 1;
 }

@@ -132,6 +132,23 @@ func runUpdate(method string) error {
 		if err := runUpdateCommand("npm", "install", "-g", "@claudecodelaunch/ccl@latest"); err != nil {
 			return fmt.Errorf("npm update failed: %w", err)
 		}
+		// npm lists a launcher before its platform package is downloadable, and
+		// skips an optional dependency it cannot resolve without failing the
+		// install. The command then has no binary, so confirm the new one runs.
+		if err := verifyNpmInstall(latestVersion); err != nil {
+			fmt.Printf("\n⚠️  %v\n", err)
+			if runtime.GOOS == "windows" {
+				// The running executable cannot be replaced here; npm fetches the
+				// platform package once the registry finishes indexing it.
+				return fmt.Errorf("npm installed ccl without its native binary; run \"npm install -g @claudecodelaunch/ccl@%s\" again in a moment", canonicalReleaseTag(latestVersion))
+			}
+			fmt.Println("Downloading the release binary directly instead...")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			if selfErr := selfUpdate(ctx, latestVersion); selfErr != nil {
+				return fmt.Errorf("npm installed ccl without its native binary and the direct download failed too: %w", selfErr)
+			}
+		}
 		fmt.Println("\n🎉 Successfully updated ccl to the latest version via npm!")
 	case "go":
 		fmt.Println("Updating via Go... Running 'go install github.com/claude-code-launch/ccl@latest'")
@@ -201,6 +218,52 @@ func promptUpdateMethod(detected string, npmReady bool) string {
 	default:
 		return "cancel"
 	}
+}
+
+// verifyNpmInstall checks that the command npm just replaced runs and reports
+// the release being installed. `npm install` exits 0 when it silently skipped
+// an optional platform package, leaving a launcher with no binary behind it.
+func verifyNpmInstall(want string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var candidates []string
+	// os.Executable is the file npm replaced; PATH covers an invocation through
+	// a shim that resolves elsewhere. Only a ccl binary is probed: a test or
+	// `go run` executable would answer the argument some other way.
+	if exe, err := os.Executable(); err == nil {
+		if base := filepath.Base(exe); base == "ccl" || base == "ccl.exe" {
+			candidates = append(candidates, exe)
+		}
+	}
+	if path, err := exec.LookPath("ccl"); err == nil {
+		for _, known := range candidates {
+			if filepath.Clean(known) == filepath.Clean(path) {
+				path = ""
+				break
+			}
+		}
+		if path != "" {
+			candidates = append(candidates, path)
+		}
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("ccl cannot be found after the npm install")
+	}
+	var lastErr error
+	for _, path := range candidates {
+		out, err := exec.CommandContext(ctx, path, "version").Output()
+		if err != nil {
+			lastErr = fmt.Errorf("%s does not run: %w", path, err)
+			continue
+		}
+		got := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "ccl version"))
+		if canonicalReleaseTag(got) != canonicalReleaseTag(want) {
+			lastErr = fmt.Errorf("%s reports %s, not %s", path, got, want)
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func runUpdateCommand(name string, args ...string) error {

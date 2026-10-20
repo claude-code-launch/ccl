@@ -63,7 +63,10 @@ test('resolves all native packages and preserves legacy bundled installs', t => 
     assert.equal(resolveBinary(bin, p.os, p.arch), legacy);
   });
   assert.throws(() => resolveBinary(bin, 'linux', 'ia32'), /Unsupported platform/);
-  assert.throws(() => resolveBinary(path.join(fixture(t), 'bin'), 'linux', 'x64'), /optional dependencies enabled/);
+  // The advice must be the reinstall command, not "uninstall first": npm
+  // skipped the platform package, so installing again is all that is missing.
+  assert.throws(() => resolveBinary(path.join(fixture(t), 'bin'), 'linux', 'x64'),
+    /npm install -g @claudecodelaunch\/ccl@latest/);
 });
 
 test('postinstall replaces the placeholder with the native binary', t => {
@@ -187,4 +190,42 @@ test('npm installs exactly one native tarball from platform optional dependencie
   assert.equal(fs.readFileSync(resolveBinary(launcherBin, process.platform, process.arch), 'utf8'), native.asset);
   // postinstall put the native binary behind the installed command itself.
   assert.equal(fs.readFileSync(path.join(launcherBin, 'ccl.exe'), 'utf8'), native.asset);
+});
+
+test('postinstall fails the install when the platform package is missing', t => {
+  const root = fixture(t);
+  const bin = path.join(root, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'ccl.exe'), 'placeholder');
+  fs.copyFileSync(path.join(__dirname, '..', 'bin', 'install.js'), path.join(bin, 'install.js'));
+  fs.copyFileSync(path.join(__dirname, '..', 'bin', 'wrapper.js'), path.join(bin, 'wrapper.js'));
+  fs.copyFileSync(path.join(__dirname, '..', 'bin', 'platforms.js'), path.join(bin, 'platforms.js'));
+  // A zero exit code here would let npm finish an install that has no binary.
+  const result = spawnSync(process.execPath, [path.join(bin, 'install.js')], { encoding: 'utf8' });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /npm install -g @claudecodelaunch\/ccl@/);
+  assert.equal(fs.readFileSync(path.join(bin, 'ccl.exe'), 'utf8'), 'placeholder');
+});
+
+test('publishing waits until every platform package resolves', async () => {
+  const { waitUntilInstallable } = require('./publish-npm-packages');
+  const probes = [];
+  const sleeps = [];
+  await waitUntilInstallable('@claudecodelaunch/ccl-darwin-arm64@2.0.1', '@claudecodelaunch/ccl-darwin-arm64', '2.0.1', {
+    probe: () => { probes.push(Date.now()); return probes.length >= 3; },
+    sleep: ms => { sleeps.push(ms); return Promise.resolve(); },
+  });
+  assert.equal(probes.length, 3);
+  assert.deepEqual(sleeps, [1000, 2000]);
+});
+
+test('publishing gives up when a package never resolves', async () => {
+  const { waitUntilInstallable } = require('./publish-npm-packages');
+  await assert.rejects(
+    waitUntilInstallable('@claudecodelaunch/ccl-linux-x64@2.0.1', '@claudecodelaunch/ccl-linux-x64', '2.0.1', {
+      probe: () => false,
+      sleep: () => Promise.resolve(),
+      timeout: 0,
+    }),
+    /still cannot resolve it/);
 });
