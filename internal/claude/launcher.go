@@ -67,6 +67,21 @@ type settingsJSON struct {
 	// when the provider opts out, which lets Claude Code fall back to the user's
 	// statusLine from ~/.claude/settings.json.
 	StatusLine *statusLineConfig `json:"statusLine,omitempty"`
+	// Attribution hides Claude Code's git/PR signature. ccl turns it off by
+	// default (see SigningEnabled); an omitted value leaves Claude Code's own.
+	Attribution *attributionConfig `json:"attribution,omitempty"`
+	// IncludeCoAuthoredBy is the deprecated form of the same switch, written
+	// alongside Attribution so Claude Code versions that predate it also stop
+	// signing. It is only ever set to false.
+	IncludeCoAuthoredBy *bool `json:"includeCoAuthoredBy,omitempty"`
+}
+
+// attributionConfig is Claude Code's attribution settings object. The commit
+// and pr fields are the attribution text; an empty text hides it.
+type attributionConfig struct {
+	Commit     string `json:"commit"`
+	PR         string `json:"pr"`
+	SessionURL bool   `json:"sessionUrl"`
 }
 
 // modelPickerConfig is Claude Code's modelPicker settings object: the rows
@@ -612,6 +627,14 @@ func (c *providerContext) settingsForCWD(cwd string) settingsJSON {
 		DisableClaudeAiConnectors: true,
 	}
 	userKeys := userDefinedSettings(cwd)
+	if !SigningEnabled() && !userKeys["attribution"] && !userKeys["includeCoAuthoredBy"] {
+		// ccl signs nothing by default. Empty texts hide the trailer; the
+		// deprecated boolean keeps older Claude Code versions quiet too. A user
+		// who configured attribution themselves keeps their choice.
+		settings.Attribution = attributionOff()
+		include := false
+		settings.IncludeCoAuthoredBy = &include
+	}
 	if !userKeys["outputStyle"] {
 		settings.OutputStyle = DefaultOutputStyle
 	}

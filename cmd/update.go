@@ -35,6 +35,13 @@ const releaseArchiveSuffix = ".gz"
 // hostile archive cannot fill the disk. Release binaries are about 30 MiB.
 var maxReleaseBinaryBytes int64 = 256 << 20
 
+// latestReleaseAPI is the GitHub endpoint naming the newest published release.
+// It is the version source of truth: the GitHub release and its assets exist
+// before the npm job that publishes the matching package has run.
+var latestReleaseAPI = "https://api.github.com/repos/claude-code-launch/ccl/releases/latest"
+
+var updateHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
 var updateMethod string
 
 var updateCmd = func() *cobra.Command {
@@ -60,10 +67,9 @@ func runUpdate(method string) error {
 	fmt.Printf("Current version: %s\n", Version)
 	fmt.Println("Checking for updates...")
 
-	latestVersion, err := fetchLatestNpmVersion()
-	if err != nil {
-		fmt.Printf("⚠️  Could not check for latest version: %v\n", err)
-		latestVersion = "unknown"
+	latestVersion, npmReady := latestVersions()
+	if latestVersion == "unknown" {
+		fmt.Println("⚠️  Could not check for latest version: neither the GitHub release nor the npm registry answered")
 	} else {
 		fmt.Printf("Latest version: %s\n\n", latestVersion)
 	}
@@ -71,15 +77,39 @@ func runUpdate(method string) error {
 		fmt.Println("✨ You are already on the latest version!")
 		return nil
 	}
+	// The npm package is published by a later job than the GitHub release, so a
+	// brand-new version can exist for hours without an npm package. Offering npm
+	// then installs an older version (or fails), and a launcher replaced by npm
+	// has to be reinstalled by hand.
 
 	detected := detectInstallMethod()
+	suggested := detected
+	if detected == "npm" && !npmReady {
+		// npm can only install its own latest, which is still the old release.
+		// Replacing the binary in place leaves the npm package installed; on
+		// Windows a running executable cannot be replaced, so there is nothing
+		// to offer yet.
+		if runtime.GOOS == "windows" {
+			return fmt.Errorf("npm has not published %s yet (the registry lags the GitHub release) and Windows cannot replace a running binary; retry later or run ccl update --method go", latestVersion)
+		}
+		suggested = "self"
+	}
 	method = strings.ToLower(strings.TrimSpace(method))
 	switch method {
 	case "":
 		if !term.IsTerminal(os.Stdin.Fd()) {
-			return fmt.Errorf("no terminal to ask on; run ccl update --method %s (detected) or self|npm|go", detected)
+			available := "self|go"
+			if npmReady {
+				available = "self|npm|go"
+			}
+			return fmt.Errorf("no terminal to ask on; run ccl update --method %s (suggested) or %s", suggested, available)
 		}
-		method = promptUpdateMethod(detected)
+		if detected == "npm" && !npmReady {
+			fmt.Println(locale.T(
+				"npm 上还没有这个版本；本次只替换二进制文件，不重装 npm 包。",
+				"npm does not carry this version yet; replacing the binary in place instead of reinstalling the npm package."))
+		}
+		method = promptUpdateMethod(suggested, npmReady)
 	case "self", "npm", "go":
 	default:
 		return fmt.Errorf("unknown update method %q; use self, npm, or go", method)
@@ -91,10 +121,13 @@ func runUpdate(method string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		if err := selfUpdate(ctx, latestVersion); err != nil {
-			return fmt.Errorf("self-update failed (try the npm or go method instead): %w", err)
+			return fmt.Errorf("self-update failed (try the go method instead): %w", err)
 		}
 		fmt.Println("\n🎉 Successfully updated ccl to the latest version!")
 	case "npm":
+		if !npmReady {
+			return fmt.Errorf("npm does not have %s yet (publishing lags the GitHub release); use --method self or go", latestVersion)
+		}
 		fmt.Println("Updating via npm... Running 'npm install -g @claudecodelaunch/ccl@latest'")
 		if err := runUpdateCommand("npm", "install", "-g", "@claudecodelaunch/ccl@latest"); err != nil {
 			return fmt.Errorf("npm update failed: %w", err)
@@ -115,36 +148,55 @@ func runUpdate(method string) error {
 	return nil
 }
 
-// promptUpdateMethod asks which method to use; Enter picks the detected one.
-func promptUpdateMethod(detected string) string {
-	labels := map[string]string{"self": "1", "npm": "2", "go": "3"}
-	fmt.Println(locale.T("选择更新方式:", "Choose update method:"))
-	for _, row := range []struct{ key, text string }{
-		{"self", "1. Auto update (download latest binary)"},
-		{"npm", "2. Update via npm (Global install)"},
-		{"go", "3. Update via Go (go install)"},
-	} {
-		if row.key == detected {
-			fmt.Println(row.text + "  ← detected")
-		} else {
-			fmt.Println(row.text)
-		}
+// updateChoice is one row of the update prompt; its number is its position.
+type updateChoice struct{ method, text string }
+
+// updateChoices lists the methods this run can actually use: npm is left out
+// until the registry carries the version being installed.
+func updateChoices(npmReady bool) []updateChoice {
+	choices := []updateChoice{
+		{"self", "Auto update (download latest binary)"},
 	}
-	fmt.Println("4. View installation instructions")
-	fmt.Println("5. Cancel")
-	fmt.Printf("Choose [1-5] (Enter = %s): ", labels[detected])
+	if npmReady {
+		choices = append(choices, updateChoice{"npm", "Update via npm (Global install)"})
+	}
+	return append(choices, updateChoice{"go", "Update via Go (go install)"})
+}
+
+// promptUpdateMethod asks which method to use; Enter picks the detected one.
+func promptUpdateMethod(detected string, npmReady bool) string {
+	choices := updateChoices(npmReady)
+	labels := make(map[string]string, len(choices))
+	fmt.Println(locale.T("选择更新方式:", "Choose update method:"))
+	defaultChoice := choices[0].method
+	for i, row := range choices {
+		number := fmt.Sprintf("%d", i+1)
+		labels[row.method] = number
+		text := number + ". " + row.text
+		if row.method == detected {
+			text += "  ← detected"
+			defaultChoice = detected
+		}
+		fmt.Println(text)
+	}
+	manual := len(choices) + 1
+	cancel := len(choices) + 2
+	fmt.Printf("%d. View installation instructions\n%d. Cancel\n", manual, cancel)
+	fmt.Printf("Choose [1-%d] (Enter = %s): ", cancel, labels[defaultChoice])
 	var choice string
 	_, _ = fmt.Scanln(&choice)
-	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "":
-		return detected
-	case "1", "auto", "self":
-		return "self"
-	case "2", "npm":
-		return "npm"
-	case "3", "go":
-		return "go"
-	case "4", "manual":
+	trimmed := strings.ToLower(strings.TrimSpace(choice))
+	if trimmed == "" {
+		return defaultChoice
+	}
+	for i, row := range choices {
+		if trimmed == fmt.Sprintf("%d", i+1) || trimmed == row.method ||
+			(row.method == "self" && trimmed == "auto") {
+			return row.method
+		}
+	}
+	switch trimmed {
+	case fmt.Sprintf("%d", manual), "manual":
 		return "manual"
 	default:
 		return "cancel"
@@ -209,11 +261,61 @@ func goBinDirs() []string {
 	return dirs
 }
 
-func fetchLatestNpmVersion() (string, error) {
-	client := http.Client{
-		Timeout: 5 * time.Second,
+// latestVersions resolves the version ccl update installs and whether npm
+// carries it. The GitHub release is authoritative and appears first; npm is
+// both the fallback when the GitHub API is unreachable (it is blocked on some
+// networks) and the gate on the npm method.
+func latestVersions() (latest string, npmReady bool) {
+	release, releaseErr := fetchLatestReleaseVersion()
+	npm, npmErr := fetchLatestNpmVersion()
+	switch {
+	case releaseErr == nil:
+		latest = release
+	case npmErr == nil:
+		latest = npm
+	default:
+		return "unknown", false
 	}
-	resp, err := client.Get("https://registry.npmjs.org/@claudecodelaunch/ccl/latest")
+	return latest, npmErr == nil && npm != "unknown" && canonicalReleaseTag(npm) == canonicalReleaseTag(latest)
+}
+
+// fetchLatestReleaseVersion names the newest published GitHub release.
+func fetchLatestReleaseVersion() (string, error) {
+	req, err := http.NewRequest(http.MethodGet, latestReleaseAPI, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := updateHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		TagName    string `json:"tag_name"`
+		Draft      bool   `json:"draft"`
+		Prerelease bool   `json:"prerelease"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return "", err
+	}
+	if result.TagName == "" {
+		return "", fmt.Errorf("empty tag in response")
+	}
+	if result.Draft || result.Prerelease {
+		return "", fmt.Errorf("latest release %s is not a stable release", result.TagName)
+	}
+	return canonicalReleaseTag(result.TagName), nil
+}
+
+// fetchLatestNpmVersion names the newest version of the npm launcher package.
+func fetchLatestNpmVersion() (string, error) {
+	resp, err := updateHTTPClient.Get("https://registry.npmjs.org/@claudecodelaunch/ccl/latest")
 	if err != nil {
 		return "", err
 	}
@@ -226,15 +328,13 @@ func fetchLatestNpmVersion() (string, error) {
 	var result struct {
 		Version string `json:"version"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return "", err
 	}
-
 	if result.Version == "" {
 		return "", fmt.Errorf("empty version in response")
 	}
-
-	return "v" + result.Version, nil
+	return canonicalReleaseTag(result.Version), nil
 }
 
 // releaseAssetName returns the GitHub release asset name for the current

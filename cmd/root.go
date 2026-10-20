@@ -32,6 +32,7 @@ Common commands:
   ccl doctor                  Environment + provider + subscription health
   ccl acp                     Agent Client Protocol on stdio (Xcode 27 and other ACP clients)
   ccl cloud login|push|pull   Encrypted multi-remote config sync
+  ccl sign on|off             Claude's commit/PR signature (off by default; --default also edits ~/.claude/settings.json)
   ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)
 
 Deprecated root shortcuts (removed in the next minor release):
@@ -121,6 +122,8 @@ func configureLogging() {
 		return
 	}
 	oauthproxy.ConfigureLogLevel(configuredLogLevel(cfg.LogLevel))
+	// Every launch path (normal, proxy serve, ACP) reads the same switch.
+	claude.ConfigureSignOn(cfg.SignOn)
 }
 
 func isCclCommand(arg string) bool {

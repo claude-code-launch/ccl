@@ -113,6 +113,10 @@ var standaloneAbsentValues = map[string]json.RawMessage{
 	"outputStyle":    json.RawMessage(`"default"`),
 	"language":       json.RawMessage(`""`),
 	"statusLine":     json.RawMessage(`{"type":"command","command":""}`),
+	// An empty attribution object leaves the signature texts to Claude Code,
+	// which is what "not set" means for them.
+	"attribution":         json.RawMessage(`{}`),
+	"includeCoAuthoredBy": json.RawMessage(`true`),
 }
 
 func standaloneOverlayDefault(key string, before json.RawMessage) json.RawMessage {

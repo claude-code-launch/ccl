@@ -221,7 +221,11 @@ type Config struct {
 	ConfigVersion int `yaml:"config_version,omitempty"`
 	// LogLevel is the threshold for ccl's per-session slog files: debug, info,
 	// warn, error, or off. Config loading normalizes an omitted value to off.
-	LogLevel  string              `yaml:"log_level,omitempty"`
+	LogLevel string `yaml:"log_level,omitempty"`
+	// SignOn keeps Claude Code's git/PR attribution in ccl-launched sessions.
+	// It is off unless asked for: ccl writes Claude Code's attribution setting
+	// with empty texts, so commits get no Co-Authored-By trailer.
+	SignOn    bool                `yaml:"sign_on,omitempty"`
 	Providers map[string]Provider `yaml:"providers"`
 }
 
