@@ -231,12 +231,16 @@ test('publishing waits until every platform package resolves', async () => {
   const { waitUntilInstallable } = require('./publish-npm-packages');
   const probes = [];
   const sleeps = [];
+  const logs = [];
   await waitUntilInstallable('@claudecodelaunch/ccl-darwin-arm64@2.0.1', '@claudecodelaunch/ccl-darwin-arm64', '2.0.1', {
     probe: () => { probes.push(Date.now()); return probes.length >= 3; },
     sleep: ms => { sleeps.push(ms); return Promise.resolve(); },
+    log: message => logs.push(message),
   });
   assert.equal(probes.length, 3);
   assert.deepEqual(sleeps, [1000, 2000]);
+  assert.ok(logs.some(line => line.includes('[pending]') && line.includes('probe returned not ready')));
+  assert.ok(logs.some(line => line.includes('[ready]') && line.includes('attempt=3') && line.includes('elapsed=')));
 });
 
 test('publishing gives up when a package never resolves without busy looping', async () => {
@@ -279,9 +283,9 @@ test('readiness verifies install metadata, actual archive, integrity and latest'
   const { installable } = require('./publish-npm-packages');
   const name = platforms[0].packageName;
   for (const [fault, error] of [
-    [{ missingInstallView: true }, /missing from/],
-    [{ tarballStatus: 404 }, /tarball: HTTP 404/],
-    [{ corrupt: true }, /integrity mismatch/],
+    [{ missingInstallView: true }, /install-v1 metadata failed after .*missing from.*HTTP=200/],
+    [{ tarballStatus: 404 }, /tarball download\/SHA512 failed after .*tarball: HTTP 404/],
+    [{ corrupt: true }, /tarball download\/SHA512 failed after .*integrity mismatch/],
     [{ latest: '2.0.0' }, /latest does not point/],
   ]) {
     await assert.rejects(installable(name, '2.0.1', { fetch: registryProbe(fault).fetch, latest: true }), error);
