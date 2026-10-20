@@ -3,85 +3,156 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const { platforms } = require('../bin/platforms');
 
-// Publish platform packages first: the launcher must never point to versions
-// which have not been published. npm Trusted Publishing is configured per package.
-//
-// A package is not installable the moment `npm publish` returns: the registry
-// accepts it, runs provenance, and only then serves its metadata. The launcher
-// pins exact platform versions, and npm silently skips an optional dependency
-// that cannot be resolved, so publishing the launcher while a platform package
-// is still being processed installs a ccl with no binary. Wait for every
-// published package to answer before moving on.
-const root = path.resolve(process.argv[2] || 'dist/npm');
+const registry = 'https://registry.npmjs.org/';
+const installAccept = 'application/vnd.npm.install-v1+json';
+const waitTimeout = 30 * 60 * 1000;
 
+// Existence and installability are different: never republish an existing
+// version, but do not mistake npm view's answer for a downloadable package.
 function published(name, version) {
-  const result = spawnSync('npm', ['view', name + '@' + version, 'version', '--json'], { encoding: 'utf8' });
-  if (result.status !== 0) return false;
-  try { return JSON.parse(result.stdout) === version; }
-  catch (err) { return false; }
+  const result = spawnSync('npm', ['view', name + '@' + version, 'version', '--json', '--prefer-online'], {
+    encoding: 'utf8', timeout: 60000,
+  });
+  if (result.error) throw result.error;
+  if (result.status === 0) return JSON.parse(result.stdout) === version;
+  if ((result.stderr || '').includes('E404')) return false;
+  throw new Error('Cannot check ' + name + '@' + version + ': ' + result.stderr);
 }
 
-// waitUntilInstallable polls until the registry resolves spec. The probe and
-// sleep are injectable so the behaviour is testable without a registry.
-async function waitUntilInstallable(spec, name, version, options) {
-  const probe = (options && options.probe) || published;
-  const sleep = (options && options.sleep) || (ms => new Promise(resolve => setTimeout(resolve, ms)));
-  // An explicit 0 (a test) must mean "no waiting", not "use the default".
-  const timeout = options && options.timeout !== undefined ? options.timeout : 15 * 60 * 1000;
-  const deadline = Date.now() + timeout;
-  let delay = 1000;
-  for (;;) {
-    if (probe(name, version)) return;
-    if (Date.now() > deadline) {
-      throw new Error(spec + ' was published but the registry still cannot resolve it after 15 minutes');
+async function bodyBytes(response, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.length;
+    if (size > limit) throw new Error('registry response exceeded ' + limit + ' bytes');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function installable(name, version, options = {}) {
+  const origin = options.registry || registry;
+  const request = options.fetch || fetch;
+  const metadataURL = new URL(name.replace('/', '%2f'), origin);
+  const manifests = [];
+  for (const accept of ['application/json', installAccept]) {
+    const response = await request(metadataURL, {
+      headers: { accept, 'cache-control': 'no-cache', pragma: 'no-cache' },
+      signal: AbortSignal.timeout(15000), redirect: 'error',
+    });
+    if (!response.ok) throw new Error(name + ' metadata: HTTP ' + response.status);
+    const catalog = JSON.parse((await bodyBytes(response, 8 << 20)).toString('utf8'));
+    const manifest = catalog.versions && catalog.versions[version];
+    if (!manifest || manifest.version !== version || manifest.name !== name || !manifest.dist) {
+      throw new Error(name + '@' + version + ' missing from ' + accept + ' metadata');
     }
-    console.log(spec + ' is not in the registry yet; waiting ' + Math.round(delay / 1000) + 's');
-    await sleep(delay);
+    if (options.latest && (!catalog['dist-tags'] || catalog['dist-tags'].latest !== version)) {
+      throw new Error(name + ' latest does not point to ' + version);
+    }
+    manifests.push(manifest);
+  }
+  const dist = manifests[0].dist;
+  if (!dist.tarball || manifests[1].dist.tarball !== dist.tarball || manifests[1].dist.integrity !== dist.integrity) {
+    throw new Error(name + ' metadata disagrees about the tarball');
+  }
+  const tarball = new URL(dist.tarball);
+  if (tarball.origin !== metadataURL.origin) throw new Error('unexpected tarball origin for ' + name);
+  const response = await request(tarball, {
+    headers: { 'cache-control': 'no-cache' }, signal: AbortSignal.timeout(30000), redirect: 'error',
+  });
+  if (!response.ok) throw new Error(name + ' tarball: HTTP ' + response.status);
+  // Hash the complete archive, without retaining six platform tarballs in RAM.
+  const hash = crypto.createHash('sha512');
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.length;
+    if (size > 128 << 20) throw new Error(name + ' tarball is too large');
+    hash.update(chunk);
+  }
+  const want = 'sha512-' + hash.digest('base64');
+  if (!size || !(dist.integrity || '').split(/\s+/).includes(want)) {
+    throw new Error(name + ' tarball integrity mismatch');
+  }
+  return true;
+}
+
+// One deadline covers the whole platform set, not 30 minutes per package.
+// Count scheduled sleeps as well as wall time, so a fake clock or resolved
+// test promise cannot turn an unsuccessful probe into an unbounded busy loop.
+async function waitForPackages(packages, options = {}) {
+  const probe = options.probe || ((name, version) => installable(name, version, options));
+  const sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const now = options.now || Date.now;
+  const timeout = options.timeout === undefined ? waitTimeout : options.timeout;
+  const start = now();
+  let waited = 0;
+  let delay = 1000;
+  let pending = packages;
+  let lastError;
+  for (;;) {
+    const remaining = [];
+    for (const pkg of pending) {
+      try {
+        if (!await probe(pkg.name, pkg.version)) remaining.push(pkg);
+      } catch (err) {
+        lastError = err;
+        remaining.push(pkg);
+      }
+      if (Math.max(now() - start, waited) >= timeout && remaining.length) break;
+    }
+    if (!remaining.length) return;
+    const left = timeout - Math.max(now() - start, waited);
+    if (left <= 0) {
+      throw new Error('Registry still cannot resolve it for installation: ' +
+        remaining.map(p => p.name + '@' + p.version).join(', ') + (lastError ? '; ' + lastError.message : ''));
+    }
+    pending = remaining;
+    const pause = Math.min(delay, left);
+    console.log('Waiting for npm packages to become installable: ' + pending.map(p => p.name).join(', '));
+    await sleep(pause);
+    waited += pause;
     delay = Math.min(delay * 2, 30000);
   }
 }
 
-async function main() {
+async function waitUntilInstallable(spec, name, version, options) {
+  return waitForPackages([{ name, version }], options);
+}
+
+async function publishPackages(root, options = {}) {
+  const exists = options.published || published;
+  const publish = options.publish || (cwd => {
+    const result = spawnSync('npm', ['publish', '--provenance', '--access', 'public'], { cwd, stdio: 'inherit', timeout: 180000 });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error('npm publish failed in ' + cwd);
+  });
   const launcher = path.join(root, 'main');
   const launcherPkg = JSON.parse(fs.readFileSync(path.join(launcher, 'package.json'), 'utf8'));
-  const platformDirs = platforms.map(p => ({ directory: p.os + '-' + p.arch, name: p.packageName }));
-
-  for (const { directory, name } of platformDirs) {
-    const cwd = path.join(root, directory);
+  const packages = platforms.map(platform => {
+    const cwd = path.join(root, platform.os + '-' + platform.arch);
     const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8'));
-    const spec = name + '@' + pkg.version;
-    if (published(name, pkg.version)) {
-      console.log(spec + ' already exists; skipping.');
-      continue;
+    if (pkg.name !== platform.packageName || !launcherPkg.optionalDependencies || launcherPkg.optionalDependencies[pkg.name] !== pkg.version) {
+      throw new Error('launcher dependency does not match ' + platform.packageName);
     }
-    const publish = spawnSync('npm', ['publish', '--provenance', '--access', 'public'], { cwd, stdio: 'inherit' });
-    if (publish.error) throw publish.error;
-    if (publish.status !== 0) throw new Error('npm publish failed for ' + spec);
+    return { cwd, name: pkg.name, version: pkg.version };
+  });
+  for (const pkg of packages) {
+    if (!await exists(pkg.name, pkg.version)) await publish(pkg.cwd);
+    else console.log(pkg.name + '@' + pkg.version + ' already exists; skipping.');
   }
-  // Every platform package the launcher depends on must resolve first.
-  for (const { name } of platformDirs) {
-    const version = launcherPkg.optionalDependencies[name];
-    if (!version) throw new Error('the launcher lists no ' + name + ' dependency');
-    await waitUntilInstallable(name + '@' + version, name, version);
-  }
-
-  const launcherSpec = launcherPkg.name + '@' + launcherPkg.version;
-  if (published(launcherPkg.name, launcherPkg.version)) {
-    console.log(launcherSpec + ' already exists; skipping.');
-  } else {
-    const publish = spawnSync('npm', ['publish', '--provenance', '--access', 'public'], { cwd: launcher, stdio: 'inherit' });
-    if (publish.error) throw publish.error;
-    if (publish.status !== 0) throw new Error('npm publish failed for ' + launcherSpec);
-  }
-  // The version published is the one `npm install -g …@latest` must install.
-  await waitUntilInstallable(launcherSpec, launcherPkg.name, launcherPkg.version);
+  // Both npm metadata representations and every archive must be usable before
+  // the launcher referencing those exact platform versions can be published.
+  await waitForPackages(packages, options);
+  if (!await exists(launcherPkg.name, launcherPkg.version)) await publish(launcher);
+  await waitForPackages([{ name: launcherPkg.name, version: launcherPkg.version }], { ...options, latest: true });
 }
 
 if (require.main === module) {
-  main().catch(err => { console.error(err.message); process.exit(1); });
+  publishPackages(path.resolve(process.argv[2] || 'dist/npm')).catch(err => { console.error(err.message); process.exit(1); });
 }
 
-module.exports = { published, waitUntilInstallable };
+module.exports = { published, installable, waitUntilInstallable, waitForPackages, publishPackages };

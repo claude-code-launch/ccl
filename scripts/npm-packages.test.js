@@ -137,6 +137,15 @@ function npmCLI() {
 
 test('npm installs exactly one native tarball from platform optional dependencies', { timeout: 45000 }, async t => {
   const root = fixture(t);
+  const native = platforms.find(p => p.os === process.platform && p.arch === process.arch);
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase().startsWith('npm_config_') || ['NPM_TOKEN', 'NODE_AUTH_TOKEN', 'NPM_AUTH_TOKEN'].includes(key)) delete env[key];
+  }
+  const home = path.join(root, 'home');
+  fs.mkdirSync(home);
+  for (const file of ['user.npmrc', 'global.npmrc']) fs.writeFileSync(path.join(root, file), '');
+  Object.assign(env, { HOME: home, USERPROFILE: home, NPM_CONFIG_USERCONFIG: path.join(root, 'user.npmrc'), NPM_CONFIG_GLOBALCONFIG: path.join(root, 'global.npmrc') });
   const binaries = path.join(root, 'binaries');
   fs.mkdirSync(binaries);
   platforms.forEach(p => fs.writeFileSync(path.join(binaries, p.asset + '.gz'), zlib.gzipSync(Buffer.from(p.asset))));
@@ -146,7 +155,7 @@ test('npm installs exactly one native tarball from platform optional dependencie
   const packages = new Map();
   for (const directory of [...platforms.map(p => p.os + '-' + p.arch), 'main']) {
     const cwd = path.join(built.output, directory);
-    const pack = spawnSync(process.execPath, [cli, 'pack', '--json', '--ignore-scripts', '--cache', cache], { cwd, encoding: 'utf8' });
+    const pack = spawnSync(process.execPath, [cli, 'pack', '--json', '--ignore-scripts', '--cache', cache], { cwd, env, encoding: 'utf8' });
     assert.equal(pack.status, 0, pack.stderr);
     const info = JSON.parse(pack.stdout)[0];
     const manifest = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json')));
@@ -154,8 +163,12 @@ test('npm installs exactly one native tarball from platform optional dependencie
   }
   const downloaded = [];
   let origin;
+  let platformUnavailable = false;
   const server = http.createServer((req, res) => {
     const resource = decodeURIComponent(req.url.split('?')[0].slice(1));
+    if (platformUnavailable && resource === native.packageName) {
+      res.writeHead(404); res.end('{}'); return;
+    }
     if (resource.startsWith('tarballs/')) {
       const pkg = [...packages.values()].find(p => p.filename === resource.slice('tarballs/'.length));
       if (!pkg) { res.writeHead(404); res.end(); return; }
@@ -174,22 +187,29 @@ test('npm installs exactly one native tarball from platform optional dependencie
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = 'http://127.0.0.1:' + server.address().port;
   t.after(() => server.close());
-  const result = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, 'install', '@claudecodelaunch/ccl@' + built.version, '--prefix', path.join(root, 'install'), '--registry', origin,
-      '--noproxy=127.0.0.1', '--no-audit', '--no-fund', '--cache', path.join(root, 'install-cache')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const installAt = directory => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, 'install', '@claudecodelaunch/ccl@' + built.version, '--prefix', path.join(root, directory), '--registry', origin,
+      '--include=optional', '--prefer-online', '--noproxy=127.0.0.1', '--no-audit', '--no-fund', '--cache', path.join(root, directory + '-cache')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     child.stdout.on('data', data => { output += data; });
     child.stderr.on('data', data => { output += data; });
     child.on('error', reject);
     child.on('close', code => resolve({ code, output }));
   });
+  const result = await installAt('install');
   assert.equal(result.code, 0, result.output);
-  const native = platforms.find(p => p.os === process.platform && p.arch === process.arch);
   assert.deepEqual(downloaded.sort(), ['@claudecodelaunch/ccl', native.packageName].sort());
   const launcherBin = path.join(root, 'install', 'node_modules', '@claudecodelaunch', 'ccl', 'bin');
   assert.equal(fs.readFileSync(resolveBinary(launcherBin, process.platform, process.arch), 'utf8'), native.asset);
   // postinstall put the native binary behind the installed command itself.
   assert.equal(fs.readFileSync(path.join(launcherBin, 'ccl.exe'), 'utf8'), native.asset);
+
+  // Reproduce the real release race with a fresh prefix/cache: npm skips the
+  // missing optional package, then our postinstall makes the install fail.
+  platformUnavailable = true;
+  const failed = await installAt('missing-platform');
+  assert.notEqual(failed.code, 0, failed.output);
+  assert.match(failed.output, /not installed|postinstall|install\.js/);
 });
 
 test('postinstall fails the install when the platform package is missing', t => {
@@ -219,13 +239,93 @@ test('publishing waits until every platform package resolves', async () => {
   assert.deepEqual(sleeps, [1000, 2000]);
 });
 
-test('publishing gives up when a package never resolves', async () => {
+test('publishing gives up when a package never resolves without busy looping', async () => {
   const { waitUntilInstallable } = require('./publish-npm-packages');
+  let probes = 0;
   await assert.rejects(
     waitUntilInstallable('@claudecodelaunch/ccl-linux-x64@2.0.1', '@claudecodelaunch/ccl-linux-x64', '2.0.1', {
-      probe: () => false,
+      probe: () => { probes++; return false; },
       sleep: () => Promise.resolve(),
-      timeout: 0,
+      now: () => 0,
+      timeout: 3000,
     }),
     /still cannot resolve it/);
+  assert.equal(probes, 3);
+});
+
+// Model independently propagated registry views: the full document can contain
+// a version while npm's install-v1 view or the archive still does not.
+function registryProbe(options = {}) {
+  const fetched = [];
+  const data = Buffer.from('complete tarball');
+  const fetch = async (input, init) => {
+    const url = new URL(input);
+    fetched.push({ path: url.pathname, accept: init.headers.accept });
+    if (url.pathname.endsWith('.tgz')) {
+      return new Response(options.corrupt ? 'truncated' : data, { status: options.tarballStatus || 200 });
+    }
+    const name = decodeURIComponent(url.pathname.slice(1));
+    const manifest = { name, version: '2.0.1', dist: {
+      tarball: 'https://registry.npmjs.org/tarballs/' + encodeURIComponent(name) + '.tgz',
+      integrity: 'sha512-' + crypto.createHash('sha512').update(data).digest('base64'),
+    } };
+    const missing = options.missingInstallView && init.headers.accept.includes('install-v1');
+    return new Response(JSON.stringify({ name, 'dist-tags': { latest: options.latest || '2.0.1' }, versions: missing ? {} : { '2.0.1': manifest } }));
+  };
+  return { fetch, fetched };
+}
+
+test('readiness verifies install metadata, actual archive, integrity and latest', async () => {
+  const { installable } = require('./publish-npm-packages');
+  const name = platforms[0].packageName;
+  for (const [fault, error] of [
+    [{ missingInstallView: true }, /missing from/],
+    [{ tarballStatus: 404 }, /tarball: HTTP 404/],
+    [{ corrupt: true }, /integrity mismatch/],
+    [{ latest: '2.0.0' }, /latest does not point/],
+  ]) {
+    await assert.rejects(installable(name, '2.0.1', { fetch: registryProbe(fault).fetch, latest: true }), error);
+  }
+  const registry = registryProbe();
+  assert.equal(await installable(name, '2.0.1', { fetch: registry.fetch, latest: true }), true);
+  assert.equal(registry.fetched.length, 3);
+  assert.deepEqual(registry.fetched.slice(0, 2).map(r => r.accept), ['application/json', 'application/vnd.npm.install-v1+json']);
+  assert.match(registry.fetched[2].path, /\.tgz$/);
+});
+
+test('launcher is never published while any platform archive is unavailable', async t => {
+  const { publishPackages } = require('./publish-npm-packages');
+  const root = fixture(t);
+  const optionalDependencies = {};
+  for (const p of platforms) {
+    const dir = path.join(root, p.os + '-' + p.arch);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: p.packageName, version: '2.0.1' }));
+    optionalDependencies[p.packageName] = '2.0.1';
+  }
+  fs.mkdirSync(path.join(root, 'main'));
+  fs.writeFileSync(path.join(root, 'main', 'package.json'), JSON.stringify({ name: '@claudecodelaunch/ccl', version: '2.0.1', optionalDependencies }));
+  const published = [];
+  await assert.rejects(publishPackages(root, {
+    published: () => false,
+    publish: dir => published.push(path.basename(dir)),
+    fetch: registryProbe({ tarballStatus: 404 }).fetch,
+    timeout: 0,
+  }), /tarball: HTTP 404/);
+  assert.deepEqual(published, platforms.map(p => p.os + '-' + p.arch));
+  assert.ok(!published.includes('main'));
+
+  published.length = 0;
+  const registry = registryProbe();
+  await publishPackages(root, {
+    published: () => false,
+    publish: dir => {
+      if (path.basename(dir) === 'main') assert.equal(registry.fetched.filter(r => r.path.endsWith('.tgz')).length, platforms.length);
+      published.push(path.basename(dir));
+    },
+    fetch: registry.fetch,
+    timeout: 1000,
+  });
+  assert.equal(published.at(-1), 'main');
+  assert.equal(registry.fetched.filter(r => r.path.endsWith('.tgz')).length, platforms.length + 1);
 });

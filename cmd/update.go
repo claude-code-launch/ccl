@@ -64,6 +64,10 @@ SHA256SUMS, and keeps the previous binary as a backup.`,
 }()
 
 func runUpdate(method string) error {
+	method = strings.ToLower(strings.TrimSpace(method))
+	if method != "" && method != "self" && method != "npm" && method != "go" {
+		return fmt.Errorf("unknown update method %q; use self, npm, or go", method)
+	}
 	fmt.Printf("Current version: %s\n", Version)
 	fmt.Println("Checking for updates...")
 
@@ -73,7 +77,7 @@ func runUpdate(method string) error {
 	} else {
 		fmt.Printf("Latest version: %s\n\n", latestVersion)
 	}
-	if Version != "dev" && latestVersion != "unknown" && canonicalReleaseTag(Version) == canonicalReleaseTag(latestVersion) {
+	if Version != "dev" && latestVersion != "unknown" && canonicalReleaseTag(Version) == canonicalReleaseTag(latestVersion) && method != "npm" {
 		fmt.Println("✨ You are already on the latest version!")
 		return nil
 	}
@@ -89,12 +93,11 @@ func runUpdate(method string) error {
 		// Replacing the binary in place leaves the npm package installed; on
 		// Windows a running executable cannot be replaced, so there is nothing
 		// to offer yet.
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == "windows" && method == "" {
 			return fmt.Errorf("npm has not published %s yet (the registry lags the GitHub release) and Windows cannot replace a running binary; retry later or run ccl update --method go", latestVersion)
 		}
 		suggested = "self"
 	}
-	method = strings.ToLower(strings.TrimSpace(method))
 	switch method {
 	case "":
 		if !term.IsTerminal(os.Stdin.Fd()) {
@@ -128,28 +131,7 @@ func runUpdate(method string) error {
 		if !npmReady {
 			return fmt.Errorf("npm does not have %s yet (publishing lags the GitHub release); use --method self or go", latestVersion)
 		}
-		fmt.Println("Updating via npm... Running 'npm install -g @claudecodelaunch/ccl@latest'")
-		if err := runUpdateCommand("npm", "install", "-g", "@claudecodelaunch/ccl@latest"); err != nil {
-			return fmt.Errorf("npm update failed: %w", err)
-		}
-		// npm lists a launcher before its platform package is downloadable, and
-		// skips an optional dependency it cannot resolve without failing the
-		// install. The command then has no binary, so confirm the new one runs.
-		if err := verifyNpmInstall(latestVersion); err != nil {
-			fmt.Printf("\n⚠️  %v\n", err)
-			if runtime.GOOS == "windows" {
-				// The running executable cannot be replaced here; npm fetches the
-				// platform package once the registry finishes indexing it.
-				return fmt.Errorf("npm installed ccl without its native binary; run \"npm install -g @claudecodelaunch/ccl@%s\" again in a moment", canonicalReleaseTag(latestVersion))
-			}
-			fmt.Println("Downloading the release binary directly instead...")
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			if selfErr := selfUpdate(ctx, latestVersion); selfErr != nil {
-				return fmt.Errorf("npm installed ccl without its native binary and the direct download failed too: %w", selfErr)
-			}
-		}
-		fmt.Println("\n🎉 Successfully updated ccl to the latest version via npm!")
+		return updateViaNpm(latestVersion)
 	case "go":
 		fmt.Println("Updating via Go... Running 'go install github.com/claude-code-launch/ccl@latest'")
 		if err := runUpdateCommand("go", "install", "github.com/claude-code-launch/ccl@latest"); err != nil {
@@ -218,52 +200,6 @@ func promptUpdateMethod(detected string, npmReady bool) string {
 	default:
 		return "cancel"
 	}
-}
-
-// verifyNpmInstall checks that the command npm just replaced runs and reports
-// the release being installed. `npm install` exits 0 when it silently skipped
-// an optional platform package, leaving a launcher with no binary behind it.
-func verifyNpmInstall(want string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	var candidates []string
-	// os.Executable is the file npm replaced; PATH covers an invocation through
-	// a shim that resolves elsewhere. Only a ccl binary is probed: a test or
-	// `go run` executable would answer the argument some other way.
-	if exe, err := os.Executable(); err == nil {
-		if base := filepath.Base(exe); base == "ccl" || base == "ccl.exe" {
-			candidates = append(candidates, exe)
-		}
-	}
-	if path, err := exec.LookPath("ccl"); err == nil {
-		for _, known := range candidates {
-			if filepath.Clean(known) == filepath.Clean(path) {
-				path = ""
-				break
-			}
-		}
-		if path != "" {
-			candidates = append(candidates, path)
-		}
-	}
-	if len(candidates) == 0 {
-		return fmt.Errorf("ccl cannot be found after the npm install")
-	}
-	var lastErr error
-	for _, path := range candidates {
-		out, err := exec.CommandContext(ctx, path, "version").Output()
-		if err != nil {
-			lastErr = fmt.Errorf("%s does not run: %w", path, err)
-			continue
-		}
-		got := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "ccl version"))
-		if canonicalReleaseTag(got) != canonicalReleaseTag(want) {
-			lastErr = fmt.Errorf("%s reports %s, not %s", path, got, want)
-			continue
-		}
-		return nil
-	}
-	return lastErr
 }
 
 func runUpdateCommand(name string, args ...string) error {
@@ -631,18 +567,8 @@ func humanSize(n int64) string {
 }
 
 // selfUpdate downloads the current platform's release binary and atomically
-// replaces the running ccl binary at os.Executable(). It is a no-op on Windows,
-// where the running executable cannot be replaced in place.
+// replaces the running ccl binary at os.Executable().
 func selfUpdate(ctx context.Context, version string) error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("self-update is not supported on Windows; use the npm or go method instead")
-	}
-
-	asset, err := releaseAssetName()
-	if err != nil {
-		return err
-	}
-
 	target, err := os.Executable()
 	if err != nil {
 		return err
@@ -651,7 +577,19 @@ func selfUpdate(ctx context.Context, version string) error {
 	if err != nil {
 		return err
 	}
+	return selfUpdateTo(ctx, version, target)
+}
 
+// selfUpdateTo also supports npm recovery: its target is resolved before npm
+// starts, rather than looking up the running executable after npm removed it.
+func selfUpdateTo(ctx context.Context, version, target string) error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("self-update is not supported on Windows; use the npm or go method instead")
+	}
+	asset, err := releaseAssetName()
+	if err != nil {
+		return err
+	}
 	dir := filepath.Dir(target)
 	staging, err := os.CreateTemp(dir, "."+filepath.Base(target)+".download-*")
 	if err != nil {
@@ -683,7 +621,9 @@ func selfUpdate(ctx context.Context, version string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Previous version retained at: %s\n", backup)
+	if backup != "" {
+		fmt.Printf("Previous version retained at: %s\n", backup)
+	}
 	return nil
 }
 
@@ -692,6 +632,13 @@ func installReleaseBinary(target, downloaded string) (backupPath string, err err
 		return "", err
 	}
 	current, err := os.Open(target)
+	if os.IsNotExist(err) {
+		// A failed npm install may already have removed the old binary.
+		if err := os.Rename(downloaded, target); err != nil {
+			return "", fmt.Errorf("install missing binary: %w", err)
+		}
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}

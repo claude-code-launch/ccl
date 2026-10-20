@@ -3,8 +3,6 @@ package cmd
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -115,33 +113,14 @@ func TestUpdateChoicesDropNpmUntilPublished(t *testing.T) {
 	}
 }
 
-func TestVerifyNpmInstallRejectsAnotherVersion(t *testing.T) {
-	// A fake ccl that answers `version` with a fixed string, standing in for
-	// either a working install or one that still runs the old release.
-	dir := t.TempDir()
-	script := filepath.Join(dir, "ccl")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'ccl version v1.6.5'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := verifyNpmInstall("v1.6.6"); err == nil {
-		t.Fatal("an old version was accepted as the new install")
-	}
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'ccl version v1.6.6'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyNpmInstall("1.6.6"); err != nil {
-		t.Fatalf("matching version rejected: %v", err)
-	}
-}
-
-func TestVerifyNpmInstallRejectsAMissingBinary(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "ccl"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
-	if err := verifyNpmInstall("v1.6.6"); err == nil {
-		t.Fatal("a broken ccl was accepted")
+func TestRunUpdateNpmDoesNotSkipRepairWhenBinaryIsCurrent(t *testing.T) {
+	withReleaseAndNpm(t, http.StatusOK, `{"tag_name":"v1.6.7"}`, http.StatusOK, `{"version":"1.6.6"}`)
+	previous := Version
+	Version = "v1.6.7"
+	t.Cleanup(func() { Version = previous })
+	// No install can run in this fixture: npm is deliberately behind. Before
+	// the fix, this returned success without even considering the npm repair.
+	if err := runUpdate(" npm "); err == nil || !strings.Contains(err.Error(), "npm does not have") {
+		t.Fatalf("explicit npm repair was skipped: %v", err)
 	}
 }

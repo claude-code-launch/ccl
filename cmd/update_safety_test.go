@@ -68,6 +68,25 @@ func TestUpdatePreservesPreviousExecutable(t *testing.T) {
 	if err := validateReleaseBinary(target); err != nil {
 		t.Fatal(err)
 	}
+
+	// npm may remove the executable before its postinstall fails. Recovery
+	// must install a verified replacement even when there is nothing to back up.
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(downloaded, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if backup, err := installReleaseBinary(target, downloaded); err != nil || backup != "" {
+		t.Fatalf("recover removed target: backup=%q error=%v", backup, err)
+	}
+	if err := validateReleaseBinary(target); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPreviewReturnsSetupError(t *testing.T) {
