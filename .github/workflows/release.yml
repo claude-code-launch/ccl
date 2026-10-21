@@ -181,11 +181,12 @@ jobs:
           gh release create "$VERSION" "${assets[@]}" --verify-tag --generate-notes "${notes[@]}"
 
   # Each platform package ships one native binary; npm installs only the
-  # matching optional dependency. Publish the launcher after all six versions.
+  # matching optional dependency. Until npm serves that package, postinstall
+  # downloads the binary from the GitHub release, so it must exist first.
   npm:
     name: Publish npm
     if: github.ref_type == 'tag'
-    needs: [prepare, verify, build]
+    needs: [prepare, verify, build, github-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read

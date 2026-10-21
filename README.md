@@ -11,7 +11,7 @@
 ### 安装
 
 ```bash
-npm install -g @claudecodelaunch/ccl                 # 推荐
+npm install -g @claudecodelaunch/ccl                 # 推荐，需 Node.js >= 22
 go install github.com/claude-code-launch/ccl@latest  # 或 Go
 ```
 
@@ -134,7 +134,7 @@ MIT。第三方参考实现见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)�
 ### Install
 
 ```bash
-npm install -g @claudecodelaunch/ccl                 # recommended
+npm install -g @claudecodelaunch/ccl                 # recommended, needs Node.js >= 22
 go install github.com/claude-code-launch/ccl@latest  # or Go
 ```
 

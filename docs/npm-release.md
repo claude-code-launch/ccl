@@ -39,6 +39,8 @@ This bootstrap was completed on 2026-10-15: each platform package has a `0.0.0` 
 
 `node scripts/build-npm-packages.js vMAJOR.MINOR.PATCH` validates all six compressed release assets under `dist/` and stages seven packages under `dist/npm/`. Legacy four-component tags become npm prerelease versions, matching the previous workflow.
 
-`node scripts/publish-npm-packages.js dist/npm` checks each exact version, skips existing versions, publishes all six platform packages, then publishes the launcher. A failure prevents publishing a launcher whose required native package versions are unavailable. Reruns safely continue from already-published platform versions.
+`node scripts/publish-npm-packages.js dist/npm` skips versions that already exist, publishes the six platform packages in parallel, and publishes the launcher once npm has accepted all six. It does not wait for npm to serve them: npm can take from about one to more than thirteen minutes per package, and an install in that window skips the unresolved optional dependency without failing. `bin/install.js` then downloads the same `.gz` asset from the GitHub release (`CCL_RELEASE_DOWNLOAD_URL` overrides the base URL), verifies it against `SHA256SUMS`, and places it; the npm job runs after the GitHub release job for that reason. A failed download fails the install. Reruns safely continue from already-published versions.
 
-`node --test scripts/npm-packages.test.js` checks the package layout, supported targets, binary resolution, postinstall placement, the placeholder fallback, legacy installs, CLI argument forwarding and exit codes. Packaging checks do not publish anything or require registry credentials.
+The launcher declares `engines.node >=22`, the oldest Node.js release line still maintained and the one `ccl acp` already requires.
+
+`node --test scripts/npm-packages.test.js` checks the package layout, supported targets, binary resolution, postinstall placement, the GitHub release download when npm skipped the platform package, the placeholder fallback, legacy installs, CLI argument forwarding and exit codes. Packaging checks do not publish anything or require registry credentials.

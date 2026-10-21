@@ -9,6 +9,9 @@
   "bin": {
     "ccl": "bin/ccl.exe"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "files": [
     "bin/",
     "README.md",

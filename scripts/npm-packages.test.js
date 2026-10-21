@@ -166,8 +166,16 @@ test('npm installs exactly one native tarball from platform optional dependencie
   const downloaded = [];
   let origin;
   let platformUnavailable = false;
+  let releaseBroken = false;
+  const sums = platforms.map(p => crypto.createHash('sha256').update(fs.readFileSync(path.join(binaries, p.asset + '.gz'))).digest('hex') + '  ' + p.asset + '.gz').join('\n') + '\n';
   const server = http.createServer((req, res) => {
     const resource = decodeURIComponent(req.url.split('?')[0].slice(1));
+    if (resource.startsWith('releases/v2.0.1/')) {
+      const file = resource.slice('releases/v2.0.1/'.length);
+      if (file === 'SHA256SUMS') { res.end(releaseBroken ? sums.replace(/^[0-9a-f]/gm, '0') : sums); return; }
+      if (fs.existsSync(path.join(binaries, file))) { res.end(fs.readFileSync(path.join(binaries, file))); return; }
+      res.writeHead(404); res.end(); return;
+    }
     if (platformUnavailable && resource === native.packageName) {
       res.writeHead(404); res.end('{}'); return;
     }
@@ -188,6 +196,7 @@ test('npm installs exactly one native tarball from platform optional dependencie
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = 'http://127.0.0.1:' + server.address().port;
+  env.CCL_RELEASE_DOWNLOAD_URL = origin + '/releases/';
   t.after(() => server.close());
   const installAt = directory => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, 'install', '@claudecodelaunch/ccl@' + built.version, '--prefix', path.join(root, directory), '--registry', origin,
@@ -206,100 +215,28 @@ test('npm installs exactly one native tarball from platform optional dependencie
   // postinstall put the native binary behind the installed command itself.
   assert.equal(fs.readFileSync(path.join(launcherBin, 'ccl.exe'), 'utf8'), native.asset);
 
-  // Reproduce the real release race with a fresh prefix/cache: npm skips the
-  // missing optional package, then our postinstall makes the install fail.
+  // Reproduce the release race with a fresh prefix/cache: npm skips the
+  // optional package it cannot resolve yet, and postinstall downloads the
+  // same binary from the GitHub release instead.
   platformUnavailable = true;
-  const failed = await installAt('missing-platform');
+  const fallback = await installAt('missing-platform');
+  assert.equal(fallback.code, 0, fallback.output);
+  const fallbackBin = path.join(root, 'missing-platform', 'node_modules', '@claudecodelaunch', 'ccl', 'bin');
+  assert.equal(fs.readFileSync(path.join(fallbackBin, 'ccl.exe'), 'utf8'), native.asset);
+
+  // A download that fails verification still fails the install.
+  releaseBroken = true;
+  const failed = await installAt('broken-release');
   assert.notEqual(failed.code, 0, failed.output);
-  assert.match(failed.output, /not installed|postinstall|install\.js/);
+  assert.match(failed.output, /checksum mismatch/);
 });
 
-test('postinstall fails the install when the platform package is missing', t => {
-  const root = fixture(t);
-  const bin = path.join(root, 'bin');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'ccl.exe'), 'placeholder');
-  fs.copyFileSync(path.join(__dirname, '..', 'bin', 'install.js'), path.join(bin, 'install.js'));
-  fs.copyFileSync(path.join(__dirname, '..', 'bin', 'wrapper.js'), path.join(bin, 'wrapper.js'));
-  fs.copyFileSync(path.join(__dirname, '..', 'bin', 'platforms.js'), path.join(bin, 'platforms.js'));
-  // A zero exit code here would let npm finish an install that has no binary.
-  const result = spawnSync(process.execPath, [path.join(bin, 'install.js')], { encoding: 'utf8' });
-  assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stderr, /npm install -g @claudecodelaunch\/ccl@/);
-  assert.equal(fs.readFileSync(path.join(bin, 'ccl.exe'), 'utf8'), 'placeholder');
+test('release tags round-trip npm versions', () => {
+  const { releaseTag } = require('../bin/install');
+  for (const tag of ['v2.0.1', 'v1.2.3.4']) assert.equal(releaseTag(releaseVersion(tag)), tag);
 });
 
-test('publishing waits until every platform package resolves', async () => {
-  const { waitUntilInstallable } = require('./publish-npm-packages');
-  const probes = [];
-  const sleeps = [];
-  const logs = [];
-  await waitUntilInstallable('@claudecodelaunch/ccl-darwin-arm64@2.0.1', '@claudecodelaunch/ccl-darwin-arm64', '2.0.1', {
-    probe: () => { probes.push(Date.now()); return probes.length >= 3; },
-    sleep: ms => { sleeps.push(ms); return Promise.resolve(); },
-    log: message => logs.push(message),
-  });
-  assert.equal(probes.length, 3);
-  assert.deepEqual(sleeps, [1000, 2000]);
-  assert.ok(logs.some(line => line.includes('[pending]') && line.includes('probe returned not ready')));
-  assert.ok(logs.some(line => line.includes('[ready]') && line.includes('attempt=3') && line.includes('elapsed=')));
-});
-
-test('publishing gives up when a package never resolves without busy looping', async () => {
-  const { waitUntilInstallable } = require('./publish-npm-packages');
-  let probes = 0;
-  await assert.rejects(
-    waitUntilInstallable('@claudecodelaunch/ccl-linux-x64@2.0.1', '@claudecodelaunch/ccl-linux-x64', '2.0.1', {
-      probe: () => { probes++; return false; },
-      sleep: () => Promise.resolve(),
-      now: () => 0,
-      timeout: 3000,
-    }),
-    /still cannot resolve it/);
-  assert.equal(probes, 3);
-});
-
-// Model independently propagated registry views: the full document can contain
-// a version while npm's install-v1 view or the archive still does not.
-function registryProbe(options = {}) {
-  const fetched = [];
-  const data = Buffer.from('complete tarball');
-  const fetch = async (input, init) => {
-    const url = new URL(input);
-    fetched.push({ path: url.pathname, accept: init.headers.accept });
-    if (url.pathname.endsWith('.tgz')) {
-      return new Response(options.corrupt ? 'truncated' : data, { status: options.tarballStatus || 200 });
-    }
-    const name = decodeURIComponent(url.pathname.slice(1));
-    const manifest = { name, version: '2.0.1', dist: {
-      tarball: 'https://registry.npmjs.org/tarballs/' + encodeURIComponent(name) + '.tgz',
-      integrity: 'sha512-' + crypto.createHash('sha512').update(data).digest('base64'),
-    } };
-    const missing = options.missingInstallView && init.headers.accept.includes('install-v1');
-    return new Response(JSON.stringify({ name, 'dist-tags': { latest: options.latest || '2.0.1' }, versions: missing ? {} : { '2.0.1': manifest } }));
-  };
-  return { fetch, fetched };
-}
-
-test('readiness verifies install metadata, actual archive, integrity and latest', async () => {
-  const { installable } = require('./publish-npm-packages');
-  const name = platforms[0].packageName;
-  for (const [fault, error] of [
-    [{ missingInstallView: true }, /install-v1 metadata failed after .*missing from.*HTTP=200/],
-    [{ tarballStatus: 404 }, /tarball download\/SHA512 failed after .*tarball: HTTP 404/],
-    [{ corrupt: true }, /tarball download\/SHA512 failed after .*integrity mismatch/],
-    [{ latest: '2.0.0' }, /latest does not point/],
-  ]) {
-    await assert.rejects(installable(name, '2.0.1', { fetch: registryProbe(fault).fetch, latest: true }), error);
-  }
-  const registry = registryProbe();
-  assert.equal(await installable(name, '2.0.1', { fetch: registry.fetch, latest: true }), true);
-  assert.equal(registry.fetched.length, 3);
-  assert.deepEqual(registry.fetched.slice(0, 2).map(r => r.accept), ['application/json', 'application/vnd.npm.install-v1+json']);
-  assert.match(registry.fetched[2].path, /\.tgz$/);
-});
-
-test('launcher is never published while any platform archive is unavailable', async t => {
+test('launcher is published only after every platform upload is accepted', async t => {
   const { publishPackages } = require('./publish-npm-packages');
   const root = fixture(t);
   const optionalDependencies = {};
@@ -312,26 +249,19 @@ test('launcher is never published while any platform archive is unavailable', as
   fs.mkdirSync(path.join(root, 'main'));
   fs.writeFileSync(path.join(root, 'main', 'package.json'), JSON.stringify({ name: '@claudecodelaunch/ccl', version: '2.0.1', optionalDependencies }));
   const published = [];
+  const log = () => {};
   await assert.rejects(publishPackages(root, {
-    published: () => false,
-    publish: dir => published.push(path.basename(dir)),
-    fetch: registryProbe({ tarballStatus: 404 }).fetch,
-    timeout: 0,
-  }), /tarball: HTTP 404/);
-  assert.deepEqual(published, platforms.map(p => p.os + '-' + p.arch));
+    log, published: () => false,
+    publish: async dir => { if (dir.endsWith('win32-arm64')) throw new Error('upload rejected'); published.push(path.basename(dir)); },
+  }), /upload rejected/);
   assert.ok(!published.includes('main'));
 
   published.length = 0;
-  const registry = registryProbe();
   await publishPackages(root, {
-    published: () => false,
-    publish: dir => {
-      if (path.basename(dir) === 'main') assert.equal(registry.fetched.filter(r => r.path.endsWith('.tgz')).length, platforms.length);
-      published.push(path.basename(dir));
-    },
-    fetch: registry.fetch,
-    timeout: 1000,
+    log, published: name => name.endsWith('darwin-x64'),
+    publish: async dir => { published.push(path.basename(dir)); },
   });
+  assert.equal(published.length, platforms.length);
   assert.equal(published.at(-1), 'main');
-  assert.equal(registry.fetched.filter(r => r.path.endsWith('.tgz')).length, platforms.length + 1);
+  assert.ok(!published.includes('darwin-x64'));
 });
