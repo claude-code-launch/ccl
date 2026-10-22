@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { Blocks, FileText, KeyRound, List, LoaderCircle, Pencil, Plus, RefreshCw, Server, SlidersHorizontal, Star, Trash2, Wifi, X } from "lucide-react";
+import { Blocks, Cloud, FileText, KeyRound, List, LoaderCircle, Pencil, Plus, RefreshCw, Server, SlidersHorizontal, Star, Trash2, Wifi, X } from "lucide-react";
 import type { Api } from "../api";
 import type { ConfigView, ProviderView, TestResult } from "../types";
 import { EFFORT_LEVELS } from "../types";
@@ -8,6 +8,7 @@ import { IconButton } from "./Sidebar";
 import { useI18n } from "../i18n";
 import { MCPServers, SubscriptionLogin } from "./SettingsExtras";
 import { MemoryEditor } from "./MemoryEditor";
+import { CloudSync } from "./CloudSync";
 import type { MemorySource } from "./MemoryEditor";
 
 // Settings: a large centered dialog with a section list, like claude.ai's.
@@ -24,7 +25,7 @@ const SLOT_FIELDS = [
   ["subagentModel", "subagent"],
 ] as const;
 
-type Tab = "general" | "providers" | "login" | "connectors" | "instructions";
+type Tab = "general" | "providers" | "login" | "connectors" | "instructions" | "cloud";
 type Form = Record<string, string> & { name: string; type: string; endpoint: string; apiKey: string; effortLevel: string };
 
 const emptyForm = (): Form => ({
@@ -99,6 +100,7 @@ export function SettingsDialog({ api, workspaceApi, config, loadError, initialTa
     { id: "login", label: t("subscriptionLogin"), icon: <KeyRound size={16} /> },
     { id: "connectors", label: t("connectorsShort"), icon: <Blocks size={16} /> },
     { id: "instructions", label: t("instructions"), icon: <FileText size={16} /> },
+    { id: "cloud", label: t("cloudSync"), icon: <Cloud size={16} /> },
   ];
   const current = tabs.find((item) => item.id === tab)!;
 
@@ -138,6 +140,7 @@ export function SettingsDialog({ api, workspaceApi, config, loadError, initialTa
             {tab === "providers" && <Providers api={api} config={config} onChanged={onChanged} onEdit={setEditor} />}
             {tab === "login" && <SubscriptionLogin api={api} onDone={() => void onChanged()} />}
             {tab === "connectors" && <MCPServers api={workspaceApi} />}
+            {tab === "cloud" && <CloudSync api={api} onPulled={() => void onChanged()} />}
             {tab === "instructions" && <MemoryEditor title={t("userInstructions")} sources={userMemory} registerLeaveGuard={registerLeaveGuard} framed={false} />}
           </div>
         </section>

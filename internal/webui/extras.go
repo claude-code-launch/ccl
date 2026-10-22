@@ -44,6 +44,8 @@ type oauthLogin struct {
 	// Cancelled marks a login the user stopped, which is not a failure.
 	Cancelled bool   `json:"cancelled,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// stdin takes a pasted redirect address (cloud login); nil otherwise.
+	stdin io.WriteCloser
 
 	cancel context.CancelFunc
 }
@@ -125,7 +127,17 @@ func (s *Server) startLogin(w http.ResponseWriter, r *http.Request) {
 		args = append(args, alias)
 	}
 	args = append(args, "--no-browser")
+	login, err := s.runLogin(body.Provider, args, false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": login.ID})
+}
 
+// runLogin starts `ccl <args>` and keeps what it prints, with the URLs in it,
+// for the page to poll. withStdin keeps its input open for a pasted line.
+func (s *Server) runLogin(provider string, args []string, withStdin bool) (*oauthLogin, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), loginTimeout)
 	cmd := exec.CommandContext(ctx, s.selfBinary, args...)
 	// The login does not depend on a workspace; any served one will do.
@@ -133,15 +145,23 @@ func (s *Server) startLogin(w http.ResponseWriter, r *http.Request) {
 		cmd.Dir = workspace.Path
 	}
 	cmd.Stdin = nil
+	var stdin io.WriteCloser
+	if withStdin {
+		pipe, err := cmd.StdinPipe()
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		stdin = pipe
+	}
 	reader, writer := io.Pipe()
 	cmd.Stdout = writer
 	cmd.Stderr = writer
 	if err := cmd.Start(); err != nil {
 		cancel()
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
-	login := &oauthLogin{ID: uuid.NewString(), Provider: body.Provider, Output: []string{}, URLs: []string{}, cancel: cancel}
+	login := &oauthLogin{ID: uuid.NewString(), Provider: provider, Output: []string{}, URLs: []string{}, cancel: cancel, stdin: stdin}
 	s.logins.mu.Lock()
 	s.logins.logins[login.ID] = login
 	s.logins.mu.Unlock()
@@ -170,7 +190,7 @@ func (s *Server) startLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logins.mu.Unlock()
 	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"id": login.ID})
+	return login, nil
 }
 
 // ── MCP servers ─────────────────────────────────────────────────────────────

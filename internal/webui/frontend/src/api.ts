@@ -2,6 +2,7 @@ import type {
   Attachment,
   Capabilities,
   ClaudeSession,
+  CloudOverview,
   ConfigView,
   DirListing,
   FileContent,
@@ -54,6 +55,8 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    // The parsed response, for errors that carry more than a message.
+    public body?: unknown,
   ) {
     super(message);
   }
@@ -105,7 +108,7 @@ export class Api {
     }
     if (!response.ok) {
       const message = body && typeof body === "object" && "error" in body ? String(body.error) : response.statusText;
-      throw new HttpError(response.status, message);
+      throw new HttpError(response.status, message, body);
     }
     return body as T;
   }
@@ -203,6 +206,14 @@ export class Api {
   userMemory = () => this.request<{ path: string; hash: string; content: string; tooBig?: boolean }>("/api/memory");
   saveUserMemory = (content: string, expectedHash: string) =>
     this.request<{ path: string; hash: string }>("/api/memory", { method: "PUT", body: { content, expectedHash } });
+  cloud = () => this.request<CloudOverview>("/api/cloud");
+  cloudCommand = (action: "push" | "pull" | "primary" | "logout", remote: string, force = false) =>
+    this.request<{ output: string }>(`/api/cloud/${action}`, { method: "POST", body: { remote, force } });
+  cloudLogin = (platform: string, alias: string) => this.request<{ id: string }>("/api/cloud/login", { method: "POST", body: { platform, alias } });
+  cloudLoginStatus = (id: string) =>
+    this.request<{ id: string; output: string[]; urls: string[]; done: boolean; ok: boolean; cancelled?: boolean; error?: string }>(`/api/cloud/login/${id}`);
+  cloudLoginPaste = (id: string, address: string) => this.request<null>(`/api/cloud/login/${id}`, { method: "POST", body: { address } });
+  cloudLoginCancel = (id: string) => this.request<null>(`/api/cloud/login/${id}`, { method: "DELETE" });
   updateInfo = () => this.request<{ current: string; latest: string; newer: boolean }>("/api/update");
 
   schedules = (id: string) => this.request<{ schedules: Schedule[] }>(`/api/sessions/${id}/schedules`);

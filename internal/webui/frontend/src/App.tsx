@@ -108,8 +108,8 @@ export function App() {
   const [configError, setConfigError] = useState("");
   const [serverCapabilities, setServerCapabilities] = useState<Capabilities>(NO_CAPABILITIES);
   // The settings dialog and the section it opens on.
-  const [settingsOpen, setSettingsOpenState] = useState<false | "general" | "providers" | "login" | "connectors" | "instructions">(false);
-  const setSettingsOpen = (open: boolean | "general" | "providers" | "login" | "connectors" | "instructions") => setSettingsOpenState(open === true ? "general" : open);
+  const [settingsOpen, setSettingsOpenState] = useState<false | "general" | "providers" | "login" | "connectors" | "instructions" | "cloud">(false);
+  const setSettingsOpen = (open: boolean | "general" | "providers" | "login" | "connectors" | "instructions" | "cloud") => setSettingsOpenState(open === true ? "general" : open);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [collapsed, setCollapsed] = useState(() => readStorage("ccl-web-sidebar") === "collapsed");
   // The side panel's tab; null hides it. Wide when a file or diff is open.

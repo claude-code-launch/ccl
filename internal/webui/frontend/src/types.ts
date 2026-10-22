@@ -287,6 +287,32 @@ export interface WorktreeStatus extends SessionWorktree {
   upstream?: string;
 }
 
+// One `ccl cloud` remote with its state; times are zero ("0001-…") when unknown.
+export interface CloudRemote {
+  alias: string;
+  provider: string;
+  primary: boolean;
+  mirror: boolean;
+  signedIn: boolean;
+  accountHint?: string;
+  state?: string;
+  remoteTag?: string;
+  remoteDevice?: string;
+  remoteCreated?: string;
+  device?: string;
+  lastOperation?: string;
+  lastSyncAt?: string;
+  error?: string;
+}
+
+export interface CloudOverview {
+  remotes: CloudRemote[];
+  // icloud only on macOS.
+  platforms: string[];
+  // False in a build without its own binary path.
+  available: boolean;
+}
+
 export interface WorktreeDiff {
   base: string;
   diff: string;

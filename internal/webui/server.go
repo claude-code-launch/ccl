@@ -268,6 +268,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/mcp/", s.authenticated(s.withWorkspace(s.handleMCP)))
 	mux.HandleFunc("/api/update", s.authenticated(s.handleUpdate))
 	mux.HandleFunc("/api/memory", s.authenticated(s.handleMemory))
+	mux.HandleFunc("/api/cloud", s.authenticated(s.handleCloud))
+	mux.HandleFunc("/api/cloud/", s.authenticated(s.handleCloud))
 	// A share link carries its own token instead of the server's.
 	mux.HandleFunc("/api/share/", s.handleShared)
 	// The terminal authenticates itself: its stream also takes ?token=.
