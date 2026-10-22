@@ -280,6 +280,9 @@ func TestSessionStreamFrames(t *testing.T) {
 				}
 			}
 			if len(seen) >= 3 {
+				// The runner still stores the turn after its result; the
+				// temporary store is removed only once it is done.
+				waitIdle(t, httpServer.URL, meta.ID)
 				return
 			}
 			continue
@@ -287,6 +290,23 @@ func TestSessionStreamFrames(t *testing.T) {
 		frame.WriteString(line)
 	}
 	t.Fatalf("stream delivered %v", seen)
+}
+
+// waitIdle waits until a conversation's turn has finished and been stored.
+func waitIdle(t *testing.T, base, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		status, body := doJSON(t, "GET", base+"/api/sessions/"+id, "secret", "")
+		var view struct {
+			Running bool `json:"running"`
+		}
+		if status == http.StatusOK && json.Unmarshal(body, &view) == nil && !view.Running {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("session %s still running", id)
 }
 
 func TestMessageWhileRunningConflicts(t *testing.T) {
