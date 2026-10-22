@@ -51,6 +51,7 @@ ccl            # 用当前 provider 启动 Claude Code
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
 | `ccl proxy -p <name>` / `status` / `stop` | 后台代理，让直接运行的 `claude` 使用指定 provider |
 | `ccl acp [install]` | Agent Client Protocol（Xcode 27 等） |
+| `ccl web [--port 8099]` | 浏览器里使用 ccl 会话（HTTP + SSE；默认只监听回环地址） |
 | `ccl cloud login\|push\|pull\|status\|remote` | 加密云同步（iCloud / Google Drive） |
 | `ccl bypass [on\|off]` | 启动时附加 `--dangerously-skip-permissions`，仅在可信环境使用 |
 | `ccl sign [on\|off] [--default]` | 提交 / PR 的 Claude 署名（默认关闭）；`--default` 同时改 `~/.claude/settings.json` |
@@ -80,6 +81,15 @@ ccl use --acp <name>   # 可选：为 ACP 单独固定 provider；--follow 恢�
 ```
 
 Xcode → Settings → Intelligence → Agents → Add an Agent：`Executable` 填 `ccl` 的**绝对路径**，`Arguments` 填 `acp`。ACP 协议与 Agent 行为由上游 [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) 实现，ccl 只注入 provider / 模型 / 环境；运行中修改配置会在下一条空闲 prompt 前生效。`--adapter` 或 `CCL_ACP_ADAPTER` 可指定适配器路径。`ccl bypass` 不适用于 ACP。
+
+### 浏览器（ccl web）
+
+```bash
+ccl web                    # http://127.0.0.1:8099，自动打开浏览器，不需要 token
+ccl web --host 0.0.0.0 --no-open --token "$(openssl rand -hex 24)"   # 容器
+```
+
+一个对话就是一个 ccl 终端实例：它在 `--workspace` 目录读写、运行工具，每个回合起一个新的 Claude Code 进程并用 `--resume` 续接同一会话，所以 provider / 模型 / effort 在回合边界生效，停止就是结束进程。历史存放在 `~/.ccl/web/sessions/<id>/`。页面布局参照 claude.ai/code：左侧会话列表，中间消息流，右侧环境/用量/连接器面板，外加设置抽屉（provider、endpoint、API key、模型槽位、effort）。输入框的 ＋ 菜单可以添加文件或照片（⌘U，也支持拖放和粘贴；图片直接发给模型，其他文件以路径交给 Claude Code）、选择斜杠命令、查看已加载的 MCP 连接器。界面语言跟随 `ccl lang`。此外：工具调用可展开查看 diff、待办和计划；需要确认的工具会弹出允许/拒绝卡片（权限模式可选逐次询问、自动接受编辑、计划模式或跳过，默认跟随 `ccl bypass`）；右侧可浏览和编辑工作区文件、做 git 暂存/提交/切换分支；能导入本工作区已有的 Claude Code 会话、定时发送消息、导出 Markdown/HTML；设置里可以用订阅登录（`ccl oauth`）和管理 MCP 连接器。`ccl web --shell` 额外提供网页终端（默认关闭）。设置抽屉通过 `/api/config` 写 `~/.ccl/config.yaml`，同样走文件锁；正在运行的回合使用它启动时的配置快照。工作目录锁死为 `--workspace`。绑定回环地址时不要求 token，其它地址必须提供 `--token` 或 `CCL_WEB_TOKEN`。
 
 ### 协议与接入
 
@@ -174,6 +184,7 @@ Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, 
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |
 | `ccl proxy -p <name>` / `status` / `stop` | Background proxy so a plain `claude` uses the chosen provider |
 | `ccl acp [install]` | Agent Client Protocol (Xcode 27, …) |
+| `ccl web [--port 8099]` | ccl conversations in a browser (HTTP + SSE; loopback by default) |
 | `ccl cloud login\|push\|pull\|status\|remote` | Encrypted sync (iCloud / Google Drive) |
 | `ccl bypass [on\|off]` | Add `--dangerously-skip-permissions` on launch; trusted environments only |
 | `ccl sign [on\|off] [--default]` | Claude's commit / PR signature (off by default); `--default` also edits `~/.claude/settings.json` |
@@ -203,6 +214,15 @@ ccl use --acp <name>   # optional: pin a provider for ACP; --follow unpins
 ```
 
 Xcode → Settings → Intelligence → Agents → Add an Agent: set `Executable` to the **absolute path** of `ccl` and `Arguments` to `acp`. The ACP protocol and agent behavior come from upstream [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp); ccl only injects provider / model / environment. Config changes apply before the next idle prompt. Use `--adapter` or `CCL_ACP_ADAPTER` to point at the adapter. `ccl bypass` does not apply to ACP.
+
+### Browser (ccl web)
+
+```bash
+ccl web                    # http://127.0.0.1:8099, opens the browser, no token
+ccl web --host 0.0.0.0 --no-open --token "$(openssl rand -hex 24)"   # container
+```
+
+One conversation is one ccl terminal session: it reads and writes inside `--workspace` and runs tools. Every turn starts a new Claude Code process and resumes the same session with `--resume`, so provider / model / effort take effect at turn boundaries and stopping a turn ends the process. History lives in `~/.ccl/web/sessions/<id>/`. The layout follows claude.ai/code: sessions on the left, the thread in the middle, an environment / usage / connectors panel on the right, plus a settings drawer (provider, endpoint, API key, model slots, effort). The composer's + menu attaches files or photos (⌘U, drag and drop, or paste; images go to the model directly, other files reach Claude Code by path), picks slash commands, and lists the MCP connectors that loaded. The page follows `ccl lang`. Tool calls open to diffs, todo lists and plans; tools that need approval show allow/deny cards (permission modes: ask, accept edits, plan, bypass — the default follows `ccl bypass`); a side panel browses and edits workspace files and stages, commits and switches git branches; existing Claude Code sessions of the workspace can be imported; messages can be scheduled; transcripts export as Markdown or HTML; settings log in to subscriptions (`ccl oauth`) and manage MCP connectors. `ccl web --shell` adds a terminal (off by default). The drawer writes `~/.ccl/config.yaml` through `/api/config` under the same file lock; a running turn keeps the configuration snapshot it started with. The workspace is fixed by `--workspace`. A loopback listener needs no token; any other address requires `--token` or `CCL_WEB_TOKEN`.
 
 ### Protocols
 

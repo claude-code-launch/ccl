@@ -31,6 +31,9 @@ func TestLibraryPackagesHoldNoChineseStringLiterals(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		if entry.IsDir() && entry.Name() == "node_modules" {
+			return filepath.SkipDir
+		}
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}

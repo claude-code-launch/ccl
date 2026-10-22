@@ -1,0 +1,1070 @@
+package webui
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/provider"
+)
+
+//go:embed web
+var webAssets embed.FS
+
+// TokenHeader and TokenQuery are the two ways a client presents its token.
+const (
+	TokenHeader = "Authorization"
+	// TokenQuery is accepted only by the read-only stream and events endpoints:
+	// EventSource cannot set a header.
+	TokenQuery = "token"
+)
+
+// Config configures a web UI server.
+type Config struct {
+	// Token authenticates /api requests. It may be empty only when the server
+	// listens on a loopback address and RequireToken is false.
+	Token string
+	// RequireToken makes an empty Token a startup error. ccl web sets it when
+	// the bind address is reachable from outside the machine.
+	RequireToken bool
+	// Workspace is the directory every conversation runs in. Clients cannot
+	// choose another.
+	Workspace string
+	// MaxConcurrency bounds simultaneous Claude Code processes. <=0 uses 3.
+	MaxConcurrency int
+	// DefaultProvider/DefaultModel/DefaultEffort seed new conversations.
+	DefaultProvider string
+	DefaultModel    string
+	DefaultEffort   string
+	// StoreRoot overrides the on-disk conversation directory (tests).
+	StoreRoot string
+	// Version is reported by /health.
+	Version string
+	// Launch overrides the process launcher (tests).
+	Launch LaunchFunc
+	// SelfBinary is the ccl executable; subscription logins run `ccl oauth`.
+	SelfBinary string
+	// LatestVersion names the newest ccl release, for the update notice.
+	LatestVersion func() (string, error)
+	// Shell turns on the web terminal (ccl web --shell).
+	Shell bool
+}
+
+// Server is the HTTP surface of ccl web.
+type Server struct {
+	store     *Store
+	runner    *Runner
+	timeline  *Timeline
+	token     string
+	workspace string
+	// realWorkspace is workspace with symbolic links resolved: file paths are
+	// checked against it after their own links are resolved.
+	realWorkspace string
+	version       string
+
+	defaults metaDefaults
+
+	// subscribers wakes open SSE streams when an event is appended.
+	mu          sync.Mutex
+	subscribers map[string][]chan struct{}
+
+	selfBinary    string
+	latestVersion func() (string, error)
+	update        updateCache
+	logins        loginRegistry
+	schedules     *scheduler
+	shell         bool
+	terminals     terminalRegistry
+}
+
+type metaDefaults struct {
+	Provider       string
+	Model          string
+	Effort         string
+	PermissionMode string
+}
+
+// ProviderInfo is one selectable provider, as the browser sees it.
+type ProviderInfo struct {
+	Name        string            `json:"name"`
+	IsDefault   bool              `json:"isDefault"`
+	Slots       map[string]string `json:"slots"`
+	EffortLevel string            `json:"effortLevel,omitempty"`
+	Active      bool              `json:"active,omitempty"`
+}
+
+// SessionView is a conversation as the browser sees it. Running is known only
+// to this process, so it is never stored in meta.json.
+type SessionView struct {
+	Meta
+	Running bool `json:"running"`
+}
+
+func (s *Server) view(meta Meta) SessionView {
+	return SessionView{Meta: meta, Running: s.timeline.Running(meta.ID)}
+}
+
+// New creates a server. An empty token is an error: ccl web never listens
+// without authentication.
+func New(cfg Config) (*Server, error) {
+	token := strings.TrimSpace(cfg.Token)
+	if token == "" && cfg.RequireToken {
+		return nil, errors.New("a token is required when listening beyond 127.0.0.1: pass --token or set CCL_WEB_TOKEN")
+	}
+	workspace := strings.TrimSpace(cfg.Workspace)
+	if workspace == "" {
+		workspace = "."
+	}
+	abs, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("workspace %s is not a directory", abs)
+	}
+
+	root := cfg.StoreRoot
+	if root == "" {
+		root, err = DefaultRoot()
+		if err != nil {
+			return nil, err
+		}
+	}
+	store, err := NewStore(root)
+	if err != nil {
+		return nil, err
+	}
+	concurrency := cfg.MaxConcurrency
+	if concurrency <= 0 {
+		concurrency = 3
+	}
+	runner := NewRunner(concurrency)
+	if cfg.Launch != nil {
+		runner.Prepare = cfg.Launch
+	}
+	realWorkspace, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
+	}
+	server := &Server{
+		realWorkspace: realWorkspace,
+		store:         store,
+		runner:        runner,
+		timeline:      NewTimeline(),
+		token:         token,
+		workspace:     abs,
+		version:       cfg.Version,
+		subscribers:   make(map[string][]chan struct{}),
+		selfBinary:    cfg.SelfBinary,
+		latestVersion: cfg.LatestVersion,
+		logins:        loginRegistry{logins: map[string]*oauthLogin{}},
+		schedules:     newScheduler(schedulePath(root)),
+		shell:         cfg.Shell,
+		terminals:     terminalRegistry{terminals: map[string]*terminal{}},
+	}
+	defProvider := strings.TrimSpace(cfg.DefaultProvider)
+	// Turns ask before tools as the terminal would, unless ccl's bypass mode
+	// (ccl bypass) is on.
+	permissionMode := "default"
+	if loaded, err := config.Load(); err == nil {
+		if defProvider == "" {
+			defProvider = loaded.ActiveProvider
+		}
+		if loaded.BypassMode {
+			permissionMode = "bypassPermissions"
+		}
+	}
+	if defProvider == "" {
+		defProvider = provider.DefaultProvider
+	}
+	store.OnAppend = server.notify
+	server.defaults = metaDefaults{
+		Provider:       defProvider,
+		Model:          strings.TrimSpace(cfg.DefaultModel),
+		Effort:         strings.ToLower(strings.TrimSpace(cfg.DefaultEffort)),
+		PermissionMode: permissionMode,
+	}
+	go server.runSchedules()
+	return server, nil
+}
+
+// Store exposes the conversation store (tests, tooling).
+func (s *Server) Store() *Store { return s.store }
+
+// Handler returns the HTTP handler.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/api/providers", s.authenticated(s.handleProviders))
+	mux.HandleFunc("/api/config", s.authenticated(s.handleConfig))
+	mux.HandleFunc("/api/config/providers", s.authenticated(s.handleConfigProviders))
+	mux.HandleFunc("/api/config/providers/", s.authenticated(s.handleConfigProvider))
+	mux.HandleFunc("/api/sessions", s.authenticated(s.handleSessions))
+	mux.HandleFunc("/api/capabilities", s.authenticated(s.handleCapabilities))
+	mux.HandleFunc("/api/files/", s.authenticated(s.handleFiles))
+	mux.HandleFunc("/api/git/", s.authenticated(s.handleGit))
+	mux.HandleFunc("/api/claude-sessions", s.authenticated(s.handleClaudeSessions))
+	mux.HandleFunc("/api/oauth/login", s.authenticated(s.handleOAuth))
+	mux.HandleFunc("/api/oauth/login/", s.authenticated(s.handleOAuth))
+	mux.HandleFunc("/api/mcp", s.authenticated(s.handleMCP))
+	mux.HandleFunc("/api/mcp/", s.authenticated(s.handleMCP))
+	mux.HandleFunc("/api/update", s.authenticated(s.handleUpdate))
+	// The terminal authenticates itself: its stream also takes ?token=.
+	mux.HandleFunc("/api/terminal", s.handleTerminal)
+	mux.HandleFunc("/api/terminal/", s.handleTerminal)
+	mux.HandleFunc("/api/claude-sessions/", s.authenticated(s.handleClaudeSessions))
+	// <img> cannot send a header: the raw file route also takes ?token=.
+	mux.HandleFunc("/api/files/raw", func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(r) && !s.queryAuthorized(r) {
+			writeError(w, http.StatusUnauthorized, "missing or invalid token")
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.serveRaw(w, r)
+	})
+	// The session routes authenticate themselves: the stream and events
+	// endpoints also accept ?token=, which EventSource can use and a header
+	// cannot.
+	mux.HandleFunc("/api/sessions/", s.handleSession)
+	mux.Handle("/", s.staticHandler())
+	return s.guard(mux)
+}
+
+func (s *Server) staticHandler() http.Handler {
+	assets, err := fs.Sub(webAssets, "web")
+	if err != nil {
+		return http.NotFoundHandler()
+	}
+	files := http.FileServer(http.FS(assets))
+	etags := assetETags(assets)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// The page carries no secret; it asks for one and keeps it locally.
+		// no-cache still lets the browser keep a copy: it revalidates every
+		// load and gets a 304 while the binary is unchanged. web/ is the build
+		// output of internal/webui/frontend (npm run build).
+		w.Header().Set("Cache-Control", "no-cache")
+		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if name == "" {
+			name = "index.html"
+		}
+		// Vite names built assets by content hash: one URL never changes.
+		if strings.HasPrefix(name, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		if tag, ok := etags[name]; ok {
+			w.Header().Set("ETag", tag)
+			if etagMatches(r.Header.Get("If-None-Match"), tag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
+// assetETags hashes every embedded asset. An embedded file has no modification
+// time, so the content is the only thing a validator can come from.
+func assetETags(assets fs.FS) map[string]string {
+	etags := make(map[string]string)
+	_ = fs.WalkDir(assets, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		data, err := fs.ReadFile(assets, name)
+		if err != nil {
+			return nil
+		}
+		sum := sha256.Sum256(data)
+		etags[name] = `W/"` + hex.EncodeToString(sum[:8]) + `"`
+		return nil
+	})
+	return etags
+}
+
+// etagMatches applies If-None-Match's weak comparison.
+func etagMatches(header, tag string) bool {
+	weak := strings.TrimPrefix(tag, "W/")
+	for candidate := range strings.SplitSeq(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || strings.TrimPrefix(candidate, "W/") == weak {
+			return true
+		}
+	}
+	return false
+}
+
+// ── authentication ──────────────────────────────────────────────────────────
+
+func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(r) {
+			writeError(w, http.StatusUnauthorized, "missing or invalid token")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) authorized(r *http.Request) bool {
+	header := strings.TrimSpace(r.Header.Get(TokenHeader))
+	if after, ok := cutPrefixFold(header, "bearer "); ok {
+		return tokenEqual(after, s.token)
+	}
+	// No usable header: tokenEqual accepts that only in loopback mode, where the
+	// configured token is empty.
+	return tokenEqual("", s.token)
+}
+
+// queryAuthorized is the EventSource path: browsers cannot set headers there.
+func (s *Server) queryAuthorized(r *http.Request) bool {
+	return tokenEqual(r.URL.Query().Get(TokenQuery), s.token)
+}
+
+func tokenEqual(got, want string) bool {
+	if want == "" {
+		// Local-only mode: the listener is loopback, so the browser is the user.
+		return true
+	}
+	if got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func cutPrefixFold(text, prefix string) (string, bool) {
+	if len(text) < len(prefix) || !strings.EqualFold(text[:len(prefix)], prefix) {
+		return text, false
+	}
+	return strings.TrimSpace(text[len(prefix):]), true
+}
+
+// ── handlers ────────────────────────────────────────────────────────────────
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	sessions, _ := s.store.List()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"version":       s.version,
+		"claudeVersion": claudeVersion(),
+		"sessions":      len(sessions),
+		"workspace":     s.workspace,
+		// authRequired tells the page whether to ask for a token at all.
+		"authRequired": s.token != "",
+		"shell":        s.shell,
+	})
+}
+
+// claudeVersion asks the installed Claude Code for its version. It is cached:
+// /health may be polled by a container orchestration probe.
+var claudeVersion = func() func() string {
+	var once sync.Once
+	var version string
+	return func() string {
+		once.Do(func() {
+			path, err := exec.LookPath("claude")
+			if err != nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, path, "--version").Output()
+			if err != nil {
+				return
+			}
+			version = strings.TrimSpace(string(out))
+		})
+		return version
+	}
+}()
+
+func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load ccl config: "+err.Error())
+		return
+	}
+	providers := []ProviderInfo{{
+		Name:        provider.DefaultProvider,
+		IsDefault:   true,
+		Slots:       map[string]string{},
+		EffortLevel: "",
+		Active:      provider.IsDefaultProvider(cfg.ActiveProvider),
+	}}
+	names := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	for _, name := range names {
+		p := cfg.Providers[name]
+		providers = append(providers, ProviderInfo{
+			Name:        name,
+			Slots:       slotsOf(p),
+			EffortLevel: strings.TrimSpace(p.EffortLevel),
+			Active:      name == cfg.ActiveProvider,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"providers": providers, "current": cfg.ActiveProvider})
+}
+
+func slotsOf(p provider.Provider) map[string]string {
+	slots := map[string]string{
+		"opus":     stripOneM(p.OpusModel),
+		"sonnet":   stripOneM(p.SonnetModel),
+		"haiku":    stripOneM(p.HaikuModel),
+		"fable":    stripOneM(p.FableModel),
+		"custom":   stripOneM(p.CustomModelID),
+		"subagent": stripOneM(p.SubagentModel),
+	}
+	for key, value := range slots {
+		if value == "" {
+			delete(slots, key)
+		}
+	}
+	return slots
+}
+
+func stripOneM(model string) string {
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(model), "[1m]"))
+}
+
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		sessions, err := s.store.List()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		views := make([]SessionView, 0, len(sessions))
+		for _, meta := range sessions {
+			views = append(views, s.view(meta))
+		}
+		writeJSON(w, http.StatusOK, views)
+
+	case http.MethodPost:
+		var body struct {
+			Title    string `json:"title"`
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			Effort   string `json:"effort"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		meta := Meta{
+			Title:     strings.TrimSpace(body.Title),
+			Provider:  s.defaults.Provider,
+			Model:     s.defaults.Model,
+			Effort:    s.defaults.Effort,
+			Workspace: s.workspace,
+		}
+		if strings.TrimSpace(body.Provider) != "" {
+			meta.Provider = strings.TrimSpace(body.Provider)
+		}
+		if strings.TrimSpace(body.Model) != "" {
+			meta.Model = strings.TrimSpace(body.Model)
+		}
+		if strings.TrimSpace(body.Effort) != "" {
+			meta.Effort = strings.ToLower(strings.TrimSpace(body.Effort))
+		}
+		if err := s.validateProvider(meta.Provider); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validateEffort(meta.Effort); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		session, err := s.store.Create(meta)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, s.view(session.Meta()))
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleSession routes /api/sessions/{id}[/...].
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	id := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+	if len(parts) > 3 || (len(parts) == 3 && action != "uploads" && action != "schedules") {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	// The stream, events and attachment downloads take ?token= as well:
+	// EventSource and <img> cannot send a header. Every other route accepts
+	// only the header.
+	queryAuth := action == "stream" || action == "events" || (action == "uploads" && len(parts) == 3 && r.Method == http.MethodGet)
+	if !s.authorized(r) && !(queryAuth && s.queryAuthorized(r)) {
+		writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		return
+	}
+
+	session, err := s.store.Open(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	switch action {
+	case "":
+		s.handleSessionMeta(w, r, session)
+	case "messages":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleMessage(w, r, session)
+	case "stream":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleStream(w, r, session)
+	case "events":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		since := parseSeq(r.URL.Query().Get("since"))
+		events, err := session.Events(since)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if events == nil {
+			events = []Event{}
+		}
+		writeJSON(w, http.StatusOK, events)
+	case "schedules":
+		scheduleID := ""
+		if len(parts) == 3 {
+			scheduleID = parts[2]
+		}
+		s.handleSchedules(w, r, session, scheduleID)
+	case "permissions":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handlePermission(w, r, session)
+	case "uploads":
+		if len(parts) == 3 {
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			s.serveUpload(w, session, parts[2])
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleUploads(w, r, session)
+	case "cancel":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !s.timeline.Running(session.ID()) {
+			writeJSON(w, http.StatusOK, map[string]any{"cancelled": false, "running": false})
+			return
+		}
+		s.timeline.RequestCancel(session.ID())
+		writeJSON(w, http.StatusAccepted, map[string]any{"cancelled": true, "running": true})
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (s *Server) handleSessionMeta(w http.ResponseWriter, r *http.Request, session *Session) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.view(session.Meta()))
+
+	case http.MethodPatch:
+		if s.timeline.Running(session.ID()) {
+			writeError(w, http.StatusConflict, ErrBusy.Error())
+			return
+		}
+		var body struct {
+			Title    *string `json:"title"`
+			Provider *string `json:"provider"`
+			Model    *string `json:"model"`
+			Effort   *string `json:"effort"`
+			// PermissionMode is "" (the default) or one of PermissionModes.
+			PermissionMode *string `json:"permissionMode"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if body.PermissionMode != nil && *body.PermissionMode != "" && !validPermissionMode(*body.PermissionMode) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("permission mode: expected one of %s", strings.Join(PermissionModes, ", ")))
+			return
+		}
+		if body.Provider != nil {
+			if err := s.validateProvider(*body.Provider); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if body.Effort != nil {
+			if err := validateEffort(strings.ToLower(strings.TrimSpace(*body.Effort))); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		meta, err := session.UpdateMeta(func(meta *Meta) {
+			if body.Title != nil {
+				meta.Title = strings.TrimSpace(*body.Title)
+			}
+			if body.Provider != nil {
+				meta.Provider = strings.TrimSpace(*body.Provider)
+			}
+			if body.Model != nil {
+				meta.Model = strings.TrimSpace(*body.Model)
+			}
+			if body.Effort != nil {
+				meta.Effort = strings.ToLower(strings.TrimSpace(*body.Effort))
+			}
+			if body.PermissionMode != nil {
+				meta.PermissionMode = *body.PermissionMode
+			}
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, s.view(meta))
+
+	case http.MethodDelete:
+		if s.timeline.Running(session.ID()) {
+			writeError(w, http.StatusConflict, ErrBusy.Error())
+			return
+		}
+		if err := s.store.Delete(session.ID()); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, session *Session) {
+	var body struct {
+		Text     string `json:"text"`
+		Effort   string `json:"effort"`
+		Model    string `json:"model"`
+		Provider string `json:"provider"`
+		// Attachments are ids returned by the uploads endpoint.
+		Attachments []string `json:"attachments"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	text := strings.TrimSpace(body.Text)
+	attachments, err := resolveAttachments(session, body.Attachments)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if text == "" && len(attachments) == 0 {
+		writeError(w, http.StatusBadRequest, "text is required")
+		return
+	}
+
+	// A turn's provider/model/effort take effect at the process boundary, so a
+	// change arrives with the message that needs it; startTurn reads it back.
+	if changed := strings.TrimSpace(body.Provider) != "" || strings.TrimSpace(body.Model) != "" || strings.TrimSpace(body.Effort) != ""; changed {
+		if s.timeline.Running(session.ID()) {
+			writeError(w, http.StatusConflict, ErrBusy.Error())
+			return
+		}
+		if providerName := strings.TrimSpace(body.Provider); providerName != "" {
+			if err := s.validateProvider(providerName); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		effort := strings.ToLower(strings.TrimSpace(body.Effort))
+		if effort != "" {
+			if err := validateEffort(effort); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		_, err := session.UpdateMeta(func(meta *Meta) {
+			if providerName := strings.TrimSpace(body.Provider); providerName != "" {
+				meta.Provider = providerName
+			}
+			if model := strings.TrimSpace(body.Model); model != "" {
+				meta.Model = model
+			}
+			if effort != "" {
+				meta.Effort = effort
+			}
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	if _, err := s.startTurn(session, text, attachments); err != nil {
+		if errors.Is(err, ErrBusy) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if isLaunchStart(err) {
+			// The failure is already in the conversation history.
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"messageId": session.LastSeq(), "seq": session.LastSeq(), "running": true})
+}
+
+// startTurn runs one turn of a conversation with its current settings. Both
+// the message endpoint and the scheduler start turns through it.
+func (s *Server) startTurn(session *Session, text string, attachments []Attachment) (*TurnHandle, error) {
+	meta := session.Meta()
+	if meta.Title == "" || meta.Title == "New conversation" {
+		title := text
+		if title == "" && len(attachments) > 0 {
+			title = attachments[0].Name
+		}
+		_, _ = session.UpdateMeta(func(meta *Meta) { meta.Title = TitleFrom(title) })
+	}
+
+	spec := LaunchSpec{
+		Provider:  meta.Provider,
+		Model:     meta.Model,
+		Effort:    meta.Effort,
+		Workspace: meta.Workspace,
+		Resume:    meta.ClaudeSessionID,
+		Prompt:    text,
+		// An empty mode follows the server default.
+		PermissionMode: firstNonEmpty(meta.PermissionMode, s.defaults.PermissionMode),
+	}
+	for _, attachment := range attachments {
+		spec.Attachments = append(spec.Attachments, LaunchAttachment{
+			Path:      session.AttachmentPath(attachment.ID),
+			Name:      attachment.Name,
+			MediaType: attachment.Type,
+			Image:     attachment.Image,
+		})
+	}
+	spec.attachmentViews = attachments
+	if spec.Workspace == "" || !withinWorkspace(spec.Workspace, s.workspace) {
+		spec.Workspace = s.workspace
+	}
+	handle, err := s.timeline.Start(s.runner, session, spec)
+	if err != nil {
+		return nil, err
+	}
+	go s.notifyOnDone(session.ID(), handle.Done)
+	return handle, nil
+}
+
+func (s *Server) validateProvider(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if provider.IsDefaultProvider(name) {
+		return nil
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load ccl config: %w", err)
+	}
+	if _, ok := cfg.Providers[name]; !ok {
+		return fmt.Errorf("provider %q not found; use ccl ls or ccl set", name)
+	}
+	return nil
+}
+
+func validateEffort(level string) error {
+	level = strings.TrimSpace(level)
+	if level == "" {
+		return nil
+	}
+	for _, candidate := range EffortLevels {
+		if candidate == level {
+			return nil
+		}
+	}
+	return fmt.Errorf("effort: expected one of %s, got %q", strings.Join(EffortLevels, ", "), level)
+}
+
+// withinWorkspace reports whether dir is the workspace or below it.
+func withinWorkspace(dir, workspace string) bool {
+	rel, err := filepath.Rel(workspace, dir)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
+}
+
+// handleCapabilities reports the slash commands and MCP servers Claude Code
+// listed in the most recent turn of any conversation, so a new conversation's
+// menus are not empty. Each turn reports its own in its init event.
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	init := s.runner.Capabilities()
+	if init.SlashCommands == nil {
+		init.SlashCommands = []string{}
+	}
+	if init.MCPServers == nil {
+		init.MCPServers = []MCPServer{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"slashCommands":         init.SlashCommands,
+		"mcpServers":            init.MCPServers,
+		"defaultPermissionMode": s.defaults.PermissionMode,
+	})
+}
+
+// ── SSE ─────────────────────────────────────────────────────────────────────
+
+// heartbeatInterval keeps proxies from closing an idle stream.
+const heartbeatInterval = 15 * time.Second
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, session *Session) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	since := parseSeq(r.URL.Query().Get("since"))
+	if since == 0 {
+		// EventSource sends Last-Event-ID on reconnect.
+		since = parseSeq(r.Header.Get("Last-Event-ID"))
+	}
+
+	header := w.Header()
+	header.Set("Content-Type", "text/event-stream")
+	header.Set("Cache-Control", "no-cache")
+	header.Set("Connection", "keep-alive")
+	header.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	changed := s.subscribe(session.ID())
+	defer s.unsubscribe(session.ID(), changed)
+
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
+
+	for {
+		events, err := session.Events(since)
+		if err != nil {
+			s.writeEvent(w, flusher, Event{Type: EventError, Payload: mustJSON(ErrorPayload{Message: err.Error()})})
+			return
+		}
+		for _, event := range events {
+			if !s.writeEvent(w, flusher, event) {
+				return
+			}
+			since = event.Seq
+		}
+
+		select {
+		case <-r.Context().Done():
+			return
+		case <-changed:
+		case <-heartbeat.C:
+			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) writeEvent(w http.ResponseWriter, flusher http.Flusher, event Event) bool {
+	if _, err := fmt.Fprintf(w, "id: %d\n", event.Seq); err != nil {
+		return false
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
+		return false
+	}
+	payload := event.Payload
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
+	// A JSON event payload never contains a raw newline, so one data line is
+	// enough; json.Marshal escapes them inside strings.
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
+}
+
+func (s *Server) subscribe(id string) chan struct{} {
+	ch := make(chan struct{}, 1)
+	s.mu.Lock()
+	s.subscribers[id] = append(s.subscribers[id], ch)
+	s.mu.Unlock()
+	return ch
+}
+
+func (s *Server) unsubscribe(id string, target chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.subscribers[id]
+	for i, ch := range list {
+		if ch == target {
+			s.subscribers[id] = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	if len(s.subscribers[id]) == 0 {
+		delete(s.subscribers, id)
+	}
+}
+
+// Publish wakes the streams watching a session. Callers use it after appending
+// events themselves; the turn runner publishes per event.
+func (s *Server) Publish(id string) { s.notify(id) }
+
+func (s *Server) notify(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ch := range s.subscribers[id] {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *Server) notifyOnDone(id string, done <-chan struct{}) {
+	<-done
+	s.notify(id)
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+func parseSeq(value string) int64 {
+	var seq int64
+	for _, char := range strings.TrimSpace(value) {
+		if char < '0' || char > '9' {
+			return 0
+		}
+		seq = seq*10 + int64(char-'0')
+		if seq < 0 {
+			return 0
+		}
+	}
+	return seq
+}
+
+func decodeBody(r *http.Request, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	if err := decoder.Decode(target); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return fmt.Errorf("decode request body: %w", err)
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Printf("ccl web: write response: %v", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func mustJSON(value any) json.RawMessage {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return data
+}
+
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
+}
+
+func isLaunchStart(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "start Claude Code") || strings.Contains(message, "not found in PATH")
+}

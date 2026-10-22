@@ -42,6 +42,36 @@ jobs:
       - name: Build
         run: go build ./...
 
+  webui:
+    name: Web UI build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: internal/webui/frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: internal/webui/frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+      # The binary embeds internal/webui/web, and go install must work without
+      # Node, so the build output is committed. It must match the sources.
+      - name: Check the committed build is current
+        working-directory: .
+        run: |
+          if [ -n "$(git status --porcelain -- internal/webui/web)" ]; then
+            echo "internal/webui/web is stale: run npm run build in internal/webui/frontend and commit the result."
+            git status --short -- internal/webui/web
+            exit 1
+          fi
+
   portable:
     name: Core contracts (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

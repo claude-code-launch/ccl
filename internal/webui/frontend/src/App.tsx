@@ -1,0 +1,713 @@
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
+import { Api, Unauthorized, storeToken, storedToken } from "./api";
+import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProviderView, Schedule, Session, StoredEvent } from "./types";
+import { buildThread, latestCapabilities, pendingPermissions } from "./thread";
+import { download, safeFileName, transcriptHTML, transcriptMarkdown } from "./export";
+import { CommandPalette } from "./components/CommandPalette";
+import { useConversation } from "./useConversation";
+import { I18n, resolveLang, translator } from "./i18n";
+import { Sidebar } from "./components/Sidebar";
+import { SessionHeader } from "./components/SessionHeader";
+import { RightPanel } from "./components/RightPanel";
+import { FilesPanel } from "./components/FilesPanel";
+import { GitPanel } from "./components/GitPanel";
+import type { PanelTab } from "./components/SessionHeader";
+import { Thread } from "./components/Thread";
+import { Composer } from "./components/Composer";
+import { SettingsDrawer } from "./components/SettingsDrawer";
+import { Gate } from "./components/Gate";
+
+// The terminal (xterm.js) loads only when its panel opens.
+const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
+
+type Theme = "light" | "dark";
+
+function readStorage(key: string): string {
+  try {
+    return localStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // A per-browser convenience only.
+  }
+}
+
+// The theme follows the system until the user picks one with the switch.
+function useTheme(): [Theme, () => void] {
+  const media = useMemo(() => window.matchMedia("(prefers-color-scheme: dark)"), []);
+  const [choice, setChoice] = useState(() => readStorage("ccl-web-theme"));
+  const [system, setSystem] = useState<Theme>(media.matches ? "dark" : "light");
+  useEffect(() => {
+    const onChange = (event: MediaQueryListEvent) => setSystem(event.matches ? "dark" : "light");
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [media]);
+  const theme: Theme = choice === "light" || choice === "dark" ? choice : system;
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
+  const toggle = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setChoice(next);
+    writeStorage("ccl-web-theme", next);
+  };
+  return [theme, toggle];
+}
+
+const narrow = () => window.matchMedia("(max-width: 767px)").matches;
+const NO_CAPABILITIES: Capabilities = { slashCommands: [], mcpServers: [] };
+
+interface Queued {
+  key: string;
+  text: string;
+  attachments: string[];
+}
+
+// contextOf is the size of the newest model call against the model's window:
+// a model id marked [1m] runs with the 1M window.
+function contextOf(events: StoredEvent[], session: Session | null): { tokens: number; window: number } | undefined {
+  let tokens = 0;
+  let model = session?.model || "";
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (!tokens && event.type === "context") tokens = Number((event.payload as { tokens?: number }).tokens) || 0;
+    if (event.type === "init") {
+      model = String((event.payload as { model?: string }).model || model);
+      break;
+    }
+  }
+  if (!tokens) return undefined;
+  return { tokens, window: /\[1m\]|-1m\b/i.test(model) ? 1_000_000 : 200_000 };
+}
+
+export function App() {
+  const [token, setToken] = useState(storedToken);
+  const api = useMemo(() => new Api(token), [token]);
+  const [phase, setPhase] = useState<"loading" | "gate" | "ready">("loading");
+  const [gateError, setGateError] = useState("");
+  const [health, setHealth] = useState<Health | null>(null);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [config, setConfig] = useState<ConfigView | null>(null);
+  const [configError, setConfigError] = useState("");
+  const [serverCapabilities, setServerCapabilities] = useState<Capabilities>(NO_CAPABILITIES);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => readStorage("ccl-web-sidebar") === "collapsed");
+  // The side panel's tab; null hides it. Wide when a file or diff is open.
+  const [panel, setPanel] = useState<PanelTab | null>(() => {
+    const saved = readStorage("ccl-web-panel");
+    return saved === "closed" ? null : saved === "files" || saved === "git" || saved === "terminal" ? saved : "overview";
+  });
+  const [panelWide, setPanelWide] = useState(false);
+  const [gitFocus, setGitFocus] = useState("");
+  // Bumped when a turn ends, so open panels reload what Claude may have changed.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [claudeSessions, setClaudeSessions] = useState<ClaudeSession[] | null>(null);
+  const [git, setGit] = useState<GitStatus | null>(null);
+  const [queues, setQueues] = useState<Record<string, Queued[]>>({});
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [terminalId, setTerminalId] = useState<string | null>(null);
+  const [update, setUpdate] = useState("");
+  const [notice, setNotice] = useState("");
+  const [theme, toggleTheme] = useTheme();
+
+  const lang = resolveLang(config?.lang);
+  const i18n = useMemo(() => ({ lang, t: translator(lang) }), [lang]);
+  const { t } = i18n;
+  useEffect(() => {
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  }, [lang]);
+
+  const signOut = useCallback((message: string) => {
+    storeToken("");
+    setToken("");
+    setGateError(message);
+    setPhase("gate");
+  }, []);
+
+  const fail = useCallback(
+    (error: unknown) => {
+      if (error instanceof Unauthorized) signOut("Token rejected");
+      else setNotice(error instanceof Error ? error.message : String(error));
+    },
+    [signOut],
+  );
+
+  const loadSessions = useCallback(async () => {
+    try {
+      setSessions(await api.sessions());
+    } catch (error) {
+      fail(error);
+    }
+  }, [api, fail]);
+
+  const loadConfig = useCallback(async () => {
+    try {
+      setConfig(await api.config());
+      setConfigError("");
+    } catch (error) {
+      if (error instanceof Unauthorized) fail(error);
+      else setConfigError(error instanceof Error ? error.message : String(error));
+    }
+  }, [api, fail]);
+
+  const loadGit = useCallback(async () => {
+    try {
+      setGit(await api.gitStatus());
+    } catch {
+      setGit(null);
+    }
+  }, [api]);
+
+  const loadClaudeSessions = useCallback(async () => {
+    try {
+      setClaudeSessions((await api.claudeSessions()).sessions);
+    } catch (error) {
+      setClaudeSessions([]);
+      fail(error);
+    }
+  }, [api, fail]);
+
+  const loadCapabilities = useCallback(async () => {
+    try {
+      setServerCapabilities(await api.capabilities());
+    } catch {
+      // Menus fall back to the conversation's own init event.
+    }
+  }, [api]);
+
+  // Boot: a loopback ccl web asks for no token at all.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await api.health();
+        if (cancelled) return;
+        setHealth(info);
+        if (info.authRequired && !api.token) {
+          setPhase("gate");
+          return;
+        }
+        const list = await api.sessions();
+        if (cancelled) return;
+        setSessions(list);
+        setCurrentId((current) => current || list[0]?.id || null);
+        setPhase("ready");
+        loadConfig();
+        loadCapabilities();
+        loadGit();
+        api.updateInfo().then((info) => info.newer && setUpdate(info.latest)).catch(() => {});
+      } catch (error) {
+        if (cancelled) return;
+        if (error instanceof Unauthorized) signOut(api.token ? "Token rejected" : "");
+        else signOut("Could not connect: " + (error instanceof Error ? error.message : String(error)));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, loadConfig, loadCapabilities, loadGit, signOut]);
+
+  // Turn boundaries change titles, counts, usage and what Claude Code offers;
+  // refresh shortly after rather than once per event.
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) return;
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = undefined;
+      setRefreshKey((key) => key + 1);
+      loadSessions();
+      loadCapabilities();
+      loadGit();
+    }, 600);
+  }, [loadSessions, loadCapabilities, loadGit]);
+
+  const mergeSession = useCallback((session: Session) => {
+    setSessions((list) => {
+      const found = list.some((item) => item.id === session.id);
+      return found ? list.map((item) => (item.id === session.id ? { ...item, ...session } : item)) : [session, ...list];
+    });
+  }, []);
+
+  const conversation = useConversation(api, phase === "ready" ? currentId : null, scheduleRefresh, mergeSession);
+  const items = useMemo(() => buildThread(conversation.events), [conversation.events]);
+  const capabilities = useMemo(() => {
+    const own = latestCapabilities(conversation.events);
+    return own ? { ...own, defaultPermissionMode: serverCapabilities.defaultPermissionMode } : serverCapabilities;
+  }, [conversation.events, serverCapabilities]);
+  const pending = useMemo(() => pendingPermissions(items), [items]);
+
+  const respondPermission = useCallback(
+    async (decision: PermissionDecision) => {
+      if (!currentId) return;
+      try {
+        await api.respondPermission(currentId, decision);
+        if (decision.mode) scheduleRefresh();
+      } catch (error) {
+        fail(error);
+      }
+    },
+    [api, currentId, fail, scheduleRefresh],
+  );
+
+  // A question while the page is in the background deserves a notification.
+  const notified = useRef(new Set<string>());
+  useEffect(() => {
+    for (const request of pending) {
+      if (notified.current.has(request.requestId)) continue;
+      notified.current.add(request.requestId);
+      if (document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification(t("permNotify"), { body: request.description || request.summary || request.toolName, tag: request.requestId });
+      }
+    }
+  }, [pending, t]);
+
+  const current = sessions.find((session) => session.id === currentId) || null;
+  const providers: ProviderView[] = useMemo(
+    () => Object.values(config?.providers || {}).sort((a, b) => a.name.localeCompare(b.name)),
+    [config],
+  );
+  const workspace = health?.workspace || "";
+  const route = current ? [current.provider || "default", current.model, current.effort].filter(Boolean).join(" · ") : "";
+
+  const select = (id: string) => {
+    setCurrentId(id);
+    setMobileSidebar(false);
+  };
+
+  // A session the composer created for its first upload keeps the composer
+  // (and the files in it): its key stays "new".
+  const adopted = useRef<string | null>(null);
+
+  const create = async (adopt = false): Promise<Session | null> => {
+    try {
+      const session = await api.createSession();
+      if (adopt) adopted.current = session.id;
+      mergeSession(session);
+      select(session.id);
+      return session;
+    } catch (error) {
+      fail(error);
+      return null;
+    }
+  };
+
+  // Starting a new session is lazy: the first message or file creates it.
+  const startNew = () => {
+    setCurrentId(null);
+    setMobileSidebar(false);
+  };
+
+  const ensureSession = async (): Promise<string | null> => {
+    if (currentId) return currentId;
+    const session = await create(true);
+    return session?.id || null;
+  };
+
+  const upload = async (files: File[]): Promise<Attachment[]> => {
+    const id = await ensureSession();
+    if (!id) throw new Error("no session");
+    return api.upload(id, files);
+  };
+
+  const send = async (text: string, attachments: string[]): Promise<boolean> => {
+    const id = await ensureSession();
+    if (!id) return false;
+    // Notifications need the user's permission, asked on a click.
+    if (typeof Notification !== "undefined" && Notification.permission === "default") void Notification.requestPermission();
+    if (conversation.running && id === currentId) {
+      const item = { key: `${Date.now()}-${Math.random().toString(36).slice(2)}`, text, attachments };
+      setQueues((all) => ({ ...all, [id]: [...(all[id] || []), item] }));
+      return true;
+    }
+    try {
+      await api.send(id, text, attachments);
+      conversation.setRunning(true);
+      scheduleRefresh();
+      return true;
+    } catch (error) {
+      fail(error);
+      return false;
+    }
+  };
+
+  // A queued message goes out once the turn before it ended.
+  const queue = (currentId && queues[currentId]) || [];
+  const flushing = useRef(false);
+  useEffect(() => {
+    if (!currentId || conversation.running || conversation.loading || !queue.length || flushing.current) return;
+    const [next, ...rest] = queue;
+    flushing.current = true;
+    setQueues((all) => ({ ...all, [currentId]: rest }));
+    api
+      .send(currentId, next.text, next.attachments)
+      .then(() => {
+        conversation.setRunning(true);
+        scheduleRefresh();
+      })
+      .catch(fail)
+      .finally(() => {
+        flushing.current = false;
+      });
+  }, [currentId, conversation, queue, api, fail, scheduleRefresh]);
+
+  // Tell the user when a turn ends while the page is in the background.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    const title = current?.title || "ccl web";
+    document.title = conversation.running ? `● ${title}` : title;
+    if (wasRunning.current && !conversation.running && document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      const last = [...items].reverse().find((item) => item.kind === "turn-end");
+      const state = last && last.kind === "turn-end" ? (last.result.cancelled ? "turnStopped" : last.result.isError ? "turnFailed" : "turnDone") : "turnDone";
+      new Notification(t(state), { body: title, tag: currentId || undefined });
+    }
+    wasRunning.current = conversation.running;
+  }, [conversation.running, current?.title, currentId, items, t]);
+
+  // ⌘K / Ctrl+K opens the command palette.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+        if (claudeSessions === null) loadClaudeSessions();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [claudeSessions, loadClaudeSessions]);
+
+  const importSession = async (id: string) => {
+    try {
+      const session = await api.importClaudeSession(id);
+      mergeSession(session);
+      select(session.id);
+      loadClaudeSessions();
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  const exportTranscript = async (format: "md" | "html") => {
+    const title = current?.title || "conversation";
+    const markdown = transcriptMarkdown(title, items, t);
+    if (format === "md") download(safeFileName(title) + ".md", markdown, "text/markdown");
+    else download(safeFileName(title) + ".html", await transcriptHTML(title, markdown), "text/html");
+  };
+
+  // Scheduled messages of the open conversation; a turn boundary may have
+  // sent one.
+  const loadSchedules = useCallback(async () => {
+    if (!currentId) {
+      setSchedules([]);
+      return;
+    }
+    try {
+      setSchedules((await api.schedules(currentId)).schedules);
+    } catch {
+      setSchedules([]);
+    }
+  }, [api, currentId]);
+  useEffect(() => {
+    void loadSchedules();
+  }, [loadSchedules, refreshKey]);
+
+  const scheduleMessage = async (text: string, at: string): Promise<boolean> => {
+    const id = await ensureSession();
+    if (!id) return false;
+    try {
+      await api.schedule(id, at, text);
+      await loadSchedules();
+      return true;
+    } catch (error) {
+      fail(error);
+      return false;
+    }
+  };
+
+  const stop = async () => {
+    if (!currentId) return;
+    try {
+      const result = await api.cancel(currentId);
+      // Nothing was running any more: the result event is already on its way.
+      if (!result.running) conversation.setRunning(false);
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  const patch = async (session: Session, change: Parameters<Api["patchSession"]>[1]) => {
+    try {
+      mergeSession(await api.patchSession(session.id, change));
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  const rename = (session: Session) => {
+    const title = prompt(t("sessionTitle"), session.title || "");
+    if (title !== null) patch(session, { title });
+  };
+
+  const remove = async (session: Session) => {
+    if (!confirm(t("confirmDelete", { title: session.title || t("untitled") }))) return;
+    try {
+      await api.deleteSession(session.id);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    setSessions((list) => list.filter((item) => item.id !== session.id));
+    if (currentId === session.id) setCurrentId(null);
+  };
+
+  const toggleSidebar = () => {
+    if (narrow()) {
+      setMobileSidebar(!mobileSidebar);
+      return;
+    }
+    const next = !collapsed;
+    setCollapsed(next);
+    writeStorage("ccl-web-sidebar", next ? "collapsed" : "");
+  };
+
+  const openPanel = (tab: PanelTab) => {
+    const next = panel === tab ? null : tab;
+    setPanel(next);
+    setPanelWide(false);
+    writeStorage("ccl-web-panel", next || "closed");
+  };
+  const togglePanel = () => openPanel(panel || "overview");
+
+  const mention = useRef<(path: string) => void>(() => {});
+  const registerMention = useCallback((insert: (path: string) => void) => {
+    mention.current = insert;
+  }, []);
+
+  // Files dropped anywhere on the conversation attach to the next message.
+  const addFiles = useRef<(files: File[]) => void>(() => {});
+  const registerAddFiles = useCallback((add: (files: File[]) => void) => {
+    addFiles.current = add;
+  }, []);
+  const dragDepth = useRef(0);
+  const hasFiles = (event: React.DragEvent) => Array.from(event.dataTransfer.types).includes("Files");
+
+  if (phase === "loading") return <div className="h-full bg-canvas" />;
+  if (phase === "gate") {
+    return (
+      <I18n.Provider value={i18n}>
+        <Gate
+          error={gateError}
+          onSubmit={(value) => {
+            storeToken(value);
+            setGateError("");
+            setPhase("loading");
+            setToken(value);
+          }}
+        />
+      </I18n.Provider>
+    );
+  }
+
+  return (
+    <I18n.Provider value={i18n}>
+      <div className="flex h-full bg-canvas text-ink">
+        <div
+          className={
+            "fixed inset-y-0 left-0 z-20 w-[288px] max-w-[88vw] shadow-xl transition-transform md:static md:z-auto md:translate-x-0 md:shadow-none " +
+            (mobileSidebar ? "translate-x-0 " : "-translate-x-full ") +
+            (collapsed ? "md:hidden" : "")
+          }
+        >
+          <Sidebar
+            sessions={sessions}
+            currentId={currentId}
+            health={health}
+            theme={theme}
+            onSelect={select}
+            onCreate={startNew}
+            onRename={rename}
+            onDelete={remove}
+            onSettings={() => {
+              setSettingsOpen(true);
+              setMobileSidebar(false);
+              loadConfig();
+            }}
+            onToggleTheme={toggleTheme}
+            onCollapse={toggleSidebar}
+            claudeSessions={claudeSessions}
+            update={update}
+            onLoadClaudeSessions={loadClaudeSessions}
+            onImport={importSession}
+          />
+        </div>
+        {mobileSidebar && <div className="fixed inset-0 z-10 bg-black/40 md:hidden" onClick={() => setMobileSidebar(false)} />}
+
+        <main
+          className="relative flex min-w-0 flex-1 flex-col"
+          onDragEnter={(event) => {
+            if (!hasFiles(event)) return;
+            event.preventDefault();
+            dragDepth.current++;
+            setDragging(true);
+          }}
+          onDragOver={(event) => hasFiles(event) && event.preventDefault()}
+          onDragLeave={() => {
+            dragDepth.current = Math.max(0, dragDepth.current - 1);
+            if (!dragDepth.current) setDragging(false);
+          }}
+          onDrop={(event) => {
+            if (!hasFiles(event)) return;
+            event.preventDefault();
+            dragDepth.current = 0;
+            setDragging(false);
+            addFiles.current(Array.from(event.dataTransfer.files));
+          }}
+        >
+          <SessionHeader
+            session={current}
+            sidebarHidden={collapsed}
+            panel={panel}
+            onShowSidebar={toggleSidebar}
+            onPanel={openPanel}
+            onRename={() => current && rename(current)}
+            onDelete={() => current && remove(current)}
+            onExport={exportTranscript}
+            terminal={!!health?.shell}
+          />
+          <div className="flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
+              {conversation.error && (
+                <div className="mx-auto mt-2 w-full max-w-[635px] rounded-lg bg-red-500/10 px-3 py-2 text-[13px] text-red-500">{conversation.error}</div>
+              )}
+              <Thread
+                items={items}
+                running={conversation.running}
+                loading={conversation.loading}
+                workspace={workspace}
+                route={route}
+                attachmentURL={(file) => (currentId ? api.uploadURL(currentId, file) : "")}
+                onPermission={respondPermission}
+                onOnboard={config && !providers.length && !currentId ? () => { setSettingsOpen(true); loadConfig(); } : undefined}
+              />
+              <Composer
+                key={!currentId || adopted.current === currentId ? "new" : currentId}
+                running={conversation.running}
+                workspace={workspace}
+                session={current}
+                providers={providers}
+                capabilities={capabilities}
+                onRoute={(change) => current && patch(current, change)}
+                onUpload={upload}
+                onSend={send}
+                onStop={stop}
+                registerAddFiles={registerAddFiles}
+                registerMention={registerMention}
+                onSearchFiles={async (query) => (await api.searchFiles(query)).files}
+                queued={queue.map((item) => ({ key: item.key, text: item.text, files: item.attachments.length }))}
+                onRemoveQueued={(key) => currentId && setQueues((all) => ({ ...all, [currentId]: (all[currentId] || []).filter((item) => item.key !== key) }))}
+                context={contextOf(conversation.events, current)}
+                awaitingPermission={pending.length > 0}
+                scheduled={schedules}
+                onSchedule={scheduleMessage}
+                onUnschedule={(id) => currentId && api.unschedule(currentId, id).then(loadSchedules).catch(fail)}
+                onManageConnectors={() => {
+                  setSettingsOpen(true);
+                  loadConfig();
+                }}
+              />
+            </div>
+            {panel && (
+              <>
+                <div className="fixed inset-0 z-10 bg-black/30 lg:hidden" onClick={() => openPanel(panel)} />
+                <div
+                  style={{ width: panel === "overview" ? 290 : panelWide || panel === "terminal" ? "min(760px, 52vw)" : 360 }}
+                  className="fixed inset-y-0 right-0 z-20 flex max-w-full shrink-0 flex-col border-l border-line bg-canvas transition-[width] max-lg:!w-[min(560px,100vw)] lg:static lg:z-auto lg:border-l-0"
+                >
+                  {panel === "overview" && (
+                    <RightPanel
+                      session={current}
+                      providers={providers}
+                      workspace={workspace}
+                      capabilities={capabilities}
+                      git={git}
+                      onOpenChange={(path) => {
+                        setGitFocus(path);
+                        setPanel("git");
+                      }}
+                    />
+                  )}
+                  {panel === "files" && (
+                    <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
+                      <FilesPanel api={api} refreshKey={refreshKey} onMention={(path) => mention.current(path)} onWide={setPanelWide} onError={fail} onSaved={loadGit} />
+                    </div>
+                  )}
+                  {panel === "terminal" && health?.shell && (
+                    <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
+                      <Suspense fallback={null}>
+                        <TerminalPanel api={api} id={terminalId} onId={setTerminalId} onError={fail} />
+                      </Suspense>
+                    </div>
+                  )}
+                  {panel === "git" && (
+                    <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
+                      <GitPanel api={api} status={git} onStatus={setGit} onRefresh={loadGit} focus={gitFocus} onWide={setPanelWide} onError={fail} />
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          {dragging && (
+            <div className="pointer-events-none absolute inset-3 z-30 grid place-items-center rounded-2xl border-2 border-dashed border-clay/70 bg-canvas/80">
+              <div className="flex items-center gap-2 text-[15px] text-ink">
+                <Paperclip size={18} className="text-clay" /> {t("dropFiles")}
+              </div>
+            </div>
+          )}
+        </main>
+
+        {paletteOpen && (
+          <CommandPalette
+            actions={[
+              { id: "new", label: t("newSession"), icon: <Plus size={15} />, run: startNew },
+              { id: "settings", label: t("settings"), icon: <Settings size={15} />, run: () => { setSettingsOpen(true); loadConfig(); } },
+              { id: "theme", label: theme === "dark" ? t("lightTheme") : t("darkTheme"), icon: theme === "dark" ? <Sun size={15} /> : <Moon size={15} />, run: toggleTheme },
+              { id: "sidebar", label: t("toggleSidebar"), icon: <PanelLeft size={15} />, run: toggleSidebar },
+              { id: "panel", label: t("togglePanel"), icon: <PanelRight size={15} />, run: togglePanel },
+            ]}
+            sessions={sessions}
+            claudeSessions={claudeSessions || []}
+            onSelect={select}
+            onImport={importSession}
+            onClose={() => setPaletteOpen(false)}
+          />
+        )}
+
+        {settingsOpen && (
+          <SettingsDrawer api={api} config={config} loadError={configError} onClose={() => setSettingsOpen(false)} onChanged={loadConfig} />
+        )}
+
+        {notice && (
+          <div className="fixed bottom-24 left-1/2 z-40 flex max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-xl border border-line bg-surface px-4 py-2.5 text-[13px] text-ink shadow-xl">
+            <span className="truncate">{notice}</span>
+            <button onClick={() => setNotice("")} aria-label={t("dismiss")} className="text-ink-3 hover:text-ink">
+              <X size={15} />
+            </button>
+          </div>
+        )}
+      </div>
+    </I18n.Provider>
+  );
+}

@@ -4,9 +4,13 @@ go 1.26.0
 
 toolchain go1.26.6
 
+// The web UI's npm dependencies are not Go packages.
+ignore ./internal/webui/frontend/node_modules
+
 require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/x/term v0.2.2
+	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	github.com/grindlemire/go-tui v0.19.0
 	github.com/spf13/cobra v1.10.2

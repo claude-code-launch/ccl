@@ -1,0 +1,192 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* Dark mode is the html data-theme attribute: the page sets it from the
+   user's choice, or from the system preference when there is none. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* Values measured from claude.ai/code (dark) and its light counterpart.
+   Components use the semantic names (bg-canvas, text-ink-2, border-line…),
+   which follow data-theme. */
+:root {
+  --canvas: #faf9f7;
+  --sidebar: #f3f2ef;
+  --surface: #ffffff;
+  --raised: #ffffff;
+  --hover: rgb(0 0 0 / 0.045);
+  --active: rgb(0 0 0 / 0.075);
+  --bubble: rgb(0 0 0 / 0.05);
+  --line: rgb(0 0 0 / 0.1);
+  --line-strong: rgb(0 0 0 / 0.18);
+  --ink: #1a1a18;
+  --ink-2: #4a4945;
+  --ink-3: #85837c;
+  --clay: #c96442;
+  --clay-hover: #b5583a;
+  --code: rgb(0 0 0 / 0.035);
+}
+[data-theme="dark"] {
+  --canvas: #151515;
+  --sidebar: #111111;
+  --surface: #20201f;
+  --raised: #1b1b1a;
+  --hover: rgb(255 255 255 / 0.06);
+  --active: rgb(255 255 255 / 0.1);
+  --bubble: rgb(255 255 255 / 0.05);
+  --line: rgb(255 255 255 / 0.1);
+  --line-strong: rgb(255 255 255 / 0.18);
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --ink-3: #898781;
+  --clay: #d97757;
+  --clay-hover: #e08a6d;
+  --code: rgb(255 255 255 / 0.03);
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+  --color-bubble: var(--bubble);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-clay: var(--clay);
+  --color-clay-hover: var(--clay-hover);
+  --color-code: var(--code);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  background: var(--canvas);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The block being streamed ends with a cursor. */
+.streaming > :last-child::after {
+  content: "▌";
+  margin-left: 2px;
+  color: var(--clay);
+  animation: ccl-blink 1s steps(2) infinite;
+}
+@keyframes ccl-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Syntax colors for rehype-highlight (highlight.js class names). */
+.hljs-comment,
+.hljs-quote {
+  color: var(--color-gray-500);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-type {
+  color: var(--color-violet-700);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute {
+  color: var(--color-emerald-700);
+}
+.hljs-number,
+.hljs-literal,
+.hljs-symbol {
+  color: var(--color-amber-700);
+}
+.hljs-title,
+.hljs-section,
+.hljs-function .hljs-title {
+  color: var(--color-blue-700);
+}
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-property {
+  color: var(--color-sky-700);
+}
+.hljs-deletion {
+  color: var(--color-red-700);
+}
+.hljs-meta {
+  color: var(--color-gray-500);
+}
+[data-theme="dark"] .hljs-keyword,
+[data-theme="dark"] .hljs-selector-tag,
+[data-theme="dark"] .hljs-built_in,
+[data-theme="dark"] .hljs-type {
+  color: var(--color-violet-300);
+}
+[data-theme="dark"] .hljs-string,
+[data-theme="dark"] .hljs-regexp,
+[data-theme="dark"] .hljs-addition,
+[data-theme="dark"] .hljs-attribute {
+  color: var(--color-emerald-300);
+}
+[data-theme="dark"] .hljs-number,
+[data-theme="dark"] .hljs-literal,
+[data-theme="dark"] .hljs-symbol {
+  color: var(--color-amber-300);
+}
+[data-theme="dark"] .hljs-title,
+[data-theme="dark"] .hljs-section,
+[data-theme="dark"] .hljs-function .hljs-title {
+  color: var(--color-blue-300);
+}
+[data-theme="dark"] .hljs-attr,
+[data-theme="dark"] .hljs-variable,
+[data-theme="dark"] .hljs-template-variable,
+[data-theme="dark"] .hljs-property {
+  color: var(--color-sky-300);
+}
+[data-theme="dark"] .hljs-deletion {
+  color: var(--color-red-300);
+}
+
+/* Typography quotes a blockquote's first paragraph; replies quote text as is. */
+.prose blockquote p:first-of-type::before,
+.prose blockquote p:last-of-type::after {
+  content: none;
+}
+.prose blockquote {
+  font-style: normal;
+}
+
+.font-display {
+  font-family: Georgia, "Times New Roman", "Songti SC", serif;
+}
+
+/* CodeMirror tokens (classHighlighter emits tok-* classes). */
+.tok-keyword, .tok-operatorKeyword, .tok-modifier { color: var(--color-violet-700); }
+.tok-string, .tok-string2 { color: var(--color-emerald-700); }
+.tok-number, .tok-bool, .tok-atom { color: var(--color-amber-700); }
+.tok-comment { color: var(--ink-3); font-style: italic; }
+.tok-typeName, .tok-className, .tok-namespace { color: var(--color-sky-700); }
+.tok-definition, .tok-function { color: var(--color-blue-700); }
+.tok-propertyName { color: var(--color-cyan-700); }
+.tok-heading { font-weight: 600; }
+.tok-link, .tok-url { color: var(--clay); }
+.tok-invalid { color: var(--color-red-600); }
+[data-theme="dark"] .tok-keyword, [data-theme="dark"] .tok-operatorKeyword, [data-theme="dark"] .tok-modifier { color: var(--color-violet-300); }
+[data-theme="dark"] .tok-string, [data-theme="dark"] .tok-string2 { color: var(--color-emerald-300); }
+[data-theme="dark"] .tok-number, [data-theme="dark"] .tok-bool, [data-theme="dark"] .tok-atom { color: var(--color-amber-300); }
+[data-theme="dark"] .tok-typeName, [data-theme="dark"] .tok-className, [data-theme="dark"] .tok-namespace { color: var(--color-sky-300); }
+[data-theme="dark"] .tok-definition, [data-theme="dark"] .tok-function { color: var(--color-blue-300); }
+[data-theme="dark"] .tok-propertyName { color: var(--color-cyan-300); }

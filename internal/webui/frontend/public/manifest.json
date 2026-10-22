@@ -1,0 +1,11 @@
+{
+  "name": "ccl web",
+  "short_name": "ccl web",
+  "description": "Claude Code in the browser, with any provider",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#151515",
+  "theme_color": "#151515",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

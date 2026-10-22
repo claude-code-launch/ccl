@@ -1,0 +1,307 @@
+import type {
+  Attachment,
+  Capabilities,
+  InitPayload,
+  ResultPayload,
+  StoredEvent,
+  TokenPayload,
+  ToolResultPayload,
+  ToolUsePayload,
+  UserPayload,
+} from "./types";
+import { diffLines, diffStats } from "./diff";
+
+// A conversation's history is a flat event stream; the thread is what the page
+// renders from it. buildThread is pure so it can be tested and recomputed on
+// every streamed token. A sub-agent's events nest under the Task call that
+// started it.
+
+export type TextItem = { kind: "text"; key: string; text: string; subagent: boolean };
+export type ThinkingItem = { kind: "thinking"; key: string; text: string };
+
+export type ToolItem = {
+  kind: "tool";
+  key: string;
+  id: string;
+  name: string;
+  summary: string;
+  description: string;
+  input?: Record<string, unknown>;
+  subagent: boolean;
+  status: "running" | "ok" | "err";
+  output?: string;
+  // What a sub-agent did inside this call (Task / Agent).
+  children: ThreadItem[];
+};
+
+export type PermissionItem = {
+  kind: "permission";
+  key: string;
+  requestId: string;
+  toolName: string;
+  title: string;
+  description: string;
+  summary: string;
+  reason: string;
+  input?: Record<string, unknown>;
+  canRemember: boolean;
+  status: "pending" | "allow" | "deny" | "cancelled";
+  message: string;
+  mode: string;
+};
+
+export type ThreadItem =
+  // A day separator; the label is rendered in the page's language.
+  | { kind: "day"; key: string; ts: number }
+  | { kind: "user"; key: string; text: string; attachments: Attachment[]; ts: number }
+  | TextItem
+  | ThinkingItem
+  | ToolItem
+  | { kind: "error"; key: string; message: string }
+  | { kind: "queued"; key: string }
+  | PermissionItem
+  | { kind: "turn-end"; key: string; result: ResultPayload; model?: string; ts: number };
+
+interface Scope {
+  items: ThreadItem[];
+  text: TextItem | null;
+  thinking: ThinkingItem | null;
+  lastTool: ToolItem | null;
+}
+
+const scope = (items: ThreadItem[]): Scope => ({ items, text: null, thinking: null, lastTool: null });
+
+export function buildThread(events: StoredEvent[]): ThreadItem[] {
+  const root = scope([]);
+  // Tool ids are only meaningful within a turn.
+  let tools = new Map<string, ToolItem>();
+  let scopes = new Map<string, Scope>();
+  const permissions = new Map<string, PermissionItem>();
+  let model: string | undefined;
+  let lastDay = "";
+
+  // A sub-agent's event goes into its Task call when that call is known.
+  const scopeFor = (parent?: string): Scope => {
+    if (!parent) return root;
+    const tool = tools.get(parent);
+    if (!tool) return root;
+    let child = scopes.get(parent);
+    if (!child) {
+      child = scope(tool.children);
+      scopes.set(parent, child);
+    }
+    return child;
+  };
+
+  for (const event of events) {
+    const payload = (event.payload || {}) as Record<string, unknown>;
+    const parent = typeof payload.parent === "string" ? payload.parent : undefined;
+    switch (event.type) {
+      case "user": {
+        const user = payload as unknown as UserPayload;
+        const day = event.ts ? new Date(event.ts).toDateString() : "";
+        if (day && day !== lastDay) {
+          lastDay = day;
+          root.items.push({ kind: "day", key: `d${event.seq}`, ts: event.ts });
+        }
+        root.items.push({ kind: "user", key: `u${event.seq}`, text: String(user.text || ""), attachments: user.attachments || [], ts: event.ts });
+        tools = new Map();
+        scopes = new Map();
+        root.text = root.thinking = root.lastTool = null;
+        model = undefined;
+        break;
+      }
+      case "init":
+        model = (payload as unknown as InitPayload).model || model;
+        break;
+      case "thinking": {
+        const target = scopeFor(parent);
+        if (!target.thinking) {
+          target.thinking = { kind: "thinking", key: `k${event.seq}`, text: "" };
+          target.items.push(target.thinking);
+          target.text = null;
+        }
+        target.thinking.text += (payload as unknown as TokenPayload).text || "";
+        break;
+      }
+      case "token": {
+        const token = payload as unknown as TokenPayload;
+        const target = scopeFor(parent);
+        // Legacy events mark sub-agent text without naming its call.
+        const subagent = !!token.subagent && target === root;
+        if (!target.text || target.text.subagent !== subagent) {
+          target.text = { kind: "text", key: `t${event.seq}`, text: "", subagent };
+          target.items.push(target.text);
+        }
+        target.thinking = null;
+        target.text.text += token.text || "";
+        break;
+      }
+      case "tool_use": {
+        const use = payload as unknown as ToolUsePayload;
+        const target = scopeFor(parent);
+        target.text = target.thinking = null;
+        // A call is announced as it starts streaming and again, with its input,
+        // once the assistant message is complete: one row for both.
+        let tool = use.id ? tools.get(use.id) : undefined;
+        if (!tool) {
+          tool = {
+            kind: "tool",
+            key: `c${event.seq}`,
+            id: use.id || "",
+            name: use.name || "tool",
+            summary: "",
+            description: "",
+            subagent: !!use.subagent && target === root,
+            status: "running",
+            children: [],
+          };
+          if (use.id) tools.set(use.id, tool);
+          target.items.push(tool);
+        }
+        if (use.name) tool.name = use.name;
+        if (use.summary) tool.summary = use.summary;
+        if (use.description) tool.description = use.description;
+        if (use.input && typeof use.input === "object") tool.input = use.input as Record<string, unknown>;
+        target.lastTool = tool;
+        break;
+      }
+      case "tool_result": {
+        const result = payload as unknown as ToolResultPayload;
+        const target = scopeFor(parent);
+        const tool = (result.id && tools.get(result.id)) || target.lastTool;
+        if (tool) {
+          tool.status = result.ok === false ? "err" : "ok";
+          tool.output = result.output || "";
+        }
+        target.lastTool = null;
+        break;
+      }
+      case "permission": {
+        root.text = root.thinking = null;
+        const request = payload as Record<string, unknown>;
+        const item: PermissionItem = {
+          kind: "permission",
+          key: `p${event.seq}`,
+          requestId: String(request.requestId || ""),
+          toolName: String(request.toolName || ""),
+          title: String(request.title || ""),
+          description: String(request.description || ""),
+          summary: String(request.summary || ""),
+          reason: String(request.reason || ""),
+          input: request.input && typeof request.input === "object" ? (request.input as Record<string, unknown>) : undefined,
+          canRemember: !!request.canRemember,
+          status: "pending",
+          message: "",
+          mode: "",
+        };
+        permissions.set(item.requestId, item);
+        root.items.push(item);
+        break;
+      }
+      case "permission_resolved": {
+        const resolved = payload as Record<string, unknown>;
+        const item = permissions.get(String(resolved.requestId || ""));
+        if (item) {
+          item.status = (["allow", "deny", "cancelled"].includes(String(resolved.behavior)) ? resolved.behavior : "cancelled") as PermissionItem["status"];
+          item.message = String(resolved.message || "");
+          item.mode = String(resolved.mode || "");
+        }
+        break;
+      }
+      case "error":
+        root.text = root.thinking = null;
+        root.items.push({ kind: "error", key: `e${event.seq}`, message: String(payload.message || "error") });
+        break;
+      case "queued":
+      case "status":
+        if (event.type === "queued" || payload.state === "queued") {
+          root.text = null;
+          root.items.push({ kind: "queued", key: `q${event.seq}` });
+        }
+        break;
+      case "result":
+        root.text = root.thinking = root.lastTool = null;
+        // A tool still marked running when its turn ended never reported back,
+        // and a question nobody answered can no longer be answered.
+        for (const tool of tools.values()) {
+          if (tool.status === "running") tool.status = "err";
+        }
+        for (const item of permissions.values()) {
+          if (item.status === "pending") item.status = "cancelled";
+        }
+        root.items.push({ kind: "turn-end", key: `r${event.seq}`, result: payload as unknown as ResultPayload, model, ts: event.ts });
+        break;
+    }
+  }
+  return root.items;
+}
+
+// latestCapabilities is what the newest init event of a conversation offered.
+export function latestCapabilities(events: StoredEvent[]): Capabilities | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type !== "init") continue;
+    const init = events[i].payload as InitPayload;
+    return { slashCommands: init.slashCommands || [], mcpServers: init.mcpServers || [] };
+  }
+  return null;
+}
+
+const str = (value: unknown) => (typeof value === "string" ? value : "");
+
+// The before/after text of an editing call, or null for other tools.
+export function toolEdit(tool: ToolItem): { path: string; before: string; after: string }[] | null {
+  const input = tool.input;
+  if (!input) return null;
+  const path = str(input.file_path) || str(input.notebook_path);
+  switch (tool.name) {
+    case "Edit":
+      return [{ path, before: str(input.old_string), after: str(input.new_string) }];
+    case "MultiEdit":
+      return Array.isArray(input.edits)
+        ? input.edits.map((edit) => ({ path, before: str((edit as Record<string, unknown>).old_string), after: str((edit as Record<string, unknown>).new_string) }))
+        : null;
+    case "Write":
+      return [{ path, before: "", after: str(input.content) }];
+    case "NotebookEdit":
+      return [{ path, before: "", after: str(input.new_source) }];
+  }
+  return null;
+}
+
+export function editStats(tool: ToolItem): { added: number; deleted: number } | null {
+  const edits = toolEdit(tool);
+  if (!edits) return null;
+  let added = 0;
+  let deleted = 0;
+  for (const edit of edits) {
+    const stats = diffStats(diffLines(edit.before, edit.after));
+    added += stats.added;
+    deleted += stats.deleted;
+  }
+  return { added, deleted };
+}
+
+export interface Todo {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  activeForm?: string;
+}
+
+export function toolTodos(tool: ToolItem): Todo[] | null {
+  if (tool.name !== "TodoWrite" || !tool.input || !Array.isArray(tool.input.todos)) return null;
+  return (tool.input.todos as Record<string, unknown>[]).map((todo) => ({
+    content: str(todo.content),
+    status: (["pending", "in_progress", "completed"].includes(str(todo.status)) ? str(todo.status) : "pending") as Todo["status"],
+    activeForm: str(todo.activeForm) || undefined,
+  }));
+}
+
+export function toolPlan(tool: ToolItem): string | null {
+  if (tool.name !== "ExitPlanMode" || !tool.input) return null;
+  return str(tool.input.plan) || null;
+}
+
+export function pendingPermissions(items: ThreadItem[]): PermissionItem[] {
+  return items.filter((item): item is PermissionItem => item.kind === "permission" && item.status === "pending");
+}
