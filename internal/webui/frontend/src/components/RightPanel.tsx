@@ -65,7 +65,12 @@ export function RightPanel({ session, providers, workspace, capabilities, git, o
         </Card>
       )}
       <Card title={t("usageTitle")}>
-        <Stat label={t("costTotal")} value={usage?.costUsd ? money(usage.costUsd) : "—"} />
+        {/* A subscription's cost is Claude Code's estimate, not a bill. */}
+        {provider?.oauthProvider ? (
+          <Stat label={t("inputTokens")} value={usage?.inputTokens ? usage.inputTokens.toLocaleString() : "—"} />
+        ) : (
+          <Stat label={t("costTotal")} value={usage?.costUsd ? money(usage.costUsd) : "—"} />
+        )}
         <Stat label={t("outputTokens")} value={usage?.outputTokens ? usage.outputTokens.toLocaleString() : "—"} />
         <Stat label={t("turnsLabel")} value={String(session?.turns || 0)} />
         <Stat label={t("claudeSession")} value={session?.claudeSessionId ? session.claudeSessionId.slice(0, 8) : t("notStarted")} title={session?.claudeSessionId} mono />

@@ -63,8 +63,10 @@ export function turnSummary(result: ResultPayload, t: Translate, model?: string)
   const counts = tokens(usage);
   if (counts) parts.push(counts);
   if (usage.durationMs) parts.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
-  if (turn && turn.costUsd) parts.push(t("thisTurn", { cost: money(turn.costUsd) }));
-  if (result.usage && result.usage.costUsd) parts.push(t("total", { cost: money(result.usage.costUsd) }));
+  if (!result.subscription) {
+    if (turn && turn.costUsd) parts.push(t("thisTurn", { cost: money(turn.costUsd) }));
+    if (result.usage && result.usage.costUsd) parts.push(t("total", { cost: money(result.usage.costUsd) }));
+  }
   return parts;
 }
 

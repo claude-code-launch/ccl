@@ -82,7 +82,9 @@ type Server struct {
 	token    string
 	// workspaces are the directories conversations may run in.
 	workspaces *workspaceSet
-	version    string
+	// projects holds each project's defaults for new conversations.
+	projects *projectStore
+	version  string
 
 	defaults metaDefaults
 
@@ -174,6 +176,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	server := &Server{
 		workspaces:    workspaces,
+		projects:      loadProjects(filepath.Join(root, "projects.json")),
 		store:         store,
 		runner:        runner,
 		timeline:      NewTimeline(),
@@ -265,6 +268,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/mcp/", s.authenticated(s.withWorkspace(s.handleMCP)))
 	mux.HandleFunc("/api/update", s.authenticated(s.handleUpdate))
 	mux.HandleFunc("/api/memory", s.authenticated(s.handleMemory))
+	// A share link carries its own token instead of the server's.
+	mux.HandleFunc("/api/share/", s.handleShared)
 	// The terminal authenticates itself: its stream also takes ?token=.
 	mux.HandleFunc("/api/terminal", s.handleTerminal)
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -306,6 +311,12 @@ func (s *Server) staticHandler() http.Handler {
 		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		if name == "" {
 			name = "index.html"
+		}
+		// A share link is the page itself, which reads /api/share/<token>.
+		if strings.HasPrefix(name, "share/") {
+			w.Header().Set("Referrer-Policy", "no-referrer")
+			r = r.Clone(r.Context())
+			r.URL.Path, name = "/", "index.html"
 		}
 		// Vite names built assets by content hash: one URL never changes.
 		if strings.HasPrefix(name, "assets/") {
@@ -523,7 +534,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			// is never accepted: clients only choose among served directories.
 			Workspace string `json:"workspace"`
 			// Worktree runs the conversation on a new branch in a worktree.
-			Worktree bool `json:"worktree"`
+			Worktree       bool   `json:"worktree"`
+			PermissionMode string `json:"permissionMode"`
 		}
 		if err := decodeBody(r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -543,6 +555,15 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			Model:     s.defaults.Model,
 			Effort:    s.defaults.Effort,
 			Workspace: workspace.Path,
+		}
+		// The request wins, then the project's defaults, then the server's.
+		s.applyProjectDefaults(&meta, workspace.ID, strings.TrimSpace(body.Provider) != "", strings.TrimSpace(body.Model) != "", strings.TrimSpace(body.Effort) != "")
+		if body.PermissionMode != "" {
+			if !validPermissionMode(body.PermissionMode) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("permission mode: expected one of %s", strings.Join(PermissionModes, ", ")))
+				return
+			}
+			meta.PermissionMode = body.PermissionMode
 		}
 		if strings.TrimSpace(body.Provider) != "" {
 			meta.Provider = strings.TrimSpace(body.Provider)
@@ -674,6 +695,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			sub = parts[2]
 		}
 		s.handleWorktree(w, r, session, sub)
+	case "share":
+		s.handleShare(w, r, session)
 	case "permissions":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -918,12 +941,13 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 	}
 
 	spec := LaunchSpec{
-		Provider:  meta.Provider,
-		Model:     meta.Model,
-		Effort:    meta.Effort,
-		Workspace: meta.Workspace,
-		Resume:    meta.ClaudeSessionID,
-		Prompt:    text,
+		Provider:     meta.Provider,
+		Subscription: s.isSubscription(meta.Provider),
+		Model:        meta.Model,
+		Effort:       meta.Effort,
+		Workspace:    meta.Workspace,
+		Resume:       meta.ClaudeSessionID,
+		Prompt:       text,
 		// An empty mode follows the server default.
 		PermissionMode: firstNonEmpty(meta.PermissionMode, s.defaults.PermissionMode),
 	}
@@ -962,6 +986,21 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 	}
 	go s.notifyOnDone(session.ID(), handle.Done)
 	return handle, nil
+}
+
+// isSubscription reports whether a provider logs in to a subscription
+// (OAuth) rather than paying per token. Claude Code's own configuration is
+// not known either way, so it is not one.
+func (s *Server) isSubscription(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || provider.IsDefaultProvider(name) {
+		return false
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(cfg.Providers[name].OAuthProvider) != ""
 }
 
 func (s *Server) validateProvider(name string) error {

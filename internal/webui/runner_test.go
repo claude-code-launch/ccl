@@ -547,3 +547,23 @@ func TestPermissionDenyMessage(t *testing.T) {
 		t.Fatal("accepted an unknown behavior")
 	}
 }
+
+func TestRunnerMarksSubscriptionResults(t *testing.T) {
+	store := newTestStore(t)
+	session, err := store.Create(Meta{Title: "t", Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := `{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.26,"usage":{"input_tokens":2,"output_tokens":3}}`
+	handle, err := NewTimeline().Start(newTestRunner(t, helperPrepare(t, output, false)), session,
+		LaunchSpec{Provider: "sub", Subscription: true, Workspace: session.Meta().Workspace, Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, handle.Done)
+	events, _ := session.Events(0)
+	last := events[len(events)-1]
+	if last.Type != EventResult || !strings.Contains(string(last.Payload), `"subscription":true`) {
+		t.Fatalf("last event = %s %s", last.Type, last.Payload)
+	}
+}

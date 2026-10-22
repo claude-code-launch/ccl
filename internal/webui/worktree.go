@@ -268,6 +268,13 @@ func (s *Server) handleWorktree(w http.ResponseWriter, r *http.Request, session 
 	switch {
 	case action == "" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, s.worktreeStatus(ctx, ws, info))
+	case action == "diff" && r.Method == http.MethodGet:
+		diff, err := s.sessionDiff(ctx, meta)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, diff)
 	case (action == "merge" || action == "push") && r.Method == http.MethodPost:
 		if s.timeline.Running(session.ID()) {
 			writeError(w, http.StatusConflict, ErrBusy.Error())

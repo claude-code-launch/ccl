@@ -105,6 +105,9 @@ type ResultPayload struct {
 	// Cancelled marks a turn the user stopped; it is not a failure.
 	Cancelled bool   `json:"cancelled,omitempty"`
 	Message   string `json:"message,omitempty"`
+	// Subscription marks a turn on a subscription (OAuth) provider: Claude
+	// Code prices it from its own table, which is not what the user pays.
+	Subscription bool `json:"subscription,omitempty"`
 }
 
 // ErrorPayload reports a failure that ended the turn early.

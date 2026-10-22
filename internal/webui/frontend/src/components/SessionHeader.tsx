@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Download, FolderOpen, GitBranch, PanelLeft, PanelRight, Pencil, SquareTerminal, Trash2 } from "lucide-react";
+import { ChevronDown, Download, FolderOpen, GitBranch, Link2, PanelLeft, PanelRight, Pencil, SquareTerminal, Trash2 } from "lucide-react";
 import type { Session } from "../types";
 import { useI18n } from "../i18n";
 import { IconButton, MenuButton } from "./Sidebar";
@@ -13,6 +13,7 @@ interface Props {
   onRename: () => void;
   onDelete: () => void;
   onExport: (format: "md" | "html") => void;
+  onShare: () => void;
   // The server offers a terminal (ccl web --shell).
   terminal: boolean;
 }
@@ -21,7 +22,7 @@ interface Props {
 // left, panel toggles on the right.
 export type PanelTab = "overview" | "files" | "git" | "terminal";
 
-export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, onPanel, onRename, onDelete, onExport, terminal }: Props) {
+export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, onPanel, onRename, onDelete, onExport, onShare, terminal }: Props) {
   const { t } = useI18n();
   const [menu, setMenu] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -57,6 +58,7 @@ export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, on
         {menu && session && (
           <div className="absolute left-0 top-full z-30 mt-1 min-w-[160px] rounded-[10px] border border-line bg-surface p-1 shadow-lg">
             <MenuButton icon={<Pencil size={14} />} onClick={() => { setMenu(false); onRename(); }}>{t("rename")}</MenuButton>
+            <MenuButton icon={<Link2 size={14} />} onClick={() => { setMenu(false); onShare(); }}>{session.shareToken ? t("sharing") : t("share")}</MenuButton>
             <MenuButton icon={<Download size={14} />} onClick={() => { setMenu(false); onExport("md"); }}>{t("exportMarkdown")}</MenuButton>
             <MenuButton icon={<Download size={14} />} onClick={() => { setMenu(false); onExport("html"); }}>{t("exportHTML")}</MenuButton>
             <MenuButton icon={<Trash2 size={14} />} danger onClick={() => { setMenu(false); onDelete(); }}>{t("delete")}</MenuButton>

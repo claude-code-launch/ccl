@@ -1,9 +1,9 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Folders, Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
 import { Api, HttpError, Unauthorized, storeToken, storedToken } from "./api";
-import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
+import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProjectDefaults, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
 import { buildThread, latestCapabilities, pendingPermissions } from "./thread";
-import { download, safeFileName, transcriptHTML, transcriptMarkdown } from "./export";
+import { diffSection, download, safeFileName, transcriptHTML, transcriptMarkdown } from "./export";
 import { CommandPalette } from "./components/CommandPalette";
 import { useConversation } from "./useConversation";
 import { I18n, resolveLang, translator } from "./i18n";
@@ -17,6 +17,7 @@ import { Thread } from "./components/Thread";
 import { Composer } from "./components/Composer";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { FolderPicker } from "./components/FolderPicker";
+import { ShareDialog } from "./components/Share";
 import { ProjectDetail, ProjectsList } from "./components/ProjectsPage";
 import { Gate } from "./components/Gate";
 
@@ -124,6 +125,7 @@ export function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [claudeSessions, setClaudeSessions] = useState<ClaudeSession[] | null>(null);
   const [git, setGit] = useState<GitStatus | null>(null);
   const [queues, setQueues] = useState<Record<string, Queued[]>>({});
@@ -163,6 +165,15 @@ export function App() {
   const scopeKey = `${activeWorkspace?.id || ""}:${worktreeName}`;
   // The next new conversation runs in a worktree of its own.
   const [newWorktree, setNewWorktree] = useState(false);
+  // Each project's defaults, and the route the next new conversation starts
+  // with: the active project's defaults until the user changes it.
+  const [projectDefaults, setProjectDefaults] = useState<Record<string, ProjectDefaults>>({});
+  const activeDefaults = projectDefaults[activeWorkspace?.id || ""];
+  const [draftRoute, setDraftRoute] = useState<ProjectDefaults>({});
+  const defaultsKey = JSON.stringify(activeDefaults || {});
+  useEffect(() => {
+    setDraftRoute(JSON.parse(defaultsKey));
+  }, [activeWorkspace?.id, defaultsKey]);
   const [terminals, setTerminals] = useState<Record<string, string>>({});
 
   const lang = resolveLang(config?.lang);
@@ -227,6 +238,7 @@ export function App() {
       const result = await api.workspaces();
       setWorkspaceList(result.workspaces);
       setCanAddWorkspace(result.canAdd);
+      setProjectDefaults(result.defaults || {});
     } catch {
       // The list from /health stays.
     }
@@ -420,7 +432,7 @@ export function App() {
 
   const create = async (adopt = false): Promise<Session | null> => {
     try {
-      const session = await api.createSession(activeWorkspace?.id || "", newWorktree);
+      const session = await api.createSession(activeWorkspace?.id || "", newWorktree, draftRoute);
       setNewWorktree(false);
       if (adopt) adopted.current = session.id;
       mergeSession(session);
@@ -437,6 +449,7 @@ export function App() {
     if (page === "project" && !canLeave()) return;
     setPage("chat");
     setCurrentId(null);
+    setDraftRoute(JSON.parse(defaultsKey));
     setMobileSidebar(false);
   };
 
@@ -532,7 +545,15 @@ export function App() {
 
   const exportTranscript = async (format: "md" | "html") => {
     const title = current?.title || "conversation";
-    const markdown = transcriptMarkdown(title, items, t);
+    let markdown = transcriptMarkdown(title, items, t);
+    // A worktree conversation's export carries what it changed.
+    if (current?.worktree) {
+      try {
+        markdown += diffSection(await api.worktreeDiff(current.id), current.worktree.branch, t);
+      } catch {
+        // The worktree may be gone; the conversation still exports.
+      }
+    }
     if (format === "md") download(safeFileName(title) + ".md", markdown, "text/markdown");
     else download(safeFileName(title) + ".html", await transcriptHTML(title, markdown), "text/html");
   };
@@ -760,6 +781,13 @@ export function App() {
                 onNewConversation={startNew}
                 onSelect={select}
                 onPatchMany={patchMany}
+                providers={providers}
+                defaults={activeDefaults || {}}
+                onSaveDefaults={async (defaults) => {
+                  if (!activeWorkspace) return;
+                  const saved = await api.setProjectDefaults(activeWorkspace.id, defaults);
+                  setProjectDefaults((all) => ({ ...all, [activeWorkspace.id]: saved }));
+                }}
                 onDeleteMany={deleteMany}
                 onConnectors={() => {
                   setSettingsOpen("connectors");
@@ -803,6 +831,7 @@ export function App() {
             onRename={() => current && rename(current)}
             onDelete={() => current && remove(current)}
             onExport={exportTranscript}
+            onShare={() => setShareOpen(true)}
             terminal={!!health?.shell}
           />
           <div className="flex min-h-0 flex-1">
@@ -829,6 +858,8 @@ export function App() {
                 onWorkspace={chooseWorkspace}
                 onOpenFolder={openFolder}
                 worktree={!currentId && git?.repo ? { on: newWorktree, onToggle: () => setNewWorktree(!newWorktree) } : undefined}
+                draft={currentId ? undefined : draftRoute}
+                onDraft={setDraftRoute}
                 session={current}
                 providers={providers}
                 capabilities={capabilities}
@@ -927,6 +958,10 @@ export function App() {
             onImport={importSession}
             onClose={() => setPaletteOpen(false)}
           />
+        )}
+
+        {shareOpen && current && (
+          <ShareDialog api={api} sessionId={current.id} token={current.shareToken} onChanged={loadSessions} onClose={() => setShareOpen(false)} />
         )}
 
         {folderPicker && (

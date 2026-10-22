@@ -295,7 +295,7 @@ function Item({ item, streaming, attachmentURL, renderItems, onPermission }: {
       const state = turnState(item.result);
       // An imported turn has nothing to report beyond having ended.
       const usage = item.result.turnUsage || item.result.usage;
-      if (state === "done" && !item.result.message && !(usage && (usage.outputTokens || usage.durationMs || usage.costUsd))) return null;
+      if (state === "done" && !item.result.message && !(usage && (usage.outputTokens || usage.durationMs || (usage.costUsd && !item.result.subscription)))) return null;
       const color = state === "stopped" ? "text-clay" : state === "failed" ? "text-red-600 dark:text-red-400" : "text-ink-3";
       return (
         <div className={"mb-1 mt-1 flex flex-wrap items-center gap-x-1.5 pl-1 text-xs " + color}>

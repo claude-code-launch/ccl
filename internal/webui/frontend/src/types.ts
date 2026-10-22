@@ -22,6 +22,8 @@ export interface Session {
   // Where the page lists it: pinned on top, archived out of the recents.
   pinned?: boolean;
   archived?: boolean;
+  // Set while a read-only link at /share/<token> is open.
+  shareToken?: string;
   createdAt: string;
   updatedAt: string;
   turns: number;
@@ -108,6 +110,9 @@ export interface ResultPayload {
   isError: boolean;
   cancelled?: boolean;
   message?: string;
+  // A subscription (OAuth) provider's turn: Claude Code's cost is its own
+  // price estimate, not what the user pays, so only tokens are shown.
+  subscription?: boolean;
 }
 
 export interface Health {
@@ -280,6 +285,34 @@ export interface WorktreeStatus extends SessionWorktree {
   current?: string;
   remote?: string;
   upstream?: string;
+}
+
+export interface WorktreeDiff {
+  base: string;
+  diff: string;
+  truncated?: boolean;
+}
+
+// What a share link reveals: the folder's name, never its path.
+export interface SharedSession {
+  title: string;
+  provider: string;
+  model: string;
+  workspace: string;
+  createdAt: string;
+  updatedAt: string;
+  worktree?: SessionWorktree;
+  events: StoredEvent[];
+  diff?: WorktreeDiff;
+}
+
+// What a new conversation in a project starts with; empty fields follow
+// the server's defaults.
+export interface ProjectDefaults {
+  provider?: string;
+  model?: string;
+  effort?: string;
+  permissionMode?: string;
 }
 
 export interface Workspace {

@@ -59,6 +59,16 @@ export function transcriptMarkdown(title: string, items: ThreadItem[], t: Transl
   return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
+// diffSection is a worktree's change as a Markdown section, fenced with more
+// backticks than the diff itself contains.
+export function diffSection(diff: { base: string; diff: string; truncated?: boolean }, branch: string, t: Translate): string {
+  if (!diff.diff.trim()) return "";
+  const longest = Math.max(2, ...(diff.diff.match(/`+/g) || []).map((run) => run.length));
+  const fence = "`".repeat(longest + 1);
+  const note = diff.truncated ? ` (${t("truncated")})` : "";
+  return `\n## ${t("shareChanges", { branch, base: diff.base })}${note}\n\n${fence}diff\n${diff.diff.replace(/\n$/, "")}\n${fence}\n`;
+}
+
 export async function transcriptHTML(title: string, markdown: string): Promise<string> {
   // Only the server renderer is loaded on demand; the rest is already in the page.
   const { renderToStaticMarkup } = await import("react-dom/server");

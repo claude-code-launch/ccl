@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Archive, ArchiveRestore, ArrowLeft, Blocks, FolderGit2, GitBranch, FolderOpen, FolderPlus, History, LoaderCircle, MessageSquare, PanelLeft, Pin, Plus, Search, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Blocks, FolderGit2, GitBranch, FolderOpen, FolderPlus, History, LoaderCircle, MessageSquare, PanelLeft, Pin, Plus, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
 import type { Api } from "../api";
-import type { Session, Workspace } from "../types";
+import type { ProjectDefaults, ProviderView, Session, Workspace } from "../types";
+import { EFFORT_LEVELS, PERMISSION_MODES } from "../types";
 import { relativeTime } from "../format";
 import { useI18n } from "../i18n";
 import { IconButton } from "./Sidebar";
@@ -186,6 +187,9 @@ export function ProjectDetail(props: Common & {
   onSelect: (id: string) => void;
   onPatchMany: (sessions: Session[], change: { archived?: boolean; pinned?: boolean }) => Promise<void>;
   onDeleteMany: (sessions: Session[]) => Promise<void>;
+  providers: ProviderView[];
+  defaults: ProjectDefaults;
+  onSaveDefaults: (defaults: ProjectDefaults) => Promise<void>;
   onConnectors: () => void;
   registerLeaveGuard: (guard: (() => boolean) | null) => void;
 }) {
@@ -227,6 +231,7 @@ export function ProjectDetail(props: Common & {
           <div className="mt-6 grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,440px)]">
             <ProjectSessions sessions={sessions} onSelect={props.onSelect} onPatchMany={props.onPatchMany} onDeleteMany={props.onDeleteMany} />
             <div className="flex min-w-0 flex-col gap-4 max-lg:order-first">
+              <DefaultsCard key={props.workspace.id} providers={props.providers} defaults={props.defaults} onSave={props.onSaveDefaults} />
               <MemoryEditor key={props.workspace.id} title={t("projectInstructions")} sources={sources} registerLeaveGuard={props.registerLeaveGuard} />
               <PermissionRules key={props.workspace.id} api={props.api} />
             </div>
@@ -330,4 +335,94 @@ function ProjectSessions({ sessions, onSelect, onPatchMany, onDeleteMany }: {
       </ul>
     </section>
   );
+}
+
+// DefaultsCard sets what new conversations in the project start with.
+function DefaultsCard({ providers, defaults, onSave }: { providers: ProviderView[]; defaults: ProjectDefaults; onSave: (defaults: ProjectDefaults) => Promise<void> }) {
+  const { t } = useI18n();
+  const [draft, setDraft] = useState<ProjectDefaults>(defaults);
+  const [state, setState] = useState<"" | "saving" | "saved" | string>("");
+  // Defaults that arrive (or change) after the card opened replace the form.
+  const loaded = JSON.stringify(defaults);
+  useEffect(() => setDraft(JSON.parse(loaded)), [loaded]);
+  const dirty = JSON.stringify(clean(draft)) !== JSON.stringify(clean(defaults));
+  const provider = providers.find((item) => item.name === draft.provider);
+  const save = async () => {
+    setState("saving");
+    try {
+      await onSave(clean(draft));
+      setState("saved");
+    } catch (error) {
+      setState(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const field = "h-8 w-full min-w-0 rounded-lg border border-line bg-canvas px-2 text-[13px] text-ink outline-none focus:border-line-strong";
+  return (
+    <section className="flex min-w-0 flex-col rounded-xl border border-line bg-surface">
+      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
+        <SlidersHorizontal size={15} className="shrink-0 text-ink-3" />
+        <h2 className="mr-auto text-[14px] font-medium text-ink">{t("projectDefaults")}</h2>
+      </div>
+      <p className="px-4 pt-3 text-[12.5px] leading-relaxed text-ink-3">{t("projectDefaultsHint")}</p>
+      <div className="grid grid-cols-1 gap-x-3 gap-y-2.5 px-4 py-3 sm:grid-cols-2">
+        <label className="min-w-0 text-[12.5px] text-ink-2">
+          {t("provider")}
+          <select className={field + " mt-1"} value={draft.provider || ""} onChange={(event) => setDraft({ ...draft, provider: event.target.value, model: "" })}>
+            <option value="">{t("serverDefault")}</option>
+            <option value="default">default</option>
+            {providers.map((item) => (
+              <option key={item.name} value={item.name}>{item.name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-0 text-[12.5px] text-ink-2">
+          {t("model")}
+          <select className={field + " mt-1"} value={draft.model || ""} onChange={(event) => setDraft({ ...draft, model: event.target.value })}>
+            <option value="">{t("auto")}</option>
+            {(provider?.modelChoices || []).map((choice) => (
+              <option key={choice.value} value={choice.value}>{choice.label}</option>
+            ))}
+            {draft.model && !provider?.modelChoices.some((choice) => choice.value === draft.model) && <option value={draft.model}>{draft.model}</option>}
+          </select>
+        </label>
+        <label className="min-w-0 text-[12.5px] text-ink-2">
+          {t("effort")}
+          <select className={field + " mt-1"} value={draft.effort || ""} onChange={(event) => setDraft({ ...draft, effort: event.target.value })}>
+            <option value="">{t("effortDefault")}</option>
+            {EFFORT_LEVELS.map((level) => (
+              <option key={level} value={level}>{level}</option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-0 text-[12.5px] text-ink-2">
+          {t("permissionMode")}
+          <select className={field + " mt-1"} value={draft.permissionMode || ""} onChange={(event) => setDraft({ ...draft, permissionMode: event.target.value })}>
+            <option value="">{t("serverDefault")}</option>
+            {PERMISSION_MODES.map((mode) => (
+              <option key={mode} value={mode}>{t(("mode" + mode[0].toUpperCase() + mode.slice(1)) as "modeDefault")}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
+        <span className={"mr-auto truncate text-[12.5px] " + (state && state !== "saving" && state !== "saved" ? "text-red-500" : "text-ink-3")}>
+          {dirty ? t("unsaved") : state === "saved" ? t("defaultsSaved") : state === "saving" ? "" : state}
+        </span>
+        <button
+          type="button"
+          disabled={!dirty || state === "saving"}
+          onClick={() => void save()}
+          className="flex h-8 items-center gap-1.5 rounded-lg bg-clay px-3 text-[13px] font-medium text-white hover:bg-clay-hover disabled:opacity-40"
+        >
+          {state === "saving" && <LoaderCircle size={13} className="animate-spin" />}
+          {t("save")}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// clean drops empty fields, so "not set" compares and saves the same way.
+function clean(defaults: ProjectDefaults): ProjectDefaults {
+  return Object.fromEntries(Object.entries(defaults).filter(([, value]) => value)) as ProjectDefaults;
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AlarmClock, ArrowUp, AtSign, Blocks, ChevronDown, Clock, Cloud, FileText, FolderGit2, Gauge, GitBranch, LoaderCircle, Mic, MicOff, Paperclip, Plus, ShieldCheck, Square, SquareSlash, X } from "lucide-react";
-import type { Attachment, Capabilities, ProviderView, Schedule, Session, Workspace } from "../types";
+import type { Attachment, Capabilities, ProjectDefaults, ProviderView, Schedule, Session, Workspace } from "../types";
 import { EFFORT_LEVELS, PERMISSION_MODES } from "../types";
 import { basename, fileSize } from "../format";
 import { useI18n } from "../i18n";
@@ -26,6 +26,9 @@ interface Props {
   onOpenFolder?: () => void;
   // A new conversation in a git repository may run on a branch of its own.
   worktree?: { on: boolean; onToggle: () => void };
+  // The route a new conversation will start with, chosen before it exists.
+  draft?: ProjectDefaults;
+  onDraft?: (route: ProjectDefaults) => void;
   session: Session | null;
   providers: ProviderView[];
   capabilities: Capabilities;
@@ -583,17 +586,20 @@ function PendingChip({ item, onRemove }: { item: Pending; onRemove: () => void }
 // OPEN_FOLDER is the folder menu's "open another folder" entry.
 const OPEN_FOLDER = "\u0000open";
 
-function Route({ session, providers, running, workspace, workspaces, workspaceId, onWorkspace, onOpenFolder, worktree, capabilities, onRoute }: Props) {
+function Route({ session, providers, running, workspace, workspaces, workspaceId, onWorkspace, onOpenFolder, worktree, draft, onDraft, capabilities, onRoute: onSessionRoute }: Props) {
   const { t } = useI18n();
-  const provider = providers.find((item) => session && item.name === session.provider);
+  // A new conversation's route is a draft until its first message.
+  const route: ProjectDefaults | null = session || draft || null;
+  const onRoute = (change: ProjectDefaults) => (session ? onSessionRoute(change) : onDraft?.({ ...draft, ...change }));
+  const provider = providers.find((item) => route && item.name === (route.provider || "default"));
   const choices = provider?.modelChoices || [];
-  const model = session?.model || "";
+  const model = route?.model || "";
   const knownModel = !model || choices.some((choice) => choice.value === model);
-  const locked = !session || running;
+  const locked = !route || running;
   const title = running ? t("routeLocked") : t("routeHint");
   return (
     <>
-      <Chip icon={<Cloud size={14} />} label={t("provider")} title={title} disabled={locked} value={session?.provider || "default"} onChange={(value) => onRoute({ provider: value, model: "" })}>
+      <Chip icon={<Cloud size={14} />} label={t("provider")} title={title} disabled={locked} value={route?.provider || "default"} onChange={(value) => onRoute({ provider: value, model: "" })}>
         <option value="default">default</option>
         {providers.map((item) => (
           <option key={item.name} value={item.name}>{item.name}</option>
@@ -646,7 +652,7 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
         label={t("permissionMode")}
         title={title}
         disabled={locked}
-        value={session?.permissionMode || capabilities.defaultPermissionMode || "default"}
+        value={route?.permissionMode || capabilities.defaultPermissionMode || "default"}
         onChange={(value) => onRoute({ permissionMode: value })}
       >
         {PERMISSION_MODES.map((mode) => (
@@ -667,7 +673,7 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
         label={t("effort")}
         title={title}
         disabled={locked}
-        value={session?.effort || ""}
+        value={route?.effort || ""}
         onChange={(value) => onRoute({ effort: value })}
         muted
       >

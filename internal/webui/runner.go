@@ -26,6 +26,8 @@ var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
 // LaunchSpec is everything one conversation turn needs.
 type LaunchSpec struct {
 	Provider string
+	// Subscription is set for an OAuth provider; its result says so.
+	Subscription bool
 	// Model is a slot alias (opus, sonnet, …) or a full model id.
 	Model     string
 	Effort    string
@@ -217,6 +219,8 @@ type turn struct {
 	// exiting, so the next request waits for done instead of being busy.
 	ended   chan struct{}
 	endOnce sync.Once
+	// subscription is copied to the turn's result (LaunchSpec.Subscription).
+	subscription bool
 	// abort wakes a turn still waiting for a global slot.
 	abort chan struct{}
 	// cancelRequested records a user stop so the exit is not reported as a crash.
@@ -359,7 +363,7 @@ func (t *Timeline) Start(r *Runner, session *Session, spec LaunchSpec) (*TurnHan
 		t.mu.Unlock()
 		return nil, ErrBusy
 	}
-	entry := &turn{done: make(chan struct{}), ended: make(chan struct{}), abort: make(chan struct{})}
+	entry := &turn{done: make(chan struct{}), ended: make(chan struct{}), abort: make(chan struct{}), subscription: spec.Subscription}
 	t.running[id] = entry
 	t.mu.Unlock()
 
@@ -598,6 +602,7 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 						result.TurnUsage = &turn
 					})
 					result.Cancelled = cancelled()
+					result.Subscription = entry.subscription
 					payload = result
 				}
 			}

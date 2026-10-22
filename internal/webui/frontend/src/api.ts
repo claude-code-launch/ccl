@@ -16,7 +16,9 @@ import type {
   Session,
   StoredEvent,
   TestResult,
+  ProjectDefaults,
   Workspace,
+  WorktreeDiff,
   WorktreeStatus,
 } from "./types";
 
@@ -112,12 +114,17 @@ export class Api {
 
   sessions = () => this.request<Session[]>("/api/sessions");
   session = (id: string) => this.request<Session>(`/api/sessions/${id}`);
-  createSession = (workspace = "", worktree = false) =>
-    this.request<Session>("/api/sessions", { method: "POST", body: { ...(workspace ? { workspace } : {}), ...(worktree ? { worktree } : {}) } });
+  createSession = (workspace = "", worktree = false, route: ProjectDefaults = {}) =>
+    this.request<Session>("/api/sessions", { method: "POST", body: { ...route, ...(workspace ? { workspace } : {}), ...(worktree ? { worktree } : {}) } });
+  setProjectDefaults = (id: string, defaults: ProjectDefaults) =>
+    this.request<ProjectDefaults>(`/api/workspaces/${encodeURIComponent(id)}/defaults`, { method: "PUT", body: defaults });
+  worktreeDiff = (id: string) => this.request<WorktreeDiff>(`/api/sessions/${id}/worktree/diff`);
+  share = (id: string) => this.request<{ token: string; path: string }>(`/api/sessions/${id}/share`, { method: "POST", body: {} });
+  unshare = (id: string) => this.request<null>(`/api/sessions/${id}/share`, { method: "DELETE" });
   worktreeStatus = (id: string) => this.request<WorktreeStatus>(`/api/sessions/${id}/worktree`);
   worktreeAction = (id: string, action: "merge" | "push") =>
     this.request<{ output: string; status: WorktreeStatus }>(`/api/sessions/${id}/worktree/${action}`, { method: "POST", body: {} });
-  workspaces = () => this.request<{ workspaces: Workspace[]; canAdd: boolean }>("/api/workspaces");
+  workspaces = () => this.request<{ workspaces: Workspace[]; canAdd: boolean; defaults?: Record<string, ProjectDefaults> }>("/api/workspaces");
   addWorkspace = (path: string) => this.request<Workspace>("/api/workspaces", { method: "POST", body: { path } });
   removeWorkspace = (id: string) => this.request<null>(`/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
   createDirectory = (path: string, name: string) => this.request<{ path: string }>("/api/directories", { method: "POST", body: { path, name } });

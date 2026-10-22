@@ -304,7 +304,9 @@ func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/workspaces"), "/")
 	switch {
 	case id == "" && r.Method == http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"workspaces": s.workspaces.list(), "canAdd": !s.workspaces.isLocked()})
+		writeJSON(w, http.StatusOK, map[string]any{"workspaces": s.workspaces.list(), "canAdd": !s.workspaces.isLocked(), "defaults": s.projects.all()})
+	case strings.HasSuffix(id, "/defaults"):
+		s.handleProjectDefaults(w, r, strings.TrimSuffix(id, "/defaults"))
 	case id == "" && r.Method == http.MethodPost:
 		var body struct {
 			Path string `json:"path"`

@@ -108,6 +108,19 @@ describe("turnSummary", () => {
     expect(parts).toEqual(["Done", "opus-x", "120 in / 6 out", "0.9s", "$0.0125 this turn", "$0.0375 total"]);
   });
 
+  it("shows only tokens for a subscription, whose cost is an estimate", () => {
+    const parts = turnSummary(
+      {
+        usage: { inputTokens: 120, outputTokens: 6, costUsd: 0.26, durationMs: 900 },
+        turnUsage: { inputTokens: 120, outputTokens: 6, costUsd: 0.26, durationMs: 900 },
+        isError: false,
+        subscription: true,
+      },
+      t,
+    );
+    expect(parts).toEqual(["Done", "120 in / 6 out", "0.9s"]);
+  });
+
   it("names a stopped turn in the page language", () => {
     expect(turnSummary({ usage: {} as never, isError: false, cancelled: true }, translator("zh"))[0]).toBe("已停止");
   });

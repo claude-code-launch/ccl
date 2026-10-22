@@ -114,6 +114,11 @@ func TestWorktreeSessionRunsMergesAndCleansUp(t *testing.T) {
 	if !wt.Exists || wt.Ahead != 1 || wt.Dirty != 0 || len(wt.Files) != 1 || wt.Files[0].Path != "b.txt" || wt.Current != "main" {
 		t.Fatalf("status = %s", body)
 	}
+	var diff WorktreeDiff
+	_, body = doJSON(t, "GET", base+"/api/sessions/"+session.ID+"/worktree/diff", "secret", "")
+	if json.Unmarshal(body, &diff) != nil || diff.Base != "main" || !strings.Contains(diff.Diff, "+branch") {
+		t.Fatalf("diff = %s", body)
+	}
 	if status, body = doJSON(t, "POST", base+"/api/sessions/"+session.ID+"/worktree/merge", "secret", `{}`); status != http.StatusOK {
 		t.Fatalf("merge = %d %s", status, body)
 	}

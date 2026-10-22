@@ -51,10 +51,12 @@ type Meta struct {
 	// a git worktree of Workspace (worktree.go).
 	Worktree *SessionWorktree `json:"worktree,omitempty"`
 	// Pinned and Archived only change where the page lists the conversation.
-	Pinned    bool      `json:"pinned,omitempty"`
-	Archived  bool      `json:"archived,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Pinned   bool `json:"pinned,omitempty"`
+	Archived bool `json:"archived,omitempty"`
+	// ShareToken opens the conversation read-only at /share/<token>.
+	ShareToken string    `json:"shareToken,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 	// Turns counts the messages sent, so a conversation list needs no history.
 	Turns int `json:"turns"`
 	// Usage is the conversation total: the sum of every turn's TurnUsage.
