@@ -181,6 +181,8 @@ func TestMessageWithAttachmentsUsesStreamJSON(t *testing.T) {
 	if !strings.Contains(string(single), saved[0].Name) {
 		t.Fatalf("title not taken from the attachment: %s", single)
 	}
+	// The turn may still be writing; TempDir cleanup must wait for it.
+	waitIdle(t, httpServer.URL, meta.ID)
 }
 
 func TestStdinMessageCarriesImagesAndFilePaths(t *testing.T) {

@@ -140,6 +140,8 @@ func TestSessionsRunInTheirOwnWorkspace(t *testing.T) {
 	if status, _ := doJSON(t, "GET", httpServer.URL+"/api/files/list?workspace=nope", "secret", ""); status != http.StatusNotFound {
 		t.Fatalf("unknown workspace = %d", status)
 	}
+	// The turn may still be writing; TempDir cleanup must wait for it.
+	waitIdle(t, httpServer.URL, meta.ID)
 }
 
 func TestConversationOfAnUnservedWorkspaceIsRefused(t *testing.T) {

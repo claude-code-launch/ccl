@@ -80,6 +80,8 @@ func TestSchedulesSendWhenDueAndSurviveRestart(t *testing.T) {
 	if status, _ := doJSON(t, "DELETE", base+"/"+later.ID, "secret", ""); status != http.StatusNoContent {
 		t.Fatalf("delete = %d", status)
 	}
+	// The sent turn still writes to the session; TempDir cleanup must wait.
+	waitIdle(t, httpServer, session.ID())
 }
 
 func testServerFrom(t *testing.T, server *Server) string {

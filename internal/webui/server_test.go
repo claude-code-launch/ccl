@@ -412,6 +412,8 @@ func TestEventsSince(t *testing.T) {
 			if len(resumed) != 1 || resumed[0].Seq != last {
 				t.Fatalf("since=%d returned %+v", last-1, resumed)
 			}
+			// The turn may still be writing; TempDir cleanup must wait.
+			waitIdle(t, httpServer.URL, meta.ID)
 			return
 		}
 		if time.Now().After(deadline) {
