@@ -46,6 +46,16 @@ export class Unauthorized extends Error {
   }
 }
 
+// HttpError keeps the status, for callers that treat one (a 404) as an answer.
+export class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 // Requests about a workspace's files, git, MCP servers, Claude Code sessions
 // or terminals name the workspace they mean.
 const WORKSPACE_SCOPED = ["/api/files/", "/api/git/", "/api/claude-sessions", "/api/mcp", "/api/terminal"];
@@ -88,7 +98,7 @@ export class Api {
     }
     if (!response.ok) {
       const message = body && typeof body === "object" && "error" in body ? String(body.error) : response.statusText;
-      throw new Error(message);
+      throw new HttpError(response.status, message);
     }
     return body as T;
   }

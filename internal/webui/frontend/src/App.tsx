@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
+import { Folders, Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
 import { Api, Unauthorized, storeToken, storedToken } from "./api";
 import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
 import { buildThread, latestCapabilities, pendingPermissions } from "./thread";
@@ -17,6 +17,7 @@ import { Thread } from "./components/Thread";
 import { Composer } from "./components/Composer";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { FolderPicker } from "./components/FolderPicker";
+import { ProjectDetail, ProjectsList } from "./components/ProjectsPage";
 import { Gate } from "./components/Gate";
 
 // The terminal (xterm.js) loads only when its panel opens.
@@ -139,6 +140,15 @@ export function App() {
   // The folder picker: closed, "open" or "create" (a new project folder).
   const [folderPicker, setFolderPicker] = useState<false | "open" | "create">(false);
   const [chosenWorkspace, setChosenWorkspace] = useState(() => readStorage("ccl-web-workspace"));
+  // What the main column shows: the conversation, the projects page, or the
+  // active project's page.
+  const [page, setPage] = useState<"chat" | "projects" | "project">("chat");
+  // A page with unsaved edits (a CLAUDE.md) asks before it is left.
+  const leaveGuard = useRef<(() => boolean) | null>(null);
+  const registerLeaveGuard = useCallback((guard: (() => boolean) | null) => {
+    leaveGuard.current = guard;
+  }, []);
+  const canLeave = () => !leaveGuard.current || leaveGuard.current();
   const currentSession = sessions.find((session) => session.id === currentId) || null;
   const activeWorkspace =
     (currentSession && workspaceList.find((workspace) => workspace.path === currentSession.workspace)) ||
@@ -332,6 +342,7 @@ export function App() {
   }, [activeWorkspace?.id, phase, loadGit]);
 
   const chooseWorkspace = (id: string) => {
+    if (page === "project" && id !== activeWorkspace?.id && !canLeave()) return;
     setChosenWorkspace(id);
     writeStorage("ccl-web-workspace", id);
     // A conversation of another workspace is not where the user is now.
@@ -353,6 +364,18 @@ export function App() {
     writeStorage("ccl-web-workspace", added.id);
     setFolderPicker(false);
     setMobileSidebar(false);
+    // From the projects page a folder opens as a project; elsewhere it starts
+    // a conversation there.
+    if (page !== "chat") setPage("project");
+  };
+  const showProjects = () => {
+    if (page === "project" && !canLeave()) return;
+    setPage("projects");
+    setMobileSidebar(false);
+  };
+  const openProject = (target: Workspace) => {
+    chooseWorkspace(target.id);
+    setPage("project");
   };
   const removeWorkspace = async (target: Workspace) => {
     if (!confirm(t("confirmRemoveWorkspace", { name: target.name }))) return;
@@ -371,6 +394,8 @@ export function App() {
   const route = current ? [current.provider || "default", current.model, current.effort].filter(Boolean).join(" · ") : "";
 
   const select = (id: string) => {
+    if (page === "project" && !canLeave()) return;
+    setPage("chat");
     setCurrentId(id);
     setMobileSidebar(false);
     // Opening a conversation also moves the sidebar to its workspace.
@@ -401,6 +426,8 @@ export function App() {
 
   // Starting a new session is lazy: the first message or file creates it.
   const startNew = () => {
+    if (page === "project" && !canLeave()) return;
+    setPage("chat");
     setCurrentId(null);
     setMobileSidebar(false);
   };
@@ -637,7 +664,9 @@ export function App() {
             onOpenFolder={openFolder}
             onReopenFolder={canAddWorkspace ? (path) => pickFolder(path).catch(fail) : undefined}
             onRemoveWorkspace={removeWorkspace}
-            currentId={currentId}
+            currentId={page === "chat" ? currentId : null}
+            page={page}
+            onProjects={showProjects}
             health={health}
             theme={theme}
             onSelect={select}
@@ -659,8 +688,42 @@ export function App() {
         </div>
         {mobileSidebar && <div className="fixed inset-0 z-10 bg-black/40 md:hidden" onClick={() => setMobileSidebar(false)} />}
 
+        {page === "projects" && (
+          <main className="flex min-w-0 flex-1 flex-col">
+            <ProjectsList
+              workspaces={workspaceList}
+              sessions={sessions}
+              current={activeWorkspace}
+              recentFolders={recentFolders}
+              onOpen={openProject}
+              onOpenFolder={openFolder}
+              onReopenFolder={canAddWorkspace ? (path) => pickFolder(path).catch(fail) : undefined}
+              onRemove={removeWorkspace}
+              sidebarHidden={collapsed}
+              onShowSidebar={toggleSidebar}
+            />
+          </main>
+        )}
+        {page === "project" && (
+          <main className="flex min-w-0 flex-1 flex-col">
+            {activeWorkspace ? (
+              <ProjectDetail
+                api={wsApi}
+                workspace={activeWorkspace}
+                sessions={sessions}
+                onBack={showProjects}
+                onNewConversation={startNew}
+                onSelect={select}
+                registerLeaveGuard={registerLeaveGuard}
+                sidebarHidden={collapsed}
+                onShowSidebar={toggleSidebar}
+              />
+            ) : null}
+          </main>
+        )}
+        {/* The conversation stays mounted under a page, so a draft survives. */}
         <main
-          className="relative flex min-w-0 flex-1 flex-col"
+          className={"relative min-w-0 flex-1 flex-col " + (page === "chat" ? "flex" : "hidden")}
           onDragEnter={(event) => {
             if (!hasFiles(event)) return;
             event.preventDefault();
@@ -797,6 +860,7 @@ export function App() {
           <CommandPalette
             actions={[
               { id: "new", label: t("newSession"), icon: <Plus size={15} />, run: startNew },
+              { id: "projects", label: t("projects"), icon: <Folders size={15} />, run: showProjects },
               { id: "settings", label: t("settings"), icon: <Settings size={15} />, run: () => { setSettingsOpen(true); loadConfig(); } },
               { id: "theme", label: theme === "dark" ? t("lightTheme") : t("darkTheme"), icon: theme === "dark" ? <Sun size={15} /> : <Moon size={15} />, run: toggleTheme },
               { id: "sidebar", label: t("toggleSidebar"), icon: <PanelLeft size={15} />, run: toggleSidebar },

@@ -39,7 +39,7 @@ func newWebCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "web [--port 8099] [--workspace dir]... [--workspace-root dir]... [--host 127.0.0.1] [--token <token>]",
 		Short: locale.T("在浏览器中使用 ccl 会话（HTTP + SSE）", "Use ccl conversations from a browser (HTTP + SSE)"),
-		Long: locale.T(`在浏览器中运行 ccl 会话：一个对话就是一个 ccl 终端实例（读写工作区、运行工具、切换 provider）。
+		Long: locale.T(`在浏览器中运行 ccl 会话：一个对话就是一个 ccl 终端实例（读写项目文件、运行工具、切换 provider）。
 
 每一个回合起一个新的 Claude Code 进程，用 --resume 续接同一会话，所以 provider、模型、effort 和权限模式在回合边界生效，
 停止就是把进程杀掉。会话历史存放在 ~/.ccl/web/sessions/<id>/，重启后仍在。
@@ -47,12 +47,13 @@ func newWebCommand() *cobra.Command {
 页面参照 claude.ai/code：会话列表、消息流（diff、待办、计划、权限确认卡片）、文件与 Git 面板、设置弹窗
 （provider、订阅登录、MCP 连接器）。设置通过 /api/config 读写 ~/.ccl/config.yaml；正在运行的回合不受影响。
 
-工作区：--workspace 可写多次；--workspace-root 下的每个子目录也都是工作区（新 clone 的仓库无需重启即出现）。
-都不写时用当前目录。页面上可以"打开其他文件夹"（新建会话时选择目录），添加的文件夹保存在
-~/.ccl/web/workspaces.json；--lock-workspaces 禁止从页面添加，只用启动参数里的目录。
+项目：每个项目是一个文件夹。--workspace 可写多次；--workspace-root 下的每个子目录也都是项目（新 clone 的仓库
+无需重启即出现）；都不写时用当前目录。页面的"项目"页列出所有项目，可以编辑各项目的 CLAUDE.md / CLAUDE.local.md，
+也可以"打开其他文件夹"或"新建项目"，添加的文件夹保存在 ~/.ccl/web/workspaces.json；
+--lock-workspaces 禁止从页面添加，只用启动参数里的目录。
 
 鉴权：绑定回环地址（默认 127.0.0.1）时不需要 token；--host 指定其它地址（如容器里的 0.0.0.0）时必须提供
---token 或 CCL_WEB_TOKEN，否则拒绝启动。页面带网页终端（工作区里的 shell），--no-shell 关闭。
+--token 或 CCL_WEB_TOKEN，否则拒绝启动。页面带网页终端（项目目录里的 shell），--no-shell 关闭。
 默认在就绪后打开系统浏览器；容器内用 --no-open。
 
 示例：
@@ -60,7 +61,7 @@ func newWebCommand() *cobra.Command {
   ccl web --workspace-root ~/code                # ~/code 下的每个项目
   ccl web --workspace ~/a --workspace ~/b --no-shell
   ccl web --host 0.0.0.0 --no-open --token "$(openssl rand -hex 24)"`, `Run ccl conversations in a browser: one conversation is one ccl terminal session (it reads and writes its
-workspace, runs tools, and switches provider).
+project, runs tools, and switches provider).
 
 Every turn starts a new Claude Code process and resumes the same session with --resume, so provider, model,
 effort and permission mode take effect at turn boundaries, and stopping a turn kills the process. History
@@ -70,14 +71,15 @@ The page follows claude.ai/code: a session list, the thread (diffs, todo lists, 
 and git panels, and a settings dialog (providers, subscription login, MCP connectors). Settings read and write
 ~/.ccl/config.yaml through /api/config; a running turn keeps the configuration it was started with.
 
-Workspaces: --workspace may be repeated, and every directory inside a --workspace-root is a workspace too (a
-repository cloned there appears without a restart); with neither flag, the current directory is the
-workspace. The page can also open another folder (pick a directory for a new conversation); added folders
-are kept in ~/.ccl/web/workspaces.json. --lock-workspaces stops the page from adding folders.
+Projects: each project is a folder. --workspace may be repeated, and every directory inside a --workspace-root
+is a project too (a repository cloned there appears without a restart); with neither flag, the current
+directory is the project. The page's Projects view lists them and edits each project's CLAUDE.md /
+CLAUDE.local.md; it can also open another folder or create a new project. Added folders are kept in
+~/.ccl/web/workspaces.json. --lock-workspaces stops the page from adding folders.
 
 Authentication: no token is needed while listening on a loopback address (the default, 127.0.0.1). Any other
 --host, such as 0.0.0.0 in a container, requires --token or CCL_WEB_TOKEN and refuses to start without one.
-The page has a terminal (a shell in the workspace); --no-shell turns it off. The browser opens once the server is ready; use
+The page has a terminal (a shell in the project folder); --no-shell turns it off. The browser opens once the server is ready; use
 --no-open in a container.
 
 Examples:
@@ -164,8 +166,8 @@ Examples:
 			}
 			url := "http://" + net.JoinHostPort(displayHost, strconv.Itoa(port)) + "/"
 			fmt.Fprintf(os.Stderr, locale.T(
-				"ccl web 已启动 · %s · %d 个工作区\n停止：Ctrl+C\n",
-				"ccl web listening · %s · workspaces: %d\nStop with Ctrl+C\n",
+				"ccl web 已启动 · %s · %d 个项目\n停止：Ctrl+C\n",
+				"ccl web listening · %s · projects: %d\nStop with Ctrl+C\n",
 			), url, server.WorkspaceCount())
 			// --no-open wins: a headless container must be able to turn the
 			// browser off regardless of --open.
@@ -190,14 +192,14 @@ Examples:
 	flags.StringVar(&host, "host", "127.0.0.1", "Address to bind (anything but a loopback address requires --token)")
 	flags.BoolVar(&openBrowser, "open", true, "Open the system browser once the server is ready (--open=false to disable)")
 	flags.BoolVar(&noOpen, "no-open", false, "Do not open a browser (containers); overrides --open")
-	flags.StringArrayVar(&workspaces, "workspace", nil, "A directory conversations may run in (repeatable; default: the current directory)")
-	flags.StringArrayVar(&workspaceRoots, "workspace-root", nil, "A directory whose subdirectories are all workspaces (repeatable)")
+	flags.StringArrayVar(&workspaces, "workspace", nil, "A project folder conversations may run in (repeatable; default: the current directory)")
+	flags.StringArrayVar(&workspaceRoots, "workspace-root", nil, "A directory whose subdirectories are all projects (repeatable)")
 	flags.StringVar(&token, "token", "", "Bearer token required by /api (default: CCL_WEB_TOKEN)")
 	flags.IntVar(&maxConcurrency, "max-concurrency", 3, "Maximum simultaneous Claude Code processes")
 	flags.StringVar(&providerName, "provider", "", "Provider new conversations start with (default: active provider)")
 	flags.StringVar(&model, "model", "", "Model new conversations start with (slot or full id)")
 	flags.StringVar(&effort, "effort", "", "Effort new conversations start with (low, medium, high, xhigh, max)")
-	flags.BoolVar(&shell, "shell", true, "Offer a terminal (a shell in the workspace) in the page")
+	flags.BoolVar(&shell, "shell", true, "Offer a terminal (a shell in the project folder) in the page")
 	flags.BoolVar(&noShell, "no-shell", false, "Do not offer a terminal in the page; overrides --shell")
 	flags.BoolVar(&lockWorkspaces, "lock-workspaces", false, "Serve only the --workspace / --workspace-root folders; the page cannot add others")
 	return cmd

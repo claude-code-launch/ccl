@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, FolderOpen, FolderPlus, History, LoaderCircle, Moon, PanelLeft, Pencil, Plus, Search, Settings, Sun, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, FolderOpen, FolderPlus, Folders, History, LoaderCircle, Moon, PanelLeft, Pencil, Plus, Search, Settings, Sun, Trash2, X } from "lucide-react";
 import type { ClaudeSession, Health, Session, Workspace } from "../types";
 import { relativeTime } from "../format";
 import { useI18n } from "../i18n";
@@ -18,6 +18,9 @@ interface Props {
   onReopenFolder?: (path: string) => void;
   onRemoveWorkspace: (workspace: Workspace) => void;
   currentId: string | null;
+  // The main column's page; "projects" and "project" light the Projects row.
+  page: "chat" | "projects" | "project";
+  onProjects: () => void;
   health: Health | null;
   theme: "light" | "dark";
   onSelect: (id: string) => void;
@@ -82,8 +85,11 @@ export function Sidebar(props: Props) {
       </div>
 
       <nav className="mt-2 space-y-0.5 px-2">
-        <NavRow icon={<span className="grid size-5 place-items-center rounded-full bg-active"><Plus size={13} /></span>} active={!currentId} onClick={props.onCreate}>
+        <NavRow icon={<span className="grid size-5 place-items-center rounded-full bg-active"><Plus size={13} /></span>} active={!currentId && props.page === "chat"} onClick={props.onCreate}>
           {t("newSession")}
+        </NavRow>
+        <NavRow icon={<Folders size={16} />} active={props.page !== "chat"} onClick={props.onProjects}>
+          {t("projects")}
         </NavRow>
       </nav>
 

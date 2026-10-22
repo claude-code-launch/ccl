@@ -36,11 +36,12 @@ export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, on
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-1 px-3">
-      {sidebarHidden && (
+      {/* On a phone the sidebar is an overlay, so its button is always here. */}
+      <span className={sidebarHidden ? "" : "md:hidden"}>
         <IconButton title={t("toggleSidebar")} onClick={onShowSidebar}>
           <PanelLeft size={17} />
         </IconButton>
-      )}
+      </span>
       <div ref={ref} className="relative min-w-0">
         {session ? (
           <button
