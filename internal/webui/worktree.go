@@ -151,12 +151,51 @@ func copyIfMissing(from, to string) {
 	}
 }
 
+// countChanges counts the entries of git status --porcelain -z, leaving out
+// the untracked personal files copied in at creation: they are never meant
+// to be committed, so they must not block a merge.
+func countChanges(porcelain []byte) int {
+	count := 0
+	entries := bytes.Split(porcelain, []byte{0})
+	for i := 0; i < len(entries); i++ {
+		entry := string(entries[i])
+		if len(entry) < 4 {
+			continue
+		}
+		// A rename or copy carries its old path as one more field.
+		if entry[0] == 'R' || entry[0] == 'C' {
+			i++
+		}
+		if entry[:3] == "?? " && isLocalCopy(entry[3:]) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func isLocalCopy(rel string) bool {
+	for _, local := range worktreeLocalFiles {
+		if filepath.ToSlash(local) == rel {
+			return true
+		}
+	}
+	return false
+}
+
 // removeWorktree deletes a conversation's worktree and, when it was merged,
 // its branch. Uncommitted changes refuse unless force; an unmerged branch is
 // always kept.
 func (s *Server) removeWorktree(ctx context.Context, ws Workspace, info SessionWorktree, force bool) error {
 	dir := s.worktreeDir(ws, info.Name)
 	if _, err := os.Stat(dir); err == nil {
+		// The personal files copied in are untracked, which git worktree
+		// remove refuses; the project keeps the originals.
+		for _, rel := range worktreeLocalFiles {
+			if _, err := s.gitText(ctx, Workspace{Path: dir}, "ls-files", "--error-unmatch", "--", rel); err != nil {
+				_ = os.Remove(filepath.Join(dir, rel))
+			}
+		}
 		args := []string{"worktree", "remove"}
 		if force {
 			args = append(args, "--force")
@@ -199,13 +238,7 @@ func (s *Server) worktreeStatus(ctx context.Context, ws Workspace, info SessionW
 		}
 	}
 	if result, err := s.git(ctx, tree, nil, "status", "--porcelain", "-z"); err == nil && result.code == 0 {
-		status.Dirty = bytes.Count(result.stdout, []byte{0})
-		// A rename carries its old path as one more field.
-		for _, entry := range bytes.Split(result.stdout, []byte{0}) {
-			if len(entry) > 0 && entry[0] == 'R' {
-				status.Dirty--
-			}
-		}
+		status.Dirty = countChanges(result.stdout)
 	}
 	if result, err := s.git(ctx, tree, nil, "diff", "--name-status", "-z", "--no-renames", base+"...HEAD"); err == nil && result.code == 0 {
 		fields := strings.Split(strings.TrimSuffix(string(result.stdout), "\x00"), "\x00")

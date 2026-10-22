@@ -24,6 +24,9 @@ func gitWorkspace(t *testing.T) (string, string) {
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", config)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// The default global excludes file is $XDG_CONFIG_HOME/git/ignore; the
+	// developer's own must not hide untracked files from a test.
+	t.Setenv("XDG_CONFIG_HOME", home)
 	workspace := t.TempDir()
 	run := func(args ...string) {
 		cmd := exec.Command("git", args...)

@@ -143,3 +143,13 @@ func TestWorktreeNeedsARepository(t *testing.T) {
 		t.Fatalf("create = %d %s", status, body)
 	}
 }
+
+func TestCountChangesSkipsCopiedPersonalFiles(t *testing.T) {
+	porcelain := []byte("?? CLAUDE.local.md\x00?? .claude/settings.local.json\x00R  new.go\x00old.go\x00 M a.txt\x00?? b.txt\x00")
+	if got := countChanges(porcelain); got != 3 {
+		t.Fatalf("countChanges = %d, want 3 (rename, modified, untracked b.txt)", got)
+	}
+	if got := countChanges(nil); got != 0 {
+		t.Fatalf("empty = %d", got)
+	}
+}
