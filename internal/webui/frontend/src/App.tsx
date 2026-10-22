@@ -16,12 +16,18 @@ import type { PanelTab } from "./components/SessionHeader";
 import { Thread } from "./components/Thread";
 import { Composer } from "./components/Composer";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { FolderPicker } from "./components/FolderPicker";
 import { Gate } from "./components/Gate";
 
 // The terminal (xterm.js) loads only when its panel opens.
 const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
 
 type Theme = "light" | "dark";
+
+// narrowScreen matches Tailwind's below-lg layout, where panels are overlays.
+function narrowScreen(): boolean {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 1023.98px)").matches;
+}
 
 function readStorage(key: string): string {
   try {
@@ -105,7 +111,9 @@ export function App() {
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [collapsed, setCollapsed] = useState(() => readStorage("ccl-web-sidebar") === "collapsed");
   // The side panel's tab; null hides it. Wide when a file or diff is open.
+  // On a phone the panel covers the thread, so it starts closed there.
   const [panel, setPanel] = useState<PanelTab | null>(() => {
+    if (narrowScreen()) return null;
     const saved = readStorage("ccl-web-panel");
     return saved === "closed" ? null : saved === "files" || saved === "git" || saved === "terminal" ? saved : "overview";
   });
@@ -126,6 +134,10 @@ export function App() {
   // Workspaces: the conversation's own, else the one chosen in the sidebar.
   // File, git, terminal, MCP and session-import requests go to it.
   const [workspaceList, setWorkspaceList] = useState<Workspace[]>([]);
+  // canAddWorkspace is false under --lock-workspaces; the picker adds folders.
+  const [canAddWorkspace, setCanAddWorkspace] = useState(false);
+  // The folder picker: closed, "open" or "create" (a new project folder).
+  const [folderPicker, setFolderPicker] = useState<false | "open" | "create">(false);
   const [chosenWorkspace, setChosenWorkspace] = useState(() => readStorage("ccl-web-workspace"));
   const currentSession = sessions.find((session) => session.id === currentId) || null;
   const activeWorkspace =
@@ -195,7 +207,9 @@ export function App() {
 
   const loadWorkspaces = useCallback(async () => {
     try {
-      setWorkspaceList((await api.workspaces()).workspaces);
+      const result = await api.workspaces();
+      setWorkspaceList(result.workspaces);
+      setCanAddWorkspace(result.canAdd);
     } catch {
       // The list from /health stays.
     }
@@ -227,13 +241,15 @@ export function App() {
         if (cancelled) return;
         setSessions(list);
         // Open the latest conversation of the workspace chosen last time.
-        const chosen = workspaces.find((workspace) => workspace.id === readStorage("ccl-web-workspace"));
-        const first = chosen ? list.find((session) => session.workspace === chosen.path) : list[0];
+        // A conversation of a folder no longer served is not opened.
+        const chosen = workspaces.find((workspace) => workspace.id === readStorage("ccl-web-workspace")) || workspaces[0];
+        const first = list.find((session) => session.workspace === chosen?.path);
         setCurrentId((current) => current || first?.id || null);
         // The workspace effect loads git status once the page is ready.
         setPhase("ready");
         loadConfig();
         loadCapabilities();
+        loadWorkspaces();
         api.updateInfo().then((info) => info.newer && setUpdate(info.latest)).catch(() => {});
       } catch (error) {
         if (cancelled) return;
@@ -244,7 +260,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [api, loadConfig, loadCapabilities, signOut]);
+  }, [api, loadConfig, loadCapabilities, loadWorkspaces, signOut]);
 
   // Turn boundaries change titles, counts, usage and what Claude Code offers;
   // refresh shortly after rather than once per event.
@@ -320,6 +336,37 @@ export function App() {
     writeStorage("ccl-web-workspace", id);
     // A conversation of another workspace is not where the user is now.
     if (currentSession && workspaceList.find((workspace) => workspace.id === id)?.path !== currentSession.workspace) setCurrentId(null);
+  };
+  // Opening a folder adds it to the server's list and starts a new
+  // conversation there.
+  const openFolder = canAddWorkspace ? (create?: boolean) => setFolderPicker(create ? "create" : "open") : undefined;
+  // Folders with conversations that the server does not offer now; opening
+  // one again brings its conversations back.
+  const recentFolders = [...new Set(sessions.map((session) => session.workspace))].filter(
+    (path) => path && !workspaceList.some((workspace) => workspace.path === path),
+  );
+  const pickFolder = async (path: string) => {
+    const added = await api.addWorkspace(path);
+    await loadWorkspaces();
+    setCurrentId(null);
+    setChosenWorkspace(added.id);
+    writeStorage("ccl-web-workspace", added.id);
+    setFolderPicker(false);
+    setMobileSidebar(false);
+  };
+  const removeWorkspace = async (target: Workspace) => {
+    if (!confirm(t("confirmRemoveWorkspace", { name: target.name }))) return;
+    try {
+      await api.removeWorkspace(target.id);
+      await loadWorkspaces();
+      if (activeWorkspace?.id === target.id) {
+        setCurrentId(null);
+        const next = workspaceList.find((workspace) => workspace.id !== target.id);
+        if (next) chooseWorkspace(next.id);
+      }
+    } catch (error) {
+      fail(error);
+    }
   };
   const route = current ? [current.provider || "default", current.model, current.effort].filter(Boolean).join(" · ") : "";
 
@@ -535,7 +582,8 @@ export function App() {
     const next = panel === tab ? null : tab;
     setPanel(next);
     setPanelWide(false);
-    writeStorage("ccl-web-panel", next || "closed");
+    // A phone's choice does not change what the desktop reopens.
+    if (!narrowScreen()) writeStorage("ccl-web-panel", next || "closed");
   };
   const togglePanel = () => openPanel(panel || "overview");
 
@@ -580,11 +628,15 @@ export function App() {
           }
         >
           <Sidebar
-            sessions={workspaceList.length > 1 && activeWorkspace ? sessions.filter((session) => session.workspace === activeWorkspace.path) : sessions}
+            sessions={activeWorkspace ? sessions.filter((session) => session.workspace === activeWorkspace.path) : sessions}
+            recentFolders={recentFolders}
             workspaces={workspaceList}
             workspace={activeWorkspace}
             onWorkspace={chooseWorkspace}
             onRefreshWorkspaces={loadWorkspaces}
+            onOpenFolder={openFolder}
+            onReopenFolder={canAddWorkspace ? (path) => pickFolder(path).catch(fail) : undefined}
+            onRemoveWorkspace={removeWorkspace}
             currentId={currentId}
             health={health}
             theme={theme}
@@ -658,6 +710,10 @@ export function App() {
                 key={!currentId || adopted.current === currentId ? "new" : currentId}
                 running={conversation.running}
                 workspace={workspace}
+                workspaces={workspaceList}
+                workspaceId={activeWorkspace?.id || ""}
+                onWorkspace={chooseWorkspace}
+                onOpenFolder={openFolder}
                 session={current}
                 providers={providers}
                 capabilities={capabilities}
@@ -751,6 +807,16 @@ export function App() {
             onSelect={select}
             onImport={importSession}
             onClose={() => setPaletteOpen(false)}
+          />
+        )}
+
+        {folderPicker && (
+          <FolderPicker
+            api={api}
+            start={activeWorkspace?.path.replace(/[\\/][^\\/]+[\\/]?$/, "") || ""}
+            create={folderPicker === "create"}
+            onPick={pickFolder}
+            onClose={() => setFolderPicker(false)}
           />
         )}
 

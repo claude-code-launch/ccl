@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/browser"
@@ -32,6 +33,8 @@ func newWebCommand() *cobra.Command {
 		openBrowser    bool
 		noOpen         bool
 		shell          bool
+		noShell        bool
+		lockWorkspaces bool
 	)
 	cmd := &cobra.Command{
 		Use:   "web [--port 8099] [--workspace dir]... [--workspace-root dir]... [--host 127.0.0.1] [--token <token>]",
@@ -45,16 +48,17 @@ func newWebCommand() *cobra.Command {
 （provider、订阅登录、MCP 连接器）。设置通过 /api/config 读写 ~/.ccl/config.yaml；正在运行的回合不受影响。
 
 工作区：--workspace 可写多次；--workspace-root 下的每个子目录也都是工作区（新 clone 的仓库无需重启即出现）。
-页面只能在这些目录里选，不能指定其它路径；都不写时用当前目录。
+都不写时用当前目录。页面上可以"打开其他文件夹"（新建会话时选择目录），添加的文件夹保存在
+~/.ccl/web/workspaces.json；--lock-workspaces 禁止从页面添加，只用启动参数里的目录。
 
 鉴权：绑定回环地址（默认 127.0.0.1）时不需要 token；--host 指定其它地址（如容器里的 0.0.0.0）时必须提供
---token 或 CCL_WEB_TOKEN，否则拒绝启动。--shell 额外提供网页终端（默认关闭）。
+--token 或 CCL_WEB_TOKEN，否则拒绝启动。页面带网页终端（工作区里的 shell），--no-shell 关闭。
 默认在就绪后打开系统浏览器；容器内用 --no-open。
 
 示例：
   ccl web                                        # 本机，当前目录
   ccl web --workspace-root ~/code                # ~/code 下的每个项目
-  ccl web --workspace ~/a --workspace ~/b --shell
+  ccl web --workspace ~/a --workspace ~/b --no-shell
   ccl web --host 0.0.0.0 --no-open --token "$(openssl rand -hex 24)"`, `Run ccl conversations in a browser: one conversation is one ccl terminal session (it reads and writes its
 workspace, runs tools, and switches provider).
 
@@ -67,18 +71,19 @@ and git panels, and a settings dialog (providers, subscription login, MCP connec
 ~/.ccl/config.yaml through /api/config; a running turn keeps the configuration it was started with.
 
 Workspaces: --workspace may be repeated, and every directory inside a --workspace-root is a workspace too (a
-repository cloned there appears without a restart). The page chooses among these and names no other path;
-with neither flag, the current directory is the workspace.
+repository cloned there appears without a restart); with neither flag, the current directory is the
+workspace. The page can also open another folder (pick a directory for a new conversation); added folders
+are kept in ~/.ccl/web/workspaces.json. --lock-workspaces stops the page from adding folders.
 
 Authentication: no token is needed while listening on a loopback address (the default, 127.0.0.1). Any other
 --host, such as 0.0.0.0 in a container, requires --token or CCL_WEB_TOKEN and refuses to start without one.
---shell adds a terminal to the page (off by default). The browser opens once the server is ready; use
+The page has a terminal (a shell in the workspace); --no-shell turns it off. The browser opens once the server is ready; use
 --no-open in a container.
 
 Examples:
   ccl web                                        # local, the current directory
   ccl web --workspace-root ~/code                # every project in ~/code
-  ccl web --workspace ~/a --workspace ~/b --shell
+  ccl web --workspace ~/a --workspace ~/b --no-shell
   ccl web --host 0.0.0.0 --no-open --token "$(openssl rand -hex 24)"`),
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -110,7 +115,8 @@ Examples:
 				Version:         Version,
 				SelfBinary:      selfBinary(),
 				LatestVersion:   fetchLatestReleaseVersion,
-				Shell:           shell,
+				Shell:           shell && !noShell,
+				LockWorkspaces:  lockWorkspaces,
 			})
 			if err != nil {
 				return err
@@ -121,22 +127,34 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("listen on %s: %w", address, err)
 			}
+			// Every request context derives from base, so cancelling it ends
+			// the event and terminal streams an open page holds forever.
+			base, cancelBase := context.WithCancel(context.Background())
+			defer cancelBase()
 			httpServer := &http.Server{
 				Handler:           server.Handler(),
 				ReadHeaderTimeout: 15 * time.Second,
 				// A turn streams for as long as Claude Code runs; there is no
 				// write deadline that would not cut it off.
 				IdleTimeout: 120 * time.Second,
+				BaseContext: func(net.Listener) context.Context { return base },
 			}
 
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			shutdownDone := make(chan struct{})
 			go func() {
 				defer close(shutdownDone)
 				<-ctx.Done()
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// A second Ctrl+C exits at once.
+				stop()
+				fmt.Fprint(os.Stderr, locale.T("\n正在停止 ccl web…（再按一次 Ctrl+C 立即退出）\n", "\nStopping ccl web… (Ctrl+C again to quit now)\n"))
+				cancelBase()
+				// Turns in flight are cancelled and stored; Claude Code gets
+				// SIGINT and, after 2s, SIGKILL.
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
+				_ = server.Close(shutdownCtx)
 				_ = httpServer.Shutdown(shutdownCtx)
 			}()
 
@@ -147,7 +165,7 @@ Examples:
 			url := "http://" + net.JoinHostPort(displayHost, strconv.Itoa(port)) + "/"
 			fmt.Fprintf(os.Stderr, locale.T(
 				"ccl web 已启动 · %s · %d 个工作区\n停止：Ctrl+C\n",
-				"ccl web listening · %s · %d workspaces\nStop with Ctrl+C\n",
+				"ccl web listening · %s · workspaces: %d\nStop with Ctrl+C\n",
 			), url, server.WorkspaceCount())
 			// --no-open wins: a headless container must be able to turn the
 			// browser off regardless of --open.
@@ -179,7 +197,9 @@ Examples:
 	flags.StringVar(&providerName, "provider", "", "Provider new conversations start with (default: active provider)")
 	flags.StringVar(&model, "model", "", "Model new conversations start with (slot or full id)")
 	flags.StringVar(&effort, "effort", "", "Effort new conversations start with (low, medium, high, xhigh, max)")
-	flags.BoolVar(&shell, "shell", false, "Offer a terminal (a shell in the workspace) in the page")
+	flags.BoolVar(&shell, "shell", true, "Offer a terminal (a shell in the workspace) in the page")
+	flags.BoolVar(&noShell, "no-shell", false, "Do not offer a terminal in the page; overrides --shell")
+	flags.BoolVar(&lockWorkspaces, "lock-workspaces", false, "Serve only the --workspace / --workspace-root folders; the page cannot add others")
 	return cmd
 }
 

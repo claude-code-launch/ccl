@@ -452,3 +452,47 @@ func newHTTPTestServer(t *testing.T, handler http.Handler) string {
 	t.Cleanup(httpServer.Close)
 	return httpServer.URL
 }
+
+func TestCloseCancelsTurnsAndRefusesNewOnes(t *testing.T) {
+	server, err := New(Config{Token: "secret", Workspace: t.TempDir(), StoreRoot: t.TempDir(), Launch: helperPrepare(t, "", true)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	t.Cleanup(httpServer.Close)
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "secret", `{"title":"s"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", status, body)
+	}
+	var meta Meta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"one"}`); status != http.StatusAccepted {
+		t.Fatalf("message = %d: %s", status, body)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if sessionRunning(t, httpServer.URL, meta.ID) {
+		t.Fatal("a turn is still running after Close")
+	}
+	// The cancelled turn is stored with its result.
+	session, err := server.Store().Open(meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := session.Events(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := events[len(events)-1]; last.Type != EventResult {
+		t.Fatalf("last event = %s, want a result", last.Type)
+	}
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"two"}`); status != http.StatusServiceUnavailable {
+		t.Fatalf("message after Close = %d: %s", status, body)
+	}
+}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { AlarmClock, ArrowUp, AtSign, Blocks, ChevronDown, Clock, Cloud, FileText, FolderGit2, LoaderCircle, Mic, MicOff, Paperclip, Plus, ShieldCheck, Square, SquareSlash, X } from "lucide-react";
-import type { Attachment, Capabilities, ProviderView, Schedule, Session } from "../types";
+import { AlarmClock, ArrowUp, AtSign, Blocks, ChevronDown, Clock, Cloud, FileText, FolderGit2, Gauge, LoaderCircle, Mic, MicOff, Paperclip, Plus, ShieldCheck, Square, SquareSlash, X } from "lucide-react";
+import type { Attachment, Capabilities, ProviderView, Schedule, Session, Workspace } from "../types";
 import { EFFORT_LEVELS, PERMISSION_MODES } from "../types";
 import { basename, fileSize } from "../format";
 import { useI18n } from "../i18n";
@@ -19,6 +19,11 @@ interface Pending {
 interface Props {
   running: boolean;
   workspace: string;
+  // A new conversation picks its folder; a started one keeps its own.
+  workspaces: Workspace[];
+  workspaceId: string;
+  onWorkspace: (id: string) => void;
+  onOpenFolder?: () => void;
   session: Session | null;
   providers: ProviderView[];
   capabilities: Capabilities;
@@ -484,7 +489,8 @@ export function Composer(props: Props) {
             )}
           </div>
         </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5 px-2 pt-1.5 text-[13px] text-ink-2">
+        {/* One line: chips shrink and truncate rather than wrap. */}
+        <div className="flex min-w-0 flex-nowrap items-center gap-x-1 overflow-hidden px-2 pt-1.5 text-[13px] text-ink-2">
           <Route {...props} />
           {props.context && <ContextRing {...props.context} />}
         </div>
@@ -572,7 +578,10 @@ function PendingChip({ item, onRemove }: { item: Pending; onRemove: () => void }
 
 // Route is the provider / model / effort a turn launches with. It applies at
 // the next turn; the server refuses a change while one runs.
-function Route({ session, providers, running, workspace, capabilities, onRoute }: Props) {
+// OPEN_FOLDER is the folder menu's "open another folder" entry.
+const OPEN_FOLDER = "\u0000open";
+
+function Route({ session, providers, running, workspace, workspaces, workspaceId, onWorkspace, onOpenFolder, capabilities, onRoute }: Props) {
   const { t } = useI18n();
   const provider = providers.find((item) => session && item.name === session.provider);
   const choices = provider?.modelChoices || [];
@@ -588,11 +597,29 @@ function Route({ session, providers, running, workspace, capabilities, onRoute }
           <option key={item.name} value={item.name}>{item.name}</option>
         ))}
       </Chip>
-      <span title={workspace} className="flex min-w-0 items-center gap-1.5 px-2 py-1 max-sm:hidden">
-        <FolderGit2 size={14} className="shrink-0 text-ink-3" />
-        <span className="truncate">{basename(workspace) || "."}</span>
-      </span>
+      {session ? (
+        <span title={workspace} className="flex max-w-[10rem] shrink-0 items-center gap-1.5 px-2 py-1 max-sm:hidden">
+          <FolderGit2 size={14} className="shrink-0 text-ink-3" />
+          <span className="truncate">{basename(workspace) || "."}</span>
+        </span>
+      ) : (
+        <Chip
+          compact
+          icon={<FolderGit2 size={14} />}
+          label={t("workspace")}
+          title={workspace}
+          disabled={false}
+          value={workspaceId}
+          onChange={(value) => (value === OPEN_FOLDER ? onOpenFolder?.() : onWorkspace(value))}
+        >
+          {workspaces.map((item) => (
+            <option key={item.id} value={item.id}>{item.name}</option>
+          ))}
+          {onOpenFolder && <option value={OPEN_FOLDER}>{t("openFolder")}</option>}
+        </Chip>
+      )}
       <Chip
+        compact
         icon={<ShieldCheck size={14} />}
         label={t("permissionMode")}
         title={title}
@@ -612,7 +639,16 @@ function Route({ session, providers, running, workspace, capabilities, onRoute }
         ))}
         {!knownModel && <option value={model}>{model}</option>}
       </Chip>
-      <Chip label={t("effort")} title={title} disabled={locked} value={session?.effort || ""} onChange={(value) => onRoute({ effort: value })} muted>
+      <Chip
+        compact
+        icon={<Gauge size={14} className="sm:hidden" />}
+        label={t("effort")}
+        title={title}
+        disabled={locked}
+        value={session?.effort || ""}
+        onChange={(value) => onRoute({ effort: value })}
+        muted
+      >
         <option value="">{t("effortDefault")}</option>
         {EFFORT_LEVELS.map((level) => (
           <option key={level} value={level}>{level}</option>
@@ -622,20 +658,27 @@ function Route({ session, providers, running, workspace, capabilities, onRoute }
   );
 }
 
-function Chip({ icon, label, title, value, disabled, muted, onChange, children }: {
+function Chip({ icon, label, title, value, disabled, muted, compact, onChange, children }: {
   icon?: ReactNode;
   label: string;
   title: string;
   value: string;
   disabled: boolean;
   muted?: boolean;
+  // compact shows only the icon on a phone; the menu still opens from it.
+  compact?: boolean;
   onChange: (value: string) => void;
   children: ReactNode;
 }) {
   return (
     <label
       title={`${label} · ${title}`}
-      className={"relative flex min-w-0 items-center gap-1.5 rounded-md pl-2 " + (muted ? "text-ink-3 " : "") + (disabled ? "opacity-70" : "hover:bg-hover hover:text-ink")}
+      className={
+        "relative flex min-w-0 items-center gap-1.5 rounded-md pl-2 " +
+        (compact ? "shrink-0 max-sm:px-1.5 max-sm:py-1 " : "") +
+        (muted ? "text-ink-3 " : "") +
+        (disabled ? "opacity-70" : "hover:bg-hover hover:text-ink")
+      }
     >
       {icon && <span className="shrink-0 text-ink-3">{icon}</span>}
       <select
@@ -643,11 +686,14 @@ function Chip({ icon, label, title, value, disabled, muted, onChange, children }
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        className="min-w-[3.5rem] max-w-[200px] cursor-pointer appearance-none truncate bg-transparent py-1 pr-5 outline-none [field-sizing:content] disabled:cursor-default [&>option]:bg-surface [&>option]:text-ink"
+        className={
+          "min-w-[3.5rem] max-w-[180px] cursor-pointer appearance-none truncate bg-transparent py-1 pr-5 outline-none [field-sizing:content] disabled:cursor-default [&>option]:bg-surface [&>option]:text-ink " +
+          (compact ? "max-sm:absolute max-sm:inset-0 max-sm:min-w-0 max-sm:opacity-0" : "")
+        }
       >
         {children}
       </select>
-      <ChevronDown size={12} className="pointer-events-none absolute right-1 text-ink-3" />
+      <ChevronDown size={12} className={"pointer-events-none absolute right-1 text-ink-3 " + (compact ? "max-sm:hidden" : "")} />
     </label>
   );
 }

@@ -65,8 +65,10 @@ export function Thread({ items, running, loading, workspace, route, attachmentUR
 
   return (
     <div className="relative flex min-h-0 flex-1">
-      <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto pb-8 pt-4">
-        <div className="mx-auto flex w-full max-w-[691px] flex-col gap-1.5 pl-6 pr-8 max-sm:px-4">
+      {/* The thread never scrolls sideways: long words break, and code
+          blocks and tables scroll on their own. */}
+      <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto overflow-x-hidden pb-8 pt-4">
+        <div className="mx-auto flex w-full min-w-0 max-w-[691px] flex-col gap-1.5 pl-6 pr-8 [overflow-wrap:anywhere] max-sm:px-4">
           {!items.length && !loading && <Empty workspace={workspace} route={route} onOnboard={onOnboard} />}
           {hidden > 0 && (
             <button

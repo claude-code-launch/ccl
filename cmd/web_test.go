@@ -5,7 +5,7 @@ import "testing"
 func TestWebCommandFlags(t *testing.T) {
 	web := newWebCommand()
 	flags := web.Flags()
-	for _, name := range []string{"port", "host", "open", "no-open", "workspace", "workspace-root", "shell", "token", "max-concurrency", "provider", "model", "effort"} {
+	for _, name := range []string{"port", "host", "open", "no-open", "workspace", "workspace-root", "lock-workspaces", "shell", "no-shell", "token", "max-concurrency", "provider", "model", "effort"} {
 		if flags.Lookup(name) == nil {
 			t.Fatalf("ccl web has no --%s flag", name)
 		}
@@ -22,6 +22,10 @@ func TestWebCommandFlags(t *testing.T) {
 	}
 	if got := flags.Lookup("no-open").DefValue; got != "false" {
 		t.Fatalf("--no-open default = %q, want false", got)
+	}
+	// The terminal is on unless --no-shell.
+	if got := flags.Lookup("shell").DefValue; got != "true" {
+		t.Fatalf("--shell default = %q, want true", got)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/config"
@@ -45,7 +46,7 @@ type Config struct {
 	RequireToken bool
 	// Workspace, Workspaces and WorkspaceRoots are the directories
 	// conversations may run in: each named directory, and each directory
-	// directly inside a root. Clients choose among them and name no other.
+	// directly inside a root. The page may add folders unless LockWorkspaces.
 	// With none, the current directory is the workspace.
 	Workspace      string
 	Workspaces     []string
@@ -68,6 +69,8 @@ type Config struct {
 	LatestVersion func() (string, error)
 	// Shell turns on the web terminal (ccl web --shell).
 	Shell bool
+	// LockWorkspaces keeps the page from adding folders (--lock-workspaces).
+	LockWorkspaces bool
 }
 
 // Server is the HTTP surface of ccl web.
@@ -93,6 +96,8 @@ type Server struct {
 	schedules     *scheduler
 	shell         bool
 	terminals     terminalRegistry
+	// closing is set by Close; no turn starts after it.
+	closing atomic.Bool
 }
 
 type metaDefaults struct {
@@ -157,6 +162,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	workspaces.loadAdded(filepath.Join(root, "workspaces.json"), cfg.LockWorkspaces)
 	concurrency := cfg.MaxConcurrency
 	if concurrency <= 0 {
 		concurrency = 3
@@ -209,6 +215,33 @@ func New(cfg Config) (*Server, error) {
 // Store exposes the conversation store (tests, tooling).
 func (s *Server) Store() *Store { return s.store }
 
+// ErrClosing refuses a turn while the server shuts down.
+var ErrClosing = errors.New("ccl web is shutting down")
+
+// Close stops what the server started: scheduled messages, subscription
+// logins, terminals and turns in flight. A cancelled turn is still stored with
+// its result, so Close waits for that until ctx ends.
+func (s *Server) Close(ctx context.Context) error {
+	s.closing.Store(true)
+	s.logins.mu.Lock()
+	for _, login := range s.logins.logins {
+		if !login.Done {
+			login.Cancelled = true
+			login.cancel()
+		}
+	}
+	s.logins.mu.Unlock()
+	s.closeTerminals()
+	for _, done := range s.timeline.CancelAll() {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -220,6 +253,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/sessions", s.authenticated(s.handleSessions))
 	mux.HandleFunc("/api/capabilities", s.authenticated(s.handleCapabilities))
 	mux.HandleFunc("/api/workspaces", s.authenticated(s.handleWorkspaces))
+	mux.HandleFunc("/api/workspaces/", s.authenticated(s.handleWorkspaces))
+	mux.HandleFunc("/api/directories", s.authenticated(s.handleDirectories))
 	mux.HandleFunc("/api/files/", s.authenticated(s.withWorkspace(s.handleFiles)))
 	mux.HandleFunc("/api/git/", s.authenticated(s.withWorkspace(s.handleGit)))
 	mux.HandleFunc("/api/claude-sessions", s.authenticated(s.withWorkspace(s.handleClaudeSessions)))
@@ -786,6 +821,10 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, session *
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
+		if errors.Is(err, ErrClosing) {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		if isLaunchStart(err) {
 			// The failure is already in the conversation history.
 			writeError(w, http.StatusBadGateway, err.Error())
@@ -830,6 +869,9 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 	spec.attachmentViews = attachments
 	// A conversation runs where it started. One whose directory is no longer
 	// served is refused, never moved: its Claude session belongs there.
+	if s.closing.Load() {
+		return nil, ErrClosing
+	}
 	workspace, ok := s.workspaces.byPath(meta.Workspace)
 	if meta.Workspace == "" {
 		workspace, ok = s.workspaces.fallback()

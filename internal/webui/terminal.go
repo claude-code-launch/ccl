@@ -220,6 +220,19 @@ func terminalEnv() []string {
 	return env
 }
 
+// closeTerminals ends every shell, as when the server stops.
+func (s *Server) closeTerminals() {
+	s.terminals.mu.Lock()
+	terms := make([]*terminal, 0, len(s.terminals.terminals))
+	for _, term := range s.terminals.terminals {
+		terms = append(terms, term)
+	}
+	s.terminals.mu.Unlock()
+	for _, term := range terms {
+		s.closeTerminal(term)
+	}
+}
+
 func (s *Server) closeTerminal(term *terminal) {
 	_ = term.pty.Close()
 	if term.cmd.Process != nil {

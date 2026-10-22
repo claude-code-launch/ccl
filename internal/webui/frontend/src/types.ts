@@ -137,6 +137,8 @@ export interface ProviderView {
   customModelId?: string;
   subagentModel?: string;
   effortLevel?: string;
+  // The model pool, comma-separated.
+  models?: string;
   active: boolean;
   acpActive: boolean;
   modelChoices: ModelChoice[];
@@ -258,4 +260,15 @@ export interface Workspace {
   id: string;
   name: string;
   path: string;
+  // A folder added from the page; only those can be removed from the list.
+  added?: boolean;
+}
+
+// One folder listing for the folder picker.
+export interface DirListing {
+  path: string;
+  parent: string;
+  home: string;
+  repo: boolean;
+  entries: { name: string; path: string; repo?: boolean }[];
 }

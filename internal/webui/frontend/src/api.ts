@@ -3,6 +3,7 @@ import type {
   Capabilities,
   ClaudeSession,
   ConfigView,
+  DirListing,
   FileContent,
   FileEntry,
   GitBranch,
@@ -97,7 +98,12 @@ export class Api {
   sessions = () => this.request<Session[]>("/api/sessions");
   session = (id: string) => this.request<Session>(`/api/sessions/${id}`);
   createSession = (workspace = "") => this.request<Session>("/api/sessions", { method: "POST", body: workspace ? { workspace } : {} });
-  workspaces = () => this.request<{ workspaces: Workspace[] }>("/api/workspaces");
+  workspaces = () => this.request<{ workspaces: Workspace[]; canAdd: boolean }>("/api/workspaces");
+  addWorkspace = (path: string) => this.request<Workspace>("/api/workspaces", { method: "POST", body: { path } });
+  removeWorkspace = (id: string) => this.request<null>(`/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
+  createDirectory = (path: string, name: string) => this.request<{ path: string }>("/api/directories", { method: "POST", body: { path, name } });
+  directories = (path = "", hidden = false) =>
+    this.request<DirListing>(`/api/directories?path=${encodeURIComponent(path)}${hidden ? "&hidden=1" : ""}`);
   patchSession = (id: string, patch: Partial<Pick<Session, "title" | "provider" | "model" | "effort" | "permissionMode">>) =>
     this.request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: patch });
   deleteSession = (id: string) => this.request<null>(`/api/sessions/${id}`, { method: "DELETE" });

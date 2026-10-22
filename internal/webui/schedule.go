@@ -109,6 +109,9 @@ func (s *Server) runSchedules() {
 }
 
 func (s *Server) sendDue(now time.Time) {
+	if s.closing.Load() {
+		return
+	}
 	for _, item := range s.schedules.due(now) {
 		session, err := s.store.Open(item.Session)
 		if errors.Is(err, ErrNotFound) {

@@ -77,6 +77,12 @@ export const Markdown = memo(function Markdown({ text, streaming }: { text: stri
         components={{
           pre: CodeBlock,
           a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+          // A wide table scrolls by itself instead of widening the thread.
+          table: ({ node: _node, ...props }) => (
+            <div className="my-3 max-w-full overflow-x-auto rounded-md border border-line [overflow-wrap:normal] [&_td]:min-w-[6em] [&_th]:min-w-[4em]">
+              <table {...props} className="!my-0 !border-0" />
+            </div>
+          ),
         }}
       >
         {text}

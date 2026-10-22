@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, History, LoaderCircle, Moon, PanelLeft, Pencil, Plus, Search, Settings, Sun, Trash2 } from "lucide-react";
+import { Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, FolderOpen, FolderPlus, History, LoaderCircle, Moon, PanelLeft, Pencil, Plus, Search, Settings, Sun, Trash2, X } from "lucide-react";
 import type { ClaudeSession, Health, Session, Workspace } from "../types";
 import { relativeTime } from "../format";
 import { useI18n } from "../i18n";
@@ -11,6 +11,12 @@ interface Props {
   workspace: Workspace | null;
   onWorkspace: (id: string) => void;
   onRefreshWorkspaces: () => void;
+  // Absent when the server was started with --lock-workspaces.
+  onOpenFolder?: (create?: boolean) => void;
+  // Folders whose conversations are hidden because they are not served.
+  recentFolders: string[];
+  onReopenFolder?: (path: string) => void;
+  onRemoveWorkspace: (workspace: Workspace) => void;
   currentId: string | null;
   health: Health | null;
   theme: "light" | "dark";
@@ -49,8 +55,17 @@ export function Sidebar(props: Props) {
         <span className="font-display text-[20px] font-medium tracking-tight text-ink">ccl web</span>
       </div>
 
-      {props.workspaces.length > 1 && (
-        <WorkspaceSwitcher workspaces={props.workspaces} current={props.workspace} onChoose={props.onWorkspace} onOpen={props.onRefreshWorkspaces} />
+      {props.workspaces.length > 0 && (
+        <WorkspaceSwitcher
+          workspaces={props.workspaces}
+          current={props.workspace}
+          onChoose={props.onWorkspace}
+          onOpen={props.onRefreshWorkspaces}
+          onOpenFolder={props.onOpenFolder}
+          recent={props.onReopenFolder ? props.recentFolders : []}
+          onReopen={props.onReopenFolder}
+          onRemove={props.onRemoveWorkspace}
+        />
       )}
 
       <div className="px-2">
@@ -119,11 +134,15 @@ export function Sidebar(props: Props) {
 
 // WorkspaceSwitcher chooses among the directories the server offers, like
 // claude.ai/code's repository picker.
-function WorkspaceSwitcher({ workspaces, current, onChoose, onOpen }: {
+function WorkspaceSwitcher({ workspaces, current, onChoose, onOpen, onOpenFolder, recent, onReopen, onRemove }: {
   workspaces: Workspace[];
   current: Workspace | null;
   onChoose: (id: string) => void;
   onOpen: () => void;
+  onOpenFolder?: (create?: boolean) => void;
+  recent: string[];
+  onReopen?: (path: string) => void;
+  onRemove: (workspace: Workspace) => void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -156,7 +175,7 @@ function WorkspaceSwitcher({ workspaces, current, onChoose, onOpen }: {
       </button>
       {open && (
         <div className="absolute left-2 right-2 top-full z-30 mt-1 rounded-[10px] border border-line bg-surface p-1 shadow-lg">
-          {workspaces.length > 6 && (
+          {workspaces.length + recent.length > 6 && (
             <input
               autoFocus
               value={filter}
@@ -167,24 +186,79 @@ function WorkspaceSwitcher({ workspaces, current, onChoose, onOpen }: {
           )}
           <div className="max-h-72 overflow-y-auto">
             {shown.map((workspace) => (
-              <button
-                key={workspace.id}
-                onClick={() => {
-                  onChoose(workspace.id);
-                  setOpen(false);
-                }}
-                title={workspace.path}
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-active"
-              >
-                <span className="flex min-w-0 flex-1 flex-col leading-tight">
-                  <span className="truncate text-[14px] text-ink">{workspace.name}</span>
-                  <span className="truncate text-[11px] text-ink-3">{workspace.path}</span>
-                </span>
-                {current?.id === workspace.id && <Check size={14} className="shrink-0 text-clay" />}
-              </button>
+              <div key={workspace.id} className="group flex items-center rounded-lg hover:bg-active">
+                <button
+                  onClick={() => {
+                    onChoose(workspace.id);
+                    setOpen(false);
+                  }}
+                  title={workspace.path}
+                  className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left"
+                >
+                  <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                    <span className="truncate text-[14px] text-ink">{workspace.name}</span>
+                    <span className="truncate text-[11px] text-ink-3">{workspace.path}</span>
+                  </span>
+                  {current?.id === workspace.id && <Check size={14} className="shrink-0 text-clay" />}
+                </button>
+                {workspace.added && (
+                  <button
+                    title={t("removeFromList")}
+                    aria-label={t("removeFromList")}
+                    onClick={() => onRemove(workspace)}
+                    className="mr-1 hidden shrink-0 rounded p-1 text-ink-3 hover:bg-hover hover:text-red-500 group-hover:block"
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
             ))}
             {!shown.length && <p className="px-2.5 py-2 text-[13px] text-ink-3">{t("noMatches")}</p>}
+            {recent.length > 0 && <p className="px-2.5 pb-1 pt-2 text-[11.5px] text-ink-3">{t("recentFolders")}</p>}
+            {recent
+              .filter((path) => !needle || path.toLowerCase().includes(needle))
+              .map((path) => (
+                <button
+                  key={path}
+                  onClick={() => {
+                    setOpen(false);
+                    onReopen?.(path);
+                  }}
+                  title={path}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-active"
+                >
+                  <History size={14} className="shrink-0 text-ink-3" />
+                  <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                    <span className="truncate text-[14px] text-ink-2">{path.split(/[\\/]/).filter(Boolean).pop() || path}</span>
+                    <span className="truncate text-[11px] text-ink-3">{path}</span>
+                  </span>
+                </button>
+              ))}
           </div>
+          {onOpenFolder && (
+            <div className="mt-1 border-t border-line pt-1">
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  onOpenFolder(true);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[14px] text-ink-2 hover:bg-active hover:text-ink"
+              >
+                <FolderPlus size={15} className="shrink-0 text-ink-3" />
+                {t("newProject")}
+              </button>
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  onOpenFolder();
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[14px] text-ink-2 hover:bg-active hover:text-ink"
+              >
+                <FolderOpen size={15} className="shrink-0 text-ink-3" />
+                {t("openFolder")}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -326,6 +400,7 @@ export function MenuButton({ icon, danger, onClick, children }: { icon: ReactNod
 export function IconButton({ children, title, onClick, active }: { children: ReactNode; title: string; onClick: () => void; active?: boolean }) {
   return (
     <button
+      type="button"
       title={title}
       aria-label={title}
       onClick={onClick}

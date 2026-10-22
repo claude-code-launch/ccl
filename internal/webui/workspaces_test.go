@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -159,5 +161,123 @@ func TestConversationOfAnUnservedWorkspaceIsRefused(t *testing.T) {
 	}
 	if events, _ := session.Events(0); len(events) != 0 {
 		t.Fatalf("a refused turn stored events: %+v", events)
+	}
+}
+
+func TestAddedWorkspacesPersistAndCanBeRemoved(t *testing.T) {
+	store := t.TempDir()
+	folder := t.TempDir()
+	httpServer := testServer(t, Config{Token: "secret", StoreRoot: store})
+
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/workspaces", "secret", `{"path":"relative/dir"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("relative path = %d: %s", status, body)
+	}
+	status, body = doJSON(t, "POST", httpServer.URL+"/api/workspaces", "secret", `{"path":`+strconv.Quote(folder)+`}`)
+	if status != http.StatusCreated {
+		t.Fatalf("add = %d: %s", status, body)
+	}
+	var added Workspace
+	if err := json.Unmarshal(body, &added); err != nil || !added.Added {
+		t.Fatalf("added = %s (%v)", body, err)
+	}
+	// The folder serves files and new conversations at once.
+	if status, body := doJSON(t, "GET", httpServer.URL+"/api/files/list?path=&workspace="+added.ID, "secret", ""); status != http.StatusOK {
+		t.Fatalf("files in the added folder = %d: %s", status, body)
+	}
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "secret", `{"workspace":"`+added.ID+`"}`); status != http.StatusCreated {
+		t.Fatalf("session in the added folder = %d: %s", status, body)
+	}
+
+	// Another server on the same store offers it too.
+	again := testServer(t, Config{Token: "secret", StoreRoot: store})
+	_, body = doJSON(t, "GET", again.URL+"/api/workspaces", "secret", "")
+	if !strings.Contains(string(body), added.ID) {
+		t.Fatalf("restarted server lost the folder: %s", body)
+	}
+	if status, body := doJSON(t, "DELETE", again.URL+"/api/workspaces/"+added.ID, "secret", ""); status != http.StatusNoContent {
+		t.Fatalf("remove = %d: %s", status, body)
+	}
+	_, body = doJSON(t, "GET", again.URL+"/api/workspaces", "secret", "")
+	if strings.Contains(string(body), added.ID) {
+		t.Fatalf("removed folder still offered: %s", body)
+	}
+}
+
+func TestLockedWorkspacesRefuseFolders(t *testing.T) {
+	httpServer := testServer(t, Config{Token: "secret", LockWorkspaces: true})
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/workspaces", "secret", `{"path":`+strconv.Quote(t.TempDir())+`}`); status != http.StatusForbidden {
+		t.Fatalf("add while locked = %d: %s", status, body)
+	}
+	if status, body := doJSON(t, "GET", httpServer.URL+"/api/directories", "secret", ""); status != http.StatusForbidden {
+		t.Fatalf("folder listing while locked = %d: %s", status, body)
+	}
+	// A fixed workspace cannot be removed.
+	_, body := doJSON(t, "GET", httpServer.URL+"/api/workspaces", "secret", "")
+	var list struct {
+		Workspaces []Workspace `json:"workspaces"`
+		CanAdd     bool        `json:"canAdd"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil || list.CanAdd || len(list.Workspaces) != 1 {
+		t.Fatalf("list = %s (%v)", body, err)
+	}
+	if status, _ := doJSON(t, "DELETE", httpServer.URL+"/api/workspaces/"+list.Workspaces[0].ID, "secret", ""); status != http.StatusNotFound {
+		t.Fatalf("removing a fixed workspace = %d", status)
+	}
+}
+
+func TestDirectoriesListsFoldersOnly(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"b-repo/.git", "a-plain", ".hidden"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	httpServer := testServer(t, Config{Token: "secret"})
+	status, body := doJSON(t, "GET", httpServer.URL+"/api/directories?path="+url.QueryEscape(root), "secret", "")
+	if status != http.StatusOK {
+		t.Fatalf("list = %d: %s", status, body)
+	}
+	var listing struct {
+		Path    string     `json:"path"`
+		Parent  string     `json:"parent"`
+		Entries []DirEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(body, &listing); err != nil {
+		t.Fatal(err)
+	}
+	if len(listing.Entries) != 2 || listing.Entries[0].Name != "a-plain" || listing.Entries[1].Name != "b-repo" || !listing.Entries[1].Repo || listing.Entries[0].Repo {
+		t.Fatalf("entries = %+v", listing.Entries)
+	}
+	if listing.Parent != filepath.Dir(listing.Path) {
+		t.Fatalf("parent = %q for %q", listing.Parent, listing.Path)
+	}
+	if status, _ := doJSON(t, "GET", httpServer.URL+"/api/directories?path=relative", "secret", ""); status != http.StatusBadRequest {
+		t.Fatalf("relative path = %d", status)
+	}
+}
+
+func TestCreateDirectory(t *testing.T) {
+	root := t.TempDir()
+	httpServer := testServer(t, Config{Token: "secret"})
+	create := func(name string) (int, []byte) {
+		return doJSON(t, "POST", httpServer.URL+"/api/directories", "secret", `{"path":`+strconv.Quote(root)+`,"name":`+strconv.Quote(name)+`}`)
+	}
+	if status, body := create("new-project"); status != http.StatusCreated || !strings.Contains(string(body), "new-project") {
+		t.Fatalf("create = %d: %s", status, body)
+	}
+	if info, err := os.Stat(filepath.Join(root, "new-project")); err != nil || !info.IsDir() {
+		t.Fatalf("folder not created: %v", err)
+	}
+	if status, _ := create("new-project"); status != http.StatusConflict {
+		t.Fatalf("existing folder = %d", status)
+	}
+	for _, name := range []string{"", "..", "a/b", `a\b`} {
+		if status, _ := create(name); status != http.StatusBadRequest {
+			t.Fatalf("name %q = %d", name, status)
+		}
 	}
 }

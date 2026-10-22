@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { Blocks, KeyRound, Pencil, Plus, Server, SlidersHorizontal, Star, Trash2, Wifi, X } from "lucide-react";
+import { Blocks, KeyRound, List, LoaderCircle, Pencil, Plus, RefreshCw, Server, SlidersHorizontal, Star, Trash2, Wifi, X } from "lucide-react";
 import type { Api } from "../api";
 import type { ConfigView, ProviderView, TestResult } from "../types";
 import { EFFORT_LEVELS } from "../types";
@@ -277,8 +277,20 @@ function ProviderEditor({ api, provider, onClose, onSaved }: {
   });
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  // catalog is what the endpoint's /models offered, for the slot pickers.
+  const [catalog, setCatalog] = useState<string[]>([]);
+  const [catalogState, setCatalogState] = useState<"idle" | "loading" | "done" | "failed">("idle");
   const set = (field: string) => (value: string) => setForm((current) => ({ ...current, [field]: value }));
 
+  const probe = async () => {
+    const result = await api.testProvider(form.name.trim() || "new", {
+      endpoint: form.endpoint.trim() || undefined,
+      apiKey: form.apiKey.trim() || undefined,
+      type: form.type || undefined,
+    });
+    if (result.ok && result.models?.length) setCatalog(result.models);
+    return result;
+  };
   const test = async () => {
     if (!form.name.trim()) {
       setStatus(t("saveFirst"));
@@ -286,20 +298,36 @@ function ProviderEditor({ api, provider, onClose, onSaved }: {
     }
     setStatus(t("testing", { name: form.name }));
     try {
-      setStatus(
-        describe(
-          await api.testProvider(form.name.trim(), {
-            endpoint: form.endpoint.trim() || undefined,
-            apiKey: form.apiKey.trim() || undefined,
-            type: form.type || undefined,
-          }),
-          t,
-        ),
-      );
+      setStatus(describe(await probe(), t));
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
   };
+  const loadCatalog = async () => {
+    setCatalogState("loading");
+    try {
+      const result = await probe();
+      setCatalogState(result.ok ? "done" : "failed");
+      if (!result.ok) setStatus(describe(result, t));
+    } catch (error) {
+      setCatalogState("failed");
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  // An existing provider with an endpoint lists its models at once.
+  useEffect(() => {
+    if (provider?.endpoint) void loadCatalog();
+    // Only when the editor opens.
+  }, []);
+
+  // The pickers offer the catalog, the provider's pool and what is set now.
+  const options = [
+    ...new Set(
+      [...catalog, ...(provider?.models || "").split(","), ...SLOT_FIELDS.map(([field]) => form[field])]
+        .map((model) => stripOneM(model.trim()))
+        .filter(Boolean),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -349,15 +377,30 @@ function ProviderEditor({ api, provider, onClose, onSaved }: {
             <Input type="password" value={form.apiKey} onChange={set("apiKey")} placeholder={provider?.hasKey ? t("keepKey") : t("apiKey")} />
           </Field>
           <div>
-            <p className="mb-2 text-[13px] text-ink-2">{t("modelSlots")}</p>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-2 max-sm:grid-cols-1">
+            <div className="mb-2 flex items-center gap-2">
+              <p className="flex-1 text-[13px] text-ink-2">{t("modelSlots")}</p>
+              <span className="text-[12px] text-ink-3">
+                {catalogState === "loading" ? t("loadingModels") : catalog.length ? t("modelCount", { n: catalog.length }) : ""}
+              </span>
+              <button
+                type="button"
+                onClick={loadCatalog}
+                disabled={catalogState === "loading"}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[12.5px] text-ink-2 hover:bg-hover hover:text-ink disabled:opacity-50"
+              >
+                {catalogState === "loading" ? <LoaderCircle size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                {t("fetchModels")}
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 max-sm:grid-cols-1">
               {SLOT_FIELDS.map(([field, label]) => (
-                <label key={field} className="flex flex-col gap-1 text-[12.5px] text-ink-3">
+                <div key={field} className="flex flex-col gap-1 text-[12.5px] text-ink-3">
                   {label}
-                  <Input value={form[field]} onChange={set(field)} />
-                </label>
+                  <SlotPicker value={form[field]} options={options} onChange={set(field)} />
+                </div>
               ))}
             </div>
+            {!options.length && <p className="mt-2 text-[12px] text-ink-3">{t("modelsHint")}</p>}
           </div>
           <Field label={t("effort")}>
             <Select value={form.effortLevel} onChange={set("effortLevel")} options={["", ...EFFORT_LEVELS]} labels={{ "": t("effortDefault") }} />
@@ -373,6 +416,60 @@ function ProviderEditor({ api, provider, onClose, onSaved }: {
           <Button primary type="submit" disabled={busy}>{t("saveProvider")}</Button>
         </footer>
       </form>
+    </div>
+  );
+}
+
+// stripOneM drops Claude Code's 1M-context marker from a model id.
+function stripOneM(model: string): string {
+  return model.replace(/\[1m\]$/i, "");
+}
+
+// MANUAL is the slot menu's "type a model id" entry.
+const MANUAL = "\u0000manual";
+
+// SlotPicker chooses a slot's model from a list, with a 1M-context switch.
+// Typing an id stays possible for a gateway without /models.
+function SlotPicker({ value, options, onChange }: { value: string; options: string[]; onChange: (value: string) => void }) {
+  const { t } = useI18n();
+  const base = stripOneM(value);
+  const oneM = base !== value;
+  const [manual, setManual] = useState(false);
+  const compose = (model: string, wide: boolean) => (model ? model + (wide ? "[1m]" : "") : "");
+  const typing = manual || !options.length;
+  return (
+    <div className="flex min-w-0 items-center gap-1.5">
+      {typing ? (
+        <input
+          value={base}
+          onChange={(event) => onChange(compose(event.target.value.trim(), oneM))}
+          placeholder={t("modelIdPlaceholder")}
+          autoComplete="off"
+          spellCheck={false}
+          className={control + " font-mono text-[13px]"}
+        />
+      ) : (
+        <select
+          value={base}
+          onChange={(event) => (event.target.value === MANUAL ? setManual(true) : onChange(compose(event.target.value, oneM)))}
+          className={control}
+        >
+          <option value="">{t("modelNone")}</option>
+          {options.map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+          <option value={MANUAL}>{t("manualInput")}</option>
+        </select>
+      )}
+      {typing && options.length > 0 && (
+        <button type="button" title={t("backToList")} onClick={() => setManual(false)} className="shrink-0 rounded-md p-1 text-ink-3 hover:bg-hover hover:text-ink">
+          <List size={14} />
+        </button>
+      )}
+      <label title={t("oneMHint")} className={"flex shrink-0 items-center gap-1 text-[11.5px] " + (base ? "text-ink-2" : "text-ink-3 opacity-50")}>
+        <input type="checkbox" disabled={!base} checked={oneM} onChange={(event) => onChange(compose(base, event.target.checked))} className="accent-[var(--clay)]" />
+        1M
+      </label>
     </div>
   );
 }

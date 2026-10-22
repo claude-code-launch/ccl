@@ -400,6 +400,9 @@ type ProbeResult struct {
 	Elapsed int64    `json:"elapsedMs"`
 }
 
+// maxProbeModels bounds the model ids one probe returns.
+const maxProbeModels = 2000
+
 // probeProvider issues one /models request, the same metadata call `ccl set`
 // uses for Auto Configure. It is bounded and never returns credentials.
 func probeProvider(ctx context.Context, p provider.Provider) ProbeResult {
@@ -431,8 +434,9 @@ func probeProvider(ctx context.Context, p provider.Provider) ProbeResult {
 		for _, info := range result.infos {
 			models = append(models, info.ID)
 		}
-		if len(models) > 20 {
-			models = models[:20]
+		// The provider editor offers these for its model slots.
+		if len(models) > maxProbeModels {
+			models = models[:maxProbeModels]
 		}
 		return ProbeResult{OK: true, Status: 200, Models: models, Elapsed: time.Since(start).Milliseconds()}
 	}

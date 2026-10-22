@@ -290,6 +290,23 @@ func (t *Timeline) Running(id string) bool {
 	return ok
 }
 
+// CancelAll stops every turn in flight and returns channels that close once
+// each one is stored.
+func (t *Timeline) CancelAll() []<-chan struct{} {
+	t.mu.Lock()
+	entries := make([]*turn, 0, len(t.running))
+	for _, entry := range t.running {
+		entries = append(entries, entry)
+	}
+	t.mu.Unlock()
+	done := make([]<-chan struct{}, 0, len(entries))
+	for _, entry := range entries {
+		t.cancel(entry)
+		done = append(done, entry.done)
+	}
+	return done
+}
+
 // RequestCancel stops the turn in flight for a session, if any.
 func (t *Timeline) RequestCancel(id string) bool {
 	t.mu.Lock()

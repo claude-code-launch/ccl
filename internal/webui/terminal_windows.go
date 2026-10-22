@@ -16,6 +16,8 @@ type terminalRegistry struct {
 	terminals map[string]*terminal
 }
 
+func (s *Server) closeTerminals() {}
+
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
 		writeError(w, http.StatusUnauthorized, "missing or invalid token")
