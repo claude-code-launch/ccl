@@ -31,6 +31,9 @@ interface Props {
   onDelete: (session: Session) => void;
   onPatch: (session: Session, change: { pinned?: boolean; archived?: boolean }) => void;
   onSettings: () => void;
+  // The avatar opens cloud sync; sync is its dot (absent: no remote).
+  onCloud: () => void;
+  sync?: "synced" | "pending";
   onToggleTheme: () => void;
   onCollapse: () => void;
   claudeSessions: ClaudeSession[] | null;
@@ -147,7 +150,18 @@ export function Sidebar(props: Props) {
         </div>
       )}
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-t border-line px-3">
-        <span className="grid size-7 shrink-0 place-items-center rounded-full bg-active text-[11px] font-semibold text-ink-2">C</span>
+        <button
+          type="button"
+          onClick={props.onCloud}
+          title={t("cloudSync") + (props.sync ? " · " + t(props.sync === "synced" ? "cloudStateUpToDate" : "cloudStateNotSynced") : "")}
+          aria-label={t("cloudSync")}
+          className="relative grid size-7 shrink-0 place-items-center rounded-full bg-active text-[11px] font-semibold text-ink-2 hover:ring-2 hover:ring-line-strong"
+        >
+          C
+          {props.sync && (
+            <span className={"absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-sidebar " + (props.sync === "synced" ? "bg-emerald-500" : "bg-amber-500")} />
+          )}
+        </button>
         <span className="min-w-0 flex-1 truncate text-[13px] text-ink-2" title={health?.workspace || ""}>
           ccl {health?.version || "dev"}
           <span className="text-ink-3"> · claude {(health?.claudeVersion || "?").replace(/\s*\(Claude Code\)/, "")}</span>

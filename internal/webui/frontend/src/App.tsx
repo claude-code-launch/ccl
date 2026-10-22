@@ -131,6 +131,17 @@ export function App() {
   const [queues, setQueues] = useState<Record<string, Queued[]>>({});
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [update, setUpdate] = useState("");
+  // The avatar's dot: the primary cloud remote is in sync, or not.
+  const [sync, setSync] = useState<"synced" | "pending" | undefined>(undefined);
+  const loadSync = useCallback(async () => {
+    try {
+      const { remotes } = await api.cloud();
+      const primary = remotes.find((remote) => remote.primary && remote.signedIn);
+      setSync(!primary || primary.error ? undefined : primary.state === "up to date" ? "synced" : "pending");
+    } catch {
+      setSync(undefined);
+    }
+  }, [api]);
   const [notice, setNotice] = useState("");
   const [theme, toggleTheme] = useTheme();
 
@@ -280,6 +291,7 @@ export function App() {
         loadCapabilities();
         loadWorkspaces();
         api.updateInfo().then((info) => info.newer && setUpdate(info.latest)).catch(() => {});
+        void loadSync();
       } catch (error) {
         if (cancelled) return;
         if (error instanceof Unauthorized) signOut(api.token ? "Token rejected" : "");
@@ -289,7 +301,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [api, loadConfig, loadCapabilities, loadWorkspaces, signOut]);
+  }, [api, loadConfig, loadCapabilities, loadWorkspaces, loadSync, signOut]);
 
   // Turn boundaries change titles, counts, usage and what Claude Code offers;
   // refresh shortly after rather than once per event.
@@ -744,6 +756,12 @@ export function App() {
               setMobileSidebar(false);
               loadConfig();
             }}
+            onCloud={() => {
+              setSettingsOpen("cloud");
+              setMobileSidebar(false);
+              loadConfig();
+            }}
+            sync={sync}
             onToggleTheme={toggleTheme}
             onCollapse={toggleSidebar}
             claudeSessions={claudeSessions}
@@ -975,7 +993,11 @@ export function App() {
         )}
 
         {settingsOpen && (
-          <SettingsDialog initialTab={settingsOpen} api={api} workspaceApi={wsApi} config={config} loadError={configError} onClose={() => setSettingsOpen(false)} onChanged={loadConfig} />
+          <SettingsDialog initialTab={settingsOpen} api={api} workspaceApi={wsApi} config={config} loadError={configError} onClose={() => {
+            setSettingsOpen(false);
+            // Settings may have pushed, pulled or logged in.
+            void loadSync();
+          }} onChanged={loadConfig} />
         )}
 
         {notice && (
