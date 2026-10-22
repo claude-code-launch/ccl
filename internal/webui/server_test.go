@@ -349,7 +349,8 @@ func TestMessageWhileRunningConflicts(t *testing.T) {
 	// The turn finishes once cancelled; the session is usable again.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		status, _ := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"title":"done"}`)
+		// A route change is refused while a turn runs; a title is not.
+		status, _ := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"effort":""}`)
 		if status == http.StatusOK {
 			break
 		}
