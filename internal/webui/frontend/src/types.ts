@@ -309,6 +309,8 @@ export interface CloudOverview {
   remotes: CloudRemote[];
   // icloud only on macOS.
   platforms: string[];
+  // Why a platform cannot log in from this build (no Google OAuth client).
+  unavailable?: Record<string, string>;
   // False in a build without its own binary path.
   available: boolean;
 }

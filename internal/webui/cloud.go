@@ -99,7 +99,13 @@ func (s *Server) cloudOverview(w http.ResponseWriter) {
 	if runtime.GOOS == "darwin" {
 		platforms = append(platforms, "icloud")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"remotes": remotes, "platforms": platforms, "available": s.selfBinary != ""})
+	// Why a platform cannot log in from this build, so the page says so
+	// before a login fails.
+	unavailable := map[string]string{}
+	if err := cloudsync.GoogleDriveUnavailable(); err != nil {
+		unavailable["google-drive"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"remotes": remotes, "platforms": platforms, "unavailable": unavailable, "available": s.selfBinary != ""})
 }
 
 // remoteStatus reads one remote's status, giving up after cloudStatusTimeout:
@@ -149,6 +155,12 @@ func (s *Server) cloudLogin(w http.ResponseWriter, r *http.Request) {
 	if s.selfBinary == "" {
 		writeError(w, http.StatusNotImplemented, "cloud sync is not available in this build")
 		return
+	}
+	if platform == "google-drive" {
+		if err := cloudsync.GoogleDriveUnavailable(); err != nil {
+			writeError(w, http.StatusNotImplemented, err.Error())
+			return
+		}
 	}
 	args := []string{"cloud", "login", platform}
 	if alias != "" {

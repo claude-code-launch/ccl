@@ -166,7 +166,11 @@ func (s *Server) runLogin(provider string, args []string, withStdin bool) (*oaut
 	s.logins.logins[login.ID] = login
 	s.logins.mu.Unlock()
 
+	// The output is read to its end before the result is recorded, so the
+	// last line a failure printed is there to explain it.
+	scanned := make(chan struct{})
 	go func() {
+		defer close(scanned)
 		scanner := bufio.NewScanner(reader)
 		for scanner.Scan() {
 			line := redactSecrets(strings.TrimRight(scanner.Text(), "\r"))
@@ -181,12 +185,14 @@ func (s *Server) runLogin(provider string, args []string, withStdin bool) (*oaut
 	go func() {
 		err := cmd.Wait()
 		_ = writer.Close()
+		<-scanned
 		cancel()
 		s.logins.mu.Lock()
 		login.Done = true
 		login.OK = err == nil
 		if err != nil && !login.Cancelled {
-			login.Error = err.Error()
+			// What ccl said last explains a failure better than its exit code.
+			login.Error = lastLine(strings.Join(login.Output, "\n"), err.Error())
 		}
 		s.logins.mu.Unlock()
 	}()

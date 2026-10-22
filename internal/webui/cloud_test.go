@@ -3,6 +3,7 @@ package webui
 import (
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,9 @@ func TestCloudOverviewAndCommands(t *testing.T) {
 }
 
 func TestCloudLoginTakesAPastedAddress(t *testing.T) {
+	// A development build has no Google OAuth client; the page refuses then.
+	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_ID", "test-client")
+	t.Setenv("CCL_GOOGLE_OAUTH_CLIENT_SECRET", "test-secret")
 	base := cloudServer(t)
 	if status, _ := doJSON(t, "POST", base+"/api/cloud/login", "secret", `{"platform":"dropbox"}`); status != http.StatusBadRequest {
 		t.Fatalf("unknown platform = %d", status)
@@ -112,5 +116,47 @@ func TestCloudLoginTakesAPastedAddress(t *testing.T) {
 	}
 	if status, _ := doJSON(t, "POST", login, "secret", `{"address":"http://127.0.0.1/?code=x"}`); status != http.StatusConflict {
 		t.Fatalf("paste after the login = %d", status)
+	}
+}
+
+func TestCloudLoginFailureSaysWhy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bin := writeScript(t, t.TempDir(), "ccl", `echo "Logging in..."
+echo "Error: the iCloud Drive folder is missing" >&2
+exit 1
+`)
+	server, err := New(Config{Token: "secret", Workspace: t.TempDir(), StoreRoot: t.TempDir(), SelfBinary: bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := testServerFrom(t, server)
+	// The page learns up front whether this build can log in to Google Drive.
+	_, body := doJSON(t, "GET", base+"/api/cloud", "secret", "")
+	if !strings.Contains(string(body), `"unavailable":{`) {
+		t.Fatalf("overview = %s", body)
+	}
+	platform := "icloud"
+	if runtime.GOOS != "darwin" {
+		t.Skip("iCloud logins are macOS only")
+	}
+	_, body = doJSON(t, "POST", base+"/api/cloud/login", "secret", `{"platform":"`+platform+`"}`)
+	var started struct{ ID string }
+	_ = json.Unmarshal(body, &started)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, body = doJSON(t, "GET", base+"/api/cloud/login/"+started.ID, "secret", "")
+		var progress oauthLogin
+		_ = json.Unmarshal(body, &progress)
+		if progress.Done {
+			if progress.OK || progress.Error != "the iCloud Drive folder is missing" {
+				t.Fatalf("login = %s", body)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("login never finished: %s", body)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

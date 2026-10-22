@@ -58,6 +58,12 @@ func requireGoogleDesktopClient() error {
 	return nil
 }
 
+// GoogleDriveUnavailable explains why this build cannot log in to Google
+// Drive (a development build has no OAuth client), or is nil when it can.
+func GoogleDriveUnavailable() error {
+	return requireGoogleDesktopClient()
+}
+
 type googleAuthFile struct {
 	Version int           `json:"version"`
 	Token   *oauth2.Token `json:"token"`

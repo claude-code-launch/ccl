@@ -45,7 +45,10 @@ export function CloudSync({ api, onPulled }: { api: Api; onPulled: () => void })
   const load = useCallback(async () => {
     setLoadError("");
     try {
-      setOverview(await api.cloud());
+      const next = await api.cloud();
+      setOverview(next);
+      // Start on a platform this build can log in to.
+      setPlatform((current) => (next.unavailable?.[current] ? next.platforms.find((name) => !next.unavailable?.[name]) || current : current));
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     }
@@ -168,7 +171,7 @@ export function CloudSync({ api, onPulled }: { api: Api; onPulled: () => void })
           <button
             type="button"
             onClick={() => void startLogin(platform, alias.trim())}
-            disabled={(!!login && !login.done) || overview?.available === false}
+            disabled={(!!login && !login.done) || overview?.available === false || !!overview?.unavailable?.[platform]}
             className="rounded-lg border border-clay bg-clay px-3.5 py-1.5 text-sm font-medium text-white hover:bg-clay-hover disabled:opacity-50"
           >
             {t("loginStart")}
@@ -179,6 +182,11 @@ export function CloudSync({ api, onPulled }: { api: Api; onPulled: () => void })
             </button>
           )}
         </div>
+        {overview?.unavailable?.[platform] && (
+          <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-[12.5px] leading-relaxed text-ink-2" title={overview.unavailable[platform]}>
+            {platform === "google-drive" ? t("cloudGoogleUnavailable") : overview.unavailable[platform]}
+          </p>
+        )}
         {login && (
           <div className="space-y-2 rounded-lg border border-line bg-code p-2.5 text-[12.5px]">
             <div className="flex items-center gap-1.5 text-ink-2">
