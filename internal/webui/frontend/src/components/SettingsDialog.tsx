@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { Blocks, KeyRound, List, LoaderCircle, Pencil, Plus, RefreshCw, Server, SlidersHorizontal, Star, Trash2, Wifi, X } from "lucide-react";
+import { Blocks, FileText, KeyRound, List, LoaderCircle, Pencil, Plus, RefreshCw, Server, SlidersHorizontal, Star, Trash2, Wifi, X } from "lucide-react";
 import type { Api } from "../api";
 import type { ConfigView, ProviderView, TestResult } from "../types";
 import { EFFORT_LEVELS } from "../types";
 import { IconButton } from "./Sidebar";
 import { useI18n } from "../i18n";
 import { MCPServers, SubscriptionLogin } from "./SettingsExtras";
+import { MemoryEditor } from "./MemoryEditor";
+import type { MemorySource } from "./MemoryEditor";
 
 // Settings: a large centered dialog with a section list, like claude.ai's.
 // Every write to ~/.ccl/config.yaml goes through the server's config.Update;
@@ -22,7 +24,7 @@ const SLOT_FIELDS = [
   ["subagentModel", "subagent"],
 ] as const;
 
-type Tab = "general" | "providers" | "login" | "connectors";
+type Tab = "general" | "providers" | "login" | "connectors" | "instructions";
 type Form = Record<string, string> & { name: string; type: string; endpoint: string; apiKey: string; effortLevel: string };
 
 const emptyForm = (): Form => ({
@@ -51,9 +53,32 @@ interface Props {
   onChanged: () => Promise<void>;
 }
 
-export function SettingsDialog({ api, workspaceApi, config, loadError, initialTab = "general", onClose, onChanged }: Props) {
+export function SettingsDialog({ api, workspaceApi, config, loadError, initialTab = "general", onClose: close, onChanged }: Props) {
   const { t } = useI18n();
-  const [tab, setTab] = useState<Tab>(initialTab);
+  const [tab, setTabState] = useState<Tab>(initialTab);
+  // The instructions editor asks before unsaved edits are dropped.
+  const leaveGuard = useRef<(() => boolean) | null>(null);
+  const registerLeaveGuard = useCallback((guard: (() => boolean) | null) => {
+    leaveGuard.current = guard;
+  }, []);
+  const canLeave = () => !leaveGuard.current || leaveGuard.current();
+  const onClose = () => canLeave() && close();
+  const setTab = (next: Tab) => next !== tab && canLeave() && setTabState(next);
+  const userMemory: MemorySource[] = useMemo(
+    () => [
+      {
+        key: "user",
+        label: "CLAUDE.md",
+        hint: t("memoryUser"),
+        load: async () => {
+          const file = await api.userMemory();
+          return { path: file.path, hash: file.hash, content: file.content, size: file.content.length, tooBig: file.tooBig };
+        },
+        save: async (file, content) => (await api.saveUserMemory(content, file.hash)).hash,
+      },
+    ],
+    [api, t],
+  );
   // null: no editor; "new": creating; a provider: editing it.
   const [editor, setEditor] = useState<ProviderView | "new" | null>(null);
 
@@ -73,6 +98,7 @@ export function SettingsDialog({ api, workspaceApi, config, loadError, initialTa
     { id: "providers", label: t("providers"), icon: <Server size={16} /> },
     { id: "login", label: t("subscriptionLogin"), icon: <KeyRound size={16} /> },
     { id: "connectors", label: t("connectorsShort"), icon: <Blocks size={16} /> },
+    { id: "instructions", label: t("instructions"), icon: <FileText size={16} /> },
   ];
   const current = tabs.find((item) => item.id === tab)!;
 
@@ -112,6 +138,7 @@ export function SettingsDialog({ api, workspaceApi, config, loadError, initialTa
             {tab === "providers" && <Providers api={api} config={config} onChanged={onChanged} onEdit={setEditor} />}
             {tab === "login" && <SubscriptionLogin api={api} onDone={() => void onChanged()} />}
             {tab === "connectors" && <MCPServers api={workspaceApi} />}
+            {tab === "instructions" && <MemoryEditor title={t("userInstructions")} sources={userMemory} registerLeaveGuard={registerLeaveGuard} framed={false} />}
           </div>
         </section>
       </div>

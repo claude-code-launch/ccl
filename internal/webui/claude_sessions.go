@@ -44,13 +44,9 @@ const claudeListScanLines = 400
 // non-alphanumeric character replaced, and the process may report either the
 // path as given or with links resolved.
 func claudeProjectDirs(ws Workspace) []string {
-	root := os.Getenv("CLAUDE_CONFIG_DIR")
+	root := claudeConfigDir()
 	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		root = filepath.Join(home, ".claude")
+		return nil
 	}
 	seen := map[string]bool{}
 	var dirs []string

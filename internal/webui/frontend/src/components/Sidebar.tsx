@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, FolderOpen, FolderPlus, Folders, History, LoaderCircle, Moon, PanelLeft, Pencil, Plus, Search, Settings, Sun, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, FolderOpen, FolderPlus, Folders, GitBranch, History, LoaderCircle, Moon, PanelLeft, Pencil, Pin, PinOff, Plus, Search, Settings, Sun, Trash2, X } from "lucide-react";
 import type { ClaudeSession, Health, Session, Workspace } from "../types";
-import { relativeTime } from "../format";
+import { basename, groupSessions, relativeTime } from "../format";
 import { useI18n } from "../i18n";
 
 interface Props {
+  // The active project's conversations; a search looks through allSessions.
   sessions: Session[];
+  allSessions: Session[];
   workspaces: Workspace[];
   workspace: Workspace | null;
   onWorkspace: (id: string) => void;
@@ -27,6 +29,7 @@ interface Props {
   onCreate: () => void;
   onRename: (session: Session) => void;
   onDelete: (session: Session) => void;
+  onPatch: (session: Session, change: { pinned?: boolean; archived?: boolean }) => void;
   onSettings: () => void;
   onToggleTheme: () => void;
   onCollapse: () => void;
@@ -45,8 +48,26 @@ export function Sidebar(props: Props) {
   const [query, setQuery] = useState("");
 
   const needle = query.trim().toLowerCase();
-  const matching = sessions.filter(
-    (session) => !needle || [session.title, session.provider, session.model].some((value) => (value || "").toLowerCase().includes(needle)),
+  // A search covers every project, archived conversations included.
+  const matching = needle
+    ? props.allSessions.filter((session) => [session.title, session.provider, session.model, session.worktree?.branch].some((value) => (value || "").toLowerCase().includes(needle)))
+    : [];
+  const live = sessions.filter((session) => !session.archived);
+  const archived = sessions.filter((session) => session.archived);
+  const groups = groupSessions(live);
+  const projectOf = (session: Session) =>
+    session.workspace === props.workspace?.path ? "" : props.workspaces.find((item) => item.path === session.workspace)?.name || basename(session.workspace);
+  const row = (session: Session) => (
+    <SessionRow
+      key={session.id}
+      session={session}
+      project={projectOf(session)}
+      active={session.id === currentId}
+      onSelect={() => props.onSelect(session.id)}
+      onRename={() => props.onRename(session)}
+      onDelete={() => props.onDelete(session)}
+      onPatch={(change) => props.onPatch(session, change)}
+    />
   );
 
   return (
@@ -100,17 +121,23 @@ export function Sidebar(props: Props) {
         </button>
       </div>
       <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-3">
-        {!matching.length && <li className="px-2.5 py-2 text-[13px] text-ink-3">{needle ? t("noMatches") : t("noSessions")}</li>}
-        {matching.map((session) => (
-          <SessionRow
-            key={session.id}
-            session={session}
-            active={session.id === currentId}
-            onSelect={() => props.onSelect(session.id)}
-            onRename={() => props.onRename(session)}
-            onDelete={() => props.onDelete(session)}
-          />
-        ))}
+        {needle ? (
+          <>
+            {!matching.length && <li className="px-2.5 py-2 text-[13px] text-ink-3">{t("noMatches")}</li>}
+            {matching.map(row)}
+          </>
+        ) : (
+          <>
+            {!live.length && <li className="px-2.5 py-2 text-[13px] text-ink-3">{t("noSessions")}</li>}
+            {groups.map(([label, list], index) => (
+              <li key={label}>
+                <p className={"px-2.5 pb-0.5 text-[11.5px] text-ink-3 " + (index ? "pt-3" : "")}>{t(label)}</p>
+                <ul className="space-y-0.5">{list.map(row)}</ul>
+              </li>
+            ))}
+            {archived.length > 0 && <ArchivedSessions count={archived.length}>{archived.map(row)}</ArchivedSessions>}
+          </>
+        )}
         <NativeSessions sessions={props.claudeSessions} needle={needle} onLoad={props.onLoadClaudeSessions} onImport={props.onImport} />
       </ul>
 
@@ -271,6 +298,21 @@ function WorkspaceSwitcher({ workspaces, current, onChoose, onOpen, onOpenFolder
   );
 }
 
+function ArchivedSessions({ count, children }: { count: number; children: ReactNode }) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="pt-3">
+      <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-1 px-2 pb-1 text-[13px] text-ink-3 hover:text-ink-2">
+        <ChevronRight size={13} className={"transition " + (open ? "rotate-90" : "")} />
+        {t("archived")}
+        <span className="ml-auto text-xs">{count}</span>
+      </button>
+      {open && <ul className="space-y-0.5">{children}</ul>}
+    </li>
+  );
+}
+
 // Claude Code's own sessions for this workspace, not yet opened here.
 function NativeSessions({ sessions, needle, onLoad, onImport }: {
   sessions: ClaudeSession[] | null;
@@ -337,12 +379,15 @@ function NavRow({ icon, active, onClick, children }: { icon: ReactNode; active?:
   );
 }
 
-function SessionRow({ session, active, onSelect, onRename, onDelete }: {
+function SessionRow({ session, project, active, onSelect, onRename, onDelete, onPatch }: {
   session: Session;
+  // The project's name when it is not the active one (search results).
+  project: string;
   active: boolean;
   onSelect: () => void;
   onRename: () => void;
   onDelete: () => void;
+  onPatch: (change: { pinned?: boolean; archived?: boolean }) => void;
 }) {
   const { t } = useI18n();
   const [menu, setMenu] = useState(false);
@@ -368,6 +413,8 @@ function SessionRow({ session, active, onSelect, onRename, onDelete }: {
         }
       >
         <span className="min-w-0 flex-1 truncate">{session.title || t("untitled")}</span>
+        {project && <span className="max-w-[40%] shrink-0 truncate text-[11.5px] text-ink-3">{project}</span>}
+        {session.worktree && <GitBranch size={13} className="shrink-0 text-ink-3" aria-label={session.worktree.branch} />}
         {session.running && <LoaderCircle size={14} className="shrink-0 animate-spin text-clay" aria-label={t("running")} />}
         <button
           onClick={(event) => {
@@ -383,6 +430,12 @@ function SessionRow({ session, active, onSelect, onRename, onDelete }: {
       </div>
       {menu && (
         <div className="absolute right-0 top-full z-30 mt-1 min-w-[150px] rounded-[10px] border border-line bg-surface p-1 shadow-lg">
+          <MenuButton icon={session.pinned ? <PinOff size={14} /> : <Pin size={14} />} onClick={() => { setMenu(false); onPatch({ pinned: !session.pinned }); }}>
+            {session.pinned ? t("unpin") : t("pin")}
+          </MenuButton>
+          <MenuButton icon={session.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />} onClick={() => { setMenu(false); onPatch({ archived: !session.archived }); }}>
+            {session.archived ? t("unarchive") : t("archive")}
+          </MenuButton>
           <MenuButton icon={<Pencil size={14} />} onClick={() => { setMenu(false); onRename(); }}>{t("rename")}</MenuButton>
           <MenuButton icon={<Trash2 size={14} />} danger onClick={() => { setMenu(false); onDelete(); }}>{t("delete")}</MenuButton>
         </div>

@@ -67,6 +67,10 @@ func TestHelperProcess(t *testing.T) {
 		helperAskPermission()
 		os.Exit(0)
 	}
+	if os.Getenv("CCL_WEBUI_HELPER_LINGER") == "1" {
+		// Claude Code takes a moment to exit after its result.
+		time.Sleep(time.Second)
+	}
 	if wait := os.Getenv("CCL_WEBUI_HELPER_SLEEP"); wait != "" {
 		time.Sleep(30 * time.Second)
 	}

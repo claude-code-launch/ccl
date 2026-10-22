@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -329,8 +331,13 @@ func TestMessageWhileRunningConflicts(t *testing.T) {
 	if running := sessionRunning(t, httpServer.URL, meta.ID); !running {
 		t.Fatal("GET session reports running=false during a turn")
 	}
-	if status, body := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"title":"x"}`); status != http.StatusConflict {
-		t.Fatalf("PATCH while running = %d: %s", status, body)
+	// What the next turn launches with cannot change under a running one;
+	// its title and where it is listed can.
+	if status, body := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"model":"x"}`); status != http.StatusConflict {
+		t.Fatalf("PATCH model while running = %d: %s", status, body)
+	}
+	if status, body := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"title":"x","pinned":true}`); status != http.StatusOK {
+		t.Fatalf("PATCH title while running = %d: %s", status, body)
 	}
 	if status, body := doJSON(t, "DELETE", httpServer.URL+"/api/sessions/"+meta.ID, "secret", ""); status != http.StatusConflict {
 		t.Fatalf("DELETE while running = %d: %s", status, body)
@@ -495,4 +502,41 @@ func TestCloseCancelsTurnsAndRefusesNewOnes(t *testing.T) {
 	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"two"}`); status != http.StatusServiceUnavailable {
 		t.Fatalf("message after Close = %d: %s", status, body)
 	}
+}
+
+// TestMessageRightAfterResultWaitsForTheExit covers a reply sent as soon as the
+// result arrives, while the process is still exiting: it must start, not 409.
+func TestMessageRightAfterResultWaitsForTheExit(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch := func(ctx context.Context, spec LaunchSpec) (*exec.Cmd, func(), error) {
+		cmd := exec.Command(executable, "-test.run=TestHelperProcess")
+		cmd.Env = append(os.Environ(), "CCL_WEBUI_HELPER=1", "CCL_WEBUI_HELPER_LINGER=1",
+			`CCL_WEBUI_HELPER_OUTPUT={"type":"result","subtype":"success","is_error":false}`)
+		return cmd, func() {}, nil
+	}
+	base := testServer(t, Config{Token: "secret", Launch: launch}).URL
+	_, body := doJSON(t, "POST", base+"/api/sessions", "secret", `{}`)
+	var session SessionView
+	_ = json.Unmarshal(body, &session)
+	if status, body := doJSON(t, "POST", base+"/api/sessions/"+session.ID+"/messages", "secret", `{"text":"one"}`); status >= 300 {
+		t.Fatalf("first = %d %s", status, body)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, body = doJSON(t, "GET", base+"/api/sessions/"+session.ID+"/events?since=0", "secret", "")
+		if strings.Contains(string(body), `"type":"result"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no result")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if status, body := doJSON(t, "POST", base+"/api/sessions/"+session.ID+"/messages", "secret", `{"text":"two"}`); status >= 300 {
+		t.Fatalf("second, right after the result = %d %s", status, body)
+	}
+	waitIdle(t, base, session.ID)
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { AlarmClock, ArrowUp, AtSign, Blocks, ChevronDown, Clock, Cloud, FileText, FolderGit2, Gauge, LoaderCircle, Mic, MicOff, Paperclip, Plus, ShieldCheck, Square, SquareSlash, X } from "lucide-react";
+import { AlarmClock, ArrowUp, AtSign, Blocks, ChevronDown, Clock, Cloud, FileText, FolderGit2, Gauge, GitBranch, LoaderCircle, Mic, MicOff, Paperclip, Plus, ShieldCheck, Square, SquareSlash, X } from "lucide-react";
 import type { Attachment, Capabilities, ProviderView, Schedule, Session, Workspace } from "../types";
 import { EFFORT_LEVELS, PERMISSION_MODES } from "../types";
 import { basename, fileSize } from "../format";
@@ -24,6 +24,8 @@ interface Props {
   workspaceId: string;
   onWorkspace: (id: string) => void;
   onOpenFolder?: () => void;
+  // A new conversation in a git repository may run on a branch of its own.
+  worktree?: { on: boolean; onToggle: () => void };
   session: Session | null;
   providers: ProviderView[];
   capabilities: Capabilities;
@@ -581,7 +583,7 @@ function PendingChip({ item, onRemove }: { item: Pending; onRemove: () => void }
 // OPEN_FOLDER is the folder menu's "open another folder" entry.
 const OPEN_FOLDER = "\u0000open";
 
-function Route({ session, providers, running, workspace, workspaces, workspaceId, onWorkspace, onOpenFolder, capabilities, onRoute }: Props) {
+function Route({ session, providers, running, workspace, workspaces, workspaceId, onWorkspace, onOpenFolder, worktree, capabilities, onRoute }: Props) {
   const { t } = useI18n();
   const provider = providers.find((item) => session && item.name === session.provider);
   const choices = provider?.modelChoices || [];
@@ -597,7 +599,12 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
           <option key={item.name} value={item.name}>{item.name}</option>
         ))}
       </Chip>
-      {session ? (
+      {session?.worktree ? (
+        <span title={`${workspace} · ${session.worktree.branch}`} className="flex max-w-[10rem] shrink-0 items-center gap-1.5 px-2 py-1 max-sm:hidden">
+          <GitBranch size={14} className="shrink-0 text-ink-3" />
+          <span className="truncate">{session.worktree.branch}</span>
+        </span>
+      ) : session ? (
         <span title={workspace} className="flex max-w-[10rem] shrink-0 items-center gap-1.5 px-2 py-1 max-sm:hidden">
           <FolderGit2 size={14} className="shrink-0 text-ink-3" />
           <span className="truncate">{basename(workspace) || "."}</span>
@@ -617,6 +624,21 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
           ))}
           {onOpenFolder && <option value={OPEN_FOLDER}>{t("openFolder")}</option>}
         </Chip>
+      )}
+      {!session && worktree && (
+        <button
+          type="button"
+          aria-pressed={worktree.on}
+          onClick={worktree.onToggle}
+          title={t("worktreeHint")}
+          className={
+            "flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 max-sm:px-1.5 " +
+            (worktree.on ? "bg-clay/10 text-clay" : "hover:bg-hover hover:text-ink")
+          }
+        >
+          <GitBranch size={14} className={worktree.on ? "" : "text-ink-3"} />
+          <span className="max-sm:hidden">{t("worktreeToggle")}</span>
+        </button>
       )}
       <Chip
         compact

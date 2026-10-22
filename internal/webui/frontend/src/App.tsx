@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Folders, Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
-import { Api, Unauthorized, storeToken, storedToken } from "./api";
+import { Api, HttpError, Unauthorized, storeToken, storedToken } from "./api";
 import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
 import { buildThread, latestCapabilities, pendingPermissions } from "./thread";
 import { download, safeFileName, transcriptHTML, transcriptMarkdown } from "./export";
@@ -107,8 +107,8 @@ export function App() {
   const [configError, setConfigError] = useState("");
   const [serverCapabilities, setServerCapabilities] = useState<Capabilities>(NO_CAPABILITIES);
   // The settings dialog and the section it opens on.
-  const [settingsOpen, setSettingsOpenState] = useState<false | "general" | "providers" | "login" | "connectors">(false);
-  const setSettingsOpen = (open: boolean | "general" | "providers" | "login" | "connectors") => setSettingsOpenState(open === true ? "general" : open);
+  const [settingsOpen, setSettingsOpenState] = useState<false | "general" | "providers" | "login" | "connectors" | "instructions">(false);
+  const setSettingsOpen = (open: boolean | "general" | "providers" | "login" | "connectors" | "instructions") => setSettingsOpenState(open === true ? "general" : open);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [collapsed, setCollapsed] = useState(() => readStorage("ccl-web-sidebar") === "collapsed");
   // The side panel's tab; null hides it. Wide when a file or diff is open.
@@ -155,7 +155,14 @@ export function App() {
     workspaceList.find((workspace) => workspace.id === chosenWorkspace) ||
     workspaceList[0] ||
     null;
-  const wsApi = useMemo(() => (activeWorkspace?.id ? api.forWorkspace(activeWorkspace.id) : api), [api, activeWorkspace?.id]);
+  // A conversation on a branch of its own sends its file, git and terminal
+  // requests to its worktree.
+  const worktreeName = currentSession?.worktree?.name || "";
+  const wsApi = useMemo(() => (activeWorkspace?.id ? api.forWorkspace(activeWorkspace.id, worktreeName) : api), [api, activeWorkspace?.id, worktreeName]);
+  // Panels and terminals belong to one directory: a workspace or a worktree.
+  const scopeKey = `${activeWorkspace?.id || ""}:${worktreeName}`;
+  // The next new conversation runs in a worktree of its own.
+  const [newWorktree, setNewWorktree] = useState(false);
   const [terminals, setTerminals] = useState<Record<string, string>>({});
 
   const lang = resolveLang(config?.lang);
@@ -339,7 +346,7 @@ export function App() {
     setClaudeSessions(null);
     setRefreshKey((key) => key + 1);
     void loadGit();
-  }, [activeWorkspace?.id, phase, loadGit]);
+  }, [scopeKey, phase, loadGit]);
 
   const chooseWorkspace = (id: string) => {
     if (page === "project" && id !== activeWorkspace?.id && !canLeave()) return;
@@ -413,7 +420,8 @@ export function App() {
 
   const create = async (adopt = false): Promise<Session | null> => {
     try {
-      const session = await api.createSession(activeWorkspace?.id || "");
+      const session = await api.createSession(activeWorkspace?.id || "", newWorktree);
+      setNewWorktree(false);
       if (adopt) adopted.current = session.id;
       mergeSession(session);
       select(session.id);
@@ -584,15 +592,50 @@ export function App() {
   };
 
   const remove = async (session: Session) => {
-    if (!confirm(t("confirmDelete", { title: session.title || t("untitled") }))) return;
+    const question = t("confirmDelete", { title: session.title || t("untitled") }) + (session.worktree ? "\n" + t("deleteWorktreeNote", { branch: session.worktree.branch }) : "");
+    if (!confirm(question)) return;
     try {
       await api.deleteSession(session.id);
     } catch (error) {
-      fail(error);
-      return;
+      // Uncommitted work in its worktree: deleting it too needs a second yes.
+      if (!(error instanceof HttpError && error.status === 409 && session.worktree && confirm(t("deleteWorktreeDirty")))) {
+        fail(error);
+        return;
+      }
+      try {
+        await api.deleteSession(session.id, true);
+      } catch (again) {
+        fail(again);
+        return;
+      }
     }
     setSessions((list) => list.filter((item) => item.id !== session.id));
     if (currentId === session.id) setCurrentId(null);
+  };
+
+  // The project page acts on several conversations at once.
+  const patchMany = async (list: Session[], change: { pinned?: boolean; archived?: boolean }) => {
+    for (const session of list) await patch(session, change);
+  };
+  const deleteMany = async (list: Session[]) => {
+    if (!confirm(t("confirmDeleteMany", { n: list.length }))) return;
+    const kept: string[] = [];
+    for (const session of list) {
+      try {
+        await api.deleteSession(session.id);
+      } catch (error) {
+        // Running, or its worktree has uncommitted work: it stays.
+        if (error instanceof HttpError && error.status === 409) {
+          kept.push(session.title || t("untitled"));
+          continue;
+        }
+        fail(error);
+        break;
+      }
+      setSessions((all) => all.filter((item) => item.id !== session.id));
+      if (currentId === session.id) setCurrentId(null);
+    }
+    if (kept.length) setNotice(t("notDeleted", { list: kept.join(", ") }));
   };
 
   const toggleSidebar = () => {
@@ -656,6 +699,7 @@ export function App() {
         >
           <Sidebar
             sessions={activeWorkspace ? sessions.filter((session) => session.workspace === activeWorkspace.path) : sessions}
+            allSessions={sessions}
             recentFolders={recentFolders}
             workspaces={workspaceList}
             workspace={activeWorkspace}
@@ -673,6 +717,7 @@ export function App() {
             onCreate={startNew}
             onRename={rename}
             onDelete={remove}
+            onPatch={patch}
             onSettings={() => {
               setSettingsOpen(true);
               setMobileSidebar(false);
@@ -714,6 +759,12 @@ export function App() {
                 onBack={showProjects}
                 onNewConversation={startNew}
                 onSelect={select}
+                onPatchMany={patchMany}
+                onDeleteMany={deleteMany}
+                onConnectors={() => {
+                  setSettingsOpen("connectors");
+                  loadConfig();
+                }}
                 registerLeaveGuard={registerLeaveGuard}
                 sidebarHidden={collapsed}
                 onShowSidebar={toggleSidebar}
@@ -777,6 +828,7 @@ export function App() {
                 workspaceId={activeWorkspace?.id || ""}
                 onWorkspace={chooseWorkspace}
                 onOpenFolder={openFolder}
+                worktree={!currentId && git?.repo ? { on: newWorktree, onToggle: () => setNewWorktree(!newWorktree) } : undefined}
                 session={current}
                 providers={providers}
                 capabilities={capabilities}
@@ -814,6 +866,9 @@ export function App() {
                       workspace={workspace}
                       capabilities={capabilities}
                       git={git}
+                      api={api}
+                      refreshKey={refreshKey}
+                      running={conversation.running}
                       onOpenChange={(path) => {
                         setGitFocus(path);
                         setPanel("git");
@@ -822,17 +877,17 @@ export function App() {
                   )}
                   {panel === "files" && (
                     <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
-                      <FilesPanel key={activeWorkspace?.id} api={wsApi} refreshKey={refreshKey} onMention={(path) => mention.current(path)} onWide={setPanelWide} onError={fail} onSaved={loadGit} />
+                      <FilesPanel key={scopeKey} api={wsApi} refreshKey={refreshKey} onMention={(path) => mention.current(path)} onWide={setPanelWide} onError={fail} onSaved={loadGit} />
                     </div>
                   )}
                   {panel === "terminal" && health?.shell && (
                     <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
                       <Suspense fallback={null}>
                         <TerminalPanel
-                          key={activeWorkspace?.id}
+                          key={scopeKey}
                           api={wsApi}
-                          id={terminals[activeWorkspace?.id || ""] || null}
-                          onId={(id) => setTerminals((all) => ({ ...all, [activeWorkspace?.id || ""]: id || "" }))}
+                          id={terminals[scopeKey] || null}
+                          onId={(id) => setTerminals((all) => ({ ...all, [scopeKey]: id || "" }))}
                           onError={fail}
                         />
                       </Suspense>
@@ -840,7 +895,7 @@ export function App() {
                   )}
                   {panel === "git" && (
                     <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
-                      <GitPanel key={activeWorkspace?.id} api={wsApi} status={git} onStatus={setGit} onRefresh={loadGit} focus={gitFocus} onWide={setPanelWide} onError={fail} />
+                      <GitPanel key={scopeKey} api={wsApi} status={git} onStatus={setGit} onRefresh={loadGit} focus={gitFocus} onWide={setPanelWide} onError={fail} />
                     </div>
                   )}
                 </div>

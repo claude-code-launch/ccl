@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { ArrowLeft, FileText, FolderGit2, FolderOpen, FolderPlus, History, LoaderCircle, MessageSquare, PanelLeft, Plus, RotateCcw, Search, X } from "lucide-react";
-import { HttpError } from "../api";
+import { Archive, ArchiveRestore, ArrowLeft, Blocks, FolderGit2, GitBranch, FolderOpen, FolderPlus, History, LoaderCircle, MessageSquare, PanelLeft, Pin, Plus, Search, Trash2, X } from "lucide-react";
 import type { Api } from "../api";
 import type { Session, Workspace } from "../types";
-import { fileSize, relativeTime } from "../format";
+import { relativeTime } from "../format";
 import { useI18n } from "../i18n";
 import { IconButton } from "./Sidebar";
+import { MemoryEditor, projectMemorySources } from "./MemoryEditor";
+import { PermissionRules } from "./PermissionRules";
 
 interface Common {
   sidebarHidden: boolean;
@@ -174,8 +175,8 @@ export function ProjectsList(props: Common & {
   );
 }
 
-// ProjectDetail is one project: its conversations and the CLAUDE.md files
-// Claude Code reads in it.
+// ProjectDetail is one project: its conversations, the CLAUDE.md files and
+// permission rules Claude Code reads in it, and a way to its MCP servers.
 export function ProjectDetail(props: Common & {
   api: Api;
   workspace: Workspace;
@@ -183,9 +184,13 @@ export function ProjectDetail(props: Common & {
   onBack: () => void;
   onNewConversation: () => void;
   onSelect: (id: string) => void;
+  onPatchMany: (sessions: Session[], change: { archived?: boolean; pinned?: boolean }) => Promise<void>;
+  onDeleteMany: (sessions: Session[]) => Promise<void>;
+  onConnectors: () => void;
   registerLeaveGuard: (guard: (() => boolean) | null) => void;
 }) {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
+  const sources = useMemo(() => projectMemorySources(props.api, t), [props.api, t]);
   const sessions = props.sessions
     .filter((session) => session.workspace === props.workspace.path)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -205,6 +210,13 @@ export function ProjectDetail(props: Common & {
             </div>
             <button
               type="button"
+              onClick={props.onConnectors}
+              className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-line px-3 text-[14px] text-ink-2 hover:bg-hover hover:text-ink"
+            >
+              <Blocks size={15} /> {t("connectorsShort")}
+            </button>
+            <button
+              type="button"
               onClick={props.onNewConversation}
               className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-clay px-3 text-[14px] font-medium text-white hover:bg-clay-hover"
             >
@@ -213,26 +225,11 @@ export function ProjectDetail(props: Common & {
           </div>
 
           <div className="mt-6 grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,440px)]">
-            <section className="min-w-0">
-              <h2 className="mb-2 text-[13px] font-medium text-ink-3">{t("conversationCount", { n: sessions.length })}</h2>
-              {!sessions.length && <p className="rounded-xl border border-dashed border-line px-4 py-6 text-center text-[13.5px] text-ink-3">{t("noProjectConversations")}</p>}
-              <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line empty:hidden">
-                {sessions.map((session) => (
-                  <li key={session.id}>
-                    <button type="button" onClick={() => props.onSelect(session.id)} className="flex w-full items-center gap-3 bg-surface px-4 py-3 text-left hover:bg-hover">
-                      <MessageSquare size={15} className="shrink-0 text-ink-3" />
-                      <span className="flex min-w-0 flex-1 flex-col leading-tight">
-                        <span className="truncate text-[14px] text-ink">{session.title || t("untitled")}</span>
-                        <span className="truncate text-[12px] text-ink-3">{[session.provider || "default", session.model].filter(Boolean).join(" · ")}</span>
-                      </span>
-                      {session.running && <LoaderCircle size={14} className="shrink-0 animate-spin text-clay" aria-label={t("running")} />}
-                      <span className="shrink-0 text-[12px] text-ink-3">{relativeTime(session.updatedAt, lang)}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-            <MemoryEditor key={props.workspace.id} api={props.api} registerLeaveGuard={props.registerLeaveGuard} />
+            <ProjectSessions sessions={sessions} onSelect={props.onSelect} onPatchMany={props.onPatchMany} onDeleteMany={props.onDeleteMany} />
+            <div className="flex min-w-0 flex-col gap-4 max-lg:order-first">
+              <MemoryEditor key={props.workspace.id} title={t("projectInstructions")} sources={sources} registerLeaveGuard={props.registerLeaveGuard} />
+              <PermissionRules key={props.workspace.id} api={props.api} />
+            </div>
           </div>
         </div>
       </div>
@@ -240,174 +237,97 @@ export function ProjectDetail(props: Common & {
   );
 }
 
-type MemoryKind = "shared" | "local";
-
-interface Loaded {
-  path: string;
-  // Empty for a file that does not exist yet.
-  hash: string;
-  content: string;
-  size: number;
-  tooBig?: boolean;
-}
-
-async function readOptional(api: Api, path: string): Promise<Loaded | null> {
-  try {
-    const file = await api.readFile(path);
-    return { path: file.path, hash: file.hash || "", content: file.content || "", size: file.size, tooBig: file.tooBig || file.binary };
-  } catch (error) {
-    if (error instanceof HttpError && error.status === 404) return null;
-    throw error;
-  }
-}
-
-// loadMemory reads the project's CLAUDE.md (at the root, else .claude/) or
-// its CLAUDE.local.md. A missing file is edited as a new one.
-async function loadMemory(api: Api, kind: MemoryKind): Promise<Loaded> {
-  if (kind === "local") return (await readOptional(api, "CLAUDE.local.md")) || { path: "CLAUDE.local.md", hash: "", content: "", size: 0 };
-  return (await readOptional(api, "CLAUDE.md")) || (await readOptional(api, ".claude/CLAUDE.md")) || { path: "CLAUDE.md", hash: "", content: "", size: 0 };
-}
-
-function MemoryEditor({ api, registerLeaveGuard }: { api: Api; registerLeaveGuard: (guard: (() => boolean) | null) => void }) {
-  const { t } = useI18n();
-  const [kind, setKind] = useState<MemoryKind>("shared");
-  const [file, setFile] = useState<Loaded | null>(null);
-  const [draft, setDraft] = useState("");
-  const [error, setError] = useState("");
-  const [conflict, setConflict] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [status, setStatus] = useState("");
-  const dirty = !!file && draft !== file.content;
-
-  const load = async (which: MemoryKind) => {
-    setFile(null);
-    setError("");
-    setConflict(false);
-    setStatus("");
+// ProjectSessions lists a project's conversations, archived ones included,
+// and acts on several at once.
+function ProjectSessions({ sessions, onSelect, onPatchMany, onDeleteMany }: {
+  sessions: Session[];
+  onSelect: (id: string) => void;
+  onPatchMany: (sessions: Session[], change: { archived?: boolean }) => Promise<void>;
+  onDeleteMany: (sessions: Session[]) => Promise<void>;
+}) {
+  const { t, lang } = useI18n();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const chosen = sessions.filter((session) => selected.has(session.id));
+  const toggle = (id: string) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
     try {
-      const loaded = await loadMemory(api, which);
-      setFile(loaded);
-      setDraft(loaded.content);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-  useEffect(() => {
-    void load(kind);
-    // The editor remounts for another project, so only the file changes here.
-  }, [kind]);
-
-  // Leaving the page (or the browser tab) with unsaved edits asks first.
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
-  useEffect(() => {
-    registerLeaveGuard(() => !dirtyRef.current || confirm(t("discardChanges")));
-    const onUnload = (event: BeforeUnloadEvent) => {
-      if (dirtyRef.current) event.preventDefault();
-    };
-    window.addEventListener("beforeunload", onUnload);
-    return () => {
-      registerLeaveGuard(null);
-      window.removeEventListener("beforeunload", onUnload);
-    };
-  }, [registerLeaveGuard, t]);
-
-  const save = async () => {
-    if (!file || !dirty || saving) return;
-    setSaving(true);
-    setError("");
-    try {
-      const result = await api.writeFile(file.path, draft, file.hash);
-      setFile({ ...file, hash: result.hash, content: draft });
-      setStatus(t("memoryApplies"));
-    } catch (err) {
-      if (err instanceof HttpError && err.status === 409) setConflict(true);
-      else setError(err instanceof Error ? err.message : String(err));
+      await action();
+      setSelected(new Set());
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
-
-  const choose = (next: MemoryKind) => {
-    if (next === kind || (dirty && !confirm(t("discardChanges")))) return;
-    setKind(next);
-  };
-
+  const allArchived = chosen.length > 0 && chosen.every((session) => session.archived);
   return (
-    <section className="flex min-w-0 flex-col rounded-xl border border-line bg-surface max-lg:order-first lg:sticky lg:top-2 lg:self-start">
-      <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
-        <FileText size={15} className="shrink-0 text-ink-3" />
-        <h2 className="mr-auto text-[14px] font-medium text-ink">{t("projectInstructions")}</h2>
-        <div className="flex rounded-lg bg-hover p-0.5 text-[12.5px]">
-          {(["shared", "local"] as const).map((which) => (
-            <button
-              key={which}
-              type="button"
-              onClick={() => choose(which)}
-              className={"rounded-md px-2 py-0.5 font-mono " + (kind === which ? "bg-surface text-ink shadow-sm" : "text-ink-3 hover:text-ink")}
-            >
-              {which === "shared" ? "CLAUDE.md" : "CLAUDE.local.md"}
+    <section className="min-w-0">
+      <div className="mb-2 flex min-h-8 flex-wrap items-center gap-2">
+        {chosen.length ? (
+          <>
+            <span className="mr-auto text-[13px] text-ink-2">{t("selectedCount", { n: chosen.length })}</span>
+            <button type="button" disabled={busy} onClick={() => setSelected(new Set())} className="h-7 rounded-md px-2 text-[12.5px] text-ink-3 hover:bg-hover hover:text-ink">
+              {t("cancel")}
             </button>
-          ))}
-        </div>
-      </div>
-      <div className="px-4 pt-3 text-[12.5px] leading-relaxed text-ink-3">
-        {kind === "shared" ? t("memoryShared") : t("memoryLocal")}
-        {file && !file.hash && <span className="block pt-1">{t("memoryMissing", { file: file.path })}</span>}
-        {file && file.hash && file.path !== "CLAUDE.md" && file.path !== "CLAUDE.local.md" && <span className="block pt-1 font-mono">{file.path}</span>}
-      </div>
-      <div className="min-w-0 px-4 py-3">
-        {!file && !error && (
-          <div className="grid h-40 place-items-center text-ink-3">
-            <LoaderCircle size={16} className="animate-spin" />
-          </div>
-        )}
-        {file?.tooBig && <p className="py-6 text-center text-[13px] text-ink-3">{t("fileTooBig", { size: fileSize(file.size) })}</p>}
-        {file && !file.tooBig && (
-          <textarea
-            value={draft}
-            onChange={(event) => {
-              setDraft(event.target.value);
-              setStatus("");
-            }}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
-                event.preventDefault();
-                void save();
-              }
-            }}
-            spellCheck={false}
-            placeholder={t("memoryPlaceholder")}
-            className="block h-[min(52vh,520px)] min-h-[220px] w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2.5 font-mono text-[12.5px] leading-relaxed text-ink outline-none placeholder:text-ink-3 focus:border-line-strong"
-          />
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void run(() => onPatchMany(chosen, { archived: !allArchived }))}
+              className="flex h-7 items-center gap-1.5 rounded-md border border-line px-2 text-[12.5px] text-ink-2 hover:bg-hover hover:text-ink disabled:opacity-40"
+            >
+              {allArchived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+              {allArchived ? t("unarchive") : t("archive")}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void run(() => onDeleteMany(chosen))}
+              className="flex h-7 items-center gap-1.5 rounded-md border border-line px-2 text-[12.5px] text-red-500 hover:bg-red-500/10 disabled:opacity-40"
+            >
+              {busy ? <LoaderCircle size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              {t("delete")}
+            </button>
+          </>
+        ) : (
+          <h2 className="text-[13px] font-medium text-ink-3">{t("conversationCount", { n: sessions.length })}</h2>
         )}
       </div>
-      {error && <p className="mx-4 mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-[12.5px] text-red-500">{error}</p>}
-      {conflict && (
-        <div className="mx-4 mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-[12.5px] text-ink-2">
-          <span className="mr-auto">{t("memoryConflict")}</span>
-          <button type="button" onClick={() => void load(kind)} className="flex items-center gap-1 rounded-md px-2 py-0.5 text-ink hover:bg-hover">
-            <RotateCcw size={13} /> {t("reload")}
-          </button>
-        </div>
-      )}
-      <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
-        <span className="mr-auto truncate text-[12.5px] text-ink-3">{dirty ? t("unsaved") : status}</span>
-        {dirty && (
-          <button type="button" onClick={() => file && setDraft(file.content)} className="h-8 rounded-lg px-3 text-[13px] text-ink-2 hover:bg-hover hover:text-ink">
-            {t("cancel")}
-          </button>
-        )}
-        <button
-          type="button"
-          disabled={!dirty || saving || conflict}
-          onClick={() => void save()}
-          className="flex h-8 items-center gap-1.5 rounded-lg bg-clay px-3 text-[13px] font-medium text-white hover:bg-clay-hover disabled:opacity-40"
-        >
-          {saving && <LoaderCircle size={13} className="animate-spin" />}
-          {t("save")}
-        </button>
-      </div>
+      {!sessions.length && <p className="rounded-xl border border-dashed border-line px-4 py-6 text-center text-[13.5px] text-ink-3">{t("noProjectConversations")}</p>}
+      <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line empty:hidden">
+        {sessions.map((session) => (
+          <li key={session.id} className={"group flex items-center bg-surface " + (selected.has(session.id) ? "bg-hover" : "")}>
+            <label className="flex shrink-0 cursor-pointer items-center self-stretch pl-3.5 pr-1">
+              <input
+                type="checkbox"
+                checked={selected.has(session.id)}
+                onChange={() => toggle(session.id)}
+                aria-label={session.title || t("untitled")}
+                className={"size-3.5 accent-[var(--clay)] " + (selected.size ? "" : "md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100")}
+              />
+            </label>
+            <button type="button" onClick={() => onSelect(session.id)} className="flex min-w-0 flex-1 items-center gap-3 px-2.5 py-3 text-left hover:bg-hover">
+              {session.pinned ? <Pin size={15} className="shrink-0 text-ink-3" /> : <MessageSquare size={15} className="shrink-0 text-ink-3" />}
+              <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                <span className={"truncate text-[14px] " + (session.archived ? "text-ink-3" : "text-ink")}>{session.title || t("untitled")}</span>
+                <span className="flex min-w-0 items-center gap-1 text-[12px] text-ink-3">
+                  {session.worktree && <GitBranch size={11} className="shrink-0" />}
+                  <span className="truncate">
+                    {[session.archived ? t("archived") : "", session.worktree?.branch, session.provider || "default", session.model].filter(Boolean).join(" · ")}
+                  </span>
+                </span>
+              </span>
+              {session.running && <LoaderCircle size={14} className="shrink-0 animate-spin text-clay" aria-label={t("running")} />}
+              <span className="shrink-0 text-[12px] text-ink-3">{relativeTime(session.updatedAt, lang)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

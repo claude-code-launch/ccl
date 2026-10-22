@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import { ChevronDown, Cloud, Cpu, FolderGit2, Gauge, GitBranch } from "lucide-react";
 import type { Capabilities, GitStatus, ProviderView, Session } from "../types";
 import { DiffStat } from "./ToolViews";
+import { WorktreeCard } from "./WorktreeCard";
+import type { Api } from "../api";
 import { basename, money } from "../format";
 import { useI18n } from "../i18n";
 
@@ -13,12 +15,15 @@ interface Props {
   capabilities: Capabilities;
   git: GitStatus | null;
   onOpenChange?: (path: string) => void;
+  api: Api;
+  refreshKey: number;
+  running: boolean;
 }
 
 // The side panel mirrors claude.ai/code's environment / context / changes
 // cards with what a ccl session has: where it runs, what it spent, and the
 // connectors Claude Code loaded.
-export function RightPanel({ session, providers, workspace, capabilities, git, onOpenChange }: Props) {
+export function RightPanel({ session, providers, workspace, capabilities, git, onOpenChange, api, refreshKey, running }: Props) {
   const { t } = useI18n();
   const provider = providers.find((item) => session && item.name === session.provider);
   const model = session?.model ? provider?.modelChoices.find((choice) => choice.value === session.model)?.label || session.model : t("auto");
@@ -32,6 +37,7 @@ export function RightPanel({ session, providers, workspace, capabilities, git, o
         {session?.effort && <Row icon={<Gauge size={15} />} label={session.effort} />}
         {git?.repo && git.branch && <Row icon={<GitBranch size={15} />} label={git.branch + (git.ahead ? ` ↑${git.ahead}` : "") + (git.behind ? ` ↓${git.behind}` : "")} />}
       </Card>
+      {session?.worktree && <WorktreeCard key={session.id} api={api} sessionId={session.id} refreshKey={refreshKey} running={running} />}
       {git?.repo && (
         <Card title={t("changes")}>
           {!git.files.length && <p className="px-1 py-1 text-[13px] text-ink-3">{t("noChanges")}</p>}

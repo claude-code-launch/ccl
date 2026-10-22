@@ -213,6 +213,10 @@ type turn struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	done   chan struct{}
+	// ended closes once the turn's result is stored: the process is only
+	// exiting, so the next request waits for done instead of being busy.
+	ended   chan struct{}
+	endOnce sync.Once
 	// abort wakes a turn still waiting for a global slot.
 	abort chan struct{}
 	// cancelRequested records a user stop so the exit is not reported as a crash.
@@ -283,6 +287,29 @@ type Timeline struct {
 func NewTimeline() *Timeline { return &Timeline{running: make(map[string]*turn)} }
 
 // Running reports whether the session has a turn in flight.
+// Settle waits up to timeout for a turn that already stored its result to
+// exit, so a message sent right after the result is not refused as busy.
+// A turn still working is not waited for.
+func (t *Timeline) Settle(id string, timeout time.Duration) {
+	t.mu.Lock()
+	entry, ok := t.running[id]
+	t.mu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case <-entry.ended:
+	default:
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-entry.done:
+	case <-timer.C:
+	}
+}
+
 func (t *Timeline) Running(id string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -332,7 +359,7 @@ func (t *Timeline) Start(r *Runner, session *Session, spec LaunchSpec) (*TurnHan
 		t.mu.Unlock()
 		return nil, ErrBusy
 	}
-	entry := &turn{done: make(chan struct{}), abort: make(chan struct{})}
+	entry := &turn{done: make(chan struct{}), ended: make(chan struct{}), abort: make(chan struct{})}
 	t.running[id] = entry
 	t.mu.Unlock()
 
@@ -575,6 +602,9 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 				}
 			}
 			_, _ = session.Append(kind, payload)
+			if kind == EventResult {
+				entry.endOnce.Do(func() { close(entry.ended) })
+			}
 		})
 	})
 

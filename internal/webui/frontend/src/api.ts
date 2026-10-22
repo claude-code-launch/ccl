@@ -17,6 +17,7 @@ import type {
   StoredEvent,
   TestResult,
   Workspace,
+  WorktreeStatus,
 } from "./types";
 
 // The token is needed only when ccl web listens beyond 127.0.0.1. It stays in
@@ -64,16 +65,20 @@ export class Api {
   constructor(
     public token: string,
     public workspace = "",
+    // A conversation's worktree inside the workspace.
+    public worktree = "",
   ) {}
 
-  // forWorkspace is this client scoped to one workspace.
-  forWorkspace(id: string): Api {
-    return new Api(this.token, id);
+  // forWorkspace is this client scoped to one workspace, or to one of its
+  // conversation worktrees.
+  forWorkspace(id: string, worktree = ""): Api {
+    return new Api(this.token, id, worktree);
   }
 
   scoped(path: string): string {
     if (!this.workspace || !WORKSPACE_SCOPED.some((prefix) => path.startsWith(prefix))) return path;
-    return path + (path.includes("?") ? "&" : "?") + "workspace=" + encodeURIComponent(this.workspace);
+    const scope = "workspace=" + encodeURIComponent(this.workspace) + (this.worktree ? "&worktree=" + encodeURIComponent(this.worktree) : "");
+    return path + (path.includes("?") ? "&" : "?") + scope;
   }
 
   async request<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
@@ -107,16 +112,20 @@ export class Api {
 
   sessions = () => this.request<Session[]>("/api/sessions");
   session = (id: string) => this.request<Session>(`/api/sessions/${id}`);
-  createSession = (workspace = "") => this.request<Session>("/api/sessions", { method: "POST", body: workspace ? { workspace } : {} });
+  createSession = (workspace = "", worktree = false) =>
+    this.request<Session>("/api/sessions", { method: "POST", body: { ...(workspace ? { workspace } : {}), ...(worktree ? { worktree } : {}) } });
+  worktreeStatus = (id: string) => this.request<WorktreeStatus>(`/api/sessions/${id}/worktree`);
+  worktreeAction = (id: string, action: "merge" | "push") =>
+    this.request<{ output: string; status: WorktreeStatus }>(`/api/sessions/${id}/worktree/${action}`, { method: "POST", body: {} });
   workspaces = () => this.request<{ workspaces: Workspace[]; canAdd: boolean }>("/api/workspaces");
   addWorkspace = (path: string) => this.request<Workspace>("/api/workspaces", { method: "POST", body: { path } });
   removeWorkspace = (id: string) => this.request<null>(`/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
   createDirectory = (path: string, name: string) => this.request<{ path: string }>("/api/directories", { method: "POST", body: { path, name } });
   directories = (path = "", hidden = false) =>
     this.request<DirListing>(`/api/directories?path=${encodeURIComponent(path)}${hidden ? "&hidden=1" : ""}`);
-  patchSession = (id: string, patch: Partial<Pick<Session, "title" | "provider" | "model" | "effort" | "permissionMode">>) =>
+  patchSession = (id: string, patch: Partial<Pick<Session, "title" | "provider" | "model" | "effort" | "permissionMode" | "pinned" | "archived">>) =>
     this.request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: patch });
-  deleteSession = (id: string) => this.request<null>(`/api/sessions/${id}`, { method: "DELETE" });
+  deleteSession = (id: string, force = false) => this.request<null>(`/api/sessions/${id}${force ? "?force=1" : ""}`, { method: "DELETE" });
   events = (id: string, since = 0) => this.request<StoredEvent[]>(`/api/sessions/${id}/events?since=${since}`);
   send = (id: string, text: string, attachments: string[] = []) =>
     this.request<{ seq: number; running: boolean }>(`/api/sessions/${id}/messages`, { method: "POST", body: { text, attachments } });
@@ -184,6 +193,9 @@ export class Api {
   mcpRemove = (name: string, scope: string) =>
     this.request<{ servers: MCPEntry[] }>(`/api/mcp/${encodeURIComponent(name)}?scope=${encodeURIComponent(scope)}`, { method: "DELETE" });
 
+  userMemory = () => this.request<{ path: string; hash: string; content: string; tooBig?: boolean }>("/api/memory");
+  saveUserMemory = (content: string, expectedHash: string) =>
+    this.request<{ path: string; hash: string }>("/api/memory", { method: "PUT", body: { content, expectedHash } });
   updateInfo = () => this.request<{ current: string; latest: string; newer: boolean }>("/api/update");
 
   schedules = (id: string) => this.request<{ schedules: Schedule[] }>(`/api/sessions/${id}/schedules`);

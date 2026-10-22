@@ -257,37 +257,71 @@ func (s *Server) writeFile(w http.ResponseWriter, r *http.Request, ws Workspace)
 		s.fileError(w, err)
 		return
 	}
+	hash, err := saveVerified(file, []byte(body.Content), body.ExpectedHash)
+	var stale *staleFileError
+	switch {
+	case errors.As(err, &stale):
+		writeStale(w, stale)
+		return
+	case err != nil:
+		s.fileError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": ws.relative(file), "hash": hash})
+}
+
+// staleFileError refuses a save over a file that is no longer the one the
+// editor loaded.
+type staleFileError struct {
+	// Hash is the file on disk now; empty when it was deleted.
+	Hash string
+}
+
+func (e *staleFileError) Error() string {
+	if e.Hash == "" {
+		return "the file was deleted since it was opened"
+	}
+	return "the file changed on disk since it was opened"
+}
+
+func writeStale(w http.ResponseWriter, stale *staleFileError) {
+	body := map[string]string{"error": stale.Error()}
+	if stale.Hash != "" {
+		body["hash"] = stale.Hash
+	}
+	writeJSON(w, http.StatusConflict, body)
+}
+
+// saveVerified writes content to file when the file on disk is still the one
+// with expectedHash (empty: it must not exist yet), keeping its permissions,
+// and returns the new content's hash.
+func saveVerified(file string, content []byte, expectedHash string) (string, error) {
 	mode := fs.FileMode(0o644)
 	current, err := os.ReadFile(file)
 	switch {
 	case err == nil:
 		sum := sha256.Sum256(current)
-		if hash := hex.EncodeToString(sum[:]); hash != body.ExpectedHash {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "the file changed on disk since it was opened", "hash": hash})
-			return
+		if hash := hex.EncodeToString(sum[:]); hash != expectedHash {
+			return "", &staleFileError{Hash: hash}
 		}
 		if info, err := os.Stat(file); err == nil {
 			mode = info.Mode().Perm()
 		}
 	case errors.Is(err, fs.ErrNotExist):
-		if body.ExpectedHash != "" {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "the file was deleted since it was opened"})
-			return
+		if expectedHash != "" {
+			return "", &staleFileError{}
 		}
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-			s.fileError(w, err)
-			return
+			return "", err
 		}
 	default:
-		s.fileError(w, err)
-		return
+		return "", err
 	}
-	if err := fsutil.WriteFileAtomic(file, []byte(body.Content), mode); err != nil {
-		s.fileError(w, err)
-		return
+	if err := fsutil.WriteFileAtomic(file, content, mode); err != nil {
+		return "", err
 	}
-	sum := sha256.Sum256([]byte(body.Content))
-	writeJSON(w, http.StatusOK, map[string]string{"path": ws.relative(file), "hash": hex.EncodeToString(sum[:])})
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // searchFiles finds files by name for @ mentions. In a git repository it asks

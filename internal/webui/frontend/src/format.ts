@@ -1,4 +1,4 @@
-import type { ResultPayload, Usage } from "./types";
+import type { ResultPayload, Session, Usage } from "./types";
 import type { Lang, Translate } from "./i18n";
 
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
@@ -84,4 +84,20 @@ export function shortPath(path: string, keep = 2): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   if (parts.length <= keep) return path;
   return "…/" + parts.slice(-keep).join("/");
+}
+
+export type GroupLabel = "pinned" | "today" | "yesterday" | "previous7Days" | "older";
+
+// groupSessions puts pinned conversations first, then the rest by the day
+// they were last used.
+export function groupSessions(sessions: Session[], now = new Date()): [GroupLabel, Session[]][] {
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86_400_000;
+  const groups: Record<GroupLabel, Session[]> = { pinned: [], today: [], yesterday: [], previous7Days: [], older: [] };
+  for (const session of sessions) {
+    const time = new Date(session.updatedAt).getTime();
+    const label: GroupLabel = session.pinned ? "pinned" : time >= midnight ? "today" : time >= midnight - day ? "yesterday" : time >= midnight - 7 * day ? "previous7Days" : "older";
+    groups[label].push(session);
+  }
+  return (Object.keys(groups) as GroupLabel[]).filter((label) => groups[label].length).map((label) => [label, groups[label]]);
 }

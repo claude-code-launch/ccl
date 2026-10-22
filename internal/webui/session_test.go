@@ -1,10 +1,13 @@
 package webui
 
 import (
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -235,5 +238,33 @@ func TestStoreCountsTurnsOfOlderConversations(t *testing.T) {
 	}
 	if persisted.Turns != 2 {
 		t.Fatalf("persisted Turns = %d, want 2", persisted.Turns)
+	}
+}
+
+func TestPinAndArchiveKeepTheOrder(t *testing.T) {
+	base := testServer(t, Config{Token: "secret"}).URL
+	var first, second SessionView
+	_, body := doJSON(t, "POST", base+"/api/sessions", "secret", `{"title":"first"}`)
+	_ = json.Unmarshal(body, &first)
+	time.Sleep(10 * time.Millisecond)
+	_, body = doJSON(t, "POST", base+"/api/sessions", "secret", `{"title":"second"}`)
+	_ = json.Unmarshal(body, &second)
+
+	status, body := doJSON(t, "PATCH", base+"/api/sessions/"+first.ID, "secret", `{"pinned":true,"archived":true}`)
+	var patched SessionView
+	if status != http.StatusOK || json.Unmarshal(body, &patched) != nil || !patched.Pinned || !patched.Archived {
+		t.Fatalf("patch = %d %s", status, body)
+	}
+	if !patched.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("pinning moved the conversation: %v -> %v", first.UpdatedAt, patched.UpdatedAt)
+	}
+	var list []SessionView
+	_, body = doJSON(t, "GET", base+"/api/sessions", "secret", "")
+	_ = json.Unmarshal(body, &list)
+	if len(list) != 2 || list[0].ID != second.ID || !list[1].Pinned {
+		t.Fatalf("list = %s", body)
+	}
+	if status, body = doJSON(t, "PATCH", base+"/api/sessions/"+first.ID, "secret", `{"archived":false}`); status != http.StatusOK || strings.Contains(string(body), `"archived"`) {
+		t.Fatalf("unarchive = %d %s", status, body)
 	}
 }

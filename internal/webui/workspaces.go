@@ -270,18 +270,20 @@ func (w *workspaceSet) fallback() (Workspace, bool) {
 }
 
 // workspaceFor is the workspace a request names with ?workspace=<id>, or the
-// first one when it names none.
+// first one when it names none; &worktree=<name> narrows it to a
+// conversation's worktree.
 func (s *Server) workspaceFor(r *http.Request) (Workspace, error) {
+	workspace, ok := s.workspaces.fallback()
 	if id := r.URL.Query().Get("workspace"); id != "" {
-		if workspace, ok := s.workspaces.byID(id); ok {
-			return workspace, nil
-		}
+		workspace, ok = s.workspaces.byID(id)
+	}
+	if !ok {
 		return Workspace{}, ErrWorkspaceNotServed
 	}
-	if workspace, ok := s.workspaces.fallback(); ok {
-		return workspace, nil
+	if name := r.URL.Query().Get("worktree"); name != "" {
+		return s.worktreeWorkspace(workspace, name)
 	}
-	return Workspace{}, ErrWorkspaceNotServed
+	return workspace, nil
 }
 
 // withWorkspace hands a handler the request's workspace, or refuses it.

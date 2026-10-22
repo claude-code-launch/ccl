@@ -17,6 +17,11 @@ export interface Session {
   permissionMode?: string;
   claudeSessionId?: string;
   workspace: string;
+  // Set when the conversation runs on a branch of its own in a git worktree.
+  worktree?: SessionWorktree;
+  // Where the page lists it: pinned on top, archived out of the recents.
+  pinned?: boolean;
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
   turns: number;
@@ -255,6 +260,27 @@ export interface Schedule {
 }
 
 export const OAUTH_PROVIDERS = ["gpt", "gemini", "grok", "qoder", "kimi", "kiro", "workbuddy", "workbuddycn", "autoclaw", "zed"] as const;
+
+export interface SessionWorktree {
+  name: string;
+  branch: string;
+  // The branch it started from; absent when the project's HEAD was detached.
+  base?: string;
+  baseCommit: string;
+}
+
+export interface WorktreeStatus extends SessionWorktree {
+  path: string;
+  exists: boolean;
+  ahead: number;
+  behind: number;
+  dirty: number;
+  files: { path: string; status: string }[];
+  // The branch the project itself has checked out; merges go there.
+  current?: string;
+  remote?: string;
+  upstream?: string;
+}
 
 export interface Workspace {
   id: string;

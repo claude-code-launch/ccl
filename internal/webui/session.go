@@ -45,10 +45,16 @@ type Meta struct {
 	PermissionMode string `json:"permissionMode,omitempty"`
 	// ClaudeSessionID is the id Claude Code reported in its first init event.
 	// A turn resumes it instead of starting a new conversation.
-	ClaudeSessionID string    `json:"claudeSessionId,omitempty"`
-	Workspace       string    `json:"workspace"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ClaudeSessionID string `json:"claudeSessionId,omitempty"`
+	Workspace       string `json:"workspace"`
+	// Worktree is set when the conversation runs on a branch of its own in
+	// a git worktree of Workspace (worktree.go).
+	Worktree *SessionWorktree `json:"worktree,omitempty"`
+	// Pinned and Archived only change where the page lists the conversation.
+	Pinned    bool      `json:"pinned,omitempty"`
+	Archived  bool      `json:"archived,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 	// Turns counts the messages sent, so a conversation list needs no history.
 	Turns int `json:"turns"`
 	// Usage is the conversation total: the sum of every turn's TurnUsage.
@@ -310,10 +316,22 @@ func (s *Session) Meta() Meta {
 
 // UpdateMeta applies fn to the metadata and persists it.
 func (s *Session) UpdateMeta(fn func(*Meta)) (Meta, error) {
+	return s.updateMeta(fn, true)
+}
+
+// RelabelMeta changes how a conversation is listed (pinned, archived)
+// without making it the most recently updated.
+func (s *Session) RelabelMeta(fn func(*Meta)) (Meta, error) {
+	return s.updateMeta(fn, false)
+}
+
+func (s *Session) updateMeta(fn func(*Meta), touch bool) (Meta, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fn(&s.meta)
-	s.meta.UpdatedAt = time.Now().UTC()
+	if touch {
+		s.meta.UpdatedAt = time.Now().UTC()
+	}
 	if err := writeMeta(s.dir, s.meta); err != nil {
 		return Meta{}, err
 	}

@@ -23,6 +23,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/google/uuid"
 )
 
 //go:embed web
@@ -263,6 +264,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/mcp", s.authenticated(s.withWorkspace(s.handleMCP)))
 	mux.HandleFunc("/api/mcp/", s.authenticated(s.withWorkspace(s.handleMCP)))
 	mux.HandleFunc("/api/update", s.authenticated(s.handleUpdate))
+	mux.HandleFunc("/api/memory", s.authenticated(s.handleMemory))
 	// The terminal authenticates itself: its stream also takes ?token=.
 	mux.HandleFunc("/api/terminal", s.handleTerminal)
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -520,6 +522,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			// Workspace is a workspace id; empty means the default one. A path
 			// is never accepted: clients only choose among served directories.
 			Workspace string `json:"workspace"`
+			// Worktree runs the conversation on a new branch in a worktree.
+			Worktree bool `json:"worktree"`
 		}
 		if err := decodeBody(r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -557,8 +561,20 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if body.Worktree {
+			meta.ID = uuid.NewString()
+			info, err := s.createWorktree(r.Context(), workspace, meta.ID[:8])
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			meta.Worktree = &info
+		}
 		session, err := s.store.Create(meta)
 		if err != nil {
+			if meta.Worktree != nil {
+				_ = s.removeWorktree(context.WithoutCancel(r.Context()), workspace, *meta.Worktree, true)
+			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -568,6 +584,10 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
+
+// settleTimeout bounds how long a request waits for a finished turn's
+// process to exit.
+const settleTimeout = 15 * time.Second
 
 // handleSession routes /api/sessions/{id}[/...].
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -582,7 +602,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		action = parts[1]
 	}
-	if len(parts) > 3 || (len(parts) == 3 && action != "uploads" && action != "schedules") {
+	if len(parts) > 3 || (len(parts) == 3 && action != "uploads" && action != "schedules" && action != "worktree") {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -604,6 +624,12 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// The browser ends a turn at its result, while the process may still be
+	// exiting; a change right after it waits for that instead of a 409.
+	if r.Method != http.MethodGet && action != "cancel" && action != "permissions" {
+		s.timeline.Settle(session.ID(), settleTimeout)
 	}
 
 	switch action {
@@ -642,6 +668,12 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			scheduleID = parts[2]
 		}
 		s.handleSchedules(w, r, session, scheduleID)
+	case "worktree":
+		sub := ""
+		if len(parts) == 3 {
+			sub = parts[2]
+		}
+		s.handleWorktree(w, r, session, sub)
 	case "permissions":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -684,10 +716,6 @@ func (s *Server) handleSessionMeta(w http.ResponseWriter, r *http.Request, sessi
 		writeJSON(w, http.StatusOK, s.view(session.Meta()))
 
 	case http.MethodPatch:
-		if s.timeline.Running(session.ID()) {
-			writeError(w, http.StatusConflict, ErrBusy.Error())
-			return
-		}
 		var body struct {
 			Title    *string `json:"title"`
 			Provider *string `json:"provider"`
@@ -695,9 +723,34 @@ func (s *Server) handleSessionMeta(w http.ResponseWriter, r *http.Request, sessi
 			Effort   *string `json:"effort"`
 			// PermissionMode is "" (the default) or one of PermissionModes.
 			PermissionMode *string `json:"permissionMode"`
+			Pinned         *bool   `json:"pinned"`
+			Archived       *bool   `json:"archived"`
 		}
 		if err := decodeBody(r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// What the next turn launches with cannot change under a running
+		// one; its title and where it is listed can.
+		route := body.Provider != nil || body.Model != nil || body.Effort != nil || body.PermissionMode != nil
+		if route && s.timeline.Running(session.ID()) {
+			writeError(w, http.StatusConflict, ErrBusy.Error())
+			return
+		}
+		if !route && body.Title == nil {
+			meta, err := session.RelabelMeta(func(meta *Meta) {
+				if body.Pinned != nil {
+					meta.Pinned = *body.Pinned
+				}
+				if body.Archived != nil {
+					meta.Archived = *body.Archived
+				}
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, s.view(meta))
 			return
 		}
 		if body.PermissionMode != nil && *body.PermissionMode != "" && !validPermissionMode(*body.PermissionMode) {
@@ -732,6 +785,12 @@ func (s *Server) handleSessionMeta(w http.ResponseWriter, r *http.Request, sessi
 			if body.PermissionMode != nil {
 				meta.PermissionMode = *body.PermissionMode
 			}
+			if body.Pinned != nil {
+				meta.Pinned = *body.Pinned
+			}
+			if body.Archived != nil {
+				meta.Archived = *body.Archived
+			}
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -743,6 +802,16 @@ func (s *Server) handleSessionMeta(w http.ResponseWriter, r *http.Request, sessi
 		if s.timeline.Running(session.ID()) {
 			writeError(w, http.StatusConflict, ErrBusy.Error())
 			return
+		}
+		// A worktree goes with its conversation; uncommitted work in it
+		// refuses the delete unless ?force=1. An unmerged branch is kept.
+		if meta := session.Meta(); meta.Worktree != nil {
+			if workspace, ok := s.workspaces.byPath(meta.Workspace); ok {
+				if err := s.removeWorktree(r.Context(), workspace, *meta.Worktree, r.URL.Query().Get("force") == "1"); err != nil {
+					writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "worktreeDirty": true})
+					return
+				}
+			}
 		}
 		if err := s.store.Delete(session.ID()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -817,7 +886,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, session *
 	}
 
 	if _, err := s.startTurn(session, text, attachments); err != nil {
-		if errors.Is(err, ErrBusy) || errors.Is(err, ErrWorkspaceNotServed) {
+		if errors.Is(err, ErrBusy) || errors.Is(err, ErrWorkspaceNotServed) || errors.Is(err, ErrWorktreeMissing) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -880,6 +949,13 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 		return nil, ErrWorkspaceNotServed
 	}
 	spec.Workspace = workspace.Path
+	if meta.Worktree != nil {
+		tree, err := s.worktreeWorkspace(workspace, meta.Worktree.Name)
+		if err != nil {
+			return nil, err
+		}
+		spec.Workspace = tree.Path
+	}
 	handle, err := s.timeline.Start(s.runner, session, spec)
 	if err != nil {
 		return nil, err
