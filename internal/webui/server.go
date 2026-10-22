@@ -13,7 +13,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -44,9 +43,13 @@ type Config struct {
 	// RequireToken makes an empty Token a startup error. ccl web sets it when
 	// the bind address is reachable from outside the machine.
 	RequireToken bool
-	// Workspace is the directory every conversation runs in. Clients cannot
-	// choose another.
-	Workspace string
+	// Workspace, Workspaces and WorkspaceRoots are the directories
+	// conversations may run in: each named directory, and each directory
+	// directly inside a root. Clients choose among them and name no other.
+	// With none, the current directory is the workspace.
+	Workspace      string
+	Workspaces     []string
+	WorkspaceRoots []string
 	// MaxConcurrency bounds simultaneous Claude Code processes. <=0 uses 3.
 	MaxConcurrency int
 	// DefaultProvider/DefaultModel/DefaultEffort seed new conversations.
@@ -69,15 +72,13 @@ type Config struct {
 
 // Server is the HTTP surface of ccl web.
 type Server struct {
-	store     *Store
-	runner    *Runner
-	timeline  *Timeline
-	token     string
-	workspace string
-	// realWorkspace is workspace with symbolic links resolved: file paths are
-	// checked against it after their own links are resolved.
-	realWorkspace string
-	version       string
+	store    *Store
+	runner   *Runner
+	timeline *Timeline
+	token    string
+	// workspaces are the directories conversations may run in.
+	workspaces *workspaceSet
+	version    string
 
 	defaults metaDefaults
 
@@ -128,20 +129,21 @@ func New(cfg Config) (*Server, error) {
 	if token == "" && cfg.RequireToken {
 		return nil, errors.New("a token is required when listening beyond 127.0.0.1: pass --token or set CCL_WEB_TOKEN")
 	}
-	workspace := strings.TrimSpace(cfg.Workspace)
-	if workspace == "" {
-		workspace = "."
+	var paths []string
+	if workspace := strings.TrimSpace(cfg.Workspace); workspace != "" {
+		paths = append(paths, workspace)
 	}
-	abs, err := filepath.Abs(workspace)
+	for _, workspace := range cfg.Workspaces {
+		if workspace = strings.TrimSpace(workspace); workspace != "" {
+			paths = append(paths, workspace)
+		}
+	}
+	if len(paths) == 0 && len(cfg.WorkspaceRoots) == 0 {
+		paths = []string{"."}
+	}
+	workspaces, err := newWorkspaceSet(paths, cfg.WorkspaceRoots)
 	if err != nil {
-		return nil, fmt.Errorf("resolve workspace: %w", err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, fmt.Errorf("workspace: %w", err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("workspace %s is not a directory", abs)
+		return nil, err
 	}
 
 	root := cfg.StoreRoot
@@ -163,17 +165,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Launch != nil {
 		runner.Prepare = cfg.Launch
 	}
-	realWorkspace, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return nil, fmt.Errorf("workspace: %w", err)
-	}
 	server := &Server{
-		realWorkspace: realWorkspace,
+		workspaces:    workspaces,
 		store:         store,
 		runner:        runner,
 		timeline:      NewTimeline(),
 		token:         token,
-		workspace:     abs,
 		version:       cfg.Version,
 		subscribers:   make(map[string][]chan struct{}),
 		selfBinary:    cfg.SelfBinary,
@@ -222,18 +219,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/config/providers/", s.authenticated(s.handleConfigProvider))
 	mux.HandleFunc("/api/sessions", s.authenticated(s.handleSessions))
 	mux.HandleFunc("/api/capabilities", s.authenticated(s.handleCapabilities))
-	mux.HandleFunc("/api/files/", s.authenticated(s.handleFiles))
-	mux.HandleFunc("/api/git/", s.authenticated(s.handleGit))
-	mux.HandleFunc("/api/claude-sessions", s.authenticated(s.handleClaudeSessions))
+	mux.HandleFunc("/api/workspaces", s.authenticated(s.handleWorkspaces))
+	mux.HandleFunc("/api/files/", s.authenticated(s.withWorkspace(s.handleFiles)))
+	mux.HandleFunc("/api/git/", s.authenticated(s.withWorkspace(s.handleGit)))
+	mux.HandleFunc("/api/claude-sessions", s.authenticated(s.withWorkspace(s.handleClaudeSessions)))
 	mux.HandleFunc("/api/oauth/login", s.authenticated(s.handleOAuth))
 	mux.HandleFunc("/api/oauth/login/", s.authenticated(s.handleOAuth))
-	mux.HandleFunc("/api/mcp", s.authenticated(s.handleMCP))
-	mux.HandleFunc("/api/mcp/", s.authenticated(s.handleMCP))
+	mux.HandleFunc("/api/mcp", s.authenticated(s.withWorkspace(s.handleMCP)))
+	mux.HandleFunc("/api/mcp/", s.authenticated(s.withWorkspace(s.handleMCP)))
 	mux.HandleFunc("/api/update", s.authenticated(s.handleUpdate))
 	// The terminal authenticates itself: its stream also takes ?token=.
 	mux.HandleFunc("/api/terminal", s.handleTerminal)
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
-	mux.HandleFunc("/api/claude-sessions/", s.authenticated(s.handleClaudeSessions))
+	mux.HandleFunc("/api/claude-sessions/", s.authenticated(s.withWorkspace(s.handleClaudeSessions)))
 	// <img> cannot send a header: the raw file route also takes ?token=.
 	mux.HandleFunc("/api/files/raw", func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) && !s.queryAuthorized(r) {
@@ -244,7 +242,7 @@ func (s *Server) Handler() http.Handler {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.serveRaw(w, r)
+		s.withWorkspace(s.serveRaw)(w, r)
 	})
 	// The session routes authenticate themselves: the stream and events
 	// endpoints also accept ?token=, which EventSource can use and a header
@@ -371,12 +369,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessions, _ := s.store.List()
+	defaultWorkspace, _ := s.workspaces.fallback()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
 		"version":       s.version,
 		"claudeVersion": claudeVersion(),
 		"sessions":      len(sessions),
-		"workspace":     s.workspace,
+		// workspace is the default one, for clients that know only one.
+		"workspace":  defaultWorkspace.Path,
+		"workspaces": s.workspaces.list(),
 		// authRequired tells the page whether to ask for a token at all.
 		"authRequired": s.token != "",
 		"shell":        s.shell,
@@ -481,9 +482,20 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
 			Effort   string `json:"effort"`
+			// Workspace is a workspace id; empty means the default one. A path
+			// is never accepted: clients only choose among served directories.
+			Workspace string `json:"workspace"`
 		}
 		if err := decodeBody(r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		workspace, ok := s.workspaces.fallback()
+		if body.Workspace != "" {
+			workspace, ok = s.workspaces.byID(body.Workspace)
+		}
+		if !ok {
+			writeError(w, http.StatusBadRequest, ErrWorkspaceNotServed.Error())
 			return
 		}
 		meta := Meta{
@@ -491,7 +503,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			Provider:  s.defaults.Provider,
 			Model:     s.defaults.Model,
 			Effort:    s.defaults.Effort,
-			Workspace: s.workspace,
+			Workspace: workspace.Path,
 		}
 		if strings.TrimSpace(body.Provider) != "" {
 			meta.Provider = strings.TrimSpace(body.Provider)
@@ -770,7 +782,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, session *
 	}
 
 	if _, err := s.startTurn(session, text, attachments); err != nil {
-		if errors.Is(err, ErrBusy) {
+		if errors.Is(err, ErrBusy) || errors.Is(err, ErrWorkspaceNotServed) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -816,9 +828,16 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 		})
 	}
 	spec.attachmentViews = attachments
-	if spec.Workspace == "" || !withinWorkspace(spec.Workspace, s.workspace) {
-		spec.Workspace = s.workspace
+	// A conversation runs where it started. One whose directory is no longer
+	// served is refused, never moved: its Claude session belongs there.
+	workspace, ok := s.workspaces.byPath(meta.Workspace)
+	if meta.Workspace == "" {
+		workspace, ok = s.workspaces.fallback()
 	}
+	if !ok {
+		return nil, ErrWorkspaceNotServed
+	}
+	spec.Workspace = workspace.Path
 	handle, err := s.timeline.Start(s.runner, session, spec)
 	if err != nil {
 		return nil, err

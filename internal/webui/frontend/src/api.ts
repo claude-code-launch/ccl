@@ -15,6 +15,7 @@ import type {
   Session,
   StoredEvent,
   TestResult,
+  Workspace,
 } from "./types";
 
 // The token is needed only when ccl web listens beyond 127.0.0.1. It stays in
@@ -44,10 +45,28 @@ export class Unauthorized extends Error {
   }
 }
 
+// Requests about a workspace's files, git, MCP servers, Claude Code sessions
+// or terminals name the workspace they mean.
+const WORKSPACE_SCOPED = ["/api/files/", "/api/git/", "/api/claude-sessions", "/api/mcp", "/api/terminal"];
+
 export class Api {
-  constructor(public token: string) {}
+  constructor(
+    public token: string,
+    public workspace = "",
+  ) {}
+
+  // forWorkspace is this client scoped to one workspace.
+  forWorkspace(id: string): Api {
+    return new Api(this.token, id);
+  }
+
+  scoped(path: string): string {
+    if (!this.workspace || !WORKSPACE_SCOPED.some((prefix) => path.startsWith(prefix))) return path;
+    return path + (path.includes("?") ? "&" : "?") + "workspace=" + encodeURIComponent(this.workspace);
+  }
 
   async request<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+    path = this.scoped(path);
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = "Bearer " + this.token;
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
@@ -77,7 +96,8 @@ export class Api {
 
   sessions = () => this.request<Session[]>("/api/sessions");
   session = (id: string) => this.request<Session>(`/api/sessions/${id}`);
-  createSession = () => this.request<Session>("/api/sessions", { method: "POST", body: {} });
+  createSession = (workspace = "") => this.request<Session>("/api/sessions", { method: "POST", body: workspace ? { workspace } : {} });
+  workspaces = () => this.request<{ workspaces: Workspace[] }>("/api/workspaces");
   patchSession = (id: string, patch: Partial<Pick<Session, "title" | "provider" | "model" | "effort" | "permissionMode">>) =>
     this.request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: patch });
   deleteSession = (id: string) => this.request<null>(`/api/sessions/${id}`, { method: "DELETE" });
@@ -109,14 +129,14 @@ export class Api {
   writeFile = (path: string, content: string, expectedHash: string) =>
     this.request<{ path: string; hash: string }>("/api/files/write", { method: "PUT", body: { path, content, expectedHash } });
   rawFileURL = (path: string) =>
-    `/api/files/raw?path=${encodeURIComponent(path)}` + (this.token ? `&token=${encodeURIComponent(this.token)}` : "");
+    this.scoped(`/api/files/raw?path=${encodeURIComponent(path)}`) + (this.token ? `&token=${encodeURIComponent(this.token)}` : "");
 
   async uploadToWorkspace(dir: string, files: File[]): Promise<string[]> {
     const form = new FormData();
     for (const file of files) form.append("file", file, file.name);
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = "Bearer " + this.token;
-    const response = await fetch(`/api/files/uploads?dir=${encodeURIComponent(dir)}`, { method: "POST", headers, body: form });
+    const response = await fetch(this.scoped(`/api/files/uploads?dir=${encodeURIComponent(dir)}`), { method: "POST", headers, body: form });
     if (response.status === 401) throw new Unauthorized();
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new Error((body && body.error) || response.statusText);

@@ -15,7 +15,7 @@ import (
 
 func testServer(t *testing.T, cfg Config) *httptest.Server {
 	t.Helper()
-	if cfg.Workspace == "" {
+	if cfg.Workspace == "" && len(cfg.Workspaces) == 0 && len(cfg.WorkspaceRoots) == 0 {
 		cfg.Workspace = t.TempDir()
 	}
 	if cfg.StoreRoot == "" {
@@ -397,7 +397,11 @@ func TestEventsSince(t *testing.T) {
 func TestWorkspaceIsServerChosen(t *testing.T) {
 	workspace := t.TempDir()
 	httpServer := testServer(t, Config{Workspace: workspace, StoreRoot: t.TempDir()})
-	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "", `{"title":"s","workspace":"/etc"}`)
+	// A client names a served workspace by id, never a path of its own.
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "", `{"title":"s","workspace":"/etc"}`); status != http.StatusBadRequest {
+		t.Fatalf("POST with a path = %d: %s", status, body)
+	}
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "", `{"title":"s"}`)
 	if status != http.StatusCreated {
 		t.Fatalf("POST = %d: %s", status, body)
 	}

@@ -166,6 +166,11 @@ func (s *Server) openTerminal(w http.ResponseWriter, r *http.Request) {
 		Rows uint16 `json:"rows"`
 	}
 	_ = decodeBody(r, &body)
+	workspace, err := s.workspaceFor(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if body.Cols == 0 || body.Rows == 0 {
 		body.Cols, body.Rows = 100, 30
 	}
@@ -188,7 +193,7 @@ func (s *Server) openTerminal(w http.ResponseWriter, r *http.Request) {
 		shell = "/bin/sh"
 	}
 	cmd := exec.Command(shell, "-l")
-	cmd.Dir = s.workspace
+	cmd.Dir = workspace.Path
 	cmd.Env = append(terminalEnv(), "TERM=xterm-256color", "COLORTERM=truecolor")
 	file, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: body.Cols, Rows: body.Rows})
 	if err != nil {

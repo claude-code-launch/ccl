@@ -110,7 +110,9 @@ export interface Health {
   version: string;
   claudeVersion: string;
   sessions: number;
+  // The default workspace; workspaces lists every one the server offers.
   workspace: string;
+  workspaces?: Workspace[];
   authRequired: boolean;
   // The web terminal is on (ccl web --shell).
   shell?: boolean;
@@ -251,3 +253,9 @@ export interface Schedule {
 }
 
 export const OAUTH_PROVIDERS = ["gpt", "gemini", "grok", "qoder", "kimi", "kiro", "workbuddy", "workbuddycn", "autoclaw", "zed"] as const;
+
+export interface Workspace {
+  id: string;
+  name: string;
+  path: string;
+}

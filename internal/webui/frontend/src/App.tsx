@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
 import { Api, Unauthorized, storeToken, storedToken } from "./api";
-import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProviderView, Schedule, Session, StoredEvent } from "./types";
+import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
 import { buildThread, latestCapabilities, pendingPermissions } from "./thread";
 import { download, safeFileName, transcriptHTML, transcriptMarkdown } from "./export";
 import { CommandPalette } from "./components/CommandPalette";
@@ -15,7 +15,7 @@ import { GitPanel } from "./components/GitPanel";
 import type { PanelTab } from "./components/SessionHeader";
 import { Thread } from "./components/Thread";
 import { Composer } from "./components/Composer";
-import { SettingsDrawer } from "./components/SettingsDrawer";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { Gate } from "./components/Gate";
 
 // The terminal (xterm.js) loads only when its panel opens.
@@ -99,7 +99,9 @@ export function App() {
   const [config, setConfig] = useState<ConfigView | null>(null);
   const [configError, setConfigError] = useState("");
   const [serverCapabilities, setServerCapabilities] = useState<Capabilities>(NO_CAPABILITIES);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // The settings dialog and the section it opens on.
+  const [settingsOpen, setSettingsOpenState] = useState<false | "general" | "providers" | "login" | "connectors">(false);
+  const setSettingsOpen = (open: boolean | "general" | "providers" | "login" | "connectors") => setSettingsOpenState(open === true ? "general" : open);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [collapsed, setCollapsed] = useState(() => readStorage("ccl-web-sidebar") === "collapsed");
   // The side panel's tab; null hides it. Wide when a file or diff is open.
@@ -117,10 +119,22 @@ export function App() {
   const [git, setGit] = useState<GitStatus | null>(null);
   const [queues, setQueues] = useState<Record<string, Queued[]>>({});
   const [schedules, setSchedules] = useState<Schedule[]>([]);
-  const [terminalId, setTerminalId] = useState<string | null>(null);
   const [update, setUpdate] = useState("");
   const [notice, setNotice] = useState("");
   const [theme, toggleTheme] = useTheme();
+
+  // Workspaces: the conversation's own, else the one chosen in the sidebar.
+  // File, git, terminal, MCP and session-import requests go to it.
+  const [workspaceList, setWorkspaceList] = useState<Workspace[]>([]);
+  const [chosenWorkspace, setChosenWorkspace] = useState(() => readStorage("ccl-web-workspace"));
+  const currentSession = sessions.find((session) => session.id === currentId) || null;
+  const activeWorkspace =
+    (currentSession && workspaceList.find((workspace) => workspace.path === currentSession.workspace)) ||
+    workspaceList.find((workspace) => workspace.id === chosenWorkspace) ||
+    workspaceList[0] ||
+    null;
+  const wsApi = useMemo(() => (activeWorkspace?.id ? api.forWorkspace(activeWorkspace.id) : api), [api, activeWorkspace?.id]);
+  const [terminals, setTerminals] = useState<Record<string, string>>({});
 
   const lang = resolveLang(config?.lang);
   const i18n = useMemo(() => ({ lang, t: translator(lang) }), [lang]);
@@ -164,20 +178,28 @@ export function App() {
 
   const loadGit = useCallback(async () => {
     try {
-      setGit(await api.gitStatus());
+      setGit(await wsApi.gitStatus());
     } catch {
       setGit(null);
     }
-  }, [api]);
+  }, [wsApi]);
 
   const loadClaudeSessions = useCallback(async () => {
     try {
-      setClaudeSessions((await api.claudeSessions()).sessions);
+      setClaudeSessions((await wsApi.claudeSessions()).sessions);
     } catch (error) {
       setClaudeSessions([]);
       fail(error);
     }
-  }, [api, fail]);
+  }, [wsApi, fail]);
+
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      setWorkspaceList((await api.workspaces()).workspaces);
+    } catch {
+      // The list from /health stays.
+    }
+  }, [api]);
 
   const loadCapabilities = useCallback(async () => {
     try {
@@ -195,6 +217,8 @@ export function App() {
         const info = await api.health();
         if (cancelled) return;
         setHealth(info);
+        const workspaces = info.workspaces?.length ? info.workspaces : [{ id: "", name: info.workspace.split(/[\\/]/).pop() || info.workspace, path: info.workspace }];
+        setWorkspaceList(workspaces);
         if (info.authRequired && !api.token) {
           setPhase("gate");
           return;
@@ -202,11 +226,14 @@ export function App() {
         const list = await api.sessions();
         if (cancelled) return;
         setSessions(list);
-        setCurrentId((current) => current || list[0]?.id || null);
+        // Open the latest conversation of the workspace chosen last time.
+        const chosen = workspaces.find((workspace) => workspace.id === readStorage("ccl-web-workspace"));
+        const first = chosen ? list.find((session) => session.workspace === chosen.path) : list[0];
+        setCurrentId((current) => current || first?.id || null);
+        // The workspace effect loads git status once the page is ready.
         setPhase("ready");
         loadConfig();
         loadCapabilities();
-        loadGit();
         api.updateInfo().then((info) => info.newer && setUpdate(info.latest)).catch(() => {});
       } catch (error) {
         if (cancelled) return;
@@ -217,7 +244,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [api, loadConfig, loadCapabilities, loadGit, signOut]);
+  }, [api, loadConfig, loadCapabilities, signOut]);
 
   // Turn boundaries change titles, counts, usage and what Claude Code offers;
   // refresh shortly after rather than once per event.
@@ -278,12 +305,34 @@ export function App() {
     () => Object.values(config?.providers || {}).sort((a, b) => a.name.localeCompare(b.name)),
     [config],
   );
-  const workspace = health?.workspace || "";
+  const workspace = activeWorkspace?.path || health?.workspace || "";
+
+  // Another workspace has other files, history and native sessions.
+  useEffect(() => {
+    if (phase !== "ready") return;
+    setClaudeSessions(null);
+    setRefreshKey((key) => key + 1);
+    void loadGit();
+  }, [activeWorkspace?.id, phase, loadGit]);
+
+  const chooseWorkspace = (id: string) => {
+    setChosenWorkspace(id);
+    writeStorage("ccl-web-workspace", id);
+    // A conversation of another workspace is not where the user is now.
+    if (currentSession && workspaceList.find((workspace) => workspace.id === id)?.path !== currentSession.workspace) setCurrentId(null);
+  };
   const route = current ? [current.provider || "default", current.model, current.effort].filter(Boolean).join(" · ") : "";
 
   const select = (id: string) => {
     setCurrentId(id);
     setMobileSidebar(false);
+    // Opening a conversation also moves the sidebar to its workspace.
+    const session = sessions.find((item) => item.id === id);
+    const owner = session && workspaceList.find((workspace) => workspace.path === session.workspace);
+    if (owner) {
+      setChosenWorkspace(owner.id);
+      writeStorage("ccl-web-workspace", owner.id);
+    }
   };
 
   // A session the composer created for its first upload keeps the composer
@@ -292,7 +341,7 @@ export function App() {
 
   const create = async (adopt = false): Promise<Session | null> => {
     try {
-      const session = await api.createSession();
+      const session = await api.createSession(activeWorkspace?.id || "");
       if (adopt) adopted.current = session.id;
       mergeSession(session);
       select(session.id);
@@ -390,7 +439,7 @@ export function App() {
 
   const importSession = async (id: string) => {
     try {
-      const session = await api.importClaudeSession(id);
+      const session = await wsApi.importClaudeSession(id);
       mergeSession(session);
       select(session.id);
       loadClaudeSessions();
@@ -531,7 +580,11 @@ export function App() {
           }
         >
           <Sidebar
-            sessions={sessions}
+            sessions={workspaceList.length > 1 && activeWorkspace ? sessions.filter((session) => session.workspace === activeWorkspace.path) : sessions}
+            workspaces={workspaceList}
+            workspace={activeWorkspace}
+            onWorkspace={chooseWorkspace}
+            onRefreshWorkspaces={loadWorkspaces}
             currentId={currentId}
             health={health}
             theme={theme}
@@ -599,7 +652,7 @@ export function App() {
                 route={route}
                 attachmentURL={(file) => (currentId ? api.uploadURL(currentId, file) : "")}
                 onPermission={respondPermission}
-                onOnboard={config && !providers.length && !currentId ? () => { setSettingsOpen(true); loadConfig(); } : undefined}
+                onOnboard={config && !providers.length && !currentId ? () => { setSettingsOpen("providers"); loadConfig(); } : undefined}
               />
               <Composer
                 key={!currentId || adopted.current === currentId ? "new" : currentId}
@@ -614,7 +667,7 @@ export function App() {
                 onStop={stop}
                 registerAddFiles={registerAddFiles}
                 registerMention={registerMention}
-                onSearchFiles={async (query) => (await api.searchFiles(query)).files}
+                onSearchFiles={async (query) => (await wsApi.searchFiles(query)).files}
                 queued={queue.map((item) => ({ key: item.key, text: item.text, files: item.attachments.length }))}
                 onRemoveQueued={(key) => currentId && setQueues((all) => ({ ...all, [currentId]: (all[currentId] || []).filter((item) => item.key !== key) }))}
                 context={contextOf(conversation.events, current)}
@@ -623,7 +676,7 @@ export function App() {
                 onSchedule={scheduleMessage}
                 onUnschedule={(id) => currentId && api.unschedule(currentId, id).then(loadSchedules).catch(fail)}
                 onManageConnectors={() => {
-                  setSettingsOpen(true);
+                  setSettingsOpen("connectors");
                   loadConfig();
                 }}
               />
@@ -650,19 +703,25 @@ export function App() {
                   )}
                   {panel === "files" && (
                     <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
-                      <FilesPanel api={api} refreshKey={refreshKey} onMention={(path) => mention.current(path)} onWide={setPanelWide} onError={fail} onSaved={loadGit} />
+                      <FilesPanel key={activeWorkspace?.id} api={wsApi} refreshKey={refreshKey} onMention={(path) => mention.current(path)} onWide={setPanelWide} onError={fail} onSaved={loadGit} />
                     </div>
                   )}
                   {panel === "terminal" && health?.shell && (
                     <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
                       <Suspense fallback={null}>
-                        <TerminalPanel api={api} id={terminalId} onId={setTerminalId} onError={fail} />
+                        <TerminalPanel
+                          key={activeWorkspace?.id}
+                          api={wsApi}
+                          id={terminals[activeWorkspace?.id || ""] || null}
+                          onId={(id) => setTerminals((all) => ({ ...all, [activeWorkspace?.id || ""]: id || "" }))}
+                          onError={fail}
+                        />
                       </Suspense>
                     </div>
                   )}
                   {panel === "git" && (
                     <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
-                      <GitPanel api={api} status={git} onStatus={setGit} onRefresh={loadGit} focus={gitFocus} onWide={setPanelWide} onError={fail} />
+                      <GitPanel key={activeWorkspace?.id} api={wsApi} status={git} onStatus={setGit} onRefresh={loadGit} focus={gitFocus} onWide={setPanelWide} onError={fail} />
                     </div>
                   )}
                 </div>
@@ -696,7 +755,7 @@ export function App() {
         )}
 
         {settingsOpen && (
-          <SettingsDrawer api={api} config={config} loadError={configError} onClose={() => setSettingsOpen(false)} onChanged={loadConfig} />
+          <SettingsDialog initialTab={settingsOpen} api={api} workspaceApi={wsApi} config={config} loadError={configError} onClose={() => setSettingsOpen(false)} onChanged={loadConfig} />
         )}
 
         {notice && (

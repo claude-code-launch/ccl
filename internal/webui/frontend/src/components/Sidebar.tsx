@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Ellipsis, History, LoaderCircle, Moon, PanelLeft, Pencil, Plus, Search, Settings, Sun, Trash2 } from "lucide-react";
-import type { ClaudeSession, Health, Session } from "../types";
+import { Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, History, LoaderCircle, Moon, PanelLeft, Pencil, Plus, Search, Settings, Sun, Trash2 } from "lucide-react";
+import type { ClaudeSession, Health, Session, Workspace } from "../types";
 import { relativeTime } from "../format";
 import { useI18n } from "../i18n";
 
 interface Props {
   sessions: Session[];
+  workspaces: Workspace[];
+  workspace: Workspace | null;
+  onWorkspace: (id: string) => void;
+  onRefreshWorkspaces: () => void;
   currentId: string | null;
   health: Health | null;
   theme: "light" | "dark";
@@ -45,6 +49,10 @@ export function Sidebar(props: Props) {
         <span className="font-display text-[20px] font-medium tracking-tight text-ink">ccl web</span>
       </div>
 
+      {props.workspaces.length > 1 && (
+        <WorkspaceSwitcher workspaces={props.workspaces} current={props.workspace} onChoose={props.onWorkspace} onOpen={props.onRefreshWorkspaces} />
+      )}
+
       <div className="px-2">
         <label className="flex h-8 items-center gap-2 rounded-lg border border-line bg-hover px-2.5 text-ink-3 focus-within:border-line-strong">
           <Search size={15} className="shrink-0" />
@@ -61,9 +69,6 @@ export function Sidebar(props: Props) {
       <nav className="mt-2 space-y-0.5 px-2">
         <NavRow icon={<span className="grid size-5 place-items-center rounded-full bg-active"><Plus size={13} /></span>} active={!currentId} onClick={props.onCreate}>
           {t("newSession")}
-        </NavRow>
-        <NavRow icon={<Settings size={17} />} onClick={props.onSettings}>
-          {t("settings")}
         </NavRow>
       </nav>
 
@@ -99,11 +104,90 @@ export function Sidebar(props: Props) {
           ccl {health?.version || "dev"}
           <span className="text-ink-3"> · claude {(health?.claudeVersion || "?").replace(/\s*\(Claude Code\)/, "")}</span>
         </span>
-        <IconButton title={props.theme === "dark" ? t("lightTheme") : t("darkTheme")} onClick={props.onToggleTheme}>
-          {props.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-        </IconButton>
+        <span className="flex shrink-0 items-center gap-0.5">
+          <IconButton title={t("settings")} onClick={props.onSettings}>
+            <Settings size={16} />
+          </IconButton>
+          <IconButton title={props.theme === "dark" ? t("lightTheme") : t("darkTheme")} onClick={props.onToggleTheme}>
+            {props.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          </IconButton>
+        </span>
       </div>
     </aside>
+  );
+}
+
+// WorkspaceSwitcher chooses among the directories the server offers, like
+// claude.ai/code's repository picker.
+function WorkspaceSwitcher({ workspaces, current, onChoose, onOpen }: {
+  workspaces: Workspace[];
+  current: Workspace | null;
+  onChoose: (id: string) => void;
+  onOpen: () => void;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const needle = filter.trim().toLowerCase();
+  const shown = workspaces.filter((workspace) => !needle || workspace.name.toLowerCase().includes(needle) || workspace.path.toLowerCase().includes(needle));
+  return (
+    <div ref={ref} className="relative px-2 pb-2">
+      <button
+        onClick={() => {
+          if (!open) onOpen();
+          setOpen(!open);
+          setFilter("");
+        }}
+        title={current?.path}
+        className="flex h-9 w-full items-center gap-2 rounded-lg border border-line px-2.5 text-left text-[14px] text-ink hover:bg-hover"
+      >
+        <FolderGit2 size={15} className="shrink-0 text-ink-3" />
+        <span className="min-w-0 flex-1 truncate">{current?.name || t("workspace")}</span>
+        <ChevronsUpDown size={14} className="shrink-0 text-ink-3" />
+      </button>
+      {open && (
+        <div className="absolute left-2 right-2 top-full z-30 mt-1 rounded-[10px] border border-line bg-surface p-1 shadow-lg">
+          {workspaces.length > 6 && (
+            <input
+              autoFocus
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder={t("searchWorkspaces")}
+              className="mb-1 w-full rounded-md border border-line bg-canvas px-2 py-1 text-[13px] text-ink outline-none placeholder:text-ink-3"
+            />
+          )}
+          <div className="max-h-72 overflow-y-auto">
+            {shown.map((workspace) => (
+              <button
+                key={workspace.id}
+                onClick={() => {
+                  onChoose(workspace.id);
+                  setOpen(false);
+                }}
+                title={workspace.path}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-active"
+              >
+                <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                  <span className="truncate text-[14px] text-ink">{workspace.name}</span>
+                  <span className="truncate text-[11px] text-ink-3">{workspace.path}</span>
+                </span>
+                {current?.id === workspace.id && <Check size={14} className="shrink-0 text-clay" />}
+              </button>
+            ))}
+            {!shown.length && <p className="px-2.5 py-2 text-[13px] text-ink-3">{t("noMatches")}</p>}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

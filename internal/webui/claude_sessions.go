@@ -43,7 +43,7 @@ const claudeListScanLines = 400
 // workspace: it names them after the working directory with every
 // non-alphanumeric character replaced, and the process may report either the
 // path as given or with links resolved.
-func (s *Server) claudeProjectDirs() []string {
+func claudeProjectDirs(ws Workspace) []string {
 	root := os.Getenv("CLAUDE_CONFIG_DIR")
 	if root == "" {
 		home, err := os.UserHomeDir()
@@ -54,7 +54,7 @@ func (s *Server) claudeProjectDirs() []string {
 	}
 	seen := map[string]bool{}
 	var dirs []string
-	for _, workspace := range []string{s.workspace, s.realWorkspace} {
+	for _, workspace := range []string{ws.Path, ws.real} {
 		dir := filepath.Join(root, "projects", nonAlphanumeric.ReplaceAllString(workspace, "-"))
 		if !seen[dir] {
 			seen[dir] = true
@@ -64,11 +64,11 @@ func (s *Server) claudeProjectDirs() []string {
 	return dirs
 }
 
-func (s *Server) claudeTranscript(id string) (string, error) {
+func claudeTranscript(ws Workspace, id string) (string, error) {
 	if !claudeSessionPattern.MatchString(id) {
 		return "", ErrNotFound
 	}
-	for _, dir := range s.claudeProjectDirs() {
+	for _, dir := range claudeProjectDirs(ws) {
 		path := filepath.Join(dir, id+".jsonl")
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 			return path, nil
@@ -77,19 +77,19 @@ func (s *Server) claudeTranscript(id string) (string, error) {
 	return "", ErrNotFound
 }
 
-func (s *Server) handleClaudeSessions(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleClaudeSessions(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/claude-sessions"), "/")
 	switch {
 	case action == "" && r.Method == http.MethodGet:
-		s.listClaudeSessions(w)
+		s.listClaudeSessions(w, ws)
 	case action == "import" && r.Method == http.MethodPost:
-		s.importClaudeSession(w, r)
+		s.importClaudeSession(w, r, ws)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
 }
 
-func (s *Server) listClaudeSessions(w http.ResponseWriter) {
+func (s *Server) listClaudeSessions(w http.ResponseWriter, ws Workspace) {
 	owners := map[string]string{}
 	if metas, err := s.store.List(); err == nil {
 		for _, meta := range metas {
@@ -100,7 +100,7 @@ func (s *Server) listClaudeSessions(w http.ResponseWriter) {
 	}
 	sessions := []ClaudeSession{}
 	seen := map[string]bool{}
-	for _, dir := range s.claudeProjectDirs() {
+	for _, dir := range claudeProjectDirs(ws) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -232,7 +232,7 @@ func promptText(message json.RawMessage) string {
 	return text
 }
 
-func (s *Server) importClaudeSession(w http.ResponseWriter, r *http.Request) {
+func (s *Server) importClaudeSession(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	var body struct {
 		ID string `json:"id"`
 	}
@@ -240,7 +240,7 @@ func (s *Server) importClaudeSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	path, err := s.claudeTranscript(body.ID)
+	path, err := claudeTranscript(ws, body.ID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Claude Code session not found for this workspace")
 		return
@@ -260,7 +260,7 @@ func (s *Server) importClaudeSession(w http.ResponseWriter, r *http.Request) {
 		Provider:        s.defaults.Provider,
 		Model:           s.defaults.Model,
 		Effort:          s.defaults.Effort,
-		Workspace:       s.workspace,
+		Workspace:       ws.Path,
 		ClaudeSessionID: body.ID,
 	})
 	if err != nil {

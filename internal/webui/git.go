@@ -64,11 +64,11 @@ type gitResult struct {
 	code   int
 }
 
-func (s *Server) git(ctx context.Context, stdin []byte, args ...string) (gitResult, error) {
+func (s *Server) git(ctx context.Context, ws Workspace, stdin []byte, args ...string) (gitResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.quotepath=off", "-c", "color.ui=false"}, args...)...)
-	cmd.Dir = s.workspace
+	cmd.Dir = ws.Path
 	// Reads must not take the index lock Claude's own git commands need.
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C")
 	if stdin != nil {
@@ -87,39 +87,39 @@ func (s *Server) git(ctx context.Context, stdin []byte, args ...string) (gitResu
 	return result, err
 }
 
-func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGit(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/git"), "/")
 	get := r.Method == http.MethodGet
 	post := r.Method == http.MethodPost
 	switch {
 	case action == "status" && get:
-		writeJSON(w, http.StatusOK, s.gitStatus(r.Context()))
+		writeJSON(w, http.StatusOK, s.gitStatus(r.Context(), ws))
 	case action == "diff" && get:
-		s.gitDiff(w, r)
+		s.gitDiff(w, r, ws)
 	case action == "stage" && post:
-		s.gitPaths(w, r, "add", "--")
+		s.gitPaths(w, r, ws, "add", "--")
 	case action == "unstage" && post:
-		s.gitPaths(w, r, "restore", "--staged", "--")
+		s.gitPaths(w, r, ws, "restore", "--staged", "--")
 	case action == "commit" && post:
-		s.gitCommit(w, r)
+		s.gitCommit(w, r, ws)
 	case action == "branches" && get:
-		s.gitBranches(w, r)
+		s.gitBranches(w, r, ws)
 	case action == "checkout" && post:
-		s.gitCheckout(w, r)
+		s.gitCheckout(w, r, ws)
 	case action == "log" && get:
-		s.gitLog(w, r)
+		s.gitLog(w, r, ws)
 	case action == "show" && get:
-		s.gitShow(w, r)
+		s.gitShow(w, r, ws)
 	case action == "worktrees" && get:
-		s.gitWorktrees(w, r)
+		s.gitWorktrees(w, r, ws)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
 }
 
-func (s *Server) gitStatus(ctx context.Context) GitStatus {
+func (s *Server) gitStatus(ctx context.Context, ws Workspace) GitStatus {
 	status := GitStatus{Files: []GitFile{}}
-	result, err := s.git(ctx, nil, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all")
+	result, err := s.git(ctx, ws, nil, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all")
 	if err != nil {
 		status.Error = "git is not available: " + err.Error()
 		return status
@@ -134,16 +134,16 @@ func (s *Server) gitStatus(ctx context.Context) GitStatus {
 	// Line counts: tracked changes against HEAD (or the index in a repository
 	// without commits), and untracked files as all-added.
 	counts := map[string][2]int{}
-	numstat, err := s.git(ctx, nil, "diff", "--numstat", "-z", "HEAD")
+	numstat, err := s.git(ctx, ws, nil, "diff", "--numstat", "-z", "HEAD")
 	if err == nil && numstat.code != 0 {
-		numstat, err = s.git(ctx, nil, "diff", "--numstat", "-z", "--cached")
+		numstat, err = s.git(ctx, ws, nil, "diff", "--numstat", "-z", "--cached")
 	}
 	if err == nil && numstat.code == 0 {
 		parseNumstat(numstat.stdout, counts)
 	}
 	for i, file := range status.Files {
 		if file.Untracked {
-			if lines, ok := countLines(s, file.Path); ok {
+			if lines, ok := countLines(ws, file.Path); ok {
 				counts[file.Path] = [2]int{lines, 0}
 			}
 		}
@@ -223,8 +223,8 @@ func parseNumstat(out []byte, counts map[string][2]int) {
 	}
 }
 
-func countLines(s *Server, rel string) (int, bool) {
-	file, err := s.resolve(rel)
+func countLines(ws Workspace, rel string) (int, bool) {
+	file, err := ws.resolve(rel)
 	if err != nil {
 		return 0, false
 	}
@@ -245,25 +245,25 @@ func countLines(s *Server, rel string) (int, bool) {
 
 // checkedPath validates a path from the page and returns it relative to the
 // workspace, as git takes it.
-func (s *Server) checkedPath(rel string) (string, error) {
-	abs, err := s.resolve(rel)
+func (ws Workspace) checkedPath(rel string) (string, error) {
+	abs, err := ws.resolve(rel)
 	if err != nil {
 		return "", err
 	}
-	if relative := s.relative(abs); relative != "" {
+	if relative := ws.relative(abs); relative != "" {
 		return relative, nil
 	}
 	return ".", nil
 }
 
-func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request) {
+func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	query := r.URL.Query()
 	args := []string{"diff", "--no-ext-diff", "--no-color"}
 	if query.Get("staged") == "1" {
 		args = append(args, "--cached")
 	}
 	if rel := query.Get("path"); rel != "" {
-		path, err := s.checkedPath(rel)
+		path, err := ws.checkedPath(rel)
 		if err != nil {
 			s.fileError(w, err)
 			return
@@ -275,7 +275,7 @@ func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request) {
 			args = append(args, "--", path)
 		}
 	}
-	result, err := s.git(r.Context(), nil, args...)
+	result, err := s.git(r.Context(), ws, nil, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -291,7 +291,7 @@ func (s *Server) gitDiff(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"diff": string(diff), "truncated": truncated})
 }
 
-func (s *Server) gitPaths(w http.ResponseWriter, r *http.Request, args ...string) {
+func (s *Server) gitPaths(w http.ResponseWriter, r *http.Request, ws Workspace, args ...string) {
 	var body struct {
 		Paths []string `json:"paths"`
 	}
@@ -304,22 +304,22 @@ func (s *Server) gitPaths(w http.ResponseWriter, r *http.Request, args ...string
 		return
 	}
 	for _, rel := range body.Paths {
-		path, err := s.checkedPath(rel)
+		path, err := ws.checkedPath(rel)
 		if err != nil {
 			s.fileError(w, err)
 			return
 		}
 		args = append(args, path)
 	}
-	result, err := s.git(r.Context(), nil, args...)
+	result, err := s.git(r.Context(), ws, nil, args...)
 	if err == nil && result.code != 0 && args[0] == "restore" {
 		// A repository without commits has nothing to restore from.
-		result, err = s.git(r.Context(), nil, append([]string{"rm", "--cached", "-r", "--quiet", "--"}, args[3:]...)...)
+		result, err = s.git(r.Context(), ws, nil, append([]string{"rm", "--cached", "-r", "--quiet", "--"}, args[3:]...)...)
 	}
-	s.gitDone(w, r, result, err)
+	s.gitDone(w, r, ws, result, err)
 }
 
-func (s *Server) gitDone(w http.ResponseWriter, r *http.Request, result gitResult, err error) {
+func (s *Server) gitDone(w http.ResponseWriter, r *http.Request, ws Workspace, result gitResult, err error) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -328,10 +328,10 @@ func (s *Server) gitDone(w http.ResponseWriter, r *http.Request, result gitResul
 		writeError(w, http.StatusBadRequest, firstNonEmpty(result.stderr, strings.TrimSpace(string(result.stdout)), "git failed"))
 		return
 	}
-	writeJSON(w, http.StatusOK, s.gitStatus(r.Context()))
+	writeJSON(w, http.StatusOK, s.gitStatus(r.Context(), ws))
 }
 
-func (s *Server) gitCommit(w http.ResponseWriter, r *http.Request) {
+func (s *Server) gitCommit(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	var body struct {
 		Message string `json:"message"`
 	}
@@ -344,12 +344,12 @@ func (s *Server) gitCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The message travels on stdin, so no part of it is ever read as an option.
-	result, err := s.git(r.Context(), []byte(body.Message), "commit", "--file=-")
-	s.gitDone(w, r, result, err)
+	result, err := s.git(r.Context(), ws, []byte(body.Message), "commit", "--file=-")
+	s.gitDone(w, r, ws, result, err)
 }
 
-func (s *Server) gitBranches(w http.ResponseWriter, r *http.Request) {
-	result, err := s.git(r.Context(), nil, "for-each-ref", "--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(committerdate:iso-strict)", "refs/heads")
+func (s *Server) gitBranches(w http.ResponseWriter, r *http.Request, ws Workspace) {
+	result, err := s.git(r.Context(), ws, nil, "for-each-ref", "--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(committerdate:iso-strict)", "refs/heads")
 	if err != nil || result.code != 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"branches": []any{}})
 		return
@@ -370,7 +370,7 @@ func (s *Server) gitBranches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"branches": branches})
 }
 
-func (s *Server) gitCheckout(w http.ResponseWriter, r *http.Request) {
+func (s *Server) gitCheckout(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	var body struct {
 		Branch string `json:"branch"`
 		Create bool   `json:"create"`
@@ -384,7 +384,7 @@ func (s *Server) gitCheckout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid branch name")
 		return
 	}
-	if check, err := s.git(r.Context(), nil, "check-ref-format", "--branch", name); err != nil || check.code != 0 {
+	if check, err := s.git(r.Context(), ws, nil, "check-ref-format", "--branch", name); err != nil || check.code != 0 {
 		writeError(w, http.StatusBadRequest, "invalid branch name")
 		return
 	}
@@ -392,16 +392,16 @@ func (s *Server) gitCheckout(w http.ResponseWriter, r *http.Request) {
 	if body.Create {
 		args = append(args, "--create")
 	}
-	result, err := s.git(r.Context(), nil, append(args, name)...)
-	s.gitDone(w, r, result, err)
+	result, err := s.git(r.Context(), ws, nil, append(args, name)...)
+	s.gitDone(w, r, ws, result, err)
 }
 
-func (s *Server) gitLog(w http.ResponseWriter, r *http.Request) {
+func (s *Server) gitLog(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	result, err := s.git(r.Context(), nil, "log", "-n", strconv.Itoa(limit), "--format=%H%x00%h%x00%an%x00%aI%x00%s%x1e")
+	result, err := s.git(r.Context(), ws, nil, "log", "-n", strconv.Itoa(limit), "--format=%H%x00%h%x00%an%x00%aI%x00%s%x1e")
 	commits := []GitCommit{}
 	if err == nil && result.code == 0 {
 		for _, record := range strings.Split(string(result.stdout), "\x1e") {
@@ -414,13 +414,13 @@ func (s *Server) gitLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"commits": commits})
 }
 
-func (s *Server) gitShow(w http.ResponseWriter, r *http.Request) {
+func (s *Server) gitShow(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	commit := r.URL.Query().Get("commit")
 	if !commitPattern.MatchString(commit) {
 		writeError(w, http.StatusBadRequest, "invalid commit")
 		return
 	}
-	result, err := s.git(r.Context(), nil, "show", "--no-ext-diff", "--no-color", "--stat", "--patch", commit, "--")
+	result, err := s.git(r.Context(), ws, nil, "show", "--no-ext-diff", "--no-color", "--stat", "--patch", commit, "--")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -445,7 +445,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (s *Server) gitWorktrees(w http.ResponseWriter, r *http.Request) {
+func (s *Server) gitWorktrees(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	type worktree struct {
 		Path     string `json:"path"`
 		Branch   string `json:"branch,omitempty"`
@@ -454,7 +454,7 @@ func (s *Server) gitWorktrees(w http.ResponseWriter, r *http.Request) {
 		Current  bool   `json:"current,omitempty"`
 	}
 	trees := []worktree{}
-	result, err := s.git(r.Context(), nil, "worktree", "list", "--porcelain")
+	result, err := s.git(r.Context(), ws, nil, "worktree", "list", "--porcelain")
 	if err == nil && result.code == 0 {
 		var current *worktree
 		for _, line := range strings.Split(string(result.stdout), "\n") {
@@ -462,7 +462,7 @@ func (s *Server) gitWorktrees(w http.ResponseWriter, r *http.Request) {
 			case strings.HasPrefix(line, "worktree "):
 				trees = append(trees, worktree{Path: strings.TrimPrefix(line, "worktree ")})
 				current = &trees[len(trees)-1]
-				current.Current = sameDir(current.Path, s.realWorkspace)
+				current.Current = sameDir(current.Path, ws.real)
 			case current != nil && strings.HasPrefix(line, "HEAD "):
 				current.Head = strings.TrimPrefix(line, "HEAD ")
 			case current != nil && strings.HasPrefix(line, "branch "):

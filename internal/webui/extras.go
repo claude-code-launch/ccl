@@ -128,7 +128,10 @@ func (s *Server) startLogin(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), loginTimeout)
 	cmd := exec.CommandContext(ctx, s.selfBinary, args...)
-	cmd.Dir = s.workspace
+	// The login does not depend on a workspace; any served one will do.
+	if workspace, ok := s.workspaces.fallback(); ok {
+		cmd.Dir = workspace.Path
+	}
 	cmd.Stdin = nil
 	reader, writer := io.Pipe()
 	cmd.Stdout = writer
@@ -198,15 +201,15 @@ func claudeUserConfig() string {
 	return filepath.Join(home, ".claude.json")
 }
 
-func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	name := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/mcp"), "/")
 	switch {
 	case name == "" && r.Method == http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"servers": s.mcpServers(), "claude": claudeOnPath()})
+		writeJSON(w, http.StatusOK, map[string]any{"servers": mcpServers(ws), "claude": claudeOnPath()})
 	case name == "" && r.Method == http.MethodPost:
-		s.addMCP(w, r)
+		s.addMCP(w, r, ws)
 	case name != "" && r.Method == http.MethodDelete:
-		s.removeMCP(w, r, name)
+		s.removeMCP(w, r, ws, name)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
@@ -217,7 +220,7 @@ func claudeOnPath() bool {
 	return err == nil
 }
 
-func (s *Server) mcpServers() []MCPEntry {
+func mcpServers(ws Workspace) []MCPEntry {
 	entries := []MCPEntry{}
 	add := func(scope string, servers map[string]json.RawMessage) {
 		for name, raw := range servers {
@@ -256,7 +259,7 @@ func (s *Server) mcpServers() []MCPEntry {
 			if json.Unmarshal(data, &config) == nil {
 				add("user", config.MCPServers)
 				seen := map[string]bool{}
-				for _, key := range []string{s.workspace, s.realWorkspace} {
+				for _, key := range []string{ws.Path, ws.real} {
 					if project, ok := config.Projects[key]; ok && !seen[key] {
 						seen[key] = true
 						add("local", project.MCPServers)
@@ -265,7 +268,7 @@ func (s *Server) mcpServers() []MCPEntry {
 			}
 		}
 	}
-	if data, err := os.ReadFile(filepath.Join(s.realWorkspace, ".mcp.json")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(ws.real, ".mcp.json")); err == nil {
 		var config struct {
 			MCPServers map[string]json.RawMessage `json:"mcpServers"`
 		}
@@ -288,7 +291,7 @@ func validMCPScope(scope string) bool {
 
 // addMCP runs `claude mcp add-json`, so the server lands exactly where Claude
 // Code's own command would put it.
-func (s *Server) addMCP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) addMCP(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	var body struct {
 		Name    string            `json:"name"`
 		Scope   string            `json:"scope"`
@@ -337,19 +340,19 @@ func (s *Server) addMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	encoded, _ := json.Marshal(config)
-	s.runClaudeMCP(w, r, "add-json", "--scope", body.Scope, body.Name, string(encoded))
+	s.runClaudeMCP(w, r, ws, "add-json", "--scope", body.Scope, body.Name, string(encoded))
 }
 
-func (s *Server) removeMCP(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) removeMCP(w http.ResponseWriter, r *http.Request, ws Workspace, name string) {
 	scope := r.URL.Query().Get("scope")
 	if !mcpNamePattern.MatchString(name) || !validMCPScope(scope) {
 		writeError(w, http.StatusBadRequest, "invalid name or scope")
 		return
 	}
-	s.runClaudeMCP(w, r, "remove", "--scope", scope, name)
+	s.runClaudeMCP(w, r, ws, "remove", "--scope", scope, name)
 }
 
-func (s *Server) runClaudeMCP(w http.ResponseWriter, r *http.Request, args ...string) {
+func (s *Server) runClaudeMCP(w http.ResponseWriter, r *http.Request, ws Workspace, args ...string) {
 	claude, err := exec.LookPath("claude")
 	if err != nil {
 		writeError(w, http.StatusNotImplemented, "claude is not on PATH")
@@ -358,13 +361,13 @@ func (s *Server) runClaudeMCP(w http.ResponseWriter, r *http.Request, args ...st
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, claude, append([]string{"mcp"}, args...)...)
-	cmd.Dir = s.realWorkspace
+	cmd.Dir = ws.real
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, firstNonEmpty(redactSecrets(strings.TrimSpace(string(output))), err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"servers": s.mcpServers()})
+	writeJSON(w, http.StatusOK, map[string]any{"servers": mcpServers(ws)})
 }
 
 // ── update check ────────────────────────────────────────────────────────────

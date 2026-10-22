@@ -5,7 +5,7 @@ import "testing"
 func TestWebCommandFlags(t *testing.T) {
 	web := newWebCommand()
 	flags := web.Flags()
-	for _, name := range []string{"port", "host", "open", "no-open", "workspace", "token", "max-concurrency", "provider", "model", "effort"} {
+	for _, name := range []string{"port", "host", "open", "no-open", "workspace", "workspace-root", "shell", "token", "max-concurrency", "provider", "model", "effort"} {
 		if flags.Lookup(name) == nil {
 			t.Fatalf("ccl web has no --%s flag", name)
 		}

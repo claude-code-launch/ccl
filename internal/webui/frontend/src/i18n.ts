@@ -242,6 +242,15 @@ const en = {
   onboardText: "ccl web runs Claude Code against any provider. Add one, or log in with a subscription.",
   onboardAction: "Open settings",
   updateAvailable: "ccl {version} is available — run ccl update",
+  searchWorkspaces: "Search workspaces",
+  general: "General",
+  connectorsShort: "Connectors",
+  activeProviderHint: "New conversations and the ccl terminal use it",
+  bypassHint: "Skip Claude Code's permission prompts (ccl bypass)",
+  noKey: "no key",
+  modelCount: "{n} models",
+  modelSlots: "Model slots",
+  testConnection: "Test connection",
 };
 
 export type MessageKey = keyof typeof en;
@@ -481,6 +490,15 @@ const zh: Record<MessageKey, string> = {
   onboardText: "ccl web 让 Claude Code 使用任意 provider。添加一个，或用订阅登录。",
   onboardAction: "打开设置",
   updateAvailable: "ccl {version} 已发布，运行 ccl update 升级",
+  searchWorkspaces: "搜索工作区",
+  general: "通用",
+  connectorsShort: "连接器",
+  activeProviderHint: "新会话和 ccl 终端使用它",
+  bypassHint: "跳过 Claude Code 的权限确认（ccl bypass）",
+  noKey: "无 key",
+  modelCount: "{n} 个模型",
+  modelSlots: "模型槽位",
+  testConnection: "测试连接",
 };
 
 const tables: Record<Lang, Record<MessageKey, string>> = { en, zh };

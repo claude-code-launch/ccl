@@ -66,12 +66,12 @@ var errOutsideWorkspace = errors.New("path is outside the workspace")
 // resolve maps a workspace-relative path to an absolute one inside the
 // workspace. Symbolic links are followed before the check, so a link cannot
 // lead outside; a path that does not exist yet is checked through its parent.
-func (s *Server) resolve(rel string) (string, error) {
+func (ws Workspace) resolve(rel string) (string, error) {
 	if strings.ContainsRune(rel, 0) {
 		return "", errOutsideWorkspace
 	}
 	clean := path.Clean("/" + filepath.ToSlash(rel))
-	abs := filepath.Join(s.workspace, filepath.FromSlash(clean))
+	abs := filepath.Join(ws.Path, filepath.FromSlash(clean))
 	real, err := filepath.EvalSymlinks(abs)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Resolve the deepest ancestor that exists; the rest is created later
@@ -89,34 +89,34 @@ func (s *Server) resolve(rel string) (string, error) {
 	} else if err != nil {
 		return "", err
 	}
-	if !withinWorkspace(real, s.realWorkspace) {
+	if !withinWorkspace(real, ws.real) {
 		return "", errOutsideWorkspace
 	}
 	return real, nil
 }
 
 // relative is how the page names a path: slash-separated, from the workspace.
-func (s *Server) relative(abs string) string {
-	rel, err := filepath.Rel(s.realWorkspace, abs)
+func (ws Workspace) relative(abs string) string {
+	rel, err := filepath.Rel(ws.real, abs)
 	if err != nil || rel == "." {
 		return ""
 	}
 	return filepath.ToSlash(rel)
 }
 
-func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/files"), "/")
 	switch {
 	case action == "list" && r.Method == http.MethodGet:
-		s.listFiles(w, r)
+		s.listFiles(w, r, ws)
 	case action == "read" && r.Method == http.MethodGet:
-		s.readFile(w, r)
+		s.readFile(w, r, ws)
 	case action == "write" && r.Method == http.MethodPut:
-		s.writeFile(w, r)
+		s.writeFile(w, r, ws)
 	case action == "search" && r.Method == http.MethodGet:
-		s.searchFiles(w, r)
+		s.searchFiles(w, r, ws)
 	case action == "uploads" && r.Method == http.MethodPost:
-		s.uploadFiles(w, r)
+		s.uploadFiles(w, r, ws)
 	case action == "list" || action == "read" || action == "write" || action == "search":
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	default:
@@ -135,8 +135,8 @@ func (s *Server) fileError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
-	dir, err := s.resolve(r.URL.Query().Get("path"))
+func (s *Server) listFiles(w http.ResponseWriter, r *http.Request, ws Workspace) {
+	dir, err := ws.resolve(r.URL.Query().Get("path"))
 	if err != nil {
 		s.fileError(w, err)
 		return
@@ -161,7 +161,7 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		case entry.Type()&fs.ModeSymlink != 0:
 			kind = "symlink"
 			// A link to a directory inside the workspace browses like one.
-			if target, err := s.resolve(s.relative(filepath.Join(dir, entry.Name()))); err == nil {
+			if target, err := ws.resolve(ws.relative(filepath.Join(dir, entry.Name()))); err == nil {
 				if stat, err := os.Stat(target); err == nil && stat.IsDir() {
 					kind = "dir"
 				}
@@ -171,7 +171,7 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		list = append(list, FileEntry{
 			Name:     entry.Name(),
-			Path:     s.relative(filepath.Join(dir, entry.Name())),
+			Path:     ws.relative(filepath.Join(dir, entry.Name())),
 			Type:     kind,
 			Size:     info.Size(),
 			Modified: info.ModTime().UTC(),
@@ -183,11 +183,11 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name)
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"path": s.relative(dir), "entries": list})
+	writeJSON(w, http.StatusOK, map[string]any{"path": ws.relative(dir), "entries": list})
 }
 
-func (s *Server) readFile(w http.ResponseWriter, r *http.Request) {
-	file, err := s.resolve(r.URL.Query().Get("path"))
+func (s *Server) readFile(w http.ResponseWriter, r *http.Request, ws Workspace) {
+	file, err := ws.resolve(r.URL.Query().Get("path"))
 	if err != nil {
 		s.fileError(w, err)
 		return
@@ -203,7 +203,7 @@ func (s *Server) readFile(w http.ResponseWriter, r *http.Request) {
 	}
 	mediaType := detectType(file, file)
 	content := FileContent{
-		Path:     s.relative(file),
+		Path:     ws.relative(file),
 		Size:     info.Size(),
 		Modified: info.ModTime().UTC(),
 		Type:     mediaType,
@@ -230,7 +230,7 @@ func (s *Server) readFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, content)
 }
 
-func (s *Server) writeFile(w http.ResponseWriter, r *http.Request) {
+func (s *Server) writeFile(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	var body struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -252,7 +252,7 @@ func (s *Server) writeFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	file, err := s.resolve(body.Path)
+	file, err := ws.resolve(body.Path)
 	if err != nil {
 		s.fileError(w, err)
 		return
@@ -287,16 +287,16 @@ func (s *Server) writeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sum := sha256.Sum256([]byte(body.Content))
-	writeJSON(w, http.StatusOK, map[string]string{"path": s.relative(file), "hash": hex.EncodeToString(sum[:])})
+	writeJSON(w, http.StatusOK, map[string]string{"path": ws.relative(file), "hash": hex.EncodeToString(sum[:])})
 }
 
 // searchFiles finds files by name for @ mentions. In a git repository it asks
 // git, which honors .gitignore; elsewhere it walks the tree.
-func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request) {
+func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request, ws Workspace) {
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	paths, err := s.gitFiles(r.Context())
+	paths, err := s.gitFiles(r.Context(), ws)
 	if err != nil {
-		paths = s.walkFiles()
+		paths = ws.walkFiles()
 	}
 	type match struct {
 		path string
@@ -337,11 +337,11 @@ func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"files": results})
 }
 
-func (s *Server) gitFiles(ctx context.Context) ([]string, error) {
+func (s *Server) gitFiles(ctx context.Context, ws Workspace) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-	cmd.Dir = s.workspace
+	cmd.Dir = ws.Path
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.Output()
 	if err != nil {
@@ -356,10 +356,10 @@ func (s *Server) gitFiles(ctx context.Context) ([]string, error) {
 	return paths, nil
 }
 
-func (s *Server) walkFiles() []string {
+func (ws Workspace) walkFiles() []string {
 	var paths []string
 	visited := 0
-	_ = filepath.WalkDir(s.realWorkspace, func(file string, entry fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(ws.real, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -374,7 +374,7 @@ func (s *Server) walkFiles() []string {
 			}
 			return nil
 		}
-		paths = append(paths, s.relative(file))
+		paths = append(paths, ws.relative(file))
 		return nil
 	})
 	return paths
@@ -382,8 +382,8 @@ func (s *Server) walkFiles() []string {
 
 // serveRaw returns a workspace file for <img> and downloads, with the same
 // rules as attachments: only plain image types inline, nothing runs here.
-func (s *Server) serveRaw(w http.ResponseWriter, r *http.Request) {
-	file, err := s.resolve(r.URL.Query().Get("path"))
+func (s *Server) serveRaw(w http.ResponseWriter, r *http.Request, ws Workspace) {
+	file, err := ws.resolve(r.URL.Query().Get("path"))
 	if err != nil {
 		s.fileError(w, err)
 		return
@@ -437,8 +437,8 @@ func looksLikeText(file string) bool {
 
 // uploadFiles stores files dropped onto the file tree into a workspace
 // directory. An existing file is never replaced.
-func (s *Server) uploadFiles(w http.ResponseWriter, r *http.Request) {
-	dir, err := s.resolve(r.URL.Query().Get("dir"))
+func (s *Server) uploadFiles(w http.ResponseWriter, r *http.Request, ws Workspace) {
+	dir, err := ws.resolve(r.URL.Query().Get("dir"))
 	if err != nil {
 		s.fileError(w, err)
 		return
@@ -461,7 +461,7 @@ func (s *Server) uploadFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		target := filepath.Join(dir, sanitizeFileName(header.Filename))
 		// The name came from the browser: check it resolves inside as well.
-		if checked, err := s.resolve(s.relative(target)); err != nil || checked != target {
+		if checked, err := ws.resolve(ws.relative(target)); err != nil || checked != target {
 			writeError(w, http.StatusForbidden, errOutsideWorkspace.Error())
 			return
 		}
@@ -490,7 +490,7 @@ func (s *Server) uploadFiles(w http.ResponseWriter, r *http.Request) {
 			s.fileError(w, err)
 			return
 		}
-		saved = append(saved, s.relative(target))
+		saved = append(saved, ws.relative(target))
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"files": saved})
 }
