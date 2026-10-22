@@ -521,7 +521,7 @@ export function App() {
   // Tell the user when a turn ends while the page is in the background.
   const wasRunning = useRef(false);
   useEffect(() => {
-    const title = current?.title || "ccl web";
+    const title = current?.title || "ccl";
     document.title = conversation.running ? `● ${title}` : title;
     if (wasRunning.current && !conversation.running && document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") {
       const last = [...items].reverse().find((item) => item.kind === "turn-end");

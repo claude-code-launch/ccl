@@ -13,7 +13,7 @@ export function Gate({ error, onSubmit }: { error: string; onSubmit: (token: str
         }}
         className="grid w-[min(400px,90vw)] gap-3 rounded-[14px] border border-line bg-surface p-7"
       >
-        <h1 className="font-display text-[26px] font-medium">ccl web</h1>
+        <h1 className="font-display text-[26px] font-medium">ccl</h1>
         <p className="text-[13px] text-ink-3">{t("gateText")}</p>
         <input
           type="password"

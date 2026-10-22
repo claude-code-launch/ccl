@@ -27,7 +27,7 @@ export function SharePage({ token }: { token: string }) {
         if (!response.ok) throw new Error(response.status === 404 ? t("shareGone") : response.statusText);
         const body = (await response.json()) as SharedSession;
         setShared(body);
-        document.title = body.title || "ccl web";
+        document.title = body.title || "ccl";
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [token, lang, t]);
@@ -37,7 +37,7 @@ export function SharePage({ token }: { token: string }) {
     <I18n.Provider value={i18n}>
       <div className="flex h-full flex-col bg-canvas text-ink">
         <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-line px-4 py-2.5">
-          <span className="font-display text-[17px] font-medium tracking-tight">ccl web</span>
+          <span className="font-display text-[17px] font-medium tracking-tight">ccl</span>
           {shared && (
             <>
               <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{shared.title || t("untitled")}</span>

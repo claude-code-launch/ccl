@@ -1,6 +1,6 @@
 {
-  "name": "ccl web",
-  "short_name": "ccl web",
+  "name": "ccl",
+  "short_name": "ccl",
   "description": "Claude Code in the browser, with any provider",
   "start_url": "/",
   "scope": "/",

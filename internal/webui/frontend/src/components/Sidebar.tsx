@@ -79,7 +79,7 @@ export function Sidebar(props: Props) {
         <IconButton title={t("toggleSidebar")} onClick={props.onCollapse}>
           <PanelLeft size={17} />
         </IconButton>
-        <span className="font-display text-[20px] font-medium tracking-tight text-ink">ccl web</span>
+        <span className="font-display text-[20px] font-medium tracking-tight text-ink">ccl</span>
       </div>
 
       {props.workspaces.length > 0 && (
