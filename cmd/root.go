@@ -31,7 +31,7 @@ Common commands:
                               Log in with a subscription account
   ccl doctor                  Environment + provider + subscription health
   ccl acp                     Agent Client Protocol on stdio (Xcode 27 and other ACP clients)
-  ccl web                     Conversations and provider settings in a browser
+  ccl serve                   Conversations and provider settings in a browser
   ccl cloud login|push|pull   Encrypted multi-remote config sync
   ccl sign on|off             Claude's commit/PR signature (off by default; --default also edits ~/.claude/settings.json)
   ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)

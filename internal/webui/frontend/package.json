@@ -1,7 +1,7 @@
 {
   "name": "ccl-web",
   "private": true,
-  "description": "Browser UI for ccl web. `npm run build` writes ../web, which the Go binary embeds.",
+  "description": "Browser UI for ccl serve. `npm run build` writes ../web, which the Go binary embeds.",
   "type": "module",
   "scripts": {
     "dev": "vite",

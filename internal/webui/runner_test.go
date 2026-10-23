@@ -540,7 +540,7 @@ func TestPermissionRoundTrip(t *testing.T) {
 
 func TestPermissionDenyMessage(t *testing.T) {
 	line, err := permissionResponse(pendingPermission{input: json.RawMessage(`{"command":"rm -rf x"}`)}, PermissionDecision{RequestID: "r", Behavior: "deny"})
-	if err != nil || !strings.Contains(string(line), `"behavior":"deny","message":"The user declined this in ccl web."`) {
+	if err != nil || !strings.Contains(string(line), `"behavior":"deny","message":"The user declined this in ccl serve."`) {
 		t.Fatalf("deny = %s (%v)", line, err)
 	}
 	if _, err := permissionResponse(pendingPermission{}, PermissionDecision{RequestID: "r", Behavior: "maybe"}); err == nil {

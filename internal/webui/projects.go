@@ -40,7 +40,7 @@ func loadProjects(path string) *projectStore {
 		// A damaged file only loses defaults; conversations still start.
 		_ = json.Unmarshal(data, &store.defaults)
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(os.Stderr, "ccl web: read %s: %v\n", path, err)
+		fmt.Fprintf(os.Stderr, "ccl serve: read %s: %v\n", path, err)
 	}
 	return store
 }

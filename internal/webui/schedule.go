@@ -16,7 +16,7 @@ import (
 )
 
 // Scheduled messages: a message the user wants sent later. They survive a
-// restart of ccl web; one whose time passed while it was down goes out when
+// restart of ccl serve; one whose time passed while it was down goes out when
 // it is back. A conversation busy at the time gets it after its turn.
 
 // Schedule is one message waiting for its time.

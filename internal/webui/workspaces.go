@@ -38,10 +38,10 @@ type Workspace struct {
 
 // ErrWorkspaceNotServed reports a conversation or request for a directory
 // this server does not offer (any more).
-var ErrWorkspaceNotServed = errors.New("this workspace is not served by ccl web; add its folder again or start ccl web with --workspace covering it")
+var ErrWorkspaceNotServed = errors.New("this workspace is not served by ccl serve; add its folder again or start ccl serve with --workspace covering it")
 
 // ErrWorkspacesLocked refuses adding a folder under --lock-workspaces.
-var ErrWorkspacesLocked = errors.New("ccl web was started with --lock-workspaces; folders cannot be added from the page")
+var ErrWorkspacesLocked = errors.New("ccl serve was started with --lock-workspaces; folders cannot be added from the page")
 
 // rootRescan bounds how often --workspace-root directories are listed again,
 // so a repository cloned meanwhile appears without a restart.

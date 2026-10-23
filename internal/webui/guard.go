@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// guard stops other web pages from driving ccl web through the user's browser.
+// guard stops other web pages from driving ccl serve through the user's browser.
 //
 // Without a token the server trusts whoever reaches it, which is only safe if
 // that is a page it served itself:
@@ -19,14 +19,16 @@ import (
 //
 // With a token, a forged request lacks the Authorization header, so neither
 // check is needed; the LAN or container address the user chose is fine.
+// Neither is needed on a Unix socket either: browsers cannot reach one, and
+// its file mode admits only this user.
 //
 // Every JSON write must say it is JSON: a cross-site fetch with that content
 // type needs a CORS preflight, which this server never grants.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" {
+		if s.token == "" && !overUnixSocket(r) {
 			if !loopbackName(hostOnly(r.Host)) {
-				writeError(w, http.StatusForbidden, "ccl web without a token only answers to 127.0.0.1, localhost or [::1]")
+				writeError(w, http.StatusForbidden, "ccl serve without a token only answers to 127.0.0.1, localhost or [::1]")
 				return
 			}
 			if changesState(r.Method) && !sameMachineOrigin(r.Header.Get("Origin")) {

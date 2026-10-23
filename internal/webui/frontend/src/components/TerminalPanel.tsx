@@ -7,7 +7,7 @@ import type { Api } from "../api";
 import { useI18n } from "../i18n";
 import { IconButton } from "./Sidebar";
 
-// The web terminal (ccl web --shell). It is its own chunk. Closing the panel
+// The web terminal (ccl serve --shell). It is its own chunk. Closing the panel
 // leaves the shell running; the panel re-attaches and the server replays the
 // recent output. Only the close button ends the shell.
 

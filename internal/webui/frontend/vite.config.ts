@@ -3,9 +3,9 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 // `npm run dev` serves the UI with hot reload and forwards the API to a running
-// `ccl web` (CCL_WEB_URL, default http://127.0.0.1:8099). `npm run build`
+// `ccl serve` (CCL_SERVE_URL, default http://127.0.0.1:8099). `npm run build`
 // writes ../web, which internal/webui embeds into the ccl binary.
-const backend = process.env.CCL_WEB_URL || "http://127.0.0.1:8099";
+const backend = process.env.CCL_SERVE_URL || "http://127.0.0.1:8099";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

@@ -14,7 +14,7 @@ interface Props {
   onDelete: () => void;
   onExport: (format: "md" | "html") => void;
   onShare: () => void;
-  // The server offers a terminal (ccl web --shell).
+  // The server offers a terminal (ccl serve --shell).
   terminal: boolean;
 }
 

@@ -124,7 +124,7 @@ type StatusPayload struct {
 // emitter receives the events one stream line translates into.
 type emitter func(kind string, payload any)
 
-// translator turns Claude Code's stream-json lines into ccl web events. It
+// translator turns Claude Code's stream-json lines into ccl serve events. It
 // keeps the tool names it has seen so a tool_result can name its call.
 type translator struct {
 	tools map[string]string

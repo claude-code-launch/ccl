@@ -263,7 +263,7 @@ export function App() {
     }
   }, [api]);
 
-  // Boot: a loopback ccl web asks for no token at all.
+  // Boot: a loopback ccl serve asks for no token at all.
   useEffect(() => {
     let cancelled = false;
     (async () => {

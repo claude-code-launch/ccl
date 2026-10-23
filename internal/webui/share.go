@@ -15,7 +15,7 @@ import (
 // it a random token, and /share/<token> (the page) reads /api/share/<token>
 // without the server's own token. The link shows the whole conversation as
 // stored, tool output included, and the worktree diff; DELETE revokes it.
-// Who can open it is up to where ccl web listens: a loopback server is only
+// Who can open it is up to where ccl serve listens: a loopback server is only
 // reachable from this machine.
 
 var shareTokenPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)

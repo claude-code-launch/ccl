@@ -56,7 +56,7 @@ type WorktreeFile struct {
 
 var (
 	// ErrWorktreeMissing refuses a turn of a conversation whose worktree was
-	// removed outside ccl web.
+	// removed outside ccl serve.
 	ErrWorktreeMissing = errors.New("this conversation's git worktree no longer exists")
 	errNotARepository  = errors.New("the project is not a git repository")
 	errNoCommits       = errors.New("the repository has no commits yet")

@@ -23,5 +23,5 @@ ccl.prof
 .DS_Store
 Thumbs.db
 
-# ccl web frontend dependencies (the build output in internal/webui/web is committed)
+# ccl serve frontend dependencies (the build output in internal/webui/web is committed)
 internal/webui/frontend/node_modules/

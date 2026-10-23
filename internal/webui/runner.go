@@ -585,7 +585,7 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 				// Nothing here answers other requests; saying so keeps
 				// Claude Code from waiting for an answer that never comes.
 				if id, ok := payload.(string); ok {
-					_ = entry.write(controlError(id, "ccl web does not handle this request"))
+					_ = entry.write(controlError(id, "ccl serve does not handle this request"))
 				}
 				return
 			}

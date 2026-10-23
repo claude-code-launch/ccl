@@ -1,4 +1,4 @@
-// Wire types of the ccl web API (internal/webui). Field names follow the Go
+// Wire types of the ccl serve API (internal/webui). Field names follow the Go
 // JSON tags.
 
 export interface Usage {
@@ -124,7 +124,7 @@ export interface Health {
   workspace: string;
   workspaces?: Workspace[];
   authRequired: boolean;
-  // The web terminal is on (ccl web --shell).
+  // The web terminal is on (ccl serve --shell).
   shell?: boolean;
 }
 

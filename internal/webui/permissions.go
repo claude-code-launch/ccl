@@ -170,7 +170,7 @@ func permissionResponse(request pendingPermission, decision PermissionDecision) 
 	case "deny":
 		message := strings.TrimSpace(decision.Message)
 		if message == "" {
-			message = "The user declined this in ccl web."
+			message = "The user declined this in ccl serve."
 		}
 		body = map[string]any{"behavior": "deny", "message": message}
 	default:

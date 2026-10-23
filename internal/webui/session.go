@@ -3,7 +3,7 @@
 // A conversation is a series of ccl-launched Claude Code processes that share
 // one Claude session id and are resumed with --resume. Everything about the
 // conversation (its provider, model, effort, history) lives under
-// ~/.ccl/web/sessions; the user's ~/.ccl/config.yaml is only read.
+// ~/.ccl/serve/sessions; the user's ~/.ccl/config.yaml is only read.
 package webui
 
 import (
@@ -135,13 +135,13 @@ func NewStore(root string) (*Store, error) {
 	return &Store{root: root, open: make(map[string]*Session)}, nil
 }
 
-// DefaultRoot is where ccl web keeps conversations.
+// DefaultRoot is where ccl serve keeps conversations.
 func DefaultRoot() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	return filepath.Join(home, ".ccl", "web", "sessions"), nil
+	return filepath.Join(home, ".ccl", "serve", "sessions"), nil
 }
 
 // Root is the directory holding every conversation.

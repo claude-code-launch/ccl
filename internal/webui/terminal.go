@@ -20,7 +20,7 @@ import (
 )
 
 // The web terminal: a shell on a pseudo-terminal in the workspace. It is off
-// unless ccl web runs with --shell. Output streams over SSE from a byte offset,
+// unless ccl serve runs with --shell. Output streams over SSE from a byte offset,
 // so a reconnecting page resumes where it was; keystrokes arrive by POST.
 
 const (
@@ -90,7 +90,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.shell {
-		writeError(w, http.StatusForbidden, "the terminal is off: start ccl web with --shell")
+		writeError(w, http.StatusForbidden, "the terminal is off: start ccl serve with --shell")
 		return
 	}
 	if rest == "" {
@@ -208,11 +208,11 @@ func (s *Server) openTerminal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": term.id})
 }
 
-// terminalEnv is the server's environment without ccl web's own credential.
+// terminalEnv is the server's environment without ccl serve's own credential.
 func terminalEnv() []string {
 	env := []string{}
 	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "CCL_WEB_TOKEN=") {
+		if strings.HasPrefix(entry, "CCL_SERVE_TOKEN=") {
 			continue
 		}
 		env = append(env, entry)

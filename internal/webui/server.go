@@ -42,7 +42,7 @@ type Config struct {
 	// Token authenticates /api requests. It may be empty only when the server
 	// listens on a loopback address and RequireToken is false.
 	Token string
-	// RequireToken makes an empty Token a startup error. ccl web sets it when
+	// RequireToken makes an empty Token a startup error. ccl serve sets it when
 	// the bind address is reachable from outside the machine.
 	RequireToken bool
 	// Workspace, Workspaces and WorkspaceRoots are the directories
@@ -68,13 +68,13 @@ type Config struct {
 	SelfBinary string
 	// LatestVersion names the newest ccl release, for the update notice.
 	LatestVersion func() (string, error)
-	// Shell turns on the web terminal (ccl web --shell).
+	// Shell turns on the web terminal (ccl serve --shell).
 	Shell bool
 	// LockWorkspaces keeps the page from adding folders (--lock-workspaces).
 	LockWorkspaces bool
 }
 
-// Server is the HTTP surface of ccl web.
+// Server is the HTTP surface of ccl serve.
 type Server struct {
 	store    *Store
 	runner   *Runner
@@ -130,12 +130,12 @@ func (s *Server) view(meta Meta) SessionView {
 	return SessionView{Meta: meta, Running: s.timeline.Running(meta.ID)}
 }
 
-// New creates a server. An empty token is an error: ccl web never listens
+// New creates a server. An empty token is an error: ccl serve never listens
 // without authentication.
 func New(cfg Config) (*Server, error) {
 	token := strings.TrimSpace(cfg.Token)
 	if token == "" && cfg.RequireToken {
-		return nil, errors.New("a token is required when listening beyond 127.0.0.1: pass --token or set CCL_WEB_TOKEN")
+		return nil, errors.New("a token is required when listening beyond 127.0.0.1: pass --token or set CCL_SERVE_TOKEN")
 	}
 	var paths []string
 	if workspace := strings.TrimSpace(cfg.Workspace); workspace != "" {
@@ -220,7 +220,7 @@ func New(cfg Config) (*Server, error) {
 func (s *Server) Store() *Store { return s.store }
 
 // ErrClosing refuses a turn while the server shuts down.
-var ErrClosing = errors.New("ccl web is shutting down")
+var ErrClosing = errors.New("ccl serve is shutting down")
 
 // Close stops what the server started: scheduled messages, subscription
 // logins, terminals and turns in flight. A cancelled turn is still stored with
@@ -1218,7 +1218,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
-		log.Printf("ccl web: write response: %v", err)
+		log.Printf("ccl serve: write response: %v", err)
 	}
 }
 

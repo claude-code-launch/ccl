@@ -23,7 +23,7 @@ import type {
   WorktreeStatus,
 } from "./types";
 
-// The token is needed only when ccl web listens beyond 127.0.0.1. It stays in
+// The token is needed only when ccl serve listens beyond 127.0.0.1. It stays in
 // this browser's storage and nowhere else.
 const TOKEN_KEY = "ccl-web-token";
 
