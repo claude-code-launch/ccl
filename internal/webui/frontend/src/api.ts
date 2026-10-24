@@ -22,10 +22,15 @@ import type {
   WorktreeDiff,
   WorktreeStatus,
 } from "./types";
+import { appURL } from "./base";
 
 // The token is needed only when ccl serve listens beyond 127.0.0.1. It stays in
 // this browser's storage and nowhere else.
 const TOKEN_KEY = "ccl-web-token";
+
+// The page sends its token in X-CCL-Token, never Authorization: a proxy in
+// front of ccl serve may need that header for its own Basic auth.
+export const TOKEN_HEADER = "X-CCL-Token";
 
 export function storedToken(): string {
   try {
@@ -89,9 +94,9 @@ export class Api {
   async request<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
     path = this.scoped(path);
     const headers: Record<string, string> = {};
-    if (this.token) headers["Authorization"] = "Bearer " + this.token;
+    if (this.token) headers[TOKEN_HEADER] = this.token;
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
-    const response = await fetch(path, {
+    const response = await fetch(appURL(path), {
       method: options.method || "GET",
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -113,7 +118,7 @@ export class Api {
     return body as T;
   }
 
-  health = () => fetch("/health").then((response) => response.json() as Promise<Health>);
+  health = () => fetch(appURL("/health")).then((response) => response.json() as Promise<Health>);
 
   sessions = () => this.request<Session[]>("/api/sessions");
   session = (id: string) => this.request<Session>(`/api/sessions/${id}`);
@@ -144,8 +149,8 @@ export class Api {
     const form = new FormData();
     for (const file of files) form.append("file", file, file.name);
     const headers: Record<string, string> = {};
-    if (this.token) headers["Authorization"] = "Bearer " + this.token;
-    const response = await fetch(`/api/sessions/${id}/uploads`, { method: "POST", headers, body: form });
+    if (this.token) headers[TOKEN_HEADER] = this.token;
+    const response = await fetch(appURL(`/api/sessions/${id}/uploads`), { method: "POST", headers, body: form });
     if (response.status === 401) throw new Unauthorized();
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new Error((body && body.error) || response.statusText);
@@ -154,7 +159,7 @@ export class Api {
 
   // <img> cannot set a header either; attachments take the token as a query.
   uploadURL = (id: string, file: string) =>
-    `/api/sessions/${id}/uploads/${encodeURIComponent(file)}` + (this.token ? `?token=${encodeURIComponent(this.token)}` : "");
+    appURL(`/api/sessions/${id}/uploads/${encodeURIComponent(file)}` + (this.token ? `?token=${encodeURIComponent(this.token)}` : ""));
 
   capabilities = () => this.request<Capabilities>("/api/capabilities");
 
@@ -164,14 +169,14 @@ export class Api {
   writeFile = (path: string, content: string, expectedHash: string) =>
     this.request<{ path: string; hash: string }>("/api/files/write", { method: "PUT", body: { path, content, expectedHash } });
   rawFileURL = (path: string) =>
-    this.scoped(`/api/files/raw?path=${encodeURIComponent(path)}`) + (this.token ? `&token=${encodeURIComponent(this.token)}` : "");
+    appURL(this.scoped(`/api/files/raw?path=${encodeURIComponent(path)}`) + (this.token ? `&token=${encodeURIComponent(this.token)}` : ""));
 
   async uploadToWorkspace(dir: string, files: File[]): Promise<string[]> {
     const form = new FormData();
     for (const file of files) form.append("file", file, file.name);
     const headers: Record<string, string> = {};
-    if (this.token) headers["Authorization"] = "Bearer " + this.token;
-    const response = await fetch(this.scoped(`/api/files/uploads?dir=${encodeURIComponent(dir)}`), { method: "POST", headers, body: form });
+    if (this.token) headers[TOKEN_HEADER] = this.token;
+    const response = await fetch(appURL(this.scoped(`/api/files/uploads?dir=${encodeURIComponent(dir)}`)), { method: "POST", headers, body: form });
     if (response.status === 401) throw new Unauthorized();
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new Error((body && body.error) || response.statusText);
@@ -226,7 +231,7 @@ export class Api {
     this.request<null>(`/api/terminal/${id}/resize`, { method: "POST", body: { cols, rows } });
   terminalClose = (id: string) => this.request<null>(`/api/terminal/${id}`, { method: "DELETE" });
   terminalStreamURL = (id: string, since: number) =>
-    `/api/terminal/${id}/stream?since=${since}` + (this.token ? `&token=${encodeURIComponent(this.token)}` : "");
+    appURL(`/api/terminal/${id}/stream?since=${since}` + (this.token ? `&token=${encodeURIComponent(this.token)}` : ""));
 
   claudeSessions = () => this.request<{ sessions: ClaudeSession[] }>("/api/claude-sessions");
   importClaudeSession = (id: string) => this.request<Session>("/api/claude-sessions/import", { method: "POST", body: { id } });
@@ -237,7 +242,7 @@ export class Api {
 
   // EventSource cannot set a header, so the stream takes the token as a query.
   streamURL = (id: string, since: number) =>
-    `/api/sessions/${id}/stream?since=${since}` + (this.token ? `&token=${encodeURIComponent(this.token)}` : "");
+    appURL(`/api/sessions/${id}/stream?since=${since}` + (this.token ? `&token=${encodeURIComponent(this.token)}` : ""));
 
   config = () => this.request<ConfigView>("/api/config");
   putConfig = (body: { active?: { normal: string; acp: string }; lang?: string; bypassMode?: boolean }) =>

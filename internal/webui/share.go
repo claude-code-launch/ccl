@@ -70,7 +70,7 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request, session *Se
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"token": meta.ShareToken, "path": "/share/" + meta.ShareToken})
+		writeJSON(w, http.StatusOK, map[string]string{"token": meta.ShareToken, "path": s.basePath + "/share/" + meta.ShareToken})
 	case http.MethodDelete:
 		if _, err := session.RelabelMeta(func(meta *Meta) { meta.ShareToken = "" }); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

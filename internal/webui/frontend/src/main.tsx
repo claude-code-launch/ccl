@@ -3,8 +3,9 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import { App } from "./App";
 import { SharePage } from "./components/Share";
+import { appPath } from "./base";
 
 // /share/<token> is a read-only conversation that needs no server token.
-const shared = /^\/share\/([0-9a-f]{64})\/?$/.exec(location.pathname);
+const shared = /^\/share\/([0-9a-f]{64})\/?$/.exec(appPath(location.pathname) || "");
 
 createRoot(document.getElementById("root")!).render(<StrictMode>{shared ? <SharePage token={shared[1]} /> : <App />}</StrictMode>);

@@ -9,7 +9,9 @@ const backend = process.env.CCL_SERVE_URL || "http://127.0.0.1:8099";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: "/",
+  // Relative assets resolve against the <base> ccl serve fills in, so one build
+  // works at the root and under --base-path.
+  base: "./",
   build: {
     outDir: "../web",
     emptyOutDir: true,

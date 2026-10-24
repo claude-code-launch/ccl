@@ -37,6 +37,7 @@ func newServeCommand() *cobra.Command {
 		noShell        bool
 		lockWorkspaces bool
 		socket         string
+		basePath       string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve [--port 8099 | --socket [path]] [--workspace dir]... [--workspace-root dir]... [--host 127.0.0.1] [--token <token>]",
@@ -127,6 +128,9 @@ Examples:
 			if len(workspaces) == 0 && len(workspaceRoots) == 0 {
 				workspaces = []string{"."}
 			}
+			if basePath, err = webui.NormalizeBasePath(strings.TrimSpace(basePath)); err != nil {
+				return fmt.Errorf("--base-path: %w", err)
+			}
 			server, err := webui.New(webui.Config{
 				Token:           token,
 				RequireToken:    requiresToken,
@@ -141,6 +145,7 @@ Examples:
 				LatestVersion:   fetchLatestReleaseVersion,
 				Shell:           shell && !noShell,
 				LockWorkspaces:  lockWorkspaces,
+				BasePath:        basePath,
 			})
 			if err != nil {
 				return err
@@ -203,7 +208,7 @@ Examples:
 				if displayHost == "0.0.0.0" || displayHost == "::" || displayHost == "" {
 					displayHost = "127.0.0.1"
 				}
-				url := "http://" + net.JoinHostPort(displayHost, strconv.Itoa(port)) + "/"
+				url := "http://" + net.JoinHostPort(displayHost, strconv.Itoa(port)) + basePath + "/"
 				fmt.Fprintf(os.Stderr, locale.T(
 					"ccl serve 已启动 · %s · %d 个项目\n停止：Ctrl+C\n",
 					"ccl serve listening · %s · projects: %d\nStop with Ctrl+C\n",
@@ -234,7 +239,7 @@ Examples:
 	flags.BoolVar(&noOpen, "no-open", false, "Do not open a browser (containers); overrides --open")
 	flags.StringArrayVar(&workspaces, "workspace", nil, "A project folder conversations may run in (repeatable; default: the current directory)")
 	flags.StringArrayVar(&workspaceRoots, "workspace-root", nil, "A directory whose subdirectories are all projects (repeatable)")
-	flags.StringVar(&token, "token", "", "Bearer token required by /api (default: CCL_SERVE_TOKEN)")
+	flags.StringVar(&token, "token", "", "Token required by /api, sent as Authorization: Bearer or X-CCL-Token (default: CCL_SERVE_TOKEN)")
 	flags.IntVar(&maxConcurrency, "max-concurrency", 3, "Maximum simultaneous Claude Code processes")
 	flags.StringVar(&providerName, "provider", "", "Provider new conversations start with (default: active provider)")
 	flags.StringVar(&model, "model", "", "Model new conversations start with (slot or full id)")
@@ -243,6 +248,7 @@ Examples:
 	flags.BoolVar(&noShell, "no-shell", false, "Do not offer a terminal in the page; overrides --shell")
 	flags.BoolVar(&lockWorkspaces, "lock-workspaces", false, "Serve only the --workspace / --workspace-root folders; the page cannot add others")
 	flags.StringVar(&socket, "socket", "", "Listen on this Unix socket instead of a TCP port (no value: ~/.ccl/serve/ccl.sock)")
+	flags.StringVar(&basePath, "base-path", "", "Serve the page and /api under this URL prefix, such as /chat, behind a proxy that keeps the prefix (default: the root)")
 	flags.Lookup("socket").NoOptDefVal = defaultSocket
 	return cmd
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, GitBranch, Link2, LoaderCircle, X } from "lucide-react";
 import type { Api } from "../api";
+import { appURL } from "../base";
 import type { SharedSession } from "../types";
 import { buildThread } from "../thread";
 import { I18n, resolveLang, translator, useI18n } from "../i18n";
@@ -22,7 +23,7 @@ export function SharePage({ token }: { token: string }) {
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     document.documentElement.style.colorScheme = dark ? "dark" : "light";
-    fetch(`/api/share/${encodeURIComponent(token)}`)
+    fetch(appURL(`/api/share/${encodeURIComponent(token)}`))
       .then(async (response) => {
         if (!response.ok) throw new Error(response.status === 404 ? t("shareGone") : response.statusText);
         const body = (await response.json()) as SharedSession;
@@ -64,7 +65,7 @@ export function SharePage({ token }: { token: string }) {
               loading={false}
               workspace={shared.workspace}
               route={[shared.provider || "default", shared.model].filter(Boolean).join(" · ")}
-              attachmentURL={(file) => `/api/share/${encodeURIComponent(token)}/uploads/${encodeURIComponent(file)}`}
+              attachmentURL={(file) => appURL(`/api/share/${encodeURIComponent(token)}/uploads/${encodeURIComponent(file)}`)}
               onPermission={async () => {}}
             />}
             {shared.diff && shared.diff.diff && (
@@ -99,7 +100,7 @@ export function ShareDialog({ api, sessionId, token, onChanged, onClose }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const url = token ? `${location.origin}/share/${token}` : "";
+  const url = token ? location.origin + appURL(`/share/${token}`) : "";
   const loopback = /^(localhost|127\.|\[::1\])/.test(location.hostname);
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);

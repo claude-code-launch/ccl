@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -29,9 +30,14 @@ import (
 //go:embed web
 var webAssets embed.FS
 
-// TokenHeader and TokenQuery are the two ways a client presents its token.
+// TokenHeader, PageTokenHeader and TokenQuery are the ways a client presents
+// its token.
 const (
 	TokenHeader = "Authorization"
+	// PageTokenHeader is what the page sends: it leaves Authorization to a
+	// proxy's Basic auth in front of ccl serve. A request that carries it is
+	// judged by it alone.
+	PageTokenHeader = "X-CCL-Token"
 	// TokenQuery is accepted only by the read-only stream and events endpoints:
 	// EventSource cannot set a header.
 	TokenQuery = "token"
@@ -72,6 +78,9 @@ type Config struct {
 	Shell bool
 	// LockWorkspaces keeps the page from adding folders (--lock-workspaces).
 	LockWorkspaces bool
+	// BasePath mounts the page and the API under a URL prefix such as /chat
+	// (--base-path); empty serves them at the root.
+	BasePath string
 }
 
 // Server is the HTTP surface of ccl serve.
@@ -99,6 +108,11 @@ type Server struct {
 	schedules     *scheduler
 	shell         bool
 	terminals     terminalRegistry
+	// basePath is the normalized URL prefix ("" at the root); index is the
+	// page with its base filled in for it.
+	basePath  string
+	index     []byte
+	indexETag string
 	// closing is set by Close; no turn starts after it.
 	closing atomic.Bool
 }
@@ -136,6 +150,14 @@ func New(cfg Config) (*Server, error) {
 	token := strings.TrimSpace(cfg.Token)
 	if token == "" && cfg.RequireToken {
 		return nil, errors.New("a token is required when listening beyond 127.0.0.1: pass --token or set CCL_SERVE_TOKEN")
+	}
+	basePath, err := NormalizeBasePath(strings.TrimSpace(cfg.BasePath))
+	if err != nil {
+		return nil, err
+	}
+	index, err := pageIndex(basePath)
+	if err != nil {
+		return nil, err
 	}
 	var paths []string
 	if workspace := strings.TrimSpace(cfg.Workspace); workspace != "" {
@@ -189,6 +211,9 @@ func New(cfg Config) (*Server, error) {
 		schedules:     newScheduler(schedulePath(root)),
 		shell:         cfg.Shell,
 		terminals:     terminalRegistry{terminals: map[string]*terminal{}},
+		basePath:      basePath,
+		index:         index,
+		indexETag:     contentETag(index),
 	}
 	defProvider := strings.TrimSpace(cfg.DefaultProvider)
 	// Turns ask before tools as the terminal would, unless ccl's bypass mode
@@ -249,35 +274,42 @@ func (s *Server) Close(ctx context.Context) error {
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/api/providers", s.authenticated(s.handleProviders))
-	mux.HandleFunc("/api/config", s.authenticated(s.handleConfig))
-	mux.HandleFunc("/api/config/providers", s.authenticated(s.handleConfigProviders))
-	mux.HandleFunc("/api/config/providers/", s.authenticated(s.handleConfigProvider))
-	mux.HandleFunc("/api/sessions", s.authenticated(s.handleSessions))
-	mux.HandleFunc("/api/capabilities", s.authenticated(s.handleCapabilities))
-	mux.HandleFunc("/api/workspaces", s.authenticated(s.handleWorkspaces))
-	mux.HandleFunc("/api/workspaces/", s.authenticated(s.handleWorkspaces))
-	mux.HandleFunc("/api/directories", s.authenticated(s.handleDirectories))
-	mux.HandleFunc("/api/files/", s.authenticated(s.withWorkspace(s.handleFiles)))
-	mux.HandleFunc("/api/git/", s.authenticated(s.withWorkspace(s.handleGit)))
-	mux.HandleFunc("/api/claude-sessions", s.authenticated(s.withWorkspace(s.handleClaudeSessions)))
-	mux.HandleFunc("/api/oauth/login", s.authenticated(s.handleOAuth))
-	mux.HandleFunc("/api/oauth/login/", s.authenticated(s.handleOAuth))
-	mux.HandleFunc("/api/mcp", s.authenticated(s.withWorkspace(s.handleMCP)))
-	mux.HandleFunc("/api/mcp/", s.authenticated(s.withWorkspace(s.handleMCP)))
-	mux.HandleFunc("/api/update", s.authenticated(s.handleUpdate))
-	mux.HandleFunc("/api/memory", s.authenticated(s.handleMemory))
-	mux.HandleFunc("/api/cloud", s.authenticated(s.handleCloud))
-	mux.HandleFunc("/api/cloud/", s.authenticated(s.handleCloud))
+	// Every route is registered under the prefix, so ServeMux's own redirects
+	// (a missing trailing slash, an unclean path) keep it; each handler and the
+	// guard then see the path they would see at the root.
+	handle := func(pattern string, handler http.Handler) {
+		mux.Handle(s.basePath+pattern, stripBasePath(s.basePath, s.guard(handler)))
+	}
+	handleFunc := func(pattern string, handler http.HandlerFunc) { handle(pattern, handler) }
+	handleFunc("/health", s.handleHealth)
+	handleFunc("/api/providers", s.authenticated(s.handleProviders))
+	handleFunc("/api/config", s.authenticated(s.handleConfig))
+	handleFunc("/api/config/providers", s.authenticated(s.handleConfigProviders))
+	handleFunc("/api/config/providers/", s.authenticated(s.handleConfigProvider))
+	handleFunc("/api/sessions", s.authenticated(s.handleSessions))
+	handleFunc("/api/capabilities", s.authenticated(s.handleCapabilities))
+	handleFunc("/api/workspaces", s.authenticated(s.handleWorkspaces))
+	handleFunc("/api/workspaces/", s.authenticated(s.handleWorkspaces))
+	handleFunc("/api/directories", s.authenticated(s.handleDirectories))
+	handleFunc("/api/files/", s.authenticated(s.withWorkspace(s.handleFiles)))
+	handleFunc("/api/git/", s.authenticated(s.withWorkspace(s.handleGit)))
+	handleFunc("/api/claude-sessions", s.authenticated(s.withWorkspace(s.handleClaudeSessions)))
+	handleFunc("/api/oauth/login", s.authenticated(s.handleOAuth))
+	handleFunc("/api/oauth/login/", s.authenticated(s.handleOAuth))
+	handleFunc("/api/mcp", s.authenticated(s.withWorkspace(s.handleMCP)))
+	handleFunc("/api/mcp/", s.authenticated(s.withWorkspace(s.handleMCP)))
+	handleFunc("/api/update", s.authenticated(s.handleUpdate))
+	handleFunc("/api/memory", s.authenticated(s.handleMemory))
+	handleFunc("/api/cloud", s.authenticated(s.handleCloud))
+	handleFunc("/api/cloud/", s.authenticated(s.handleCloud))
 	// A share link carries its own token instead of the server's.
-	mux.HandleFunc("/api/share/", s.handleShared)
+	handleFunc("/api/share/", s.handleShared)
 	// The terminal authenticates itself: its stream also takes ?token=.
-	mux.HandleFunc("/api/terminal", s.handleTerminal)
-	mux.HandleFunc("/api/terminal/", s.handleTerminal)
-	mux.HandleFunc("/api/claude-sessions/", s.authenticated(s.withWorkspace(s.handleClaudeSessions)))
+	handleFunc("/api/terminal", s.handleTerminal)
+	handleFunc("/api/terminal/", s.handleTerminal)
+	handleFunc("/api/claude-sessions/", s.authenticated(s.withWorkspace(s.handleClaudeSessions)))
 	// <img> cannot send a header: the raw file route also takes ?token=.
-	mux.HandleFunc("/api/files/raw", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("/api/files/raw", func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) && !s.queryAuthorized(r) {
 			writeError(w, http.StatusUnauthorized, "missing or invalid token")
 			return
@@ -291,9 +323,21 @@ func (s *Server) Handler() http.Handler {
 	// The session routes authenticate themselves: the stream and events
 	// endpoints also accept ?token=, which EventSource can use and a header
 	// cannot.
-	mux.HandleFunc("/api/sessions/", s.handleSession)
-	mux.Handle("/", s.staticHandler())
-	return s.guard(mux)
+	handleFunc("/api/sessions/", s.handleSession)
+	handle("/", s.staticHandler())
+	if s.basePath != "" {
+		// A container probe keeps asking /health; nothing else answers
+		// outside the prefix.
+		mux.Handle("/health", s.guard(http.HandlerFunc(s.handleHealth)))
+		mux.HandleFunc(s.basePath, func(w http.ResponseWriter, r *http.Request) {
+			target := s.basePath + "/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		})
+	}
+	return mux
 }
 
 func (s *Server) staticHandler() http.Handler {
@@ -317,8 +361,14 @@ func (s *Server) staticHandler() http.Handler {
 		// A share link is the page itself, which reads /api/share/<token>.
 		if strings.HasPrefix(name, "share/") {
 			w.Header().Set("Referrer-Policy", "no-referrer")
-			r = r.Clone(r.Context())
-			r.URL.Path, name = "/", "index.html"
+			name = "index.html"
+		}
+		// The page is served as rendered for this prefix, and validated by
+		// what it is, not by the embedded template.
+		if name == "index.html" {
+			w.Header().Set("ETag", s.indexETag)
+			http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(s.index))
+			return
 		}
 		// Vite names built assets by content hash: one URL never changes.
 		if strings.HasPrefix(name, "assets/") {
@@ -347,11 +397,29 @@ func assetETags(assets fs.FS) map[string]string {
 		if err != nil {
 			return nil
 		}
-		sum := sha256.Sum256(data)
-		etags[name] = `W/"` + hex.EncodeToString(sum[:8]) + `"`
+		etags[name] = contentETag(data)
 		return nil
 	})
 	return etags
+}
+
+func contentETag(data []byte) string {
+	sum := sha256.Sum256(data)
+	return `W/"` + hex.EncodeToString(sum[:8]) + `"`
+}
+
+// pageIndex is the embedded page with its base filled in for basePath. A
+// build without the base slot still serves at the root.
+func pageIndex(basePath string) ([]byte, error) {
+	index, err := fs.ReadFile(webAssets, "web/index.html")
+	if err != nil {
+		return nil, fmt.Errorf("the web UI is not built: %w", err)
+	}
+	rendered, err := renderIndex(index, basePath)
+	if err != nil && basePath == "" {
+		return index, nil
+	}
+	return rendered, err
 }
 
 // etagMatches applies If-None-Match's weak comparison.
@@ -379,6 +447,9 @@ func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) authorized(r *http.Request) bool {
+	if values := r.Header.Values(PageTokenHeader); len(values) > 0 {
+		return tokenEqual(strings.TrimSpace(values[0]), s.token)
+	}
 	header := strings.TrimSpace(r.Header.Get(TokenHeader))
 	if after, ok := cutPrefixFold(header, "bearer "); ok {
 		return tokenEqual(after, s.token)

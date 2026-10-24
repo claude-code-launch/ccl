@@ -96,8 +96,9 @@ func builtAssets(t *testing.T, base string) []string {
 		t.Fatal(err)
 	}
 	paths := []string{"/"}
-	for _, match := range regexp.MustCompile(`(?:src|href)="(/assets/[^"]+)"`).FindAllStringSubmatch(string(page), -1) {
-		paths = append(paths, match[1])
+	// The build references its assets relative to the page's <base>.
+	for _, match := range regexp.MustCompile(`(?:src|href)="\./(assets/[^"]+)"`).FindAllStringSubmatch(string(page), -1) {
+		paths = append(paths, "/"+match[1])
 	}
 	if len(paths) < 3 {
 		t.Fatalf("index.html references no built script and stylesheet (run npm run build in internal/webui/frontend):\n%s", page)
