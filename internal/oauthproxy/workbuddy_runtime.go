@@ -510,7 +510,7 @@ func (g *workbuddyGateway) discoverModels(ctx context.Context) ([]workbuddyModel
 // buildWorkBuddyRoutes maps the account catalog and the configured pool onto
 // runtime routes. details carries the catalog's per-model credit multiplier so
 // the model picker can show what each model costs.
-func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtimeModelRoute, []string, map[string]string, map[string]protocol.ModelInfo, error) {
+func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtimeModelRoute, []string, map[string]string, map[string]protocol.ModelInfo) {
 	lookup := make(map[string]workbuddyModel, len(catalog))
 	routes := make([]runtimeModelRoute, 0, len(catalog)+len(runtimeModelRoutes(modelSpec)))
 	models := make([]string, 0, len(catalog))
@@ -540,14 +540,18 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 		}
 		add(model.ID, model.ID)
 	}
+	// The account catalog is authoritative: a saved model WorkBuddy has since
+	// withdrawn must not stop the runtime, or the stale pool could never be
+	// refreshed from the catalog. Requests for it reach upstream unchanged.
 	for _, route := range runtimeModelRoutes(modelSpec) {
 		model, ok := lookup[strings.ToLower(route.Name)]
 		if !ok {
-			return nil, nil, nil, nil, fmt.Errorf("configured WorkBuddy model %q is not present in the upstream catalog", route.Name)
+			LogWarnEvent("configured_model_not_in_catalog", "component", "workbuddy", "model", route.Name)
+			continue
 		}
 		add(model.ID, route.Alias)
 	}
-	return routes, models, names, details, nil
+	return routes, models, names, details
 }
 
 // workbuddyCreditMultiplier reads the catalog's `credits` field, which is a
@@ -597,10 +601,7 @@ func startWorkBuddyOAuth(parent context.Context, providerName, modelSpec, creden
 	if err != nil {
 		return nil, err
 	}
-	routes, models, names, details, err := buildWorkBuddyRoutes(modelSpec, catalog)
-	if err != nil {
-		return nil, err
-	}
+	routes, models, names, details := buildWorkBuddyRoutes(modelSpec, catalog)
 	// The gateway verifies a per-runtime token on the internal hop before it
 	// attaches the user's subscription credential.
 	proxyRuntime, err := startOpenAIChatRuntimeRoutes(parent, gateway.endpoint, routes, &chatStaticAuthorizer{token: gateway.key})

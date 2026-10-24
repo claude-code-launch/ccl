@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -488,5 +489,21 @@ func TestWorkBuddyChinaDeploymentIsSeparateAccountStore(t *testing.T) {
 	}
 	if auths := runtime.ListAuths(); len(auths) != 1 || auths[0].Provider != ProviderWorkBuddyCN {
 		t.Fatalf("runtime auths = %+v", auths)
+	}
+}
+
+func TestBuildWorkBuddyRoutesSkipsModelsWithdrawnFromCatalog(t *testing.T) {
+	catalog := []workbuddyModel{{ID: "kimi-k2.8"}, {ID: "glm-5"}}
+	routes, models, _, _ := buildWorkBuddyRoutes("kimi-k2.7,GLM-5[1m]", catalog)
+	if got := strings.Join(models, ","); got != "kimi-k2.8,glm-5" {
+		t.Fatalf("models = %q", got)
+	}
+	for _, route := range routes {
+		if strings.EqualFold(route.Name, "kimi-k2.7") || strings.EqualFold(route.Alias, "kimi-k2.7") {
+			t.Fatalf("withdrawn model kept a route: %+v", routes)
+		}
+	}
+	if !slices.Contains(routes, runtimeModelRoute{Name: "glm-5", Alias: "GLM-5[1m]"}) {
+		t.Fatalf("catalog model lost its configured alias: %+v", routes)
 	}
 }
