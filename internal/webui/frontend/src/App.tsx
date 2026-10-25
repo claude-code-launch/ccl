@@ -2,7 +2,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Folders, Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
 import { Api, HttpError, Unauthorized, storeToken, storedToken } from "./api";
 import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProjectDefaults, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
-import { buildThread, latestCapabilities, pendingPermissions } from "./thread";
+import { agentsOf, agentThread, buildThread, latestCapabilities, pendingPermissions, toolActive } from "./thread";
+import { AgentBanner, AgentsPanel } from "./components/AgentsPanel";
 import { diffSection, download, safeFileName, transcriptHTML, transcriptMarkdown } from "./export";
 import { CommandPalette } from "./components/CommandPalette";
 import { useConversation } from "./useConversation";
@@ -117,7 +118,7 @@ export function App() {
   const [panel, setPanel] = useState<PanelTab | null>(() => {
     if (narrowScreen()) return null;
     const saved = readStorage("ccl-web-panel");
-    return saved === "closed" ? null : saved === "files" || saved === "git" || saved === "terminal" ? saved : "overview";
+    return saved === "closed" ? null : saved === "files" || saved === "git" || saved === "terminal" || saved === "agents" ? saved : "overview";
   });
   const [panelWide, setPanelWide] = useState(false);
   const [gitFocus, setGitFocus] = useState("");
@@ -326,6 +327,14 @@ export function App() {
 
   const conversation = useConversation(api, phase === "ready" ? currentId : null, scheduleRefresh, mergeSession);
   const items = useMemo(() => buildThread(conversation.events), [conversation.events]);
+  const agents = useMemo(() => agentsOf(items), [items]);
+  const agentsRunning = agents.filter(({ tool }) => toolActive(tool)).length;
+  // The sub-agent the main view shows instead of the conversation, like
+  // choosing an agent in Claude Code's agent list.
+  const [agentView, setAgentView] = useState<string | null>(null);
+  useEffect(() => setAgentView(null), [currentId]);
+  const viewed = agentView ? agents.find(({ tool }) => tool.key === agentView)?.tool : undefined;
+  const shownItems = useMemo(() => (viewed ? agentThread(viewed) : items), [viewed, items]);
   const capabilities = useMemo(() => {
     const own = latestCapabilities(conversation.events);
     return own ? { ...own, defaultPermissionMode: serverCapabilities.defaultPermissionMode } : serverCapabilities;
@@ -851,15 +860,18 @@ export function App() {
             onExport={exportTranscript}
             onShare={() => setShareOpen(true)}
             terminal={!!health?.shell}
+            agentsRunning={agentsRunning}
           />
           <div className="flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col">
               {conversation.error && (
                 <div className="mx-auto mt-2 w-full max-w-[635px] rounded-lg bg-red-500/10 px-3 py-2 text-[13px] text-red-500">{conversation.error}</div>
               )}
+              {viewed && <AgentBanner tool={viewed} onBack={() => setAgentView(null)} />}
               <Thread
-                items={items}
-                running={conversation.running}
+                key={viewed?.key || "main"}
+                items={shownItems}
+                running={viewed ? toolActive(viewed) : conversation.running}
                 loading={conversation.loading}
                 workspace={workspace}
                 route={route}
@@ -942,6 +954,7 @@ export function App() {
                       </Suspense>
                     </div>
                   )}
+                  {panel === "agents" && <AgentsPanel items={items} running={conversation.running} selected={viewed ? agentView : null} onSelect={setAgentView} />}
                   {panel === "git" && (
                     <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
                       <GitPanel key={scopeKey} api={wsApi} status={git} onStatus={setGit} onRefresh={loadGit} focus={gitFocus} onWide={setPanelWide} onError={fail} />

@@ -18,8 +18,10 @@ func TestServeCommandFlags(t *testing.T) {
 	if got := flags.Lookup("host").DefValue; got != "127.0.0.1" {
 		t.Fatalf("--host default = %q, want 127.0.0.1", got)
 	}
-	if got := flags.Lookup("port").DefValue; got != "8099" {
-		t.Fatalf("--port default = %q, want 8099", got)
+	// Without --port the system picks a free port, so two servers never
+	// collide; a fixed one has to be asked for.
+	if got := flags.Lookup("port").DefValue; got != "0" {
+		t.Fatalf("--port default = %q, want 0", got)
 	}
 	if got := flags.Lookup("open").DefValue; got != "true" {
 		t.Fatalf("--open default = %q, want true", got)

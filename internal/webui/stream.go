@@ -33,6 +33,9 @@ const ToolOutputLineLimit = 2000
 type UserPayload struct {
 	Text        string       `json:"text"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// Mirrored marks a prompt read from the transcript (mirror.go): typed in
+	// a terminal or imported, not a turn the page runs.
+	Mirrored bool `json:"mirrored,omitempty"`
 }
 
 // InitPayload reports the Claude session a turn runs in and what it offers.

@@ -85,7 +85,9 @@ type Config struct {
 
 // Server is the HTTP surface of ccl serve.
 type Server struct {
-	store    *Store
+	store *Store
+	// mirrorMu serializes following transcripts (mirror.go).
+	mirrorMu sync.Mutex
 	runner   *Runner
 	timeline *Timeline
 	token    string
@@ -747,6 +749,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		since := parseSeq(r.URL.Query().Get("since"))
+		s.syncMirror(session)
 		events, err := session.Events(since)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -1053,6 +1056,7 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 		}
 		spec.Workspace = tree.Path
 	}
+	s.pauseMirror(session)
 	handle, err := s.timeline.Start(s.runner, session, spec)
 	if err != nil {
 		return nil, err
@@ -1165,6 +1169,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, session *S
 
 	changed := s.subscribe(session.ID())
 	defer s.unsubscribe(session.ID(), changed)
+	// What a terminal adds to the conversation's Claude session shows too.
+	go s.followTranscript(r.Context(), session)
 
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()

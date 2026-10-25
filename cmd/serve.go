@@ -40,7 +40,7 @@ func newServeCommand() *cobra.Command {
 		basePath       string
 	)
 	cmd := &cobra.Command{
-		Use:   "serve [--port 8099 | --socket [path]] [--workspace dir]... [--workspace-root dir]... [--host 127.0.0.1] [--token <token>]",
+		Use:   "serve [--port <port> | --socket [path]] [--workspace dir]... [--workspace-root dir]... [--host 127.0.0.1] [--token <token>]",
 		Short: locale.T("在浏览器中使用 ccl 会话（HTTP + SSE，或本机 Unix socket）", "Use ccl conversations from a browser (HTTP + SSE, or a local Unix socket)"),
 		Long: locale.T(`在浏览器中运行 ccl 会话：一个对话就是一个 ccl 终端实例（读写项目文件、运行工具、切换 provider）。
 
@@ -122,8 +122,9 @@ Examples:
 			if requiresToken && strings.TrimSpace(token) == "" {
 				return fmt.Errorf("--host %s is not a loopback address, so a token is required: pass --token or set CCL_SERVE_TOKEN", host)
 			}
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("--port must be between 1 and 65535, got %d", port)
+			// 0, the default, lets the system pick a free port.
+			if port < 0 || port > 65535 {
+				return fmt.Errorf("--port must be between 0 and 65535, got %d", port)
 			}
 			if len(workspaces) == 0 && len(workspaceRoots) == 0 {
 				workspaces = []string{"."}
@@ -162,6 +163,10 @@ Examples:
 				listener, err = net.Listen("tcp", address)
 				if err != nil {
 					return fmt.Errorf("listen on %s: %w", address, err)
+				}
+				// Without --port the system picks a free one.
+				if tcp, ok := listener.Addr().(*net.TCPAddr); ok {
+					port = tcp.Port
 				}
 			}
 			// Every request context derives from base, so cancelling it ends
@@ -233,7 +238,7 @@ Examples:
 		},
 	}
 	flags := cmd.Flags()
-	flags.IntVar(&port, "port", 8099, "TCP port to listen on")
+	flags.IntVar(&port, "port", 0, "TCP port to listen on (default: a free port, printed at start)")
 	flags.StringVar(&host, "host", "127.0.0.1", "Address to bind (anything but a loopback address requires --token)")
 	flags.BoolVar(&openBrowser, "open", true, "Open the system browser once the server is ready (--open=false to disable)")
 	flags.BoolVar(&noOpen, "no-open", false, "Do not open a browser (containers); overrides --open")

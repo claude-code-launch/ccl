@@ -53,6 +53,8 @@ export interface Attachment {
 export interface UserPayload {
   text: string;
   attachments?: Attachment[];
+  // Read from the transcript: typed in a terminal, or imported.
+  mirrored?: boolean;
 }
 
 export interface MCPServer {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -63,8 +64,12 @@ func claudeSessionsServer(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	httpServer := testServer(t, Config{Token: "secret", Workspace: workspace})
+	transcriptDir = dir
 	return httpServer.URL, id
 }
+
+// transcriptDir is the project directory of the last claudeSessionsServer.
+var transcriptDir string
 
 func TestClaudeSessionsListAndImport(t *testing.T) {
 	base, id := claudeSessionsServer(t)
@@ -93,9 +98,10 @@ func TestClaudeSessionsListAndImport(t *testing.T) {
 	for _, event := range events {
 		kinds = append(kinds, event.Type)
 	}
-	// The sub-agent's own transcript is replayed under its Agent call, and
-	// the notification of its end is a task event, not a prompt.
-	want := "user,token,tool_use,tool_result,token,result,user,token,tool_use,tool_use,tool_result,token,tool_result,task,token,task,result"
+	// The sub-agent's own transcript is replayed under its Agent call, its
+	// final answer marks it done, and the notification of its end is a task
+	// event, not a prompt.
+	want := "user,token,tool_use,tool_result,token,result,user,token,tool_use,tool_use,tool_result,token,task,tool_result,task,token,task,result"
 	if strings.Join(kinds, ",") != want {
 		t.Fatalf("events = %s, want %s", strings.Join(kinds, ","), want)
 	}
@@ -104,17 +110,20 @@ func TestClaudeSessionsListAndImport(t *testing.T) {
 			t.Fatalf("sub-agent event %d = %s", index, events[index].Payload)
 		}
 	}
-	if strings.Contains(string(events[12].Payload), "parent") {
-		t.Fatalf("the Agent call's own result is not the sub-agent's: %s", events[12].Payload)
+	if !strings.Contains(string(events[12].Payload), `"status":"completed"`) {
+		t.Fatalf("the sub-agent's answer did not end it: %s", events[12].Payload)
+	}
+	if strings.Contains(string(events[13].Payload), "parent") {
+		t.Fatalf("the Agent call's own result is not the sub-agent's: %s", events[13].Payload)
 	}
 	var task TaskPayload
-	_ = json.Unmarshal(events[13].Payload, &task)
+	_ = json.Unmarshal(events[14].Payload, &task)
 	if task.ID != "a1" || task.Status != "completed" || task.Summary != `Agent "Check docs" finished` {
 		t.Fatalf("task = %+v", task)
 	}
 	// A sub-agent woken again names only itself when it stops.
-	if !strings.Contains(string(events[15].Payload), `"id":"a1"`) {
-		t.Fatalf("agent-only notification = %s", events[15].Payload)
+	if !strings.Contains(string(events[16].Payload), `"id":"a1"`) {
+		t.Fatalf("agent-only notification = %s", events[16].Payload)
 	}
 	if !strings.Contains(string(events[0].Payload), `"/review main.go"`) {
 		t.Fatalf("command prompt = %s", events[0].Payload)
@@ -138,5 +147,96 @@ func TestClaudeSessionsListAndImport(t *testing.T) {
 	}
 	if status, _ := doJSON(t, "POST", base+"/api/claude-sessions/import", "secret", `{"id":"../../etc/passwd"}`); status != http.StatusNotFound {
 		t.Fatalf("traversal import = %d", status)
+	}
+}
+
+func TestImportedConversationFollowsItsTranscript(t *testing.T) {
+	base, id := claudeSessionsServer(t)
+	status, body := doJSON(t, "POST", base+"/api/claude-sessions/import", "secret", `{"id":"`+id+`"}`)
+	var meta Meta
+	_ = json.Unmarshal(body, &meta)
+	if status != http.StatusCreated {
+		t.Fatalf("import = %d: %s", status, body)
+	}
+	_, body = doJSON(t, "GET", base+"/api/sessions/"+meta.ID+"/events", "secret", "")
+	var imported []Event
+	_ = json.Unmarshal(body, &imported)
+	last := imported[len(imported)-1].Seq
+
+	// `ccl --resume` in a terminal continues the session: a prompt, a
+	// background sub-agent still at work, and the end of the turn.
+	appendLines := func(path string, lines ...string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		for _, line := range lines {
+			if _, err := file.WriteString(line + "\n"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	transcript := filepath.Join(transcriptDir, id+".jsonl")
+	subagents := filepath.Join(transcriptDir, id, "subagents")
+	appendLines(transcript,
+		`{"type":"user","message":{"role":"user","content":"ping every 10s"},"timestamp":"2026-10-22T09:00:00Z"}`,
+		`{"type":"assistant","message":{"id":"m5","role":"assistant","content":[{"type":"tool_use","id":"a2","name":"Agent","input":{"description":"Ping"}}]},"timestamp":"2026-10-22T09:00:01Z"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"a2","content":"Async agent launched successfully."}]},"timestamp":"2026-10-22T09:00:02Z"}`,
+		`{"type":"assistant","message":{"id":"m6","role":"assistant","content":[{"type":"text","text":"Started."}]},"timestamp":"2026-10-22T09:00:03Z"}`,
+		`{"type":"system","subtype":"turn_duration","durationMs":3000,"timestamp":"2026-10-22T09:00:03Z"}`,
+	)
+	if err := os.WriteFile(filepath.Join(subagents, "agent-x2.meta.json"), []byte(`{"toolUseId":"a2"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent := filepath.Join(subagents, "agent-x2.jsonl")
+	appendLines(agent,
+		`{"type":"user","isSidechain":true,"message":{"role":"user","content":"ping"},"timestamp":"2026-10-22T09:00:02Z"}`,
+		`{"type":"assistant","isSidechain":true,"message":{"id":"s4","role":"assistant","content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ping -c1 example.com"}}]},"timestamp":"2026-10-22T09:00:04Z"}`,
+	)
+
+	since := func() []Event {
+		t.Helper()
+		_, body := doJSON(t, "GET", base+"/api/sessions/"+meta.ID+"/events?since="+strconv.FormatInt(last, 10), "secret", "")
+		var events []Event
+		_ = json.Unmarshal(body, &events)
+		if len(events) > 0 {
+			last = events[len(events)-1].Seq
+		}
+		return events
+	}
+	kinds := func(events []Event) string {
+		var out []string
+		for _, event := range events {
+			out = append(out, event.Type)
+		}
+		return strings.Join(out, ",")
+	}
+	added := since()
+	if got, want := kinds(added), "user,tool_use,tool_use,task,tool_result,token,result"; got != want {
+		t.Fatalf("followed events = %s, want %s", got, want)
+	}
+	if !strings.Contains(string(added[2].Payload), `"parent":"a2"`) || !strings.Contains(string(added[3].Payload), `"status":"running"`) {
+		t.Fatalf("sub-agent step = %s, task = %s", added[2].Payload, added[3].Payload)
+	}
+	if !strings.Contains(string(added[6].Payload), `"durationMs":3000`) {
+		t.Fatalf("turn end = %s", added[6].Payload)
+	}
+
+	// Nothing new, nothing added; the sub-agent's next steps arrive later.
+	if again := since(); len(again) != 0 {
+		t.Fatalf("a second look added %s", kinds(again))
+	}
+	appendLines(agent,
+		`{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b1","content":"64 bytes"}]},"timestamp":"2026-10-22T09:00:05Z"}`,
+		`{"type":"assistant","isSidechain":true,"message":{"id":"s5","role":"assistant","content":[{"type":"text","text":"all pings answered"}],"usage":{"output_tokens":42}},"timestamp":"2026-10-22T09:03:00Z"}`,
+	)
+	later := since()
+	if got, want := kinds(later), "tool_result,token,task"; got != want {
+		t.Fatalf("later events = %s, want %s", got, want)
+	}
+	if !strings.Contains(string(later[1].Payload), `"parent":"a2"`) || !strings.Contains(string(later[2].Payload), `"status":"completed"`) || !strings.Contains(string(later[2].Payload), `"tokens":42`) {
+		t.Fatalf("sub-agent answer = %s, task = %s", later[1].Payload, later[2].Payload)
 	}
 }

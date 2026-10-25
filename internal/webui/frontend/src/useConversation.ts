@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { Api } from "./api";
-import type { Session, StoredEvent } from "./types";
+import type { Session, StoredEvent, UserPayload } from "./types";
 
-const STREAM_TYPES = ["init", "token", "thinking", "context", "tool_use", "tool_result", "permission", "permission_resolved", "result", "error", "queued", "status", "user"];
+// EventSource delivers only the event types it listens for by name, so every
+// type the server stores must be here (stream_types_test.go checks it).
+const STREAM_TYPES = ["init", "token", "thinking", "context", "tool_use", "tool_result", "task", "permission", "permission_resolved", "result", "error", "queued", "status", "user"];
 
 export interface Conversation {
   events: StoredEvent[];
@@ -70,7 +72,9 @@ export function useConversation(
           lastSeq = seq;
           buffer.push({ seq, type, payload, ts: Date.now() });
           schedule();
-          if (type === "user") setRunning(true); // possibly from another tab
+          // A prompt from another tab starts a turn; one read from the
+          // transcript (typed in a terminal) is not a turn the page runs.
+          if (type === "user" && !(payload as UserPayload).mirrored) setRunning(true);
           if (type === "result") setRunning(false);
           if (type === "user" || type === "status" || type === "result") callbacks.current.onBoundary();
         });

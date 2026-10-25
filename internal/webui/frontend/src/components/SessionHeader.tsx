@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Download, FolderOpen, GitBranch, Link2, PanelLeft, PanelRight, Pencil, SquareTerminal, Trash2 } from "lucide-react";
+import { Bot, ChevronDown, Download, FolderOpen, GitBranch, Link2, PanelLeft, PanelRight, Pencil, SquareTerminal, Trash2 } from "lucide-react";
 import type { Session } from "../types";
 import { useI18n } from "../i18n";
 import { IconButton, MenuButton } from "./Sidebar";
@@ -16,13 +16,15 @@ interface Props {
   onShare: () => void;
   // The server offers a terminal (ccl serve --shell).
   terminal: boolean;
+  // How many sub-agents are working now.
+  agentsRunning: number;
 }
 
 // The title bar of claude.ai/code: the session title with its menu on the
 // left, panel toggles on the right.
-export type PanelTab = "overview" | "files" | "git" | "terminal";
+export type PanelTab = "overview" | "files" | "git" | "terminal" | "agents";
 
-export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, onPanel, onRename, onDelete, onExport, onShare, terminal }: Props) {
+export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, onPanel, onRename, onDelete, onExport, onShare, terminal, agentsRunning }: Props) {
   const { t } = useI18n();
   const [menu, setMenu] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -71,6 +73,14 @@ export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, on
       </IconButton>
       <IconButton title={t("git")} onClick={() => onPanel("git")} active={panel === "git"}>
         <GitBranch size={16} />
+      </IconButton>
+      <IconButton title={t("agents")} onClick={() => onPanel("agents")} active={panel === "agents"}>
+        <span className="relative">
+          <Bot size={16} />
+          {agentsRunning > 0 && (
+            <span className="absolute -right-2 -top-1.5 grid h-[14px] min-w-[14px] place-items-center rounded-full bg-clay px-[3px] text-[9.5px] font-medium leading-none text-white">{agentsRunning}</span>
+          )}
+        </span>
       </IconButton>
       {terminal && (
         <IconButton title={t("terminal")} onClick={() => onPanel("terminal")} active={panel === "terminal"}>

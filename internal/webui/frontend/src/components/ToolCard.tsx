@@ -2,7 +2,7 @@ import { memo, useState } from "react";
 import type { ReactNode } from "react";
 import { ChevronRight, CircleX, LoaderCircle } from "lucide-react";
 import type { ThreadItem, ToolItem } from "../thread";
-import { editStats, latestStep, toolActive, toolEdit, toolPlan, toolTodos } from "../thread";
+import { editStats, isAgent, latestStep, toolActive, toolEdit, toolPlan, toolTodos } from "../thread";
 import { useI18n } from "../i18n";
 import { DiffStat, DiffView, PlanCard, TodoCard } from "./ToolViews";
 
@@ -25,7 +25,7 @@ export const ToolCard = memo(function ToolCard({ tool, renderItems }: { tool: To
   const stats = editStats(tool);
   const line = tool.description || [tool.name, tool.summary].filter(Boolean).join(" ");
   const shell = tool.name === "Bash" || tool.name === "BashOutput";
-  const agent = tool.children.length > 0 || tool.name === "Task" || tool.name === "Agent";
+  const agent = isAgent(tool);
   const step = agent && running && !open ? latestStep(tool) : "";
   const seconds = !running && tool.task?.usage?.durationMs ? `${(tool.task.usage.durationMs / 1000).toFixed(1)}s` : "";
   // A launched task's tool_result is a note for the model ("Async agent

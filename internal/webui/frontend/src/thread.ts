@@ -36,6 +36,11 @@ export type ToolItem = {
   // The background work the call started. Its tool_result only says the work
   // was launched; this says whether it still runs and how it ended.
   task?: Omit<TaskPayload, "id">;
+  // When the call started and, for background work, when that ended (ms).
+  startedAt: number;
+  endedAt?: number;
+  // The sub-agent call this one was made in.
+  parent?: ToolItem;
 };
 
 export type PermissionItem = {
@@ -77,9 +82,13 @@ const scope = (items: ThreadItem[]): Scope => ({ items, text: null, thinking: nu
 
 export function buildThread(events: StoredEvent[]): ThreadItem[] {
   const root = scope([]);
-  // Tool ids are only meaningful within a turn.
+  // Tool ids are only meaningful within a turn (some providers reuse them).
+  // A background sub-agent can report after the turn that started it, so its
+  // events fall back to the latest earlier call with that id.
   let tools = new Map<string, ToolItem>();
-  let scopes = new Map<string, Scope>();
+  const earlier = new Map<string, ToolItem>();
+  const scopes = new Map<ToolItem, Scope>();
+  const callOf = (id: string) => tools.get(id) || earlier.get(id);
   const permissions = new Map<string, PermissionItem>();
   let model: string | undefined;
   let lastDay = "";
@@ -87,12 +96,12 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
   // A sub-agent's event goes into its Task call when that call is known.
   const scopeFor = (parent?: string): Scope => {
     if (!parent) return root;
-    const tool = tools.get(parent);
+    const tool = callOf(parent);
     if (!tool) return root;
-    let child = scopes.get(parent);
+    let child = scopes.get(tool);
     if (!child) {
       child = scope(tool.children);
-      scopes.set(parent, child);
+      scopes.set(tool, child);
     }
     return child;
   };
@@ -109,8 +118,8 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
           root.items.push({ kind: "day", key: `d${event.seq}`, ts: event.ts });
         }
         root.items.push({ kind: "user", key: `u${event.seq}`, text: String(user.text || ""), attachments: user.attachments || [], ts: event.ts });
+        for (const [id, tool] of tools) earlier.set(id, tool);
         tools = new Map();
-        scopes = new Map();
         root.text = root.thinking = root.lastTool = null;
         model = undefined;
         break;
@@ -162,6 +171,8 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
             subagent: !!use.subagent && target === root,
             status: "running",
             children: [],
+            startedAt: event.ts,
+            parent: parent ? callOf(parent) : undefined,
           };
           if (use.id) tools.set(use.id, tool);
           target.items.push(tool);
@@ -176,7 +187,7 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
       case "tool_result": {
         const result = payload as unknown as ToolResultPayload;
         const target = scopeFor(parent);
-        const tool = (result.id && tools.get(result.id)) || target.lastTool;
+        const tool = (result.id && (parent ? callOf(result.id) : tools.get(result.id))) || target.lastTool;
         if (tool) {
           tool.status = result.ok === false ? "err" : "ok";
           tool.output = result.output || "";
@@ -186,8 +197,11 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
       }
       case "task": {
         const { id, ...task } = payload as unknown as TaskPayload;
-        const tool = id ? tools.get(id) : undefined;
-        if (tool) tool.task = { ...tool.task, ...task, summary: task.summary || tool.task?.summary, usage: task.usage || tool.task?.usage };
+        const tool = id ? callOf(id) : undefined;
+        if (tool) {
+          tool.task = { ...tool.task, ...task, summary: task.summary || tool.task?.summary, usage: task.usage || tool.task?.usage };
+          tool.endedAt = task.status === "running" ? undefined : event.ts;
+        }
         break;
       }
       case "permission": {
@@ -236,10 +250,13 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
       case "result":
         root.text = root.thinking = root.lastTool = null;
         // A tool still marked running when its turn ended never reported back,
-        // and a question nobody answered can no longer be answered.
+        // and a question nobody answered can no longer be answered. Background
+        // work outlives a turn that ended normally (one continued in a
+        // terminal); a stopped or failed turn ends it.
+        const ended = !!(payload.cancelled || payload.isError);
         for (const tool of tools.values()) {
-          if (tool.status === "running") tool.status = "err";
-          if (tool.task?.status === "running") tool.task.status = "stopped";
+          if (tool.status === "running" && (ended || !inRunningAgent(tool))) tool.status = "err";
+          if (ended && tool.task?.status === "running") tool.task.status = "stopped";
         }
         for (const item of permissions.values()) {
           if (item.status === "pending") item.status = "cancelled";
@@ -264,6 +281,38 @@ export function latestCapabilities(events: StoredEvent[]): Capabilities | null {
 // A call is working while it runs or while the background work it started does.
 export function toolActive(tool: ToolItem): boolean {
   return tool.status === "running" || tool.task?.status === "running";
+}
+
+// A call made inside a sub-agent that still works is not over when the turn
+// that started the sub-agent is.
+function inRunningAgent(tool: ToolItem): boolean {
+  for (let owner = tool.parent; owner; owner = owner.parent) {
+    if (owner.task?.status === "running") return true;
+  }
+  return false;
+}
+
+export const isAgent = (tool: ToolItem) => tool.name === "Agent" || tool.name === "Task" || tool.children.length > 0;
+
+// agentsOf lists a conversation's sub-agents in order, each with how deeply
+// it is nested in another one.
+export function agentsOf(items: ThreadItem[], depth = 0): { tool: ToolItem; depth: number }[] {
+  const out: { tool: ToolItem; depth: number }[] = [];
+  for (const item of items) {
+    if (item.kind !== "tool") continue;
+    const agent = isAgent(item);
+    if (agent) out.push({ tool: item, depth });
+    out.push(...agentsOf(item.children, agent ? depth + 1 : depth));
+  }
+  return out;
+}
+
+// agentThread is a sub-agent's own conversation, for the main view: the
+// prompt it was given, then what it did.
+export function agentThread(tool: ToolItem): ThreadItem[] {
+  const prompt = typeof tool.input?.prompt === "string" ? tool.input.prompt : "";
+  const head: ThreadItem[] = prompt ? [{ kind: "user", key: `${tool.key}-prompt`, text: prompt, attachments: [], ts: tool.startedAt }] : [];
+  return [...head, ...tool.children];
 }
 
 // The latest step of a sub-agent, for its call's one-line preview.

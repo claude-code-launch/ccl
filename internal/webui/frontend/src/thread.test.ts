@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildThread, latestCapabilities } from "./thread";
-import { basename, dayLabel, fileSize, relativeTime, shortPath, turnSummary } from "./format";
+import { basename, dayLabel, elapsed, fileSize, relativeTime, shortPath, tokenCount, turnSummary } from "./format";
 import { translator } from "./i18n";
 import type { StoredEvent } from "./types";
 
@@ -148,7 +148,7 @@ describe("format helpers", () => {
 });
 
 import { diffLines, diffStats, withContext } from "./diff";
-import { editStats, latestStep, toolActive, toolTodos } from "./thread";
+import { agentsOf, agentThread, editStats, latestStep, toolActive, toolTodos } from "./thread";
 
 describe("sub-agents and thinking", () => {
   it("nests a sub-agent's events under its Task call", () => {
@@ -176,11 +176,11 @@ describe("sub-agents and thinking", () => {
       ev("task", { id: "a1", status: "running", description: "Check the docs", agent: "Explore" }),
       ev("tool_result", { id: "a1", ok: true, output: "Async agent launched successfully." }),
       ev("tool_use", { id: "r1", name: "Read", summary: "a.go", description: "", subagent: true, parent: "a1" }),
-      ev("result", { usage: {}, isError: false }),
+      ev("result", { usage: {}, isError: false, cancelled: true }),
     ];
     let agent = buildThread(events)[2];
     if (agent.kind !== "tool") throw new Error("not a tool");
-    // The turn ended without the task's notification: it was stopped.
+    // The turn was stopped before the task's notification: so was the task.
     expect(agent.task?.status).toBe("stopped");
     expect(toolActive(agent)).toBe(false);
 
@@ -194,6 +194,64 @@ describe("sub-agents and thinking", () => {
     if (agent.kind !== "tool") throw new Error("not a tool");
     expect(toolActive(agent)).toBe(false);
     expect(agent.task).toMatchObject({ status: "completed", summary: "found it", agent: "Explore", usage: { durationMs: 1500 } });
+  });
+
+  it("keeps a sub-agent working after a turn continued in a terminal ends", () => {
+    const items = buildThread([
+      ev("user", { text: "ping every 10s" }),
+      ev("tool_use", { id: "a1", name: "Agent", summary: "", description: "Ping" }),
+      ev("task", { id: "a1", status: "running" }),
+      ev("tool_result", { id: "a1", ok: true, output: "Async agent launched successfully." }),
+      ev("tool_use", { id: "b0", name: "Bash", summary: "ping for a while", subagent: true, parent: "a1" }),
+      ev("result", { usage: { durationMs: 3000 }, isError: false }),
+      ev("user", { text: "anything else?" }),
+      ev("tool_use", { id: "b1", name: "Bash", summary: "ping", subagent: true, parent: "a1" }),
+    ]);
+    const agent = items[2];
+    if (agent.kind !== "tool") throw new Error("not a tool");
+    expect(agent.children[0].kind === "tool" && agent.children[0].status).toBe("running");
+    // Its later steps still land in its card, after the next prompt.
+    expect(agent.children.map((child) => child.kind === "tool" && child.id)).toEqual(["b0", "b1"]);
+    expect(agent.task?.status).toBe("running");
+    expect(items.filter((item) => item.kind === "tool")).toHaveLength(1);
+  });
+
+  it("lists sub-agents with their nesting and timing", () => {
+    const items = buildThread([
+      ev("user", { text: "x" }),
+      ev("tool_use", { id: "a1", name: "Agent", summary: "", description: "Outer" }, 1_000),
+      ev("task", { id: "a1", status: "running", agent: "Explore" }, 1_000),
+      ev("tool_use", { id: "r1", name: "Read", summary: "a.go", parent: "a1" }, 2_000),
+      ev("tool_use", { id: "a2", name: "Task", summary: "", description: "Inner", parent: "a1" }, 3_000),
+      ev("tool_use", { id: "b1", name: "Bash", summary: "ls" }, 4_000),
+      ev("task", { id: "a1", status: "completed" }, 9_000),
+    ]);
+    const agents = agentsOf(items);
+    expect(agents.map(({ tool, depth }) => [tool.id, depth])).toEqual([
+      ["a1", 0],
+      ["a2", 1],
+    ]);
+    expect(agents[0].tool.startedAt).toBe(1_000);
+    expect(agents[0].tool.endedAt).toBe(9_000);
+  });
+
+  it("shows a sub-agent's own conversation: its prompt, then its steps", () => {
+    const items = buildThread([
+      ev("user", { text: "x" }),
+      ev("tool_use", { id: "a1", name: "Agent", summary: "", description: "Ping", input: { prompt: "ping google 18 times" } }),
+      ev("tool_use", { id: "b1", name: "Bash", summary: "ping", parent: "a1" }),
+      ev("token", { text: "18 pings answered", parent: "a1" }),
+    ]);
+    const agent = items[2];
+    if (agent.kind !== "tool") throw new Error("not a tool");
+    expect(agentThread(agent).map((item) => item.kind)).toEqual(["user", "tool", "text"]);
+    const prompt = agentThread(agent)[0];
+    expect(prompt.kind === "user" && prompt.text).toBe("ping google 18 times");
+  });
+
+  it("formats elapsed time and token counts like Claude Code's task list", () => {
+    expect([elapsed(8_400), elapsed(542_000), elapsed(3_780_000)]).toEqual(["8s", "9m 2s", "1h 3m"]);
+    expect([tokenCount(950), tokenCount(50_040), tokenCount(1_200_000)]).toEqual(["950", "50.0k", "1.2M"]);
   });
 
   it("starts a new paragraph for the answer to finished background work", () => {
