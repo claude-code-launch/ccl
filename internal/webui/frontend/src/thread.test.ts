@@ -148,7 +148,7 @@ describe("format helpers", () => {
 });
 
 import { diffLines, diffStats, withContext } from "./diff";
-import { editStats, toolTodos } from "./thread";
+import { editStats, latestStep, toolActive, toolTodos } from "./thread";
 
 describe("sub-agents and thinking", () => {
   it("nests a sub-agent's events under its Task call", () => {
@@ -167,6 +167,44 @@ describe("sub-agents and thinking", () => {
     if (task.kind !== "tool") throw new Error("not a tool");
     expect(task.children.map((child) => child.kind)).toEqual(["text", "tool"]);
     expect(task.status).toBe("ok");
+  });
+
+  it("keeps a background sub-agent's call working until its task ends", () => {
+    const events = [
+      ev("user", { text: "x" }),
+      ev("tool_use", { id: "a1", name: "Agent", summary: "", description: "Check the docs" }),
+      ev("task", { id: "a1", status: "running", description: "Check the docs", agent: "Explore" }),
+      ev("tool_result", { id: "a1", ok: true, output: "Async agent launched successfully." }),
+      ev("tool_use", { id: "r1", name: "Read", summary: "a.go", description: "", subagent: true, parent: "a1" }),
+      ev("result", { usage: {}, isError: false }),
+    ];
+    let agent = buildThread(events)[2];
+    if (agent.kind !== "tool") throw new Error("not a tool");
+    // The turn ended without the task's notification: it was stopped.
+    expect(agent.task?.status).toBe("stopped");
+    expect(toolActive(agent)).toBe(false);
+
+    agent = buildThread(events.slice(0, -1))[2];
+    if (agent.kind !== "tool") throw new Error("not a tool");
+    expect(agent.status).toBe("ok");
+    expect(toolActive(agent)).toBe(true);
+    expect(latestStep(agent)).toBe("Read a.go");
+
+    agent = buildThread([...events.slice(0, -1), ev("task", { id: "a1", status: "completed", summary: "found it", usage: { tokens: 9, toolUses: 1, durationMs: 1500 } })])[2];
+    if (agent.kind !== "tool") throw new Error("not a tool");
+    expect(toolActive(agent)).toBe(false);
+    expect(agent.task).toMatchObject({ status: "completed", summary: "found it", agent: "Explore", usage: { durationMs: 1500 } });
+  });
+
+  it("starts a new paragraph for the answer to finished background work", () => {
+    const items = buildThread([
+      ev("user", { text: "x" }),
+      ev("init", { sessionId: "s" }),
+      ev("token", { text: "Started an agent." }),
+      ev("init", { sessionId: "s" }),
+      ev("token", { text: "It found the bug." }),
+    ]);
+    expect(items.filter((item) => item.kind === "text").map((item) => item.kind === "text" && item.text)).toEqual(["Started an agent.", "It found the bug."]);
   });
 
   it("collects thinking into its own block before the reply", () => {

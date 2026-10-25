@@ -93,6 +93,19 @@ export interface ToolUsePayload {
   subagent?: boolean;
 }
 
+// The state of background work a tool call started: a sub-agent, which
+// Claude Code always runs in the background, or a background shell.
+export interface TaskPayload {
+  // The tool call that started it.
+  id: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  description?: string;
+  agent?: string;
+  summary?: string;
+  lastTool?: string;
+  usage?: { tokens: number; toolUses: number; durationMs: number };
+}
+
 export interface ToolResultPayload {
   id: string;
   parent?: string;

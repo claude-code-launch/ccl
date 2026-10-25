@@ -4,6 +4,7 @@ import type {
   InitPayload,
   ResultPayload,
   StoredEvent,
+  TaskPayload,
   TokenPayload,
   ToolResultPayload,
   ToolUsePayload,
@@ -32,6 +33,9 @@ export type ToolItem = {
   output?: string;
   // What a sub-agent did inside this call (Task / Agent).
   children: ThreadItem[];
+  // The background work the call started. Its tool_result only says the work
+  // was launched; this says whether it still runs and how it ended.
+  task?: Omit<TaskPayload, "id">;
 };
 
 export type PermissionItem = {
@@ -113,6 +117,9 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
       }
       case "init":
         model = (payload as unknown as InitPayload).model || model;
+        // A later init in the same turn starts Claude Code's answer to
+        // background work that finished: its text is a new paragraph.
+        root.text = root.thinking = null;
         break;
       case "thinking": {
         const target = scopeFor(parent);
@@ -177,6 +184,12 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
         target.lastTool = null;
         break;
       }
+      case "task": {
+        const { id, ...task } = payload as unknown as TaskPayload;
+        const tool = id ? tools.get(id) : undefined;
+        if (tool) tool.task = { ...tool.task, ...task, summary: task.summary || tool.task?.summary, usage: task.usage || tool.task?.usage };
+        break;
+      }
       case "permission": {
         root.text = root.thinking = null;
         const request = payload as Record<string, unknown>;
@@ -226,6 +239,7 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
         // and a question nobody answered can no longer be answered.
         for (const tool of tools.values()) {
           if (tool.status === "running") tool.status = "err";
+          if (tool.task?.status === "running") tool.task.status = "stopped";
         }
         for (const item of permissions.values()) {
           if (item.status === "pending") item.status = "cancelled";
@@ -245,6 +259,20 @@ export function latestCapabilities(events: StoredEvent[]): Capabilities | null {
     return { slashCommands: init.slashCommands || [], mcpServers: init.mcpServers || [] };
   }
   return null;
+}
+
+// A call is working while it runs or while the background work it started does.
+export function toolActive(tool: ToolItem): boolean {
+  return tool.status === "running" || tool.task?.status === "running";
+}
+
+// The latest step of a sub-agent, for its call's one-line preview.
+export function latestStep(tool: ToolItem): string {
+  for (let i = tool.children.length - 1; i >= 0; i--) {
+    const child = tool.children[i];
+    if (child.kind === "tool") return child.description || [child.name, child.summary].filter(Boolean).join(" ");
+  }
+  return tool.task?.summary || tool.task?.lastTool || "";
 }
 
 const str = (value: unknown) => (typeof value === "string" ? value : "");

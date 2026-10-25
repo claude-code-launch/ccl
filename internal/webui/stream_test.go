@@ -109,6 +109,45 @@ func TestTranslatorSubagentFlag(t *testing.T) {
 	}
 }
 
+func TestTranslatorTaskEvents(t *testing.T) {
+	translator := newTranslator()
+	var events []recorded
+	handle := func(line string) {
+		translator.Handle([]byte(line), func(kind string, payload any) {
+			events = append(events, recorded{kind: kind, payload: payload})
+		})
+	}
+	handle(`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"},{"task_id":"w1","ambient":true}]}`)
+	if !translator.Background() {
+		t.Fatal("a live agent task is background work")
+	}
+	handle(`{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_agent","description":"check docs","subagent_type":"Explore","is_backgrounded":true,"task_type":"local_agent"}`)
+	handle(`{"type":"system","subtype":"task_progress","task_id":"a1","tool_use_id":"toolu_agent","description":"check docs","usage":{"total_tokens":120,"tool_uses":2,"duration_ms":900},"last_tool_name":"Read"}`)
+	handle(`{"type":"system","subtype":"task_started","task_id":"w1","tool_use_id":"toolu_watch","description":"watch","ambient":true}`)
+	handle(`{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_agent","status":"completed","summary":"found it","usage":{"total_tokens":300,"tool_uses":4,"duration_ms":2000}}`)
+	handle(`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","ambient":true}]}`)
+	if translator.Background() {
+		t.Fatal("only ambient tasks are left")
+	}
+
+	tasks := findKind(events, EventTask)
+	if len(tasks) != 3 {
+		t.Fatalf("task events = %+v", tasks)
+	}
+	started := tasks[0].payload.(TaskPayload)
+	if started.ID != "toolu_agent" || started.Status != "running" || started.Agent != "Explore" || started.Description != "check docs" {
+		t.Fatalf("started = %+v", started)
+	}
+	progress := tasks[1].payload.(TaskPayload)
+	if progress.Status != "running" || progress.LastTool != "Read" || progress.Usage == nil || progress.Usage.ToolUses != 2 {
+		t.Fatalf("progress = %+v", progress)
+	}
+	done := tasks[2].payload.(TaskPayload)
+	if done.Status != "completed" || done.Summary != "found it" || done.Usage == nil || done.Usage.Tokens != 300 || done.Usage.DurationMs != 2000 {
+		t.Fatalf("notification = %+v", done)
+	}
+}
+
 func TestTranslatorResultUsage(t *testing.T) {
 	events := translate(t,
 		`{"type":"result","subtype":"success","is_error":false,"duration_ms":1234,"total_cost_usd":0.05,"usage":{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}`,

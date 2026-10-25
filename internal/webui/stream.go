@@ -20,6 +20,7 @@ const (
 	EventQueued     = "queued"
 	EventUser       = "user"
 	EventStatus     = "status"
+	EventTask       = "task"
 )
 
 // SummaryLimit is the rune count of a tool call's one-line summary.
@@ -110,6 +111,31 @@ type ResultPayload struct {
 	Subscription bool `json:"subscription,omitempty"`
 }
 
+// TaskPayload reports the state of a task a tool call started: a sub-agent
+// (Agent / Task), which Claude Code always runs in the background, or a
+// background shell. The call's tool_result only says it was launched; these
+// events say when the work itself is running and how it ended.
+type TaskPayload struct {
+	// ID is the tool call that started the task.
+	ID string `json:"id"`
+	// Status is running, completed, failed or stopped.
+	Status      string `json:"status"`
+	Description string `json:"description,omitempty"`
+	// Agent is the sub-agent type of an agent task.
+	Agent string `json:"agent,omitempty"`
+	// Summary is the task's latest progress line, or how it ended.
+	Summary  string     `json:"summary,omitempty"`
+	LastTool string     `json:"lastTool,omitempty"`
+	Usage    *TaskUsage `json:"usage,omitempty"`
+}
+
+// TaskUsage is what a task has spent so far.
+type TaskUsage struct {
+	Tokens     int64 `json:"tokens"`
+	ToolUses   int64 `json:"toolUses"`
+	DurationMs int64 `json:"durationMs"`
+}
+
 // ErrorPayload reports a failure that ended the turn early.
 type ErrorPayload struct {
 	Message string `json:"message"`
@@ -131,7 +157,15 @@ type translator struct {
 	// streamed holds the ids of messages whose text arrived as stream events;
 	// their complete assistant message repeats it and is skipped.
 	streamed map[string]bool
+	// background counts the live background tasks that are activity (not
+	// ambient), as Claude Code last reported them.
+	background int
 }
+
+// Background reports whether background work is still running. Claude Code
+// waits for it, then answers its notification in another turn with its own
+// result, before it exits.
+func (t *translator) Background() bool { return t.background > 0 }
 
 func newTranslator() *translator {
 	return &translator{tools: make(map[string]string), streamed: make(map[string]bool)}
@@ -171,6 +205,7 @@ func (t *translator) Handle(line []byte, emit emitter) {
 	switch raw.Type {
 	case "system":
 		if raw.Subtype != "init" {
+			t.handleSystem(raw.Subtype, line, emit)
 			return
 		}
 		emit(EventInit, InitPayload{
@@ -209,6 +244,65 @@ func (t *translator) Handle(line []byte, emit emitter) {
 		}
 		emit(EventResult, payload)
 	}
+}
+
+// handleSystem follows background work: the task_* events of each task a tool
+// call started, and the set of live background tasks.
+func (t *translator) handleSystem(subtype string, line []byte, emit emitter) {
+	var raw struct {
+		ToolUseID      string `json:"tool_use_id"`
+		Status         string `json:"status"`
+		Description    string `json:"description"`
+		SubagentType   string `json:"subagent_type"`
+		Summary        string `json:"summary"`
+		LastToolName   string `json:"last_tool_name"`
+		Ambient        bool   `json:"ambient"`
+		SkipTranscript bool   `json:"skip_transcript"`
+		Usage          *struct {
+			TotalTokens int64 `json:"total_tokens"`
+			ToolUses    int64 `json:"tool_uses"`
+			DurationMs  int64 `json:"duration_ms"`
+		} `json:"usage"`
+		Tasks []struct {
+			Ambient bool `json:"ambient"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return
+	}
+	if subtype == "background_tasks_changed" {
+		t.background = 0
+		for _, task := range raw.Tasks {
+			if !task.Ambient {
+				t.background++
+			}
+		}
+		return
+	}
+	if subtype != "task_started" && subtype != "task_progress" && subtype != "task_notification" {
+		return
+	}
+	if raw.ToolUseID == "" || raw.Ambient || raw.SkipTranscript {
+		return
+	}
+	payload := TaskPayload{
+		ID:          raw.ToolUseID,
+		Status:      "running",
+		Description: truncateRunes(redactSecrets(raw.Description), SummaryLimit),
+		Agent:       raw.SubagentType,
+		Summary:     truncateRunes(redactSecrets(raw.Summary), SummaryLimit),
+		LastTool:    raw.LastToolName,
+	}
+	if subtype == "task_notification" {
+		payload.Status = raw.Status
+		if payload.Status != "completed" && payload.Status != "failed" {
+			payload.Status = "stopped"
+		}
+	}
+	if raw.Usage != nil {
+		payload.Usage = &TaskUsage{Tokens: raw.Usage.TotalTokens, ToolUses: raw.Usage.ToolUses, DurationMs: raw.Usage.DurationMs}
+	}
+	emit(EventTask, payload)
 }
 
 // usageFrom decodes Claude Code's usage block, which is absent for some error

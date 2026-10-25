@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, Check, ChevronRight, Copy, FileText, LoaderCircle, Volume2, VolumeX } from "lucide-react";
 import type { ThreadItem } from "../thread";
+import { toolActive } from "../thread";
 import type { Attachment } from "../types";
 import { clockTime, dayLabel, fileSize, turnState, turnSummary } from "../format";
 import { useI18n } from "../i18n";
@@ -61,7 +62,7 @@ export function Thread({ items, running, loading, workspace, route, attachmentUR
   );
   const waiting =
     running &&
-    (!last || (last.kind !== "text" && !(last.kind === "tool" && last.status === "running") && !(last.kind === "permission" && last.status === "pending")));
+    (!last || (last.kind !== "text" && !(last.kind === "tool" && toolActive(last)) && !(last.kind === "permission" && last.status === "pending")));
 
   return (
     <div className="relative flex min-h-0 flex-1">

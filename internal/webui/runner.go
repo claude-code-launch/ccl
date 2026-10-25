@@ -549,6 +549,23 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 	// The browser treats a result as the end of the turn, so exactly one is
 	// stored: Claude Code's own, or one written here when it reported none.
 	sawResult := false
+	// A result that arrives while background work (a sub-agent, a background
+	// shell) still runs is held: Claude Code answers that work's notification
+	// in another turn of the same process, whose result ends this one. stdin
+	// stays open meanwhile, so a sub-agent's permission questions can be
+	// answered.
+	var held *ResultPayload
+	storeResult := func(result ResultPayload) {
+		sawResult = true
+		_, _ = session.UpdateMeta(func(meta *Meta) {
+			turn := meta.recordTurn(result.Usage)
+			result.TurnUsage = &turn
+		})
+		result.Cancelled = cancelled()
+		result.Subscription = entry.subscription
+		_, _ = session.Append(EventResult, result)
+		entry.endOnce.Do(func() { close(entry.ended) })
+	}
 
 	readStream(stdout, func(line []byte) {
 		translator.Handle(line, func(kind string, payload any) {
@@ -590,26 +607,25 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 				return
 			}
 			if kind == EventResult {
-				// The turn is over: closing stdin lets the process exit.
-				defer entry.closeStdin()
-				if sawResult {
+				result, ok := payload.(ResultPayload)
+				if !ok || sawResult {
+					entry.closeStdin()
 					return
 				}
-				sawResult = true
-				if result, ok := payload.(ResultPayload); ok {
-					_, _ = session.UpdateMeta(func(meta *Meta) {
-						turn := meta.recordTurn(result.Usage)
-						result.TurnUsage = &turn
-					})
-					result.Cancelled = cancelled()
-					result.Subscription = entry.subscription
-					payload = result
+				if held != nil {
+					result = mergeResults(*held, result)
+					held = nil
 				}
+				if translator.Background() && !cancelled() {
+					held = &result
+					return
+				}
+				// The turn is over: closing stdin lets the process exit.
+				entry.closeStdin()
+				storeResult(result)
+				return
 			}
 			_, _ = session.Append(kind, payload)
-			if kind == EventResult {
-				entry.endOnce.Do(func() { close(entry.ended) })
-			}
 		})
 	})
 
@@ -626,6 +642,11 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 		}
 		_, _ = session.Append(EventError, ErrorPayload{Message: truncateRunes(redactSecrets(message), 4000)})
 	}
+	if held != nil && !sawResult {
+		// The background work never led to another result (it was stopped,
+		// or the process exited first): the held one ends the turn.
+		storeResult(*held)
+	}
 	if !sawResult {
 		closing := ResultPayload{Cancelled: stopped}
 		if !stopped {
@@ -637,6 +658,22 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 		_, _ = session.Append(EventResult, closing)
 	}
 	_ = session.Touch()
+}
+
+// mergeResults joins a held result with the one that followed it in the same
+// process. The cost is Claude Code's running total, so the later one stands;
+// tokens and time add up.
+func mergeResults(earlier, later ResultPayload) ResultPayload {
+	later.Usage.InputTokens += earlier.Usage.InputTokens
+	later.Usage.OutputTokens += earlier.Usage.OutputTokens
+	later.Usage.DurationMs += earlier.Usage.DurationMs
+	if later.Usage.CostUSD == 0 {
+		later.Usage.CostUSD = earlier.Usage.CostUSD
+	}
+	if !later.IsError && earlier.IsError {
+		later.IsError, later.Message = true, earlier.Message
+	}
+	return later
 }
 
 // readStream calls handle for every line of r until EOF.

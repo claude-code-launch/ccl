@@ -206,6 +206,74 @@ func TestRunnerTurnCostIsDifferenceOfRunningTotal(t *testing.T) {
 	}
 }
 
+func TestRunnerHoldsResultWhileBackgroundWorkRuns(t *testing.T) {
+	store := newTestStore(t)
+	session, err := store.Create(Meta{Title: "t", Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Claude Code reports a result while a sub-agent still runs in the
+	// background, then answers its notification in another turn.
+	output := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"claude-1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"look"}}]}}`,
+		`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"}]}`,
+		`{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_agent","description":"look"}`,
+		`{"type":"result","subtype":"success","duration_ms":10,"total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":1}}`,
+		`{"type":"assistant","parent_tool_use_id":"toolu_agent","message":{"id":"m2","content":[{"type":"text","text":"sub found it"}]}}`,
+		`{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_agent","status":"completed","summary":"found it"}`,
+		`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`,
+		`{"type":"system","subtype":"init","session_id":"claude-1"}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"the agent found it"}}}`,
+		`{"type":"result","subtype":"success","duration_ms":7,"total_cost_usd":0.03,"usage":{"input_tokens":4,"output_tokens":2}}`,
+	}, "\n")
+	handle, err := NewTimeline().Start(newTestRunner(t, helperPrepare(t, output, false)), session, LaunchSpec{Prompt: "p"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitDone(t, handle.Done)
+
+	events, err := session.Events(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := events[len(events)-1]; last.Type != EventResult {
+		t.Fatalf("the turn must end with its result, last = %s", last.Type)
+	}
+	results := resultPayloads(t, session)
+	if len(results) != 1 {
+		t.Fatalf("results = %+v", results)
+	}
+	usage := results[0].Usage
+	if usage.InputTokens != 9 || usage.OutputTokens != 3 || usage.DurationMs != 17 || usage.CostUSD != 0.03 {
+		t.Fatalf("merged usage = %+v", usage)
+	}
+	if turn := results[0].TurnUsage; turn == nil || !nearly(turn.CostUSD, 0.03) {
+		t.Fatalf("turn usage = %+v", turn)
+	}
+}
+
+func TestRunnerStoresHeldResultWhenNoneFollows(t *testing.T) {
+	store := newTestStore(t)
+	session, err := store.Create(Meta{Title: "t", Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := strings.Join([]string{
+		`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash"}]}`,
+		`{"type":"result","subtype":"success","duration_ms":10,"total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":1}}`,
+	}, "\n")
+	handle, err := NewTimeline().Start(newTestRunner(t, helperPrepare(t, output, false)), session, LaunchSpec{Prompt: "p"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitDone(t, handle.Done)
+	results := resultPayloads(t, session)
+	if len(results) != 1 || results[0].IsError || results[0].Usage.InputTokens != 5 {
+		t.Fatalf("results = %+v", results)
+	}
+}
+
 func TestMetaRecordTurnIgnoresZeroedAndRestartedTotals(t *testing.T) {
 	meta := Meta{}
 	meta.recordTurn(Usage{CostUSD: 0.02})
