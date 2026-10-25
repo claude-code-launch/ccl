@@ -18,7 +18,17 @@ const transcriptFixture = `{"type":"user","message":{"role":"user","content":"Ca
 {"type":"ai-title","aiTitle":"Review main.go"}
 {"type":"custom-title","customTitle":"Main review"}
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"thanks"}]},"timestamp":"2026-10-21T09:00:00Z"}
-{"type":"assistant","message":{"id":"m3","role":"assistant","content":[{"type":"text","text":"You're welcome."}]},"timestamp":"2026-10-21T09:00:01Z"}
+{"type":"assistant","message":{"id":"m3","role":"assistant","content":[{"type":"text","text":"You're welcome."},{"type":"tool_use","id":"a1","name":"Agent","input":{"description":"Check docs","prompt":"read the docs"}}]},"timestamp":"2026-10-21T09:00:01Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"a1","content":"Async agent launched successfully."}]},"timestamp":"2026-10-21T09:00:02Z"}
+{"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification>\n<task-id>x1</task-id>\n<tool-use-id>a1</tool-use-id>\n<status>completed</status>\n<summary>Agent \"Check docs\" finished</summary>\n<result>docs are fine</result>\n</task-notification>"},"timestamp":"2026-10-21T09:01:00Z"}
+{"type":"assistant","message":{"id":"m4","role":"assistant","content":[{"type":"text","text":"The agent is done."}]},"timestamp":"2026-10-21T09:01:01Z"}
+{"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification>\n<task-id>x1</task-id>\n<status>completed</status>\n<summary>Agent \"Check docs\" finished</summary>\n</task-notification>"},"timestamp":"2026-10-21T09:02:00Z"}
+`
+
+const subagentFixture = `{"type":"user","isSidechain":true,"agentId":"x1","message":{"role":"user","content":"read the docs"},"timestamp":"2026-10-21T09:00:02Z"}
+{"type":"assistant","isSidechain":true,"agentId":"x1","message":{"id":"s2","role":"assistant","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"README.md"}}]},"timestamp":"2026-10-21T09:00:03Z"}
+{"type":"user","isSidechain":true,"agentId":"x1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"r1","content":"# readme"}]},"timestamp":"2026-10-21T09:00:04Z"}
+{"type":"assistant","isSidechain":true,"agentId":"x1","message":{"id":"s3","role":"assistant","content":[{"type":"text","text":"docs are fine"}]},"timestamp":"2026-10-21T09:00:59Z"}
 `
 
 func claudeSessionsServer(t *testing.T) (string, string) {
@@ -36,6 +46,16 @@ func claudeSessionsServer(t *testing.T) (string, string) {
 	}
 	id := "0b2947a0-a3fc-4f6a-9f65-9f14ec982d58"
 	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(transcriptFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	subagents := filepath.Join(dir, id, "subagents")
+	if err := os.MkdirAll(subagents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subagents, "agent-x1.jsonl"), []byte(subagentFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subagents, "agent-x1.meta.json"), []byte(`{"agentType":"Explore","toolUseId":"a1"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A transcript in which the user said nothing is not listed.
@@ -73,9 +93,28 @@ func TestClaudeSessionsListAndImport(t *testing.T) {
 	for _, event := range events {
 		kinds = append(kinds, event.Type)
 	}
-	want := "user,token,tool_use,tool_result,token,result,user,token,result"
+	// The sub-agent's own transcript is replayed under its Agent call, and
+	// the notification of its end is a task event, not a prompt.
+	want := "user,token,tool_use,tool_result,token,result,user,token,tool_use,tool_use,tool_result,token,tool_result,task,token,task,result"
 	if strings.Join(kinds, ",") != want {
 		t.Fatalf("events = %s, want %s", strings.Join(kinds, ","), want)
+	}
+	for _, index := range []int{9, 10, 11} {
+		if !strings.Contains(string(events[index].Payload), `"parent":"a1"`) {
+			t.Fatalf("sub-agent event %d = %s", index, events[index].Payload)
+		}
+	}
+	if strings.Contains(string(events[12].Payload), "parent") {
+		t.Fatalf("the Agent call's own result is not the sub-agent's: %s", events[12].Payload)
+	}
+	var task TaskPayload
+	_ = json.Unmarshal(events[13].Payload, &task)
+	if task.ID != "a1" || task.Status != "completed" || task.Summary != `Agent "Check docs" finished` {
+		t.Fatalf("task = %+v", task)
+	}
+	// A sub-agent woken again names only itself when it stops.
+	if !strings.Contains(string(events[15].Payload), `"id":"a1"`) {
+		t.Fatalf("agent-only notification = %s", events[15].Payload)
 	}
 	if !strings.Contains(string(events[0].Payload), `"/review main.go"`) {
 		t.Fatalf("command prompt = %s", events[0].Payload)
