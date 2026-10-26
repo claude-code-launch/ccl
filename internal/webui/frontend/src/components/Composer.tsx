@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { AlarmClock, ArrowUp, AtSign, Blocks, ChevronDown, Clock, Cloud, FileText, FolderGit2, Gauge, GitBranch, LoaderCircle, Mic, MicOff, Paperclip, Plus, ShieldCheck, Square, SquareSlash, X } from "lucide-react";
+import { AlarmClock, ArrowUp, AtSign, Blocks, ChevronDown, Clock, Cloud, CornerDownLeft, FileText, FolderGit2, Gauge, GitBranch, LoaderCircle, Mic, MicOff, Paperclip, Plus, ShieldCheck, Square, SquareSlash, X } from "lucide-react";
 import type { Attachment, Capabilities, ProjectDefaults, ProviderView, Schedule, Session, Workspace } from "../types";
 import { EFFORT_LEVELS, PERMISSION_MODES } from "../types";
 import { basename, fileSize } from "../format";
@@ -40,9 +40,11 @@ interface Props {
   registerAddFiles: (add: (files: File[]) => void) => void;
   registerMention: (mention: (path: string) => void) => void;
   onSearchFiles: (query: string) => Promise<string[]>;
-  // Messages written while a turn runs; they go out when it ends.
-  queued: { key: string; text: string; files: number }[];
+  // Messages written while a turn runs; they go out when it ends, or into the
+  // running turn once steered (sent, until Claude reads them).
+  queued: { key: string; text: string; files: number; steered: boolean }[];
   onRemoveQueued: (key: string) => void;
+  onSteerQueued: (key: string) => void;
   // Tokens the last model call read, against the model's window.
   context?: { tokens: number; window: number };
   // Claude is waiting for an answer to a permission card.
@@ -395,13 +397,27 @@ export function Composer(props: Props) {
           <div className="mb-1.5 space-y-1">
             {props.queued.map((item) => (
               <div key={item.key} className="flex items-center gap-2 rounded-[10px] border border-dashed border-line px-3 py-1.5 text-[13px] text-ink-2">
-                <Clock size={13} className="shrink-0 text-ink-3" />
+                {item.steered ? <LoaderCircle size={13} className="shrink-0 animate-spin text-ink-3" /> : <Clock size={13} className="shrink-0 text-ink-3" />}
                 <span className="truncate">{item.text || t("filesOnly", { n: item.files })}</span>
                 {item.files > 0 && item.text && <span className="shrink-0 text-ink-3">+{item.files}</span>}
-                <span className="ml-auto shrink-0 text-xs text-ink-3">{t("queuedNext")}</span>
-                <button onClick={() => props.onRemoveQueued(item.key)} title={t("remove")} aria-label={t("remove")} className="shrink-0 rounded p-0.5 text-ink-3 hover:bg-hover hover:text-ink">
-                  <X size={13} />
-                </button>
+                {item.steered ? (
+                  <span className="ml-auto shrink-0 text-xs text-ink-3">{t("steering")}</span>
+                ) : (
+                  <>
+                    <span className="ml-auto shrink-0 text-xs text-ink-3 max-sm:hidden">{t("queuedNext")}</span>
+                    <button
+                      onClick={() => props.onSteerQueued(item.key)}
+                      title={t("steerHint")}
+                      className="flex shrink-0 items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-xs text-ink-2 hover:border-line-strong hover:bg-hover hover:text-ink max-sm:ml-auto"
+                    >
+                      <CornerDownLeft size={12} />
+                      {t("steerNow")}
+                    </button>
+                    <button onClick={() => props.onRemoveQueued(item.key)} title={t("remove")} aria-label={t("remove")} className="shrink-0 rounded p-0.5 text-ink-3 hover:bg-hover hover:text-ink">
+                      <X size={13} />
+                    </button>
+                  </>
+                )}
               </div>
             ))}
           </div>

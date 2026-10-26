@@ -55,6 +55,8 @@ export interface UserPayload {
   attachments?: Attachment[];
   // Read from the transcript: typed in a terminal, or imported.
   mirrored?: boolean;
+  // Sent into a running turn, which it continues.
+  steered?: boolean;
 }
 
 export interface MCPServer {

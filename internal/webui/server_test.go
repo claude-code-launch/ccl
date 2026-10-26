@@ -328,6 +328,10 @@ func TestMessageWhileRunningConflicts(t *testing.T) {
 	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"two"}`); status != http.StatusConflict {
 		t.Fatalf("second message = %d: %s", status, body)
 	}
+	// A steered message goes into the running turn instead.
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"two","steer":true}`); status != http.StatusAccepted || !strings.Contains(string(body), `"steered":true`) {
+		t.Fatalf("steered message = %d: %s", status, body)
+	}
 	// A page loaded mid-turn learns the turn is running from the session itself.
 	if running := sessionRunning(t, httpServer.URL, meta.ID); !running {
 		t.Fatal("GET session reports running=false during a turn")
@@ -363,6 +367,13 @@ func TestMessageWhileRunningConflicts(t *testing.T) {
 	if sessionRunning(t, httpServer.URL, meta.ID) {
 		t.Fatal("GET session reports running=true after the turn ended")
 	}
+	// With no turn to steer into, the message starts one.
+	status, body = doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"three","steer":true}`)
+	if status != http.StatusAccepted || strings.Contains(string(body), "steered") {
+		t.Fatalf("steer without a turn = %d: %s", status, body)
+	}
+	doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/cancel", "secret", "")
+	waitIdle(t, httpServer.URL, meta.ID)
 }
 
 func sessionRunning(t *testing.T, base, id string) bool {

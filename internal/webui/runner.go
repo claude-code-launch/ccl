@@ -18,6 +18,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/process"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/google/uuid"
 )
 
 // EffortLevels are the values Claude Code's --effort accepts.
@@ -43,6 +44,9 @@ type LaunchSpec struct {
 	Attachments []LaunchAttachment
 	// attachmentViews is what the stored user message shows of them.
 	attachmentViews []Attachment
+	// messageID is the uuid of a message sent into a running turn, which
+	// Claude Code echoes once it has read it (--replay-user-messages).
+	messageID string
 }
 
 // LaunchAttachment is one attached file as the process sees it.
@@ -132,13 +136,16 @@ func buildArgs(spec LaunchSpec) []string {
 		mode = "bypassPermissions"
 	}
 	// The message arrives on stdin as stream-json (see stdinMessage), which
-	// stays open for the turn: permission answers travel on it too.
+	// stays open for the turn: permission answers and messages sent into the
+	// running turn (Steer) travel on it too. Claude Code echoes each message
+	// as it reads it, which tells when a steered one reached the model.
 	args := []string{
 		"--print",
 		"--verbose",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--include-partial-messages",
+		"--replay-user-messages",
 		"--permission-mode", mode,
 	}
 	if mode != "bypassPermissions" {
@@ -200,6 +207,9 @@ func stdinMessage(spec LaunchSpec) ([]byte, error) {
 		"parent_tool_use_id": nil,
 		"session_id":         "",
 	}
+	if spec.messageID != "" {
+		message["uuid"] = spec.messageID
+	}
 	line, err := json.Marshal(message)
 	if err != nil {
 		return nil, err
@@ -235,6 +245,16 @@ type turn struct {
 	// pending holds permission requests awaiting the user, with the original
 	// input that answers must send back.
 	pending map[string]pendingPermission
+	// steers holds messages sent into the turn that Claude Code has not read
+	// yet, by uuid; each is stored when its echo arrives.
+	steers map[string]UserPayload
+}
+
+// steering reports whether a message sent into the turn is still unread.
+func (e *turn) steering() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.steers) > 0
 }
 
 type pendingPermission struct {
@@ -348,6 +368,53 @@ func (t *Timeline) RequestCancel(id string) bool {
 	}
 	t.cancel(entry)
 	return true
+}
+
+// Steer sends a message into the session's running turn. Claude Code reads it
+// between the steps of the turn, or answers it in another turn of the same
+// process whose result then ends this one. The message is stored when Claude
+// Code echoes it, so the history shows it where the model read it. It returns
+// errTurnEnded when no running turn can take it, and ErrBusy while the turn
+// still waits for its slot.
+func (t *Timeline) Steer(id string, spec LaunchSpec) error {
+	t.mu.Lock()
+	entry := t.running[id]
+	t.mu.Unlock()
+	if entry == nil {
+		return errTurnEnded
+	}
+	select {
+	case <-entry.ended:
+		return errTurnEnded
+	default:
+	}
+	spec.messageID = uuid.NewString()
+	line, err := stdinMessage(spec)
+	if err != nil {
+		return err
+	}
+	entry.mu.Lock()
+	switch {
+	case entry.closed:
+		entry.mu.Unlock()
+		return errTurnEnded
+	case entry.stdin == nil:
+		entry.mu.Unlock()
+		return ErrBusy
+	}
+	// Registered before the write, so a result that follows it is held.
+	if entry.steers == nil {
+		entry.steers = map[string]UserPayload{}
+	}
+	entry.steers[spec.messageID] = UserPayload{Text: spec.Prompt, Attachments: spec.attachmentViews, Steered: true}
+	entry.mu.Unlock()
+	if err := entry.write(line); err != nil {
+		entry.mu.Lock()
+		delete(entry.steers, spec.messageID)
+		entry.mu.Unlock()
+		return errTurnEnded
+	}
+	return nil
 }
 
 // Start runs one turn: it stores the user message, launches Claude Code, and
@@ -472,13 +539,19 @@ func (t *Timeline) launch(r *Runner, session *Session, entry *turn, spec LaunchS
 	if err := cmd.Start(); err != nil {
 		return fail(cleanup, fmt.Errorf("start Claude Code: %w", err))
 	}
+	// The prompt goes first: the write lock is held until it is written, so a
+	// steered message or a permission answer cannot overtake it.
+	entry.writeMu.Lock()
 	entry.mu.Lock()
 	entry.cmd = cmd
 	entry.stdin = stdin
 	stopped = entry.cancelRequested
 	entry.mu.Unlock()
 	// The pipe is unbuffered; a large image must not hold up the request.
-	go func() { _ = entry.write(message) }()
+	go func() {
+		defer entry.writeMu.Unlock()
+		_, _ = stdin.Write(message)
+	}()
 	// cancel() saw no process yet; it is this goroutine's to stop.
 	if stopped {
 		interrupt(cmd, entry.done)
@@ -598,6 +671,20 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 					entry.mu.Unlock()
 				}
 			}
+			if kind == eventReplay {
+				// Claude Code read a message: a steered one is stored now; the
+				// turn's own prompt was stored when the turn started.
+				if id, ok := payload.(string); ok {
+					entry.mu.Lock()
+					message, steered := entry.steers[id]
+					delete(entry.steers, id)
+					entry.mu.Unlock()
+					if steered {
+						_, _ = session.Append(EventUser, message)
+					}
+				}
+				return
+			}
 			if kind == eventUnsupportedControl {
 				// Nothing here answers other requests; saying so keeps
 				// Claude Code from waiting for an answer that never comes.
@@ -616,7 +703,9 @@ func (t *Timeline) pump(r *Runner, session *Session, entry *turn, stdout, stderr
 					result = mergeResults(*held, result)
 					held = nil
 				}
-				if translator.Background() && !cancelled() {
+				// A steered message still unread is answered in another turn
+				// of the process, like background work.
+				if (translator.Background() || entry.steering()) && !cancelled() {
 					held = &result
 					return
 				}

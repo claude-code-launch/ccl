@@ -142,8 +142,10 @@ export class Api {
     this.request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: patch });
   deleteSession = (id: string, force = false) => this.request<null>(`/api/sessions/${id}${force ? "?force=1" : ""}`, { method: "DELETE" });
   events = (id: string, since = 0) => this.request<StoredEvent[]>(`/api/sessions/${id}/events?since=${since}`);
-  send = (id: string, text: string, attachments: string[] = []) =>
-    this.request<{ seq: number; running: boolean }>(`/api/sessions/${id}/messages`, { method: "POST", body: { text, attachments } });
+  // steer sends the message into the running turn; with none running it
+  // starts one like any message.
+  send = (id: string, text: string, attachments: string[] = [], steer = false) =>
+    this.request<{ seq?: number; running: boolean; steered?: boolean }>(`/api/sessions/${id}/messages`, { method: "POST", body: steer ? { text, attachments, steer } : { text, attachments } });
 
   async upload(id: string, files: File[]): Promise<Attachment[]> {
     const form = new FormData();

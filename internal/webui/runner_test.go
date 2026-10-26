@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ func TestBuildArgs(t *testing.T) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--include-partial-messages",
+		"--replay-user-messages",
 		"--permission-mode", "bypassPermissions",
 	}
 	if strings.Join(args, " ") != strings.Join(want, " ") {
@@ -67,6 +69,10 @@ func TestHelperProcess(t *testing.T) {
 		helperAskPermission()
 		os.Exit(0)
 	}
+	if os.Getenv("CCL_WEBUI_HELPER_STEER") == "1" {
+		helperSteer()
+		os.Exit(0)
+	}
 	if os.Getenv("CCL_WEBUI_HELPER_LINGER") == "1" {
 		// Claude Code takes a moment to exit after its result.
 		time.Sleep(time.Second)
@@ -94,6 +100,34 @@ func helperAskPermission() {
 	os.Stdout.WriteString(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":` + string(encoded) + `}}}` + "\n")
 	os.Stdout.WriteString(`{"type":"result","subtype":"success","is_error":false}` + "\n")
 	// Exit only once stdin is closed, as Claude Code does.
+	for stdin.Scan() {
+	}
+}
+
+// helperSteer behaves like Claude Code under --replay-user-messages when a
+// message arrives as the turn ends: it echoes the prompt, finishes the turn
+// once the second message is on stdin, then reads that message in another
+// turn of the same process.
+func helperSteer() {
+	stdin := bufio.NewScanner(os.Stdin)
+	stdin.Buffer(make([]byte, 0, 1<<20), 8<<20)
+	replay := func(line string) {
+		var message struct {
+			UUID string `json:"uuid"`
+		}
+		_ = json.Unmarshal([]byte(line), &message)
+		os.Stdout.WriteString(`{"type":"user","isReplay":true,"uuid":"` + message.UUID + `","message":{"role":"user","content":[{"type":"text","text":"echo"}]}}` + "\n")
+	}
+	stdin.Scan()
+	replay(stdin.Text())
+	os.Stdout.WriteString(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}` + "\n")
+	stdin.Scan()
+	steered := stdin.Text()
+	os.Stdout.WriteString(`{"type":"result","subtype":"success","duration_ms":10,"total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":1}}` + "\n")
+	os.Stdout.WriteString(`{"type":"system","subtype":"init","session_id":"claude-1"}` + "\n")
+	replay(steered)
+	os.Stdout.WriteString(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"read it"}}}` + "\n")
+	os.Stdout.WriteString(`{"type":"result","subtype":"success","duration_ms":7,"total_cost_usd":0.03,"usage":{"input_tokens":4,"output_tokens":2}}` + "\n")
 	for stdin.Scan() {
 	}
 }
@@ -271,6 +305,74 @@ func TestRunnerStoresHeldResultWhenNoneFollows(t *testing.T) {
 	results := resultPayloads(t, session)
 	if len(results) != 1 || results[0].IsError || results[0].Usage.InputTokens != 5 {
 		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestRunnerSteersMessageIntoRunningTurn(t *testing.T) {
+	store := newTestStore(t)
+	session, err := store.Create(Meta{Title: "t", Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := os.Executable()
+	runner := newTestRunner(t, func(ctx context.Context, spec LaunchSpec) (*exec.Cmd, func(), error) {
+		cmd := exec.Command(executable, "-test.run=TestHelperProcess")
+		cmd.Env = append(os.Environ(), "CCL_WEBUI_HELPER=1", "CCL_WEBUI_HELPER_STEER=1")
+		return cmd, func() {}, nil
+	})
+	timeline := NewTimeline()
+	if err := timeline.Steer(session.ID(), LaunchSpec{Prompt: "late"}); !errors.Is(err, errTurnEnded) {
+		t.Fatalf("steer without a turn = %v", err)
+	}
+	handle, err := timeline.Start(runner, session, LaunchSpec{Prompt: "first"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The process may not have started yet.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err = timeline.Steer(session.ID(), LaunchSpec{Prompt: "also this"})
+		if !errors.Is(err, ErrBusy) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("Steer: %v", err)
+	}
+	waitDone(t, handle.Done)
+
+	events, err := session.Events(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	var users []UserPayload
+	for _, event := range events {
+		kinds = append(kinds, event.Type)
+		if event.Type == EventUser {
+			var user UserPayload
+			_ = json.Unmarshal(event.Payload, &user)
+			users = append(users, user)
+		}
+	}
+	// The steered message is stored where Claude Code read it, after the
+	// first result, which was held for it.
+	if len(users) != 2 || users[0].Steered || users[1].Text != "also this" || !users[1].Steered {
+		t.Fatalf("user messages = %+v", users)
+	}
+	if got := strings.Join(kinds, ","); !strings.HasSuffix(got, "tool_use,init,user,token,result") || strings.Count(got, "result") != 1 {
+		t.Fatalf("events = %s", got)
+	}
+	results := resultPayloads(t, session)
+	if usage := results[0].Usage; usage.InputTokens != 9 || usage.CostUSD != 0.03 {
+		t.Fatalf("merged usage = %+v", usage)
+	}
+	if meta := session.Meta(); meta.Turns != 1 {
+		t.Fatalf("Turns = %d, want 1", meta.Turns)
+	}
+	if err := timeline.Steer(session.ID(), LaunchSpec{Prompt: "after"}); !errors.Is(err, errTurnEnded) {
+		t.Fatalf("steer after the turn = %v", err)
 	}
 }
 

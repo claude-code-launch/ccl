@@ -62,7 +62,7 @@ export type PermissionItem = {
 export type ThreadItem =
   // A day separator; the label is rendered in the page's language.
   | { kind: "day"; key: string; ts: number }
-  | { kind: "user"; key: string; text: string; attachments: Attachment[]; ts: number }
+  | { kind: "user"; key: string; text: string; attachments: Attachment[]; ts: number; steered?: boolean }
   | TextItem
   | ThinkingItem
   | ToolItem
@@ -117,10 +117,13 @@ export function buildThread(events: StoredEvent[]): ThreadItem[] {
           lastDay = day;
           root.items.push({ kind: "day", key: `d${event.seq}`, ts: event.ts });
         }
-        root.items.push({ kind: "user", key: `u${event.seq}`, text: String(user.text || ""), attachments: user.attachments || [], ts: event.ts });
+        root.items.push({ kind: "user", key: `u${event.seq}`, text: String(user.text || ""), attachments: user.attachments || [], ts: event.ts, steered: user.steered || undefined });
+        root.text = root.thinking = root.lastTool = null;
+        // A message sent into the running turn continues it: its calls and
+        // model still belong to that turn.
+        if (user.steered) break;
         for (const [id, tool] of tools) earlier.set(id, tool);
         tools = new Map();
-        root.text = root.thinking = root.lastTool = null;
         model = undefined;
         break;
       }

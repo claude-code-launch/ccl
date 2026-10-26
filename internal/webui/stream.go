@@ -21,6 +21,9 @@ const (
 	EventUser       = "user"
 	EventStatus     = "status"
 	EventTask       = "task"
+	// eventReplay is internal: Claude Code read the stdin message with this
+	// uuid. It is never stored.
+	eventReplay = "replay"
 )
 
 // SummaryLimit is the rune count of a tool call's one-line summary.
@@ -36,6 +39,9 @@ type UserPayload struct {
 	// Mirrored marks a prompt read from the transcript (mirror.go): typed in
 	// a terminal or imported, not a turn the page runs.
 	Mirrored bool `json:"mirrored,omitempty"`
+	// Steered marks a message sent into a running turn (Timeline.Steer): it
+	// continues that turn instead of starting one.
+	Steered bool `json:"steered,omitempty"`
 }
 
 // InitPayload reports the Claude session a turn runs in and what it offers.
@@ -199,6 +205,8 @@ func (t *translator) Handle(line []byte, emit emitter) {
 		Event           json.RawMessage `json:"event"`
 		RequestID       string          `json:"request_id"`
 		Request         json.RawMessage `json:"request"`
+		IsReplay        bool            `json:"isReplay"`
+		UUID            string          `json:"uuid"`
 	}
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return
@@ -226,6 +234,14 @@ func (t *translator) Handle(line []byte, emit emitter) {
 		t.handleAssistant(raw.Message, parent, emit)
 
 	case "user":
+		// The echo of a message from stdin (--replay-user-messages) says when
+		// Claude Code read it.
+		if raw.IsReplay {
+			if parent == "" && raw.UUID != "" {
+				emit(eventReplay, raw.UUID)
+			}
+			return
+		}
 		t.handleUser(raw.Message, parent, emit)
 
 	case "control_request":

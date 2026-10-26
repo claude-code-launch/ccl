@@ -263,7 +263,13 @@ function Item({ item, streaming, attachmentURL, renderItems, onPermission }: {
               {item.text}
             </div>
           )}
-          <span className="text-[11px] text-ink-3 opacity-0 transition group-hover/user:opacity-100">{clockTime(item.ts, lang)}</span>
+          {item.steered ? (
+            <span className="text-[11px] text-ink-3" title={t("steerHint")}>
+              {t("steered")} · {clockTime(item.ts, lang)}
+            </span>
+          ) : (
+            <span className="text-[11px] text-ink-3 opacity-0 transition group-hover/user:opacity-100">{clockTime(item.ts, lang)}</span>
+          )}
         </div>
       );
     case "text":

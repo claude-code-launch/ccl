@@ -931,6 +931,9 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, session *
 		Provider string `json:"provider"`
 		// Attachments are ids returned by the uploads endpoint.
 		Attachments []string `json:"attachments"`
+		// Steer sends the message into the running turn, if there is one,
+		// instead of being refused as busy.
+		Steer bool `json:"steer"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -984,6 +987,25 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, session *
 		}
 	}
 
+	if body.Steer && s.timeline.Running(session.ID()) {
+		spec := LaunchSpec{Prompt: text, Attachments: launchAttachments(session, attachments), attachmentViews: attachments}
+		err := s.timeline.Steer(session.ID(), spec)
+		switch {
+		case err == nil:
+			writeJSON(w, http.StatusAccepted, map[string]any{"steered": true, "running": true})
+			return
+		case errors.Is(err, errTurnEnded):
+			// The turn ended meanwhile: the message starts the next one.
+			s.timeline.Settle(session.ID(), settleTimeout)
+		case errors.Is(err, ErrBusy):
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	if _, err := s.startTurn(session, text, attachments); err != nil {
 		if errors.Is(err, ErrBusy) || errors.Is(err, ErrWorkspaceNotServed) || errors.Is(err, ErrWorktreeMissing) {
 			writeError(w, http.StatusConflict, err.Error())
@@ -1027,14 +1049,7 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 		// An empty mode follows the server default.
 		PermissionMode: firstNonEmpty(meta.PermissionMode, s.defaults.PermissionMode),
 	}
-	for _, attachment := range attachments {
-		spec.Attachments = append(spec.Attachments, LaunchAttachment{
-			Path:      session.AttachmentPath(attachment.ID),
-			Name:      attachment.Name,
-			MediaType: attachment.Type,
-			Image:     attachment.Image,
-		})
-	}
+	spec.Attachments = launchAttachments(session, attachments)
 	spec.attachmentViews = attachments
 	// A conversation runs where it started. One whose directory is no longer
 	// served is refused, never moved: its Claude session belongs there.
@@ -1063,6 +1078,20 @@ func (s *Server) startTurn(session *Session, text string, attachments []Attachme
 	}
 	go s.notifyOnDone(session.ID(), handle.Done)
 	return handle, nil
+}
+
+// launchAttachments is how a message's uploads reach Claude Code.
+func launchAttachments(session *Session, attachments []Attachment) []LaunchAttachment {
+	var out []LaunchAttachment
+	for _, attachment := range attachments {
+		out = append(out, LaunchAttachment{
+			Path:      session.AttachmentPath(attachment.ID),
+			Name:      attachment.Name,
+			MediaType: attachment.Type,
+			Image:     attachment.Image,
+		})
+	}
+	return out
 }
 
 // isSubscription reports whether a provider logs in to a subscription

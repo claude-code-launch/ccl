@@ -23,6 +23,25 @@ describe("buildThread", () => {
     expect(end.kind === "turn-end" && end.model).toBe("opus-x");
   });
 
+  it("keeps a message sent mid-turn inside that turn", () => {
+    const items = buildThread([
+      ev("user", { text: "go" }),
+      ev("init", { sessionId: "s", model: "opus-x" }),
+      ev("tool_use", { id: "t1", name: "Bash", summary: "ls" }),
+      ev("user", { text: "also this", steered: true }),
+      ev("tool_result", { id: "t1", ok: true, output: "a" }),
+      ev("token", { text: "done" }),
+      ev("result", { usage: {}, isError: false }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["day", "user", "tool", "user", "text", "turn-end"]);
+    const tool = items[2];
+    expect(tool.kind === "tool" && tool.status).toBe("ok");
+    const steered = items[3];
+    expect(steered.kind === "user" && steered.steered).toBe(true);
+    const end = items[5];
+    expect(end.kind === "turn-end" && end.model).toBe("opus-x");
+  });
+
   it("keeps a user message's attachments", () => {
     const items = buildThread([
       ev("user", { text: "", attachments: [{ id: "a-1.png", name: "1.png", type: "image/png", size: 3, image: true }] }),

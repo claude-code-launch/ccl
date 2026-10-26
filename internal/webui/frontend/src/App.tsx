@@ -7,6 +7,8 @@ import { AgentBanner, AgentsPanel } from "./components/AgentsPanel";
 import { diffSection, download, safeFileName, transcriptHTML, transcriptMarkdown } from "./export";
 import { CommandPalette } from "./components/CommandPalette";
 import { useConversation } from "./useConversation";
+import { settleQueue, steerFirst } from "./queue";
+import type { Queued } from "./queue";
 import { I18n, resolveLang, translator } from "./i18n";
 import { Sidebar, SidebarIcon } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
@@ -109,12 +111,6 @@ function parseAgentTab(key: string): [string, string] {
 
 const narrow = () => window.matchMedia("(max-width: 767px)").matches;
 const NO_CAPABILITIES: Capabilities = { slashCommands: [], mcpServers: [] };
-
-interface Queued {
-  key: string;
-  text: string;
-  attachments: string[];
-}
 
 // contextOf is the size of the newest model call against the model's window:
 // a model id marked [1m] runs with the 1M window.
@@ -574,8 +570,16 @@ export function App() {
   // A queued message goes out once the turn before it ended.
   const queue = (currentId && queues[currentId]) || [];
   const flushing = useRef(false);
+  // Keys of steered messages whose request is still out.
+  const steering = useRef(new Set<string>());
   useEffect(() => {
-    if (!currentId || conversation.running || conversation.loading || !queue.length || flushing.current) return;
+    if (!currentId || conversation.loading || flushing.current) return;
+    const settled = settleQueue(queue, conversation.events, conversation.running, steering.current);
+    if (settled) {
+      setQueues((all) => ({ ...all, [currentId]: settled }));
+      return;
+    }
+    if (conversation.running || !queue.length || steering.current.size) return;
     const [next, ...rest] = queue;
     flushing.current = true;
     setQueues((all) => ({ ...all, [currentId]: rest }));
@@ -590,6 +594,29 @@ export function App() {
         flushing.current = false;
       });
   }, [currentId, conversation, queue, api, fail, scheduleRefresh]);
+
+  // Steering sends a queued message into the running turn; it stays in the
+  // queue, marked sent, until Claude Code has read it.
+  const steer = async (key: string) => {
+    const id = currentId;
+    const item = id ? (queues[id] || []).find((entry) => entry.key === key) : undefined;
+    if (!id || !item || item.steered !== undefined) return;
+    const since = conversation.events.length ? conversation.events[conversation.events.length - 1].seq : 0;
+    const update = (change: (queue: Queued[]) => Queued[]) => setQueues((all) => ({ ...all, [id]: change(all[id] || []) }));
+    update((queue) => steerFirst(queue, key, since));
+    steering.current.add(key);
+    try {
+      const response = await api.send(id, item.text, item.attachments, true);
+      // The turn had ended: the message started the next one.
+      if (!response.steered) update((queue) => queue.filter((entry) => entry.key !== key));
+      scheduleRefresh();
+    } catch (error) {
+      update((queue) => queue.map((entry) => (entry.key === key ? { ...entry, steered: undefined } : entry)));
+      fail(error);
+    } finally {
+      steering.current.delete(key);
+    }
+  };
 
   // Tell the user when a turn ends while the page is in the background.
   const wasRunning = useRef(false);
@@ -1167,7 +1194,8 @@ export function App() {
                 registerAddFiles={registerAddFiles}
                 registerMention={registerMention}
                 onSearchFiles={async (query) => (await wsApi.searchFiles(query)).files}
-                queued={queue.map((item) => ({ key: item.key, text: item.text, files: item.attachments.length }))}
+                queued={queue.map((item) => ({ key: item.key, text: item.text, files: item.attachments.length, steered: item.steered !== undefined }))}
+                onSteerQueued={(key) => void steer(key)}
                 onRemoveQueued={(key) => currentId && setQueues((all) => ({ ...all, [currentId]: (all[currentId] || []).filter((item) => item.key !== key) }))}
                 context={contextOf(conversation.events, current)}
                 awaitingPermission={pending.length > 0}
