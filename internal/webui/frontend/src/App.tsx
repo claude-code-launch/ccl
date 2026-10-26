@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Folders, Moon, PanelLeft, PanelRight, PanelRightClose, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
+import { Folders, Moon, PanelRight, PanelRightClose, Paperclip, Plus, Settings, SquareTerminal, Sun, X } from "lucide-react";
 import { Api, HttpError, Unauthorized, storeToken, storedToken } from "./api";
 import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProjectDefaults, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
 import { agentsOf, agentThread, buildThread, latestCapabilities, pendingPermissions, toolActive } from "./thread";
@@ -8,12 +8,12 @@ import { diffSection, download, safeFileName, transcriptHTML, transcriptMarkdown
 import { CommandPalette } from "./components/CommandPalette";
 import { useConversation } from "./useConversation";
 import { I18n, resolveLang, translator } from "./i18n";
-import { Sidebar } from "./components/Sidebar";
-import { SessionHeader } from "./components/SessionHeader";
+import { Sidebar, SidebarIcon } from "./components/Sidebar";
+import { TabBar } from "./components/TabBar";
+import type { PanelTab, TabItem } from "./components/TabBar";
 import { RightPanel } from "./components/RightPanel";
 import { FilesPanel } from "./components/FilesPanel";
 import { GitPanel } from "./components/GitPanel";
-import type { PanelTab } from "./components/SessionHeader";
 import { Thread } from "./components/Thread";
 import { Composer } from "./components/Composer";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -22,7 +22,7 @@ import { ShareDialog } from "./components/Share";
 import { ProjectDetail, ProjectsList } from "./components/ProjectsPage";
 import { Gate } from "./components/Gate";
 
-// The terminal (xterm.js) loads only when its panel opens.
+// The terminal (xterm.js) loads only when a terminal tab opens.
 const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
 
 type Theme = "light" | "dark";
@@ -69,6 +69,42 @@ function useTheme(): [Theme, () => void] {
     writeStorage("ccl-web-theme", next);
   };
   return [theme, toggle];
+}
+
+// readList reads a JSON array kept in localStorage; anything else is empty.
+function readList<T>(key: string): T[] {
+  try {
+    const value = JSON.parse(readStorage(key) || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+// A terminal tab. id is the server's shell, null until it starts; the folder
+// is the one that was current when it opened.
+interface TermTab {
+  key: string;
+  id: string | null;
+  workspaceId: string;
+  worktree: string;
+  n: number;
+}
+
+// A sub-agent tab: the key of its Agent call, and the title it opened with
+// (the call is known only while its conversation is loaded).
+interface AgentTab {
+  key: string;
+  title: string;
+  type: string;
+}
+
+// agentTabKey names a sub-agent tab; session ids have no colon.
+const agentTabKey = (sessionId: string, toolKey: string) => `a:${sessionId}:${toolKey}`;
+function parseAgentTab(key: string): [string, string] {
+  const rest = key.slice(2);
+  const at = rest.indexOf(":");
+  return [rest.slice(0, at), rest.slice(at + 1)];
 }
 
 const narrow = () => window.matchMedia("(max-width: 767px)").matches;
@@ -118,7 +154,7 @@ export function App() {
   const [panel, setPanel] = useState<PanelTab | null>(() => {
     if (narrowScreen()) return null;
     const saved = readStorage("ccl-web-panel");
-    return saved === "closed" ? null : saved === "files" || saved === "git" || saved === "terminal" || saved === "agents" ? saved : "overview";
+    return saved === "closed" ? null : saved === "files" || saved === "git" || saved === "agents" ? saved : "overview";
   });
   const [panelWide, setPanelWide] = useState(false);
   const [gitFocus, setGitFocus] = useState("");
@@ -186,7 +222,27 @@ export function App() {
   useEffect(() => {
     setDraftRoute(JSON.parse(defaultsKey));
   }, [activeWorkspace?.id, defaultsKey]);
-  const [terminals, setTerminals] = useState<Record<string, string>>({});
+  // The tab bar: open conversations (the current one is currentId), the
+  // new-conversation draft, and terminals. Only the active conversation streams
+  // its events; the others show the running state of the session list.
+  const [openIds, setOpenIds] = useState<string[]>(() => readList<string>("ccl-web-tabs").filter((id) => typeof id === "string"));
+  const [termTabs, setTermTabs] = useState<TermTab[]>(() => readList<TermTab>("ccl-web-terminals").filter((tab) => tab && typeof tab.key === "string"));
+  // The terminal tab in front; null shows the conversation.
+  const [activeTerm, setActiveTerm] = useState<string | null>(null);
+  // Sub-agent tabs, by conversation: they sit in a group after its tab.
+  const [agentTabs, setAgentTabs] = useState<Record<string, AgentTab[]>>(() => {
+    try {
+      const value = JSON.parse(readStorage("ccl-web-agent-tabs") || "{}");
+      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    } catch {
+      return {};
+    }
+  });
+  useEffect(() => writeStorage("ccl-web-agent-tabs", JSON.stringify(agentTabs)), [agentTabs]);
+  // The draft tab was closed while terminals stay open.
+  const [draftOpen, setDraftOpen] = useState(true);
+  useEffect(() => writeStorage("ccl-web-tabs", JSON.stringify(openIds)), [openIds]);
+  useEffect(() => writeStorage("ccl-web-terminals", JSON.stringify(termTabs)), [termTabs]);
 
   const lang = resolveLang(config?.lang);
   const i18n = useMemo(() => ({ lang, t: translator(lang) }), [lang]);
@@ -332,7 +388,12 @@ export function App() {
   // The sub-agent the main view shows instead of the conversation, like
   // choosing an agent in Claude Code's agent list.
   const [agentView, setAgentView] = useState<string | null>(null);
-  useEffect(() => setAgentView(null), [currentId]);
+  // A sub-agent tab of another conversation opens it, then the sub-agent.
+  const nextAgent = useRef<string | null>(null);
+  useEffect(() => {
+    setAgentView(nextAgent.current);
+    nextAgent.current = null;
+  }, [currentId]);
   const viewed = agentView ? agents.find(({ tool }) => tool.key === agentView)?.tool : undefined;
   const shownItems = useMemo(() => (viewed ? agentThread(viewed) : items), [viewed, items]);
   const capabilities = useMemo(() => {
@@ -437,6 +498,7 @@ export function App() {
     if (page === "project" && !canLeave()) return;
     setPage("chat");
     setCurrentId(id);
+    setActiveTerm(null);
     setMobileSidebar(false);
     // Opening a conversation also moves the sidebar to its workspace.
     const session = sessions.find((item) => item.id === id);
@@ -470,6 +532,8 @@ export function App() {
     if (page === "project" && !canLeave()) return;
     setPage("chat");
     setCurrentId(null);
+    setActiveTerm(null);
+    setDraftOpen(true);
     setDraftRoute(JSON.parse(defaultsKey));
     setMobileSidebar(false);
   };
@@ -652,7 +716,12 @@ export function App() {
       }
     }
     setSessions((list) => list.filter((item) => item.id !== session.id));
-    if (currentId === session.id) setCurrentId(null);
+    if (currentId === session.id) {
+      // Its tab closes; the neighbouring one comes forward.
+      const next = neighbourOf(session.id);
+      if (next) select(next);
+      else setCurrentId(null);
+    }
   };
 
   // The project page acts on several conversations at once.
@@ -698,6 +767,178 @@ export function App() {
     if (!narrowScreen()) writeStorage("ccl-web-panel", next || "closed");
   };
   const togglePanel = () => openPanel(panel || "overview");
+
+  // The open conversation always has a tab.
+  useEffect(() => {
+    if (currentId) setOpenIds((ids) => (ids.includes(currentId) ? ids : [...ids, currentId]));
+  }, [currentId]);
+  // Deleted conversations lose their tabs. The list is complete once ready.
+  useEffect(() => {
+    if (phase !== "ready") return;
+    setOpenIds((ids) => {
+      const kept = ids.filter((id) => id === currentId || sessions.some((session) => session.id === id));
+      return kept.length === ids.length ? ids : kept;
+    });
+  }, [sessions, phase, currentId]);
+  // A background tab's turn: poll the list until it ends, for its spinner.
+  const backgroundRunning = sessions.some((session) => session.running && session.id !== currentId && openIds.includes(session.id));
+  useEffect(() => {
+    if (!backgroundRunning) return;
+    const timer = setInterval(loadSessions, 4000);
+    return () => clearInterval(timer);
+  }, [backgroundRunning, loadSessions]);
+
+  // neighbourOf is the conversation tab next to id (the right one first).
+  const neighbourOf = (id: string): string | null => {
+    const index = openIds.indexOf(id);
+    const rest = openIds.filter((item) => item !== id);
+    return rest[Math.min(Math.max(index, 0), rest.length - 1)] ?? null;
+  };
+
+  const terminalScope = (tab: TermTab) => (tab.workspaceId ? api.forWorkspace(tab.workspaceId, tab.worktree) : api);
+  const newTerminal = () => {
+    const key = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const n = termTabs.reduce((max, tab) => Math.max(max, tab.n), 0) + 1;
+    setTermTabs((tabs) => [...tabs, { key, id: null, workspaceId: activeWorkspace?.id || "", worktree: worktreeName, n }]);
+    setActiveTerm(key);
+    setPage("chat");
+    setMobileSidebar(false);
+  };
+  // The bar's terminal button: back to the conversation from a terminal, else
+  // the current folder's terminal, opened when there is none.
+  const toggleTerminal = () => {
+    if (activeTerm) {
+      setActiveTerm(null);
+      return;
+    }
+    const own = termTabs.find((tab) => tab.workspaceId === (activeWorkspace?.id || "") && tab.worktree === worktreeName);
+    if (own) {
+      setActiveTerm(own.key);
+      setPage("chat");
+    } else newTerminal();
+  };
+  // openAgent shows a sub-agent of the open conversation in a tab of its own.
+  const openAgent = (toolKey: string | null) => {
+    setActiveTerm(null);
+    setAgentView(toolKey);
+    if (!toolKey || !currentId) return;
+    const tool = agents.find((agent) => agent.tool.key === toolKey)?.tool;
+    const type = tool?.task?.agent || String(tool?.input?.subagent_type || "") || tool?.name || "agent";
+    const title = tool?.description || tool?.task?.description || type;
+    setAgentTabs((all) => {
+      const list = all[currentId] || [];
+      return list.some((tab) => tab.key === toolKey) ? all : { ...all, [currentId]: [...list, { key: toolKey, title, type }] };
+    });
+  };
+  const activateTab = (key: string) => {
+    if (key.startsWith("a:")) {
+      const [sessionId, toolKey] = parseAgentTab(key);
+      if (sessionId === currentId) {
+        if (page === "project" && !canLeave()) return;
+        setPage("chat");
+        setActiveTerm(null);
+        setAgentView(toolKey);
+      } else {
+        nextAgent.current = toolKey;
+        select(sessionId);
+      }
+      return;
+    }
+    if (key === "s:" + currentId) setAgentView(null);
+    if (key.startsWith("t:")) {
+      setActiveTerm(key.slice(2));
+      setPage("chat");
+    } else if (key === "new") {
+      if (page === "project" && !canLeave()) return;
+      setPage("chat");
+      setActiveTerm(null);
+    } else select(key.slice(2));
+  };
+  const closeTab = (key: string) => {
+    if (key.startsWith("a:")) {
+      const [sessionId, toolKey] = parseAgentTab(key);
+      setAgentTabs((all) => ({ ...all, [sessionId]: (all[sessionId] || []).filter((tab) => tab.key !== toolKey) }));
+      if (sessionId === currentId && agentView === toolKey) setAgentView(null);
+      return;
+    }
+    if (key.startsWith("t:")) {
+      const tab = termTabs.find((item) => item.key === key.slice(2));
+      if (tab?.id) terminalScope(tab).terminalClose(tab.id).catch(() => {});
+      setTermTabs((tabs) => tabs.filter((item) => item.key !== key.slice(2)));
+      if (activeTerm === key.slice(2)) setActiveTerm(null);
+      return;
+    }
+    const id = key === "new" ? null : key.slice(2);
+    if (id) {
+      setOpenIds((ids) => ids.filter((item) => item !== id));
+      // Its sub-agent tabs go with it.
+      setAgentTabs((all) => {
+        const { [id]: _, ...rest } = all;
+        return rest;
+      });
+    }
+    // Closing a tab in the background changes nothing in front.
+    if (id !== currentId) return;
+    const next = id ? neighbourOf(id) : openIds[openIds.length - 1] || null;
+    if (next && !activeTerm) {
+      select(next);
+      return;
+    }
+    // A terminal in front stays there and the conversation behind it changes.
+    setCurrentId(next);
+    if (next) return;
+    if (activeTerm || termTabs.length) {
+      setDraftOpen(false);
+      if (!activeTerm) setActiveTerm(termTabs[termTabs.length - 1].key);
+    } else startNew();
+  };
+
+  // The draft tab shows while no conversation is open, unless it was closed
+  // with a terminal in front.
+  const showDraft = !currentId && (draftOpen || !activeTerm);
+  const tabs: TabItem[] = [
+    ...openIds.flatMap((id): TabItem[] => {
+      const session = sessions.find((item) => item.id === id);
+      const isCurrent = id === currentId;
+      const inFront = isCurrent && !activeTerm && page === "chat";
+      const subs = agentTabs[id] || [];
+      const group = subs.length ? id : undefined;
+      return [
+        {
+          key: "s:" + id,
+          kind: "chat",
+          group,
+          title: session?.title || t("untitled"),
+          running: isCurrent ? conversation.running : !!session?.running,
+          active: inFront && !viewed,
+          closable: true,
+        },
+        ...subs.map((sub): TabItem => {
+          const tool = isCurrent ? agents.find((agent) => agent.tool.key === sub.key)?.tool : undefined;
+          return {
+            key: agentTabKey(id, sub.key),
+            kind: "agent",
+            group,
+            title: sub.title,
+            hint: sub.type,
+            running: !!tool && toolActive(tool),
+            active: inFront && viewed?.key === sub.key,
+            closable: true,
+          };
+        }),
+      ];
+    }),
+    ...(showDraft ? [{ key: "new", kind: "draft" as const, title: t("newSession"), active: !activeTerm && page === "chat", closable: openIds.length > 0 || termTabs.length > 0 }] : []),
+    ...termTabs.map((tab): TabItem => ({
+      key: "t:" + tab.key,
+      kind: "terminal",
+      title: `${t("terminal")} ${tab.n}`,
+      hint: [workspaceList.find((item) => item.id === tab.workspaceId)?.name, tab.worktree].filter(Boolean).join(" · "),
+      active: tab.key === activeTerm && page === "chat",
+      closable: true,
+    })),
+  ];
+  const frontTerm = termTabs.find((tab) => tab.key === activeTerm) || null;
 
   const mention = useRef<(path: string) => void>(() => {});
   const registerMention = useCallback((insert: (path: string) => void) => {
@@ -760,6 +1001,14 @@ export function App() {
             onRename={rename}
             onDelete={remove}
             onPatch={patch}
+            onShare={() => {
+              setShareOpen(true);
+              setMobileSidebar(false);
+            }}
+            onExport={(format) => {
+              setMobileSidebar(false);
+              void exportTranscript(format);
+            }}
             onSettings={() => {
               setSettingsOpen(true);
               setMobileSidebar(false);
@@ -849,23 +1098,40 @@ export function App() {
             addFiles.current(Array.from(event.dataTransfer.files));
           }}
         >
-          <SessionHeader
-            session={current}
+          <TabBar
+            tabs={tabs}
+            title={frontTerm ? `${t("terminal")} ${frontTerm.n}` : current?.title || t("newSession")}
+            onActivate={activateTab}
+            onClose={closeTab}
+            onNewSession={startNew}
+            onNewTerminal={health?.shell ? newTerminal : undefined}
             sidebarHidden={collapsed}
-            panel={panel}
             onShowSidebar={toggleSidebar}
+            panel={panel}
             onPanel={openPanel}
-            onRename={() => current && rename(current)}
-            onDelete={() => current && remove(current)}
-            onExport={exportTranscript}
-            onShare={() => setShareOpen(true)}
-            terminal={!!health?.shell}
+            onTerminal={health?.shell ? toggleTerminal : undefined}
+            terminalActive={!!frontTerm}
             agentsRunning={agentsRunning}
           />
           <div className="flex min-h-0 flex-1">
-            <div className="flex min-w-0 flex-1 flex-col">
+            {/* A terminal tab covers the conversation, which stays mounted so its
+                attachments and stream survive. Terminals mount only in front. */}
+            {frontTerm && health?.shell && (
+              <div className="min-w-0 flex-1">
+                <Suspense fallback={null}>
+                  <TerminalPanel
+                    key={frontTerm.key}
+                    api={terminalScope(frontTerm)}
+                    id={frontTerm.id}
+                    onId={(id) => setTermTabs((all) => all.map((tab) => (tab.key === frontTerm.key ? { ...tab, id } : tab)))}
+                    onError={fail}
+                  />
+                </Suspense>
+              </div>
+            )}
+            <div className={"min-w-0 flex-1 flex-col " + (frontTerm && health?.shell ? "hidden" : "flex")}>
               {conversation.error && (
-                <div className="mx-auto mt-2 w-full max-w-[635px] rounded-lg bg-red-500/10 px-3 py-2 text-[13px] text-red-500">{conversation.error}</div>
+                <div className="mx-6 mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-[13px] text-red-500">{conversation.error}</div>
               )}
               {viewed && <AgentBanner tool={viewed} onBack={() => setAgentView(null)} />}
               <Thread
@@ -881,6 +1147,7 @@ export function App() {
               />
               <Composer
                 key={!currentId || adopted.current === currentId ? "new" : currentId}
+                draftKey={!currentId || adopted.current === currentId ? "new" : currentId}
                 running={conversation.running}
                 workspace={workspace}
                 workspaces={workspaceList}
@@ -917,12 +1184,11 @@ export function App() {
               <>
                 <div className="fixed inset-0 z-10 bg-black/30 lg:hidden" onClick={() => openPanel(panel)} />
                 <div
-                  style={{ width: panel === "overview" ? 290 : panelWide || panel === "terminal" ? "min(760px, 52vw)" : 360 }}
-                  className="fixed inset-y-0 right-0 z-20 flex max-w-full shrink-0 flex-col border-l border-line bg-canvas transition-[width] max-lg:!w-[min(560px,100vw)] lg:static lg:z-auto lg:border-l-0"
+                  style={{ width: panel === "overview" ? 290 : panelWide ? "min(760px, 52vw)" : 360 }}
+                  className="fixed inset-y-0 right-0 z-20 flex max-w-full shrink-0 flex-col border-l border-line bg-canvas transition-[width] max-lg:!w-[min(560px,100vw)] lg:static lg:z-auto"
                 >
                   {/* Below lg the panel is an overlay that covers the screen on a phone, so the
-                      backdrop is out of reach: give it its own way back. Not an X — the terminal's
-                      X ends the shell. */}
+                      backdrop is out of reach: give it its own way back. */}
                   <div className="flex shrink-0 items-center justify-end border-b border-line px-1.5 py-1 lg:hidden">
                     <button
                       onClick={() => openPanel(panel)}
@@ -949,26 +1215,13 @@ export function App() {
                     />
                   )}
                   {panel === "files" && (
-                    <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
+                    <div className="min-h-0 flex-1">
                       <FilesPanel key={scopeKey} api={wsApi} refreshKey={refreshKey} onMention={(path) => mention.current(path)} onWide={setPanelWide} onError={fail} onSaved={loadGit} />
                     </div>
                   )}
-                  {panel === "terminal" && health?.shell && (
-                    <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
-                      <Suspense fallback={null}>
-                        <TerminalPanel
-                          key={scopeKey}
-                          api={wsApi}
-                          id={terminals[scopeKey] || null}
-                          onId={(id) => setTerminals((all) => ({ ...all, [scopeKey]: id || "" }))}
-                          onError={fail}
-                        />
-                      </Suspense>
-                    </div>
-                  )}
-                  {panel === "agents" && <AgentsPanel items={items} running={conversation.running} selected={viewed ? agentView : null} onSelect={setAgentView} />}
+                  {panel === "agents" && <AgentsPanel items={items} running={conversation.running} selected={viewed ? agentView : null} onSelect={openAgent} />}
                   {panel === "git" && (
-                    <div className="min-h-0 flex-1 lg:mb-2 lg:mr-2 lg:rounded-[10px] lg:border lg:border-line">
+                    <div className="min-h-0 flex-1">
                       <GitPanel key={scopeKey} api={wsApi} status={git} onStatus={setGit} onRefresh={loadGit} focus={gitFocus} onWide={setPanelWide} onError={fail} />
                     </div>
                   )}
@@ -992,8 +1245,9 @@ export function App() {
               { id: "projects", label: t("projects"), icon: <Folders size={15} />, run: showProjects },
               { id: "settings", label: t("settings"), icon: <Settings size={15} />, run: () => { setSettingsOpen(true); loadConfig(); } },
               { id: "theme", label: theme === "dark" ? t("lightTheme") : t("darkTheme"), icon: theme === "dark" ? <Sun size={15} /> : <Moon size={15} />, run: toggleTheme },
-              { id: "sidebar", label: t("toggleSidebar"), icon: <PanelLeft size={15} />, run: toggleSidebar },
+              { id: "sidebar", label: t("toggleSidebar"), icon: <SidebarIcon size={15} />, run: toggleSidebar },
               { id: "panel", label: t("togglePanel"), icon: <PanelRight size={15} />, run: togglePanel },
+              ...(health?.shell ? [{ id: "terminal", label: t("terminalNew"), icon: <SquareTerminal size={15} />, run: newTerminal }] : []),
             ]}
             sessions={sessions}
             claudeSessions={claudeSessions || []}

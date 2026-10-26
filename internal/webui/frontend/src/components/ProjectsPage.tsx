@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Archive, ArchiveRestore, ArrowLeft, Blocks, FolderGit2, GitBranch, FolderOpen, FolderPlus, History, LoaderCircle, MessageSquare, PanelLeft, Pin, Plus, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Blocks, FolderGit2, GitBranch, FolderOpen, FolderPlus, History, LoaderCircle, MessageSquare, Pin, Plus, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
 import type { Api } from "../api";
 import type { ProjectDefaults, ProviderView, Session, Workspace } from "../types";
 import { EFFORT_LEVELS, PERMISSION_MODES } from "../types";
 import { relativeTime } from "../format";
 import { useI18n } from "../i18n";
-import { IconButton } from "./Sidebar";
+import { IconButton, SidebarIcon } from "./Sidebar";
 import { MemoryEditor, projectMemorySources } from "./MemoryEditor";
 import { PermissionRules } from "./PermissionRules";
 
@@ -20,10 +20,10 @@ interface Common {
 function PageHeader({ sidebarHidden, onShowSidebar, children }: Common & { children?: ReactNode }) {
   const { t } = useI18n();
   return (
-    <header className="flex h-12 shrink-0 items-center gap-1 px-3">
+    <header className="flex h-14 shrink-0 items-center gap-1 px-3">
       <span className={sidebarHidden ? "" : "md:hidden"}>
         <IconButton title={t("toggleSidebar")} onClick={onShowSidebar}>
-          <PanelLeft size={17} />
+          <SidebarIcon />
         </IconButton>
       </span>
       {children}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Archive, ArchiveRestore, Check, ChevronRight, ChevronsUpDown, Ellipsis, FolderGit2, FolderOpen, FolderPlus, Folders, GitBranch, History, LoaderCircle, Moon, PanelLeft, Pencil, Pin, PinOff, Plus, Search, Settings, Sun, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, Check, ChevronRight, ChevronsUpDown, Download, Ellipsis, FolderGit2, FolderOpen, FolderPlus, Folders, GitBranch, History, Link2, LoaderCircle, Moon, Pencil, Pin, PinOff, Plus, Search, Settings, Sun, Trash2, X } from "lucide-react";
 import type { ClaudeSession, Health, Session, Workspace } from "../types";
 import { basename, groupSessions, relativeTime } from "../format";
 import { useI18n } from "../i18n";
@@ -30,6 +30,10 @@ interface Props {
   onRename: (session: Session) => void;
   onDelete: (session: Session) => void;
   onPatch: (session: Session, change: { pinned?: boolean; archived?: boolean }) => void;
+  // Share and export act on the open conversation (its loaded thread), so
+  // only the current row offers them.
+  onShare: () => void;
+  onExport: (format: "md" | "html") => void;
   onSettings: () => void;
   // The avatar opens cloud sync; sync is its dot (absent: no remote).
   onCloud: () => void;
@@ -70,14 +74,16 @@ export function Sidebar(props: Props) {
       onRename={() => props.onRename(session)}
       onDelete={() => props.onDelete(session)}
       onPatch={(change) => props.onPatch(session, change)}
+      onShare={session.id === currentId ? props.onShare : undefined}
+      onExport={session.id === currentId ? props.onExport : undefined}
     />
   );
 
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-r border-line bg-sidebar">
-      <div className="flex h-12 shrink-0 items-center gap-2 px-2.5">
+      <div className="flex h-14 shrink-0 items-center gap-2 px-2.5">
         <IconButton title={t("toggleSidebar")} onClick={props.onCollapse}>
-          <PanelLeft size={17} />
+          <SidebarIcon />
         </IconButton>
         <span className="font-display text-[20px] font-medium tracking-tight text-ink">ccl</span>
       </div>
@@ -393,7 +399,7 @@ function NavRow({ icon, active, onClick, children }: { icon: ReactNode; active?:
   );
 }
 
-function SessionRow({ session, project, active, onSelect, onRename, onDelete, onPatch }: {
+function SessionRow({ session, project, active, onSelect, onRename, onDelete, onPatch, onShare, onExport }: {
   session: Session;
   // The project's name when it is not the active one (search results).
   project: string;
@@ -402,6 +408,8 @@ function SessionRow({ session, project, active, onSelect, onRename, onDelete, on
   onRename: () => void;
   onDelete: () => void;
   onPatch: (change: { pinned?: boolean; archived?: boolean }) => void;
+  onShare?: () => void;
+  onExport?: (format: "md" | "html") => void;
 }) {
   const { t } = useI18n();
   const [menu, setMenu] = useState(false);
@@ -443,7 +451,7 @@ function SessionRow({ session, project, active, onSelect, onRename, onDelete, on
         </button>
       </div>
       {menu && (
-        <div className="absolute right-0 top-full z-30 mt-1 min-w-[150px] rounded-[10px] border border-line bg-surface p-1 shadow-lg">
+        <div className="absolute right-0 top-full z-30 mt-1 min-w-[160px] rounded-[10px] border border-line bg-surface p-1 shadow-lg">
           <MenuButton icon={session.pinned ? <PinOff size={14} /> : <Pin size={14} />} onClick={() => { setMenu(false); onPatch({ pinned: !session.pinned }); }}>
             {session.pinned ? t("unpin") : t("pin")}
           </MenuButton>
@@ -451,6 +459,15 @@ function SessionRow({ session, project, active, onSelect, onRename, onDelete, on
             {session.archived ? t("unarchive") : t("archive")}
           </MenuButton>
           <MenuButton icon={<Pencil size={14} />} onClick={() => { setMenu(false); onRename(); }}>{t("rename")}</MenuButton>
+          {onShare && (
+            <MenuButton icon={<Link2 size={14} />} onClick={() => { setMenu(false); onShare(); }}>{session.shareToken ? t("sharing") : t("share")}</MenuButton>
+          )}
+          {onExport && (
+            <>
+              <MenuButton icon={<Download size={14} />} onClick={() => { setMenu(false); onExport("md"); }}>{t("exportMarkdown")}</MenuButton>
+              <MenuButton icon={<Download size={14} />} onClick={() => { setMenu(false); onExport("html"); }}>{t("exportHTML")}</MenuButton>
+            </>
+          )}
           <MenuButton icon={<Trash2 size={14} />} danger onClick={() => { setMenu(false); onDelete(); }}>{t("delete")}</MenuButton>
         </div>
       )}
@@ -467,6 +484,18 @@ export function MenuButton({ icon, danger, onClick, children }: { icon: ReactNod
       {icon}
       {children}
     </button>
+  );
+}
+
+// SidebarIcon is a window with a left pane listing two rows; traefik-admin's
+// console draws its sidebar button the same way, so the two read as one app.
+export function SidebarIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+      <rect x="2.75" y="3.75" width="14.5" height="12.5" rx="3" />
+      <path d="M8 4v12" />
+      <path d="M4.9 7.25h1.2M4.9 9.75h1.2" />
+    </svg>
   );
 }
 

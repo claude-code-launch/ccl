@@ -54,7 +54,7 @@ export function AgentBanner({ tool, onBack }: { tool: ToolItem; onBack: () => vo
   const { t } = useI18n();
   const now = useClock(toolActive(tool));
   return (
-    <div className="mx-auto mt-2 flex w-full max-w-[691px] items-start gap-2 pl-6 pr-8 max-sm:px-4">
+    <div className="mt-2 flex w-full items-start gap-2 pl-6 pr-8 max-sm:px-4">
       <button type="button" onClick={onBack} className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[13px] text-ink-2 hover:bg-hover hover:text-ink">
         <ArrowLeft size={14} /> main
       </button>

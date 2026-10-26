@@ -69,7 +69,7 @@ export function Thread({ items, running, loading, workspace, route, attachmentUR
       {/* The thread never scrolls sideways: long words break, and code
           blocks and tables scroll on their own. */}
       <div ref={scroller} onScroll={onScroll} className="flex-1 overflow-y-auto overflow-x-hidden pb-8 pt-4">
-        <div className="mx-auto flex w-full min-w-0 max-w-[691px] flex-col gap-1.5 pl-6 pr-8 [overflow-wrap:anywhere] max-sm:px-4">
+        <div className="flex w-full min-w-0 flex-col gap-1.5 pl-6 pr-8 [overflow-wrap:anywhere] max-sm:px-4">
           {!items.length && !loading && <Empty workspace={workspace} route={route} onOnboard={onOnboard} />}
           {hidden > 0 && (
             <button

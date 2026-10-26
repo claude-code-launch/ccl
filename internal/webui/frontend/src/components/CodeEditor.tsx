@@ -12,7 +12,7 @@ import { classHighlighter } from "@lezer/highlight";
 
 const theme = EditorView.theme({
   "&": { height: "100%", fontSize: "12.5px", backgroundColor: "transparent", color: "var(--ink)" },
-  ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", lineHeight: "1.55" },
+  ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.55" },
   ".cm-content": { caretColor: "var(--ink)" },
   ".cm-gutters": { backgroundColor: "transparent", color: "var(--ink-3)", border: "none" },
   ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "var(--hover)" },

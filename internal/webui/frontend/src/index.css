@@ -1,3 +1,7 @@
+@import "@fontsource-variable/fraunces/opsz.css";
+@import "@fontsource-variable/instrument-sans/index.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
@@ -5,42 +9,48 @@
    user's choice, or from the system preference when there is none. */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-/* Values measured from claude.ai/code (dark) and its light counterpart.
-   Components use the semantic names (bg-canvas, text-ink-2, border-line…),
-   which follow data-theme. */
+/* Warm paper and ink, one clay accent. Components use the semantic names
+   (bg-canvas, text-ink-2, border-line…), which follow data-theme. */
 :root {
-  --canvas: #faf9f7;
-  --sidebar: #f3f2ef;
+  --canvas: #f9f8f4;
+  --sidebar: #f3f1ea;
   --surface: #ffffff;
   --raised: #ffffff;
-  --hover: rgb(0 0 0 / 0.045);
-  --active: rgb(0 0 0 / 0.075);
-  --bubble: rgb(0 0 0 / 0.05);
-  --line: rgb(0 0 0 / 0.1);
-  --line-strong: rgb(0 0 0 / 0.18);
-  --ink: #1a1a18;
-  --ink-2: #4a4945;
-  --ink-3: #85837c;
+  --hover: rgb(31 30 28 / 0.045);
+  --active: rgb(31 30 28 / 0.075);
+  --bubble: rgb(31 30 28 / 0.05);
+  --line: rgb(31 30 28 / 0.1);
+  --line-strong: rgb(31 30 28 / 0.18);
+  --ink: #1f1e1c;
+  --ink-2: #4b4840;
+  --ink-3: #6b675d;
   --clay: #c96442;
-  --clay-hover: #b5583a;
-  --code: rgb(0 0 0 / 0.035);
+  --clay-hover: #a94f31;
+  --code: rgb(31 30 28 / 0.035);
 }
 [data-theme="dark"] {
-  --canvas: #151515;
-  --sidebar: #111111;
-  --surface: #20201f;
-  --raised: #1b1b1a;
-  --hover: rgb(255 255 255 / 0.06);
-  --active: rgb(255 255 255 / 0.1);
-  --bubble: rgb(255 255 255 / 0.05);
-  --line: rgb(255 255 255 / 0.1);
-  --line-strong: rgb(255 255 255 / 0.18);
-  --ink: #f0efec;
-  --ink-2: #c3c2b7;
-  --ink-3: #898781;
-  --clay: #d97757;
+  --canvas: #1c1b19;
+  --sidebar: #191816;
+  --surface: #252421;
+  --raised: #22211e;
+  --hover: rgb(235 232 224 / 0.06);
+  --active: rgb(235 232 224 / 0.1);
+  --bubble: rgb(235 232 224 / 0.05);
+  --line: rgb(235 232 224 / 0.1);
+  --line-strong: rgb(235 232 224 / 0.18);
+  --ink: #ebe8e0;
+  --ink-2: #c6c1b5;
+  --ink-3: #a29d91;
+  --clay: #d4704d;
   --clay-hover: #e08a6d;
-  --code: rgb(255 255 255 / 0.03);
+  --code: rgb(235 232 224 / 0.03);
+}
+
+@theme {
+  --font-sans: "Instrument Sans Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  /* Chinese falls back to the system serif: a CJK web font is too large to embed. */
+  --font-serif: "Fraunces Variable", "Songti SC", "STSong", "Noto Serif CJK SC", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 @theme inline {
@@ -68,11 +78,18 @@ body,
 }
 
 body {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
+  letter-spacing: -0.003em;
   background: var(--canvas);
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-optical-sizing: auto;
+}
+
+::selection {
+  background: rgb(201 100 66 / 0.2);
 }
 
 /* The block being streamed ends with a cursor. */
@@ -170,7 +187,8 @@ body {
 }
 
 .font-display {
-  font-family: Georgia, "Times New Roman", "Songti SC", serif;
+  font-family: var(--font-serif);
+  letter-spacing: -0.015em;
 }
 
 /* CodeMirror tokens (classHighlighter emits tok-* classes). */

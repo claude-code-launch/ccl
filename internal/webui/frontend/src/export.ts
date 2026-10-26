@@ -77,8 +77,8 @@ export async function transcriptHTML(title: string, markdown: string): Promise<s
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escaped}</title>
 <style>
-:root{color-scheme:light dark;--bg:#faf9f7;--ink:#1a1a18;--line:rgba(0,0,0,.1);--code:rgba(0,0,0,.04)}
-@media (prefers-color-scheme:dark){:root{--bg:#151515;--ink:#f0efec;--line:rgba(255,255,255,.12);--code:rgba(255,255,255,.05)}}
+:root{color-scheme:light dark;--bg:#f9f8f4;--ink:#1f1e1c;--line:rgba(0,0,0,.1);--code:rgba(0,0,0,.04)}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--ink:#ebe8e0;--line:rgba(255,255,255,.12);--code:rgba(255,255,255,.05)}}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC",sans-serif}
 main{max-width:760px;margin:0 auto;padding:32px 20px}
 pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}

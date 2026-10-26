@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { Plus, X } from "lucide-react";
-import type { Api } from "../api";
+import { RotateCcw } from "lucide-react";
+import { HttpError, type Api } from "../api";
 import { useI18n } from "../i18n";
-import { IconButton } from "./Sidebar";
 
-// The web terminal (ccl serve --shell). It is its own chunk. Closing the panel
-// leaves the shell running; the panel re-attaches and the server replays the
-// recent output. Only the close button ends the shell.
+// The web terminal (ccl serve --shell), shown in a tab. It is its own chunk.
+// Switching away unmounts it and leaves the shell running; coming back
+// re-attaches and the server replays the recent output. Closing the tab ends
+// the shell.
 
 interface Props {
   api: Api;
@@ -91,7 +91,8 @@ export default function TerminalPanel({ api, id, onId, onError }: Props) {
         attach(current);
         term.focus();
       } catch (error) {
-        onError(error);
+        // A shell that is gone (a restarted server) is replaced quietly.
+        if (!(error instanceof HttpError && error.status === 404)) onError(error);
         onId(null);
       }
     })();
@@ -115,26 +116,16 @@ export default function TerminalPanel({ api, id, onId, onError }: Props) {
   }, [id === null]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-0.5 px-1.5 py-1">
-        <span className="flex-1 px-1 text-[13px] text-ink-2">{t("terminal")}</span>
-        {exited && (
-          <IconButton title={t("terminalNew")} onClick={() => { setExited(false); onId(null); }}>
-            <Plus size={15} />
-          </IconButton>
-        )}
-        <IconButton
-          title={t("terminalClose")}
-          onClick={() => {
-            if (id) api.terminalClose(id).catch(() => {});
-            setExited(false);
-            onId(null);
-          }}
+    <div className="relative flex h-full min-h-0 flex-col">
+      {exited && (
+        <button
+          onClick={() => { setExited(false); onId(null); }}
+          className="absolute right-3 top-2 z-10 flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-[13px] text-ink-2 shadow-sm hover:text-ink"
         >
-          <X size={15} />
-        </IconButton>
-      </div>
-      <div ref={host} className="min-h-0 flex-1 px-2 pb-2" />
+          <RotateCcw size={13} /> {t("terminalNew")}
+        </button>
+      )}
+      <div ref={host} className="min-h-0 flex-1 px-3 pb-2 pt-2" />
     </div>
   );
 }

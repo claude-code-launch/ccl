@@ -51,7 +51,13 @@ interface Props {
   onSchedule: (text: string, at: string) => Promise<boolean>;
   onUnschedule: (id: string) => void;
   onManageConnectors: () => void;
+  // Whose unsent text this is: switching tabs remounts the composer, and the
+  // text comes back with the tab.
+  draftKey: string;
 }
+
+// Unsent text per tab, for this page load.
+const drafts = new Map<string, string>();
 
 // The Web Speech API, where the browser has it (Chrome sends audio to its
 // recognition service).
@@ -71,7 +77,11 @@ const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigat
 export function Composer(props: Props) {
   const { running, capabilities, onUpload, onSend, onStop, registerAddFiles } = props;
   const { t } = useI18n();
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => drafts.get(props.draftKey) || "");
+  useEffect(() => {
+    if (text) drafts.set(props.draftKey, text);
+    else drafts.delete(props.draftKey);
+  }, [text, props.draftKey]);
   const [pending, setPending] = useState<Pending[]>([]);
   const [sending, setSending] = useState(false);
   const [menu, setMenu] = useState<null | "main" | "connectors" | "schedule">(null);
@@ -284,7 +294,7 @@ export function Composer(props: Props) {
   const hasHistory = (props.session?.turns || 0) > 0;
   return (
     <footer className="pb-2.5">
-      <div ref={box} className="relative mx-auto max-w-[691px] pl-6 pr-8 max-sm:px-3">
+      <div ref={box} className="relative pl-6 pr-8 max-sm:px-3">
         {menu === "main" && (
           <Popover>
             <MenuItem icon={<Paperclip size={17} />} label={t("addFiles")} shortcut={isMac ? "⌘ U" : "Ctrl U"}
