@@ -487,7 +487,7 @@ export function MenuButton({ icon, danger, onClick, children }: { icon: ReactNod
   );
 }
 
-// SidebarIcon is a window with a left pane listing two rows; traefik-admin's
+// SidebarIcon is a window with a left pane listing two rows; admin-console's
 // console draws its sidebar button the same way, so the two read as one app.
 export function SidebarIcon({ size = 18 }: { size?: number }) {
   return (
