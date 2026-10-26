@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Folders, Moon, PanelLeft, PanelRight, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
+import { Folders, Moon, PanelLeft, PanelRight, PanelRightClose, Paperclip, Plus, Settings, Sun, X } from "lucide-react";
 import { Api, HttpError, Unauthorized, storeToken, storedToken } from "./api";
 import type { Attachment, Capabilities, ClaudeSession, ConfigView, GitStatus, Health, PermissionDecision, ProjectDefaults, ProviderView, Schedule, Session, StoredEvent, Workspace } from "./types";
 import { agentsOf, agentThread, buildThread, latestCapabilities, pendingPermissions, toolActive } from "./thread";
@@ -920,6 +920,18 @@ export function App() {
                   style={{ width: panel === "overview" ? 290 : panelWide || panel === "terminal" ? "min(760px, 52vw)" : 360 }}
                   className="fixed inset-y-0 right-0 z-20 flex max-w-full shrink-0 flex-col border-l border-line bg-canvas transition-[width] max-lg:!w-[min(560px,100vw)] lg:static lg:z-auto lg:border-l-0"
                 >
+                  {/* Below lg the panel is an overlay that covers the screen on a phone, so the
+                      backdrop is out of reach: give it its own way back. Not an X — the terminal's
+                      X ends the shell. */}
+                  <div className="flex shrink-0 items-center justify-end border-b border-line px-1.5 py-1 lg:hidden">
+                    <button
+                      onClick={() => openPanel(panel)}
+                      className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] text-ink-2 hover:bg-hover hover:text-ink"
+                    >
+                      {t("closePanel")}
+                      <PanelRightClose size={16} />
+                    </button>
+                  </div>
                   {panel === "overview" && (
                     <RightPanel
                       session={current}

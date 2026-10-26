@@ -45,13 +45,18 @@ export function SessionHeader({ session, sidebarHidden, panel, onShowSidebar, on
           <PanelLeft size={17} />
         </IconButton>
       </span>
+      {/* max-w-full: the wrapper shrinks with min-w-0, the button must follow it or a
+          long title spills over the panel buttons instead of truncating. On a phone
+          there is no room for the title at all; the chevron keeps the menu reachable. */}
       <div ref={ref} className="relative min-w-0">
         {session ? (
           <button
             onClick={() => setMenu(!menu)}
-            className="flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 text-[13px] font-medium text-ink hover:bg-hover"
+            title={session.title || t("untitled")}
+            aria-label={session.title || t("untitled")}
+            className="flex min-w-0 max-w-full items-center gap-1 rounded-md px-1 py-0.5 text-[13px] font-medium text-ink hover:bg-hover"
           >
-            <span className="truncate">{session.title || t("untitled")}</span>
+            <span className="truncate max-sm:hidden">{session.title || t("untitled")}</span>
             <ChevronDown size={14} className="shrink-0 text-ink-3" />
           </button>
         ) : (
