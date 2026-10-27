@@ -166,6 +166,8 @@ export interface ProviderView {
   effortLevel?: string;
   // The model pool, comma-separated.
   models?: string;
+  // The window a Balanced context preset declares; absent for Default.
+  contextWindow?: number;
   active: boolean;
   acpActive: boolean;
   modelChoices: ModelChoice[];

@@ -325,11 +325,45 @@ func TestTranslatorDoesNotRepeatStreamedText(t *testing.T) {
 		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}`,
 		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"hi"}]}}`,
 	)
-	if len(events) != 3 || events[0].kind != EventContext || events[1].kind != EventThinking || events[2].kind != EventToken {
+	if len(events) != 2 || events[0].kind != EventThinking || events[1].kind != EventToken {
 		t.Fatalf("events = %+v", events)
 	}
-	if ctx := events[0].payload.(ContextPayload); ctx.Tokens != 1003 {
-		t.Fatalf("context = %+v", ctx)
+}
+
+// A ccl runtime's message_start carries an estimate of the request bytes, which
+// base64 images inflate far past the real context; message_delta has the
+// upstream's count.
+func TestTranslatorContextPrefersMessageDeltaUsage(t *testing.T) {
+	contexts := func(lines ...string) []int64 {
+		var tokens []int64
+		for _, event := range collectEvents(lines...) {
+			if event.kind == EventContext {
+				tokens = append(tokens, event.payload.(ContextPayload).Tokens)
+			}
+		}
+		return tokens
+	}
+	start := `{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1400000}}}}`
+	stop := `{"type":"stream_event","event":{"type":"message_stop"}}`
+
+	got := contexts(start,
+		`{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":291,"cache_read_input_tokens":164608,"output_tokens":9}}}`,
+		stop)
+	if len(got) != 1 || got[0] != 164899 {
+		t.Fatalf("with delta usage: contexts = %v", got)
+	}
+
+	got = contexts(start, `{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":9}}}`, stop)
+	if len(got) != 1 || got[0] != 1400000 {
+		t.Fatalf("without delta usage: contexts = %v", got)
+	}
+
+	got = contexts(
+		`{"type":"stream_event","parent_tool_use_id":"task_1","event":{"type":"message_start","message":{"id":"msg_2","usage":{"input_tokens":50}}}}`,
+		`{"type":"stream_event","parent_tool_use_id":"task_1","event":{"type":"message_delta","usage":{"input_tokens":60}}}`,
+		`{"type":"stream_event","parent_tool_use_id":"task_1","event":{"type":"message_stop"}}`)
+	if len(got) != 0 {
+		t.Fatalf("sub-agent: contexts = %v", got)
 	}
 }
 

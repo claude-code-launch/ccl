@@ -169,6 +169,11 @@ type translator struct {
 	// background counts the live background tasks that are activity (not
 	// ambient), as Claude Code last reported them.
 	background int
+	// startContext is the context size the current main-thread call announced
+	// in message_start. A ccl runtime fills that from an estimate of the
+	// request bytes (base64 images count in full), so the upstream's own count
+	// in message_delta replaces it; it is used only when none arrives.
+	startContext int64
 }
 
 // Background reports whether background work is still running. Claude Code
@@ -345,6 +350,18 @@ func usageFrom(data json.RawMessage, durationMs int64, costUSD float64) Usage {
 	return usage
 }
 
+// inputUsage is the prompt side of a stream event's usage: everything the
+// call sent, cached or not.
+type inputUsage struct {
+	InputTokens         int64 `json:"input_tokens"`
+	CacheCreationTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+func (u inputUsage) total() int64 {
+	return u.InputTokens + u.CacheCreationTokens + u.CacheReadTokens
+}
+
 func (t *translator) handleStreamEvent(data json.RawMessage, parent string, emit emitter) {
 	if len(data) == 0 {
 		return
@@ -353,13 +370,10 @@ func (t *translator) handleStreamEvent(data json.RawMessage, parent string, emit
 	var event struct {
 		Type    string `json:"type"`
 		Message struct {
-			ID    string `json:"id"`
-			Usage struct {
-				InputTokens         int64 `json:"input_tokens"`
-				CacheCreationTokens int64 `json:"cache_creation_input_tokens"`
-				CacheReadTokens     int64 `json:"cache_read_input_tokens"`
-			} `json:"usage"`
+			ID    string     `json:"id"`
+			Usage inputUsage `json:"usage"`
 		} `json:"message"`
+		Usage inputUsage `json:"usage"`
 		Delta struct {
 			Type     string `json:"type"`
 			Text     string `json:"text"`
@@ -380,9 +394,18 @@ func (t *translator) handleStreamEvent(data json.RawMessage, parent string, emit
 			t.streamed[event.Message.ID] = true
 		}
 		// A sub-agent's calls have their own context.
-		usage := event.Message.Usage
-		if tokens := usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens; tokens > 0 && parent == "" {
+		if parent == "" {
+			t.startContext = event.Message.Usage.total()
+		}
+	case "message_delta":
+		if tokens := event.Usage.total(); tokens > 0 && parent == "" {
+			t.startContext = 0
 			emit(EventContext, ContextPayload{Tokens: tokens})
+		}
+	case "message_stop":
+		if t.startContext > 0 && parent == "" {
+			emit(EventContext, ContextPayload{Tokens: t.startContext})
+			t.startContext = 0
 		}
 	case "content_block_delta":
 		switch {

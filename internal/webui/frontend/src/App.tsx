@@ -113,8 +113,9 @@ const narrow = () => window.matchMedia("(max-width: 767px)").matches;
 const NO_CAPABILITIES: Capabilities = { slashCommands: [], mcpServers: [] };
 
 // contextOf is the size of the newest model call against the model's window:
-// a model id marked [1m] runs with the 1M window.
-function contextOf(events: StoredEvent[], session: Session | null): { tokens: number; window: number } | undefined {
+// a provider's Balanced preset caps every slot to its own window (presetWindow);
+// otherwise a model id marked [1m] runs with the 1M window.
+function contextOf(events: StoredEvent[], session: Session | null, presetWindow?: number): { tokens: number; window: number } | undefined {
   let tokens = 0;
   let model = session?.model || "";
   for (let i = events.length - 1; i >= 0; i--) {
@@ -126,6 +127,7 @@ function contextOf(events: StoredEvent[], session: Session | null): { tokens: nu
     }
   }
   if (!tokens) return undefined;
+  if (presetWindow) return { tokens, window: presetWindow };
   return { tokens, window: /\[1m\]|-1m\b/i.test(model) ? 1_000_000 : 200_000 };
 }
 
@@ -1197,7 +1199,7 @@ export function App() {
                 queued={queue.map((item) => ({ key: item.key, text: item.text, files: item.attachments.length, steered: item.steered !== undefined }))}
                 onSteerQueued={(key) => void steer(key)}
                 onRemoveQueued={(key) => currentId && setQueues((all) => ({ ...all, [currentId]: (all[currentId] || []).filter((item) => item.key !== key) }))}
-                context={contextOf(conversation.events, current)}
+                context={contextOf(conversation.events, current, current ? config?.providers[current.provider]?.contextWindow : undefined)}
                 awaitingPermission={pending.length > 0}
                 scheduled={schedules}
                 onSchedule={scheduleMessage}

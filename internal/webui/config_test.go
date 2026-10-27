@@ -321,6 +321,14 @@ func TestProviderViewMasksAndShowsType(t *testing.T) {
 	}
 }
 
+func TestProviderViewContextWindow(t *testing.T) {
+	for preset, want := range map[string]int{"": 0, provider.ContextPresetNameBalanced500K: 500_000, provider.ContextPresetNameBalanced800K: 800_000} {
+		if got := providerView(&provider.Config{}, "p", provider.Provider{ContextPreset: preset}).ContextWindow; got != want {
+			t.Fatalf("preset %q: window = %d, want %d", preset, got, want)
+		}
+	}
+}
+
 func TestProviderViewModelChoices(t *testing.T) {
 	p := provider.Provider{
 		OpusModel:     "big-model[1m]",

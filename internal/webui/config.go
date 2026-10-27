@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,8 +66,11 @@ type ProviderView struct {
 	ModelOverrides map[string]string `json:"modelOverrides,omitempty"`
 	FastMode       bool              `json:"fastMode,omitempty"`
 	ContextPreset  string            `json:"contextPreset,omitempty"`
-	Active         bool              `json:"active"`
-	ACPActive      bool              `json:"acpActive"`
+	// ContextWindow is the window a Balanced preset caps every slot to; zero
+	// for Default, where a slot's [1m] marker decides.
+	ContextWindow int  `json:"contextWindow,omitempty"`
+	Active        bool `json:"active"`
+	ACPActive     bool `json:"acpActive"`
 	// ModelChoices is what a conversation on this provider can pick.
 	ModelChoices []ModelChoice `json:"modelChoices"`
 }
@@ -534,10 +538,22 @@ func providerView(cfg *provider.Config, name string, p provider.Provider) Provid
 		ModelOverrides: p.ModelOverrides,
 		FastMode:       p.FastMode,
 		ContextPreset:  p.ContextPreset,
+		ContextWindow:  presetContextWindow(p),
 		Active:         cfg.ActiveProvider == name,
 		ACPActive:      cfg.EffectiveACPProvider() == name,
 		ModelChoices:   modelChoices(p),
 	}
+}
+
+// presetContextWindow is the context size p's Balanced preset declares to
+// Claude Code, or zero for Default.
+func presetContextWindow(p provider.Provider) int {
+	maxContext, _, _, ok := provider.ContextPresetValues(provider.ProviderContextPreset(p))
+	if !ok {
+		return 0
+	}
+	window, _ := strconv.Atoi(maxContext)
+	return window
 }
 
 // maskKey keeps the last four characters; everything else is hidden.
