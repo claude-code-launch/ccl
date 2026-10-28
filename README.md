@@ -34,11 +34,28 @@ ccl oauth gpt | gemini | grok | qoder | kimi | kiro | workbuddy | workbuddycn | 
 ccl set deepseek
 
 ccl            # 用当前 provider 启动 Claude Code
+ccl --provider deepseek -p "你好"   # 仅本次使用 deepseek，不改变默认选择
 ```
 
 新安装默认使用 `default`，即 Claude Code 自身配置（claude.ai 订阅与 `~/.claude` 设置）：`ccl` 与 `ccl acp` 都直接以它启动。`ccl oauth`、`ccl set` 选择 Save & Activate 或 `ccl use <name>` 切换到 provider，`ccl use default` / `ccl use --acp default` 切回。`ccl proxy` 运行时，`default` 看到的就是代理写入的配置。
 
-未知命令和参数会原样透传给 Claude Code（`ccl resume`、`ccl -p "hi"`），并启动真实会话。
+未知命令和参数会原样透传给 Claude Code（`ccl resume`、`ccl -p "hi"`），并启动真实会话。单次启动参数 `--provider` 必须放在 Claude 参数之前，支持 `--provider=deepseek`；`ccl --provider default` 使用 default。
+
+### Claude 订阅多账号
+
+```bash
+ccl oauth claude work          # 通过 Claude Code 登录工作账号
+ccl oauth claude personal      # 登录另一个账号
+ccl oauth claude               # 选择已有账号，或登录新账号
+ccl oauth claude list          # 查看账号与当前选择
+ccl oauth claude use work      # 默认使用工作账号（切换到 default）
+ccl --account personal         # 仅本次使用 personal，不改变默认选择
+ccl oauth claude use default   # 恢复原来的 Claude Code 配置
+```
+
+首次不带名称运行 `ccl oauth claude` 会登录，并优先用账号邮箱命名；再次运行可在终端选择账号。用 `ccl oauth claude add [name]` 增加账号，同名重新登录会保留该账号原有目录。需要支持 `claude auth login` 的 Claude Code 版本；Claude Code 自己处理登录与令牌刷新。每个账号拥有独立的设置和会话历史，保存在 `~/.ccl/claude-accounts/`（macOS 凭据由 Claude Code 使用 Keychain）。这些账号不会被 `ccl cloud` 同步。
+
+账号选择作用于终端 `ccl` 启动的 default 模式；`ccl acp` 和 `ccl serve` 的 default 仍使用它们自身的 Claude 配置。运行单次 provider 时不会修改账号选择。
 
 ### 常用命令
 
@@ -46,6 +63,8 @@ ccl            # 用当前 provider 启动 Claude Code
 |---|---|
 | `ccl set [name]` | 新增 / 修改 provider（TUI） |
 | `ccl ls [-a]` / `ccl use <name>` | 列出 / 切换 provider；`ccl use default` = Claude Code 自身配置 |
+| `ccl --provider <name> [Claude 参数]` | 本次启动指定 provider，不改变默认选择 |
+| `ccl oauth claude [name]` / `ccl --account <name>` | 登录、选择 Claude 账号 / 本次使用指定账号 |
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | 映射模型槽位；`ccl map auto` 自动填充 |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | 订阅登录 / 清理未使用凭据 |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
@@ -169,11 +188,28 @@ ccl oauth gpt | gemini | grok | qoder | kimi | kiro | workbuddy | workbuddycn | 
 ccl set deepseek
 
 ccl            # launch Claude Code with the active provider
+ccl --provider deepseek -p "hello"  # use deepseek once without changing the selection
 ```
 
 A fresh install uses `default`, Claude Code's own configuration (claude.ai subscription and `~/.claude` settings), for both `ccl` and `ccl acp`. `ccl oauth`, Save & Activate in `ccl set`, or `ccl use <name>` switches to a provider; `ccl use default` / `ccl use --acp default` switches back. While `ccl proxy` runs, `default` sees the configuration the proxy wrote.
 
-Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, `ccl -p "hi"`) and start a real session.
+Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, `ccl -p "hi"`) and start a real session. The one-shot `--provider` must precede Claude arguments; `--provider=deepseek` and `--provider default` also work.
+
+### Multiple Claude subscription accounts
+
+```bash
+ccl oauth claude work          # sign in to the work account through Claude Code
+ccl oauth claude personal      # sign in to another account
+ccl oauth claude               # choose an account or sign in to another
+ccl oauth claude list          # show accounts and the selection
+ccl oauth claude use work      # select work and switch to default
+ccl --account personal         # use personal once without changing the selection
+ccl oauth claude use default   # restore the original Claude Code configuration
+```
+
+On first use, `ccl oauth claude` signs in and uses the account email as its name when available; subsequent runs offer an account picker in a terminal. Add an account with `ccl oauth claude add [name]`; signing in with an existing name reuses its profile. A Claude Code version supporting `claude auth login` is required; Claude Code handles login and token refresh. Each account has separate settings and session history in `~/.ccl/claude-accounts/` (on macOS Claude Code stores credentials in Keychain). These accounts are not included in `ccl cloud` sync.
+
+Account selection applies to terminal `ccl` launches in default mode. `ccl acp` and `ccl serve` continue to use their own Claude configuration for default. One-shot provider launches do not change the account selection.
 
 ### Commands
 
@@ -181,6 +217,8 @@ Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, 
 |---|---|
 | `ccl set [name]` | Add / edit a provider (TUI) |
 | `ccl ls [-a]` / `ccl use <name>` | List / switch providers; `ccl use default` = Claude Code's own configuration |
+| `ccl --provider <name> [Claude args]` | Use a provider for one launch without changing the selection |
+| `ccl oauth claude [name]` / `ccl --account <name>` | Sign in and select a Claude account / use one for a single launch |
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | Map model slots; `ccl map auto` fills them |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | Subscription login / remove unused credentials |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |

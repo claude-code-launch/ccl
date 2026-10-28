@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
@@ -21,13 +23,15 @@ var rootCmd = &cobra.Command{
 
 Common commands:
   ccl                         Start Claude Code with the active provider
+  ccl --provider <name>       Start once with a provider, without changing the selection
+  ccl --account <name>        Start once with a Claude subscription account
   ccl ls                      List providers and normal/ACP selections
   ccl use [name]              Switch the normal-mode provider; ccl use default
                               runs Claude Code's own configuration (claude.ai)
   ccl use --acp [name]        Select a shared provider configuration for ACP
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
   ccl proxy -p <name>         Connect direct claude invocations to a background proxy
-  ccl oauth <gpt|grok|workbuddy|...>
+  ccl oauth <claude|gpt|grok|workbuddy|...>
                               Log in with a subscription account
   ccl doctor                  Environment + provider + subscription health
   ccl acp                     Agent Client Protocol on stdio (Xcode 27 and other ACP clients)
@@ -78,6 +82,20 @@ func Execute() {
 	}
 
 	if len(os.Args) > 1 {
+		options, args, handled, err := parseLaunchOptions(os.Args[1:])
+		if handled {
+			if err == nil {
+				err = runClaudeWithOptions(args, options)
+			}
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					os.Exit(exitErr.ExitCode())
+				}
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
 		firstArg := os.Args[1]
 
 		if !isCclCommand(firstArg) {
@@ -151,6 +169,88 @@ func isCclCommand(arg string) bool {
 }
 
 func runClaude(args []string) error {
+	return runClaudeWithOptions(args, launchOptions{})
+}
+
+type launchOptions struct {
+	provider string
+	account  string
+}
+
+// Only leading CCL options are consumed. Once the Claude argument list starts,
+// its flags and values are forwarded verbatim (including -p and --provider).
+func parseLaunchOptions(args []string) (launchOptions, []string, bool, error) {
+	var options launchOptions
+	consumed := 0
+	for consumed < len(args) {
+		arg := args[consumed]
+		key, value, hasValue := strings.Cut(arg, "=")
+		if key != "--provider" && key != "--account" {
+			break
+		}
+		consumed++
+		if !hasValue {
+			if consumed == len(args) || strings.HasPrefix(args[consumed], "-") {
+				return options, nil, true, fmt.Errorf("%s requires a name", key)
+			}
+			value = args[consumed]
+			consumed++
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return options, nil, true, fmt.Errorf("%s requires a name", key)
+		}
+		if key == "--provider" {
+			if options.provider != "" {
+				return options, nil, true, fmt.Errorf("--provider may be specified only once")
+			}
+			options.provider = value
+		} else {
+			if options.account != "" {
+				return options, nil, true, fmt.Errorf("--account may be specified only once")
+			}
+			options.account = value
+		}
+	}
+	if consumed == 0 {
+		return options, args, false, nil
+	}
+	if options.account != "" && options.provider != "" && !provider.IsDefaultProvider(options.provider) {
+		return options, nil, true, fmt.Errorf("--account requires --provider default, or no --provider")
+	}
+	if consumed < len(args) && args[consumed] == "--" {
+		consumed++
+	}
+	return options, args[consumed:], true, nil
+}
+
+func runClaudeWithOptions(args []string, options launchOptions) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load ccl config for launcher options: %w", err)
+	}
+	name := cfg.ActiveProvider
+	if options.provider != "" {
+		name = options.provider
+	}
+	if options.account != "" {
+		name = provider.DefaultProvider
+	}
+	var p provider.Provider
+	if provider.IsDefaultProvider(name) {
+		store, err := claudeaccount.Open()
+		if err != nil {
+			return err
+		}
+		if _, _, err := store.Resolve(options.account); err != nil {
+			return err
+		}
+	} else {
+		p, err = resolveProviderFromConfig(cfg, name)
+		if err != nil {
+			return err
+		}
+	}
 	if localClaudeDir != "" {
 		printLocalClaudeHint(os.Stderr, localClaudeDir)
 	}
@@ -160,16 +260,8 @@ func runClaude(args []string) error {
 		}
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load ccl config for launcher options: %w", err)
-	}
-	if provider.IsDefaultProvider(cfg.ActiveProvider) {
-		return runClaudeWithoutProvider(applyBypassMode(args, cfg.BypassMode))
-	}
-	p, err := resolveProvider()
-	if err != nil {
-		return err
+	if provider.IsDefaultProvider(name) {
+		return runClaudeWithoutProviderForAccount(applyBypassMode(args, cfg.BypassMode), options.account)
 	}
 
 	// Record the configured threshold; claude.Run opens the uniquely named file
@@ -195,15 +287,20 @@ func resolveProvider() (provider.Provider, error) {
 	if err != nil {
 		return provider.Provider{}, fmt.Errorf("failed to load config: %w", err)
 	}
-	if cfg.ActiveProvider == "" {
+	return resolveProviderFromConfig(cfg, cfg.ActiveProvider)
+}
+
+func resolveProviderFromConfig(cfg *provider.Config, name string) (provider.Provider, error) {
+	if name == "" {
 		return provider.Provider{}, errors.New(locale.T(
 			"未选择 Provider。用 ccl set 添加、ccl use <name> 选择，或用 ccl use default 直接以 Claude Code 自身登录启动",
 			"no provider selected. Add one with ccl set, choose one with ccl use <name>, or run Claude Code on its own login with ccl use default",
 		))
 	}
-	p, ok := cfg.Providers[cfg.ActiveProvider]
+	p, ok := cfg.Providers[name]
 	if !ok {
-		return provider.Provider{}, fmt.Errorf("active provider %q not found in configuration", cfg.ActiveProvider)
+		return provider.Provider{}, fmt.Errorf("provider %q not found in configuration", name)
 	}
+	p.Name = name
 	return p, nil
 }
