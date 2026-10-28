@@ -53,7 +53,7 @@ ccl --account personal         # 仅本次使用 personal，不改变默认选�
 ccl oauth claude use default   # 恢复原来的 Claude Code 配置
 ```
 
-首次不带名称运行 `ccl oauth claude` 会登录，并优先用账号邮箱命名；再次运行可在终端选择账号。用 `ccl oauth claude add [name]` 增加账号，同名重新登录会保留该账号原有目录。需要支持 `claude auth login` 的 Claude Code 版本；Claude Code 自己处理登录与令牌刷新。每个账号拥有独立的设置和会话历史，保存在 `~/.ccl/claude-accounts/`（macOS 凭据由 Claude Code 使用 Keychain）。这些账号不会被 `ccl cloud` 同步。
+首次不带名称运行 `ccl oauth claude` 会登录，并优先用账号邮箱命名；再次运行可在终端选择账号。用 `ccl oauth claude add [name]` 增加账号，同名重新登录会保留该账号原有目录。如果已有一个账号登录了 Claude Code，它仍是 `default`，只需再登录另一个账号；选择 `default` 即可切回。需要支持 `claude auth login` 的 Claude Code 版本；Claude Code 自己处理登录与令牌刷新。每个账号拥有独立的设置和会话历史，保存在 `~/.ccl/claude-accounts/`（macOS 通常由 Claude Code 使用 Keychain 保存凭据）。这些账号不会被 `ccl cloud` 同步。
 
 账号选择作用于终端 `ccl` 启动的 default 模式；`ccl acp` 和 `ccl serve` 的 default 仍使用它们自身的 Claude 配置。运行单次 provider 时不会修改账号选择。
 
@@ -207,7 +207,7 @@ ccl --account personal         # use personal once without changing the selectio
 ccl oauth claude use default   # restore the original Claude Code configuration
 ```
 
-On first use, `ccl oauth claude` signs in and uses the account email as its name when available; subsequent runs offer an account picker in a terminal. Add an account with `ccl oauth claude add [name]`; signing in with an existing name reuses its profile. A Claude Code version supporting `claude auth login` is required; Claude Code handles login and token refresh. Each account has separate settings and session history in `~/.ccl/claude-accounts/` (on macOS Claude Code stores credentials in Keychain). These accounts are not included in `ccl cloud` sync.
+On first use, `ccl oauth claude` signs in and uses the account email as its name when available; subsequent runs offer an account picker in a terminal. Add an account with `ccl oauth claude add [name]`; signing in with an existing name reuses its profile. If you already signed in to Claude Code, that account remains available as `default`, so you only need to sign in to the other account. A Claude Code version supporting `claude auth login` is required; Claude Code handles login and token refresh. Each account has separate settings and session history in `~/.ccl/claude-accounts/` (on macOS Claude Code usually uses Keychain for credentials). These accounts are not included in `ccl cloud` sync.
 
 Account selection applies to terminal `ccl` launches in default mode. `ccl acp` and `ccl serve` continue to use their own Claude configuration for default. One-shot provider launches do not change the account selection.
 
