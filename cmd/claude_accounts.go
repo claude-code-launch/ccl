@@ -147,7 +147,15 @@ func chooseClaudeAccount(ctx context.Context, out io.Writer) error {
 		return nil
 	}
 	choices := make([]string, 0, len(names)+2)
-	values := append([]string{"default"}, names...)
+	values := []string{"default"}
+	if active != "" {
+		values = []string{active, "default"}
+	}
+	for _, name := range names {
+		if name != active {
+			values = append(values, name)
+		}
+	}
 	for index, name := range values {
 		selected := name == active || (name == "default" && active == "")
 		marker := ""
