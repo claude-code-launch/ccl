@@ -12,6 +12,9 @@ import (
 // home. The UI language is pinned to English so text assertions do not depend
 // on the machine's locale or a real config's `lang`.
 func TestMain(m *testing.M) {
+	if os.Getenv("CCL_TEST_FAKE_CLAUDE") == "1" {
+		os.Exit(fakeClaudeProcess())
+	}
 	home, err := os.MkdirTemp("", "ccl-cmd-test-home-")
 	if err != nil {
 		panic(err)

@@ -34,17 +34,20 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "oauth <gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed> [alias]",
+		Use:   "oauth <claude|gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed> [alias]",
 		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
 
-Login (creates/updates a provider and stores JSON under ~/.ccl/auth):
+Login:
 
+  ccl oauth claude work         # Claude subscription; ccl oauth claude --help for account management
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
   ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed
 
 Notes:
+  - Claude Code manages its own credentials in separate local profiles;
+    other subscription logins create providers and use ~/.ccl/auth
   - WorkBuddy has two deployments with separate accounts and credentials:
     workbuddy is www.workbuddy.ai, workbuddycn is www.workbuddy.cn
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply
@@ -72,7 +75,7 @@ Notes:
 	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw/Zed)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	cmd.Flags().BoolVar(&opts.fromDesktop, "from-desktop", false, "AutoClaw only: reuse the desktop app's login instead of a browser flow")
-	cmd.AddCommand(newOAuthPruneCommand())
+	cmd.AddCommand(newOAuthPruneCommand(), newClaudeAccountCommand())
 	return cmd
 }
 

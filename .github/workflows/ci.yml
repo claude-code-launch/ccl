@@ -86,7 +86,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test portable filesystem, protocol and provider contracts
-        run: go test -race ./internal/fsutil ./internal/provider ./internal/protocol ./internal/modelrouting ./internal/slotrec ./internal/modelsdev ./internal/proxymanager ./internal/acp
+        run: go test -race ./internal/fsutil ./internal/provider ./internal/protocol ./internal/modelrouting ./internal/slotrec ./internal/modelsdev ./internal/proxymanager ./internal/acp ./internal/claudeaccount
       - name: Build native CLI
         run: go build -o ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }} .
       - name: Test standalone proxy process lifecycle
@@ -98,6 +98,8 @@ jobs:
         run: go test -race ./cmd -run 'Test(ConfigAllRows|PickersFollow|CJKCancel|ProviderSelectionFits|OAuthAndMapping|TooSmallTerminal|Proxy)'
       - name: Test Claude model picker labels and process launch
         run: go test -race -v ./internal/claude -run 'Test(Agent|ModelPicker|ProviderModelPicker|BuildEnvUsesProviderCatalogDisplayNames|CatalogModelOverrides|ModelDisplayName|SettingsRespectTheUsersOwnPreferences|ProcessEnv)'
+      - name: Test Claude accounts and one-shot provider selection
+        run: go test -race -v ./cmd -run 'Test(LeadingLaunchOptions|ClaudeAccountLogin|FailedClaudeAccount|UnnamedClaudeLogin)'
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -110,3 +112,10 @@ jobs:
           CCL_TEST_BINARY: ${{ github.workspace }}/ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }}
           CCL_TEST_AGENT_ACP: ${{ runner.temp }}/ccl-acp-adapter/node_modules/.bin/claude-agent-acp${{ runner.os == 'Windows' && '.cmd' || '' }}
         run: go test -race -v ./integration/acp
+      - name: Install pinned Claude Code for account isolation check
+        run: npm install --prefix "${{ runner.temp }}/ccl-claude-account" --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.312
+      - name: Test real Claude Code account isolation
+        env:
+          CCL_TEST_BINARY: ${{ github.workspace }}/ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }}
+          CCL_TEST_CLAUDE: ${{ runner.temp }}/ccl-claude-account/node_modules/@anthropic-ai/claude-code-${{ runner.os == 'Windows' && 'win32' || runner.os == 'macOS' && 'darwin' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}/claude${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: go test -race -v ./integration/claudeaccount
