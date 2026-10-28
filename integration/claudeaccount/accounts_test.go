@@ -28,8 +28,15 @@ func TestRealClaudeAccountIsolation(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
-	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	for _, entry := range []struct{ key, path string }{
+		{"APPDATA", filepath.Join(home, "AppData", "Roaming")},
+		{"LOCALAPPDATA", filepath.Join(home, "AppData", "Local")},
+	} {
+		if err := os.MkdirAll(entry.path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(entry.key, entry.path)
+	}
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "original profile"))
 	t.Setenv("ANTHROPIC_API_KEY", "stale-fake-key")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "stale-fake-token")
