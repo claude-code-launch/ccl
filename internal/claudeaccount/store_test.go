@@ -115,9 +115,9 @@ func TestAccountEnvironmentRemovesOtherAuthentication(t *testing.T) {
 		"ANTHROPIC_MODEL=old-model", "CLAUDE_CODE_OAUTH_TOKEN=fake", "CLAUDE_CODE_USE_BEDROCK=1",
 		"CLAUDE_CODE_HOST_CREDS_FILE=/old-creds", "CLAUDE_CODE_HOST_AUTH_ENV_VAR=HOST_TOKEN",
 		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1",
-		"CLAUDE_CODE_USE_BUILTIN_RIPGREP=0", "UNRELATED=keep",
+		"CLAUDE_CODE_USE_BUILTIN_RIPGREP=0", "ANTHROPIC_DEFAULT_MAX_TOKENS=8192", "UNRELATED=keep",
 	}, "/new profile")
-	want := []string{"PATH=/bin", "CLAUDE_CODE_USE_BUILTIN_RIPGREP=0", "UNRELATED=keep", "CLAUDE_CONFIG_DIR=/new profile"}
+	want := []string{"PATH=/bin", "CLAUDE_CODE_USE_BUILTIN_RIPGREP=0", "ANTHROPIC_DEFAULT_MAX_TOKENS=8192", "UNRELATED=keep", "CLAUDE_CONFIG_DIR=/new profile"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("account environment = %q, want %q", got, want)
 	}
