@@ -18,7 +18,9 @@ function fixture(t) {
   // macOS exposes /var through /private/var, and require.resolve returns the
   // canonical path. Keep the fixture and package resolution on the same root.
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ccl-npm-test-')));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // Windows can briefly retain a handle after the copied native child exits.
+  // Retry transient removal failures without hiding a persistent cleanup error.
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   return dir;
 }
 
