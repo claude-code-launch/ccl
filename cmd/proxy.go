@@ -87,11 +87,25 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 		name = cfg.ActiveProvider
 	}
 	if provider.IsDefaultProvider(name) {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		p, managed, err := cfg.ResolveDefault()
+		if err != nil {
+			return err
+		}
+		if managed {
+			return fmt.Errorf("Claude subscription accounts use Claude Code directly; use ccl --provider %s", p.Name)
+		}
 		return runProxyDefault(cmd)
 	}
 	p, err := proxyProvider(name)
 	if err != nil {
 		return err
+	}
+	if provider.IsClaudeAccount(p) {
+		return fmt.Errorf("Claude subscription accounts use Claude Code directly; use ccl --provider %s", name)
 	}
 	m, err := proxymanager.Default()
 	if err != nil {

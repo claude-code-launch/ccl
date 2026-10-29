@@ -11,6 +11,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/acp"
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/process"
 	"github.com/spf13/cobra"
@@ -40,7 +41,8 @@ Xcode 27 配置（Settings → Intelligence → Agents → Add an Agent）：
 --model / --effort 指定这个 Agent 的会话从哪个模型和 effort 开始（模型可写 opus、sonnet 等槽位别名或完整模型 ID；
 effort 为 low、medium、high、xhigh、max）。客户端不显示模型选择时（如 Xcode 27），可添加多个参数不同的 Agent，
 例如 Arguments 填 acp --model opus --effort max，在 Agent 下拉框里切换。
-运行中修改该配置，会在下一条空闲 prompt 前通过上游 session/resume 更新，无需重启 Agent。
+运行中修改网关配置，会在下一条空闲 prompt 前通过上游 session/resume 更新。
+跨 Claude 账号或账号目录切换需要重启 ACP Agent，以保留正确的登录和会话目录。
 模型、模式、工具、权限、终端、MCP、会话恢复及扩展以适配器和客户端协商的能力为准。
 用 --adapter <绝对路径> 或 CCL_ACP_ADAPTER 指定 GUI 可访问的适配器入口；-- 后的选项透传上游。
 stdout 只输出上游 ACP；日志走 stderr。`, `The complete ACP implementation is claude-agent-acp. CCL only supplies provider, model, environment and proxy configuration.
@@ -60,7 +62,8 @@ Select a shared provider configuration with ccl use --acp <name>; ACP does not k
 --model / --effort set the model and effort this agent's sessions start at (a model is a slot alias such as opus or
 sonnet, or a full model ID; effort is low, medium, high, xhigh or max). When a client shows no model picker (Xcode 27),
 add several agents with different arguments, such as acp --model opus --effort max, and switch in its Agent menu.
-Configuration changes take effect through upstream session/resume before the next idle prompt; restarting the agent is not required.
+Gateway configuration changes take effect through upstream session/resume before the next idle prompt.
+Restart the ACP agent when switching Claude account profiles, so authentication and session storage stay together.
 Models, modes, tools, permissions, terminals, MCP, session history and extensions are negotiated by the adapter and client.
 Use --adapter <absolute-path> or CCL_ACP_ADAPTER for a GUI-accessible adapter entry. Options after -- are passed to the adapter.
 stdout is upstream ACP only; logs go to stderr.`),
@@ -121,6 +124,7 @@ func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter stri
 		return err
 	}
 	defer initial.Release()
+	profileID := manager.bindProfile(initial)
 	cwd, _ := os.Getwd()
 	options, err := initial.Options(cwd)
 	if err != nil {
@@ -129,7 +133,17 @@ func runACP(ctx context.Context, in io.Reader, out, errw io.Writer, adapter stri
 	// Claude Code's own configuration keeps the client's environment as is;
 	// a provider supplies the adapter's initial authentication.
 	env := os.Environ()
-	if !initial.Default() {
+	if profileID != "" {
+		store, err := claudeaccount.Open()
+		if err != nil {
+			return err
+		}
+		profile, err := store.Profile(profileID)
+		if err != nil {
+			return err
+		}
+		env = claudeaccount.Environment(env, profile)
+	} else if !initial.Default() {
 		if env, err = claude.AgentProcessEnv(options); err != nil {
 			return err
 		}

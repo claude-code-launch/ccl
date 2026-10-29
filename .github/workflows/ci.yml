@@ -99,7 +99,7 @@ jobs:
       - name: Test Claude model picker labels and process launch
         run: go test -race -v ./internal/claude -run 'Test(Agent|ModelPicker|ProviderModelPicker|BuildEnvUsesProviderCatalogDisplayNames|CatalogModelOverrides|ModelDisplayName|SettingsRespectTheUsersOwnPreferences|ProcessEnv)'
       - name: Test Claude accounts and one-shot provider selection
-        run: go test -race -v ./cmd -run 'Test(LeadingLaunchOptions|ClaudeAccountLogin|FailedClaudeAccount|UnnamedClaudeLogin)'
+        run: go test -race -v ./cmd -run 'Test(LeadingLaunchOptions|ClaudeAccount|ClaudeDefault|FailedClaudeAccount|UnnamedClaudeLogin|LegacyClaude)'
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -118,4 +118,5 @@ jobs:
         env:
           CCL_TEST_BINARY: ${{ github.workspace }}/ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }}
           CCL_TEST_CLAUDE: ${{ runner.temp }}/ccl-claude-account/node_modules/@anthropic-ai/claude-code-${{ runner.os == 'Windows' && 'win32' || runner.os == 'macOS' && 'darwin' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}/claude${{ runner.os == 'Windows' && '.exe' || '' }}
+          CCL_TEST_AGENT_ACP: ${{ runner.temp }}/ccl-acp-adapter/node_modules/.bin/claude-agent-acp${{ runner.os == 'Windows' && '.cmd' || '' }}
         run: go test -race -v ./integration/claudeaccount

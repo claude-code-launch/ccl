@@ -8,24 +8,29 @@ import (
 	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/process"
+	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
 // runClaudeWithoutProvider starts Claude Code exactly as its own
 // configuration stands (the "default" selector), apart from ccl's launcher
 // flags (bypass). A running ccl proxy's overlay is part of that configuration.
 func runClaudeWithoutProvider(args []string) error {
-	return runClaudeWithoutProviderForAccount(args, "")
+	return runClaudeWithProfile("", "", args)
 }
 
-func runClaudeWithoutProviderForAccount(args []string, account string) error {
+func runClaudeAccount(p provider.Provider, args []string) error {
 	store, err := claudeaccount.Open()
 	if err != nil {
 		return err
 	}
-	name, profile, err := store.Resolve(account)
+	profile, err := store.Profile(p.OAuthAccountCredential)
 	if err != nil {
 		return err
 	}
+	return runClaudeWithProfile(p.Name, profile, args)
+}
+
+func runClaudeWithProfile(name, profile string, args []string) error {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		return fmt.Errorf("claude CLI not found in PATH: %w", err)

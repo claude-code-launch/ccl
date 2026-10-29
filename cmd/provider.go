@@ -59,16 +59,16 @@ same provider entry is pinned for ccl acp; no provider settings are copied or
 maintained separately. Until pinned, ACP follows the normal-mode provider;
 --acp --follow removes the pin again.
 
-default is always available: it runs Claude Code with its own configuration
-(your claude.ai subscription and ~/.claude settings), loading no provider. A
-fresh install starts on default. The environment is passed to Claude Code
-unchanged and no ccl settings, proxy, or status line are added. Normal mode
-cannot switch to default while ccl proxy is running (stop it first), and on
-default ccl proxy needs an explicit provider name.
+default selects CCL's default Claude account. A successful Claude login makes
+that account the default; ccl use <account> --default sets it explicitly.
+Before a Claude account is configured, default uses Claude Code's original
+profile. ccl use default --default restores that original profile.
 
 Examples:
   ccl use cc
+  ccl use claude-work --default
   ccl use default
+  ccl use default --default
   ccl use --acp cc
   ccl use --acp default
   ccl use --acp --follow`,
@@ -76,23 +76,39 @@ Examples:
 		// invocations of the reusable Cobra root used by embedders and tests.
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, forACP, follow, showHelp, err := parseProviderUseArgs(args)
+			markDefault := false
+			filtered := make([]string, 0, len(args))
+			for _, arg := range args {
+				if arg == "--default" {
+					if markDefault {
+						return fmt.Errorf("--default may be specified only once")
+					}
+					markDefault = true
+				} else {
+					filtered = append(filtered, arg)
+				}
+			}
+			name, forACP, follow, showHelp, err := parseProviderUseArgs(filtered)
 			if err != nil {
 				return err
 			}
 			if showHelp {
 				return cmd.Help()
 			}
+			if markDefault && (forACP || follow) {
+				return fmt.Errorf("--default applies to the normal Claude account selection")
+			}
 			if follow {
 				return runACPFollow()
 			}
-			return runProviderUse(name, forACP)
+			return runProviderUseWithDefault(name, forACP, markDefault)
 		},
 	}
 	// Register the flag for help and completion metadata. Parsing is handled
 	// above so repeated in-process command execution does not retain its value.
 	cmd.Flags().Bool("acp", false, "Switch the provider used by ACP mode")
 	cmd.Flags().Bool("follow", false, "With --acp: stop pinning ACP and follow the normal-mode provider")
+	cmd.Flags().Bool("default", false, "Make this Claude account the default; use default --default to restore the original Claude profile")
 	return cmd
 }
 
@@ -174,6 +190,10 @@ func newProviderMoveCommand(use string) *cobra.Command {
 }
 
 func runProviderUse(name string, forACP bool) error {
+	return runProviderUseWithDefault(name, forACP, false)
+}
+
+func runProviderUseWithDefault(name string, forACP, markDefault bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -196,6 +216,15 @@ func runProviderUse(name string, forACP bool) error {
 	if _, exists := cfg.Providers[target]; !exists && !isDefault {
 		return fmt.Errorf(locale.T("未找到 Provider %q。请先用 'ccl set' 添加，或用 'ccl ls' 检查拼写", "provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'"), target)
 	}
+	if isDefault && !markDefault {
+		if _, _, err := cfg.ResolveDefault(); err != nil {
+			return err
+		}
+	}
+	if markDefault && !isDefault && !provider.IsClaudeAccount(cfg.Providers[target]) {
+		return fmt.Errorf("--default requires a Claude subscription account, or default to restore the original profile")
+	}
+	var selectedDefault string
 	err = config.Update(func(c *provider.Config) error {
 		if _, exists := c.Providers[target]; !exists && !isDefault {
 			return fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found in configuration"), target)
@@ -204,6 +233,17 @@ func runProviderUse(name string, forACP bool) error {
 			c.ACPProvider = target
 			return nil
 		}
+		if markDefault {
+			if isDefault {
+				c.DefaultClaudeProvider = ""
+			} else {
+				if !provider.IsClaudeAccount(c.Providers[target]) {
+					return fmt.Errorf("provider %q is not a Claude account", target)
+				}
+				c.DefaultClaudeProvider = target
+			}
+		}
+		selectedDefault = c.DefaultClaudeProvider
 		c.ActiveProvider = target
 		return nil
 	})
@@ -213,15 +253,23 @@ func runProviderUse(name string, forACP bool) error {
 
 	switch {
 	case isDefault && forACP:
-		fmt.Println(locale.T(
-			"ACP 已切换为 default：使用 Claude Code 自身配置（claude.ai 订阅）",
-			"ACP now uses default: Claude Code's own configuration (claude.ai subscription)",
-		))
+		if cfg.DefaultClaudeProvider != "" {
+			fmt.Printf(locale.T("ACP 已切换到默认 Claude 账号：%s\n", "ACP now uses default Claude account: %s\n"), cfg.DefaultClaudeProvider)
+		} else {
+			fmt.Println(locale.T(
+				"ACP 已切换为 default：使用 Claude Code 自身配置（claude.ai 订阅）",
+				"ACP now uses default: Claude Code's own configuration (claude.ai subscription)",
+			))
+		}
 	case isDefault:
-		fmt.Println(locale.T(
-			"已切换到 default：ccl 以 Claude Code 自身配置启动（claude.ai 订阅）",
-			"Switched to default: ccl starts Claude Code with its own configuration (claude.ai subscription)",
-		))
+		if selectedDefault != "" {
+			fmt.Printf(locale.T("已切换到默认 Claude 账号：%s\n", "Switched to default Claude account: %s\n"), selectedDefault)
+		} else {
+			fmt.Println(locale.T(
+				"已切换到 default：ccl 以 Claude Code 自身配置启动（claude.ai 订阅）",
+				"Switched to default: ccl starts Claude Code with its own configuration (claude.ai subscription)",
+			))
+		}
 	case forACP:
 		fmt.Printf(locale.T("ACP 已切换为使用 Provider 配置：%s\n", "ACP now uses provider configuration: %s\n"), target)
 	default:
@@ -414,6 +462,10 @@ func runProviderRemove(name string, force, purge bool) error {
 // remaining provider uses it — with --purge, or after an interactive yes. -y
 // alone confirms the provider deletion only; credentials are kept.
 func offerCredentialRemoval(cfg *provider.Config, removed provider.Provider, force, purge bool) {
+	if provider.IsClaudeAccount(removed) {
+		fmt.Println(locale.T("Claude 账号目录及会话历史已保留。", "Claude account profile and session history were kept."))
+		return
+	}
 	name := filepath.Base(strings.TrimSpace(removed.OAuthAccountCredential))
 	if name == "" || name == "." || credentialUsers(cfg)[name] > 0 {
 		return
@@ -487,6 +539,9 @@ func runProviderMove(sourceName, targetName string, force bool) error {
 		delete(c.Providers, source)
 		if c.ActiveProvider == source {
 			c.ActiveProvider = target
+		}
+		if c.DefaultClaudeProvider == source {
+			c.DefaultClaudeProvider = target
 		}
 		if c.ACPProvider == source {
 			c.ACPProvider = target

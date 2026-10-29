@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/process"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -107,20 +108,48 @@ func DefaultLauncher(ctx context.Context, spec LaunchSpec) (*exec.Cmd, func(), e
 	if err != nil {
 		return nil, nil, fmt.Errorf("load ccl config: %w", err)
 	}
-	if provider.IsDefaultProvider(spec.Provider) {
-		claudePath, err := exec.LookPath("claude")
+	name := spec.Provider
+	var selected provider.Provider
+	if provider.IsDefaultProvider(name) {
+		var managed bool
+		selected, managed, err = cfg.ResolveDefault()
 		if err != nil {
-			return nil, nil, fmt.Errorf("claude CLI not found in PATH: %w", err)
+			return nil, nil, err
 		}
-		cmd := process.Command(claudePath, args...)
-		cmd.Env = os.Environ()
+		if managed {
+			name = selected.Name
+		} else {
+			claudePath, err := exec.LookPath("claude")
+			if err != nil {
+				return nil, nil, fmt.Errorf("claude CLI not found in PATH: %w", err)
+			}
+			cmd := process.Command(claudePath, args...)
+			cmd.Env = os.Environ()
+			return cmd, func() {}, nil
+		}
+	}
+	p, ok := cfg.Providers[name]
+	if !ok || strings.TrimSpace(name) == "" {
+		return nil, nil, fmt.Errorf("provider %q not found; use ccl ls or ccl set", name)
+	}
+	p.Name = name
+	if provider.IsClaudeAccount(p) {
+		store, err := claudeaccount.Open()
+		if err != nil {
+			return nil, nil, err
+		}
+		profile, err := store.Profile(p.OAuthAccountCredential)
+		if err != nil {
+			return nil, nil, err
+		}
+		path, err := exec.LookPath("claude")
+		if err != nil {
+			return nil, nil, err
+		}
+		cmd := process.Command(path, args...)
+		cmd.Env = claudeaccount.Environment(os.Environ(), profile)
 		return cmd, func() {}, nil
 	}
-	p, ok := cfg.Providers[spec.Provider]
-	if !ok || strings.TrimSpace(spec.Provider) == "" {
-		return nil, nil, fmt.Errorf("provider %q not found; use ccl ls or ccl set", spec.Provider)
-	}
-	p.Name = spec.Provider
 	launch, err := claude.PrepareContext(ctx, p)
 	if err != nil {
 		return nil, nil, err

@@ -44,6 +44,7 @@ type DefaultView struct {
 	Name      string `json:"name"`
 	IsDefault bool   `json:"isDefault"`
 	Active    bool   `json:"active"`
+	Provider  string `json:"provider,omitempty"`
 }
 
 // ProviderView is one provider with its credential masked.
@@ -461,7 +462,7 @@ func (s *Server) configView() (ConfigView, error) {
 		Bypass:    cfg.BypassMode,
 		SignOn:    cfg.SignOn,
 		LogLevel:  cfg.LogLevel,
-		Default:   DefaultView{Name: provider.DefaultProvider, IsDefault: true, Active: provider.IsDefaultProvider(cfg.ActiveProvider)},
+		Default:   DefaultView{Name: provider.DefaultProvider, IsDefault: true, Active: provider.IsDefaultProvider(cfg.ActiveProvider), Provider: cfg.DefaultClaudeProvider},
 		Providers: make(map[string]ProviderView, len(cfg.Providers)),
 	}
 	names := make([]string, 0, len(cfg.Providers))

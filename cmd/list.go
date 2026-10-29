@@ -23,7 +23,8 @@ func newProviderListCommand(use string) *cobra.Command {
 		Short: "List registered providers",
 		Long: `List providers from ~/.ccl/config.yaml. The USED BY column shows which
 entry is selected by normal mode, ACP mode and a running ccl proxy. The first
-row, default, is Claude Code's own configuration (ccl use default).
+row, default, shows the default Claude account (ccl use default). Before a
+Claude account is configured it uses Claude Code's original configuration.
 
 -a/--all switches the table to a detailed view with full model pools and slot
 details.
@@ -64,7 +65,11 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 	if showAll {
 		fmt.Fprintln(out, provider.DefaultProvider)
 		fmt.Fprintf(out, "    Used By  : %s\n", providerUsageSummary(cfg, provider.DefaultProvider, proxyName))
-		fmt.Fprintf(out, "    Type     : %s\n", defaultProviderDescription())
+		description := defaultProviderDescription()
+		if cfg.DefaultClaudeProvider != "" {
+			description = "Claude account: " + cfg.DefaultClaudeProvider
+		}
+		fmt.Fprintf(out, "    Type     : %s\n", description)
 		if len(names) > 0 {
 			fmt.Fprintln(out)
 		}
@@ -73,8 +78,12 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tUSED BY\tTYPE/AUTH\tMODELS")
+	defaultType := "claude-code/own-config"
+	if cfg.DefaultClaudeProvider != "" {
+		defaultType = "claude/" + cfg.DefaultClaudeProvider
+	}
 	fmt.Fprintf(tw, "%s\t%s\t%s\t-\n", provider.DefaultProvider,
-		providerUsageSummary(cfg, provider.DefaultProvider, proxyName), "claude-code/own-config")
+		providerUsageSummary(cfg, provider.DefaultProvider, proxyName), defaultType)
 	for _, name := range names {
 		p := cfg.Providers[name]
 		fmt.Fprintf(

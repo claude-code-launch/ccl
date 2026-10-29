@@ -227,7 +227,7 @@ func oauthRuntimeType(providerName string) string {
 // provider names or SDK backend keys.
 func isReservedProviderName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case provider.DefaultProvider,
+	case provider.DefaultProvider, "claude",
 		oauthproxy.ProviderChatGPT, oauthproxy.ProviderCodex,
 		oauthproxy.ProviderGemini, "antigravity",
 		oauthproxy.ProviderGrok, "xai",

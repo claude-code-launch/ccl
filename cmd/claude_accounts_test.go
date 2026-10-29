@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/claudeaccount"
-	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -112,25 +111,22 @@ func readFakeTraces(t *testing.T, path string) []fakeClaudeTrace {
 
 func TestLeadingLaunchOptionsPreserveClaudeArguments(t *testing.T) {
 	tests := []struct {
-		args     []string
-		options  launchOptions
-		forward  []string
-		handled  bool
-		hasError bool
+		args              []string
+		options           launchOptions
+		forward           []string
+		handled, hasError bool
 	}{
 		{[]string{"--provider", "a", "-p", "hello"}, launchOptions{provider: "a"}, []string{"-p", "hello"}, true, false},
 		{[]string{"--provider=a", "--", "--provider", "upstream"}, launchOptions{provider: "a"}, []string{"--provider", "upstream"}, true, false},
-		{[]string{"--account", "work", "resume"}, launchOptions{account: "work"}, []string{"resume"}, true, false},
-		{[]string{"--account=work", "--provider", "default"}, launchOptions{provider: "default", account: "work"}, []string{}, true, false},
+		{[]string{"--account", "work"}, launchOptions{}, []string{"--account", "work"}, false, false},
 		{[]string{"-p", "hello", "--provider", "upstream"}, launchOptions{}, []string{"-p", "hello", "--provider", "upstream"}, false, false},
 		{[]string{"--provider"}, launchOptions{}, nil, true, true},
 		{[]string{"--provider", "a", "--provider", "b"}, launchOptions{provider: "a"}, nil, true, true},
-		{[]string{"--provider", "a", "--account", "work"}, launchOptions{provider: "a", account: "work"}, nil, true, true},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprint(test.args), func(t *testing.T) {
 			options, forward, handled, err := parseLaunchOptions(test.args)
-			if handled != test.handled || (err != nil) != test.hasError || options != test.options || !reflect.DeepEqual(forward, test.forward) {
+			if options != test.options || handled != test.handled || (err != nil) != test.hasError || !reflect.DeepEqual(forward, test.forward) {
 				t.Fatalf("got %+v %q %v %v", options, forward, handled, err)
 			}
 		})
@@ -157,28 +153,32 @@ func TestClaudeAccountLoginSelectionAndOneShotProvider(t *testing.T) {
 	}
 	traces := readFakeTraces(t, tracePath)
 	if len(traces) != 2 || traces[0].Profile == traces[1].Profile {
-		t.Fatalf("logins did not use separate profiles: %+v", traces)
+		t.Fatalf("profiles: %+v", traces)
 	}
-	for _, trace := range traces {
-		if !reflect.DeepEqual(trace.Args, []string{"auth", "login", "--claudeai"}) || trace.APIKey != "" || trace.Token != "" || trace.Base != "" {
-			t.Fatalf("unsafe login environment: %+v", trace)
+	for _, tr := range traces {
+		if !reflect.DeepEqual(tr.Args, []string{"auth", "login", "--claudeai"}) || tr.APIKey != "" || tr.Token != "" || tr.Base != "" {
+			t.Fatalf("unsafe login: %+v", tr)
 		}
 	}
-	if cfg := loadToggleConfig(t); cfg.ActiveProvider != provider.DefaultProvider {
-		t.Fatalf("login did not select Claude default: %q", cfg.ActiveProvider)
+	cfg := loadToggleConfig(t)
+	if cfg.ActiveProvider != "personal" || cfg.DefaultClaudeProvider != "personal" || !provider.IsClaudeAccount(cfg.Providers["work"]) || !provider.IsClaudeAccount(cfg.Providers["personal"]) {
+		t.Fatalf("accounts were not registered as providers: %+v", cfg)
 	}
-	if err := runClaudeWithOptions([]string{"auth", "status", "--json"}, launchOptions{account: "work"}); err != nil {
+	if err := runProviderUse("work", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := runClaude([]string{"auth", "status", "--json"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := runClaudeWithOptions([]string{"auth", "status", "--json"}, launchOptions{provider: "personal"}); err != nil {
+		t.Fatal(err)
+	}
 	traces = readFakeTraces(t, tracePath)
 	if traces[2].Profile != traces[0].Profile || traces[3].Profile != traces[1].Profile {
-		t.Fatalf("one-shot or selected account used wrong profile: %+v", traces)
+		t.Fatalf("selected wrong account: %+v", traces)
 	}
-	if err := config.Update(func(cfg *provider.Config) error { cfg.ActiveProvider = "a"; return nil }); err != nil {
-		t.Fatal(err)
+	if cfg = loadToggleConfig(t); cfg.ActiveProvider != "work" {
+		t.Fatalf("one-shot launch changed selection: %q", cfg.ActiveProvider)
 	}
 	if err := runClaudeWithOptions([]string{"-p", "fixture prompt"}, launchOptions{provider: "b"}); err != nil {
 		t.Fatal(err)
@@ -186,23 +186,22 @@ func TestClaudeAccountLoginSelectionAndOneShotProvider(t *testing.T) {
 	traces = readFakeTraces(t, tracePath)
 	last := traces[len(traces)-1]
 	if !strings.Contains(last.Settings, "fake-b") || !strings.Contains(last.Settings, "https://b.invalid") || !reflect.DeepEqual(last.Args[len(last.Args)-2:], []string{"-p", "fixture prompt"}) {
-		t.Fatalf("one-shot provider or Claude arguments not applied: %+v", last)
+		t.Fatalf("one-shot provider: %+v", last)
 	}
-	if cfg := loadToggleConfig(t); cfg.ActiveProvider != "a" {
-		t.Fatalf("one-shot launch changed active provider: %q", cfg.ActiveProvider)
+	if cfg = loadToggleConfig(t); cfg.ActiveProvider != "work" {
+		t.Fatalf("one-shot changed provider: %q", cfg.ActiveProvider)
 	}
-	if err := runClaudeWithOptions([]string{"auth", "status"}, launchOptions{account: "work"}); err != nil {
+	if err := runProviderMove("work", "office", true); err != nil {
 		t.Fatal(err)
 	}
-	if cfg := loadToggleConfig(t); cfg.ActiveProvider != "a" {
-		t.Fatalf("one-shot account changed active provider: %q", cfg.ActiveProvider)
+	if err := loginClaudeAccount(context.Background(), &output, "office"); err != nil {
+		t.Fatal(err)
 	}
-	store, _ := claudeaccount.Open()
-	selected, _, err := store.Resolve("")
-	if err != nil || selected != "personal" {
-		t.Fatalf("one-shot launch changed account selection: %q %v", selected, err)
+	traces = readFakeTraces(t, tracePath)
+	if traces[len(traces)-1].Profile != traces[0].Profile {
+		t.Fatal("re-login after rename did not reuse the profile")
 	}
-	if err := selectClaudeAccount(context.Background(), &output, "work"); err != nil {
+	if err := runProviderUse("default", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := runClaude([]string{"auth", "status"}); err != nil {
@@ -210,7 +209,17 @@ func TestClaudeAccountLoginSelectionAndOneShotProvider(t *testing.T) {
 	}
 	traces = readFakeTraces(t, tracePath)
 	if traces[len(traces)-1].Profile != traces[0].Profile {
-		t.Fatal("persistent account selection did not take effect")
+		t.Fatal("default did not use the last logged-in account")
+	}
+	if err := runProviderUseWithDefault("default", false, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := runClaude([]string{"auth", "status"}); err != nil {
+		t.Fatal(err)
+	}
+	traces = readFakeTraces(t, tracePath)
+	if traces[len(traces)-1].Profile != os.Getenv("CLAUDE_CONFIG_DIR") {
+		t.Fatal("default did not restore original Claude configuration")
 	}
 }
 
@@ -221,13 +230,9 @@ func TestFailedClaudeAccountLoginLeavesSelectionUntouched(t *testing.T) {
 	if err := loginClaudeAccount(context.Background(), io.Discard, "work"); err == nil {
 		t.Fatal("failed login succeeded")
 	}
-	if got := loadToggleConfig(t).ActiveProvider; got != "a" {
-		t.Fatalf("failed login changed provider to %q", got)
-	}
-	store, _ := claudeaccount.Open()
-	names, _, err := store.List()
-	if err != nil || len(names) != 0 {
-		t.Fatalf("failed login was registered: %v %v", names, err)
+	cfg := loadToggleConfig(t)
+	if cfg.ActiveProvider != "a" || len(cfg.Providers) != 1 {
+		t.Fatalf("failed login changed configuration: %+v", cfg)
 	}
 }
 
@@ -242,13 +247,91 @@ func TestUnnamedClaudeLoginUsesReportedEmail(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	store, _ := claudeaccount.Open()
-	name, _, err := store.Resolve("")
-	if err != nil || name != "user@example.invalid" {
-		t.Fatalf("unnamed account selection = %q: %v", name, err)
+	cfg := loadToggleConfig(t)
+	if cfg.ActiveProvider != "claude-user@example.invalid" || !provider.IsClaudeAccount(cfg.Providers[cfg.ActiveProvider]) {
+		t.Fatalf("unnamed provider = %+v", cfg)
 	}
 	traces := readFakeTraces(t, trace)
 	if len(traces) != 2 || !reflect.DeepEqual(traces[1].Args, []string{"auth", "status", "--json"}) || traces[0].Profile != traces[1].Profile {
-		t.Fatalf("status lookup did not use the new login's profile: %+v", traces)
+		t.Fatalf("status profile: %+v", traces)
+	}
+}
+
+func TestLegacyClaudeAccountsImportedOnce(t *testing.T) {
+	saveToggleFixture(t, &provider.Config{ActiveProvider: provider.DefaultProvider})
+	store, _ := claudeaccount.Open()
+	candidate, err := store.Prepare("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Activate(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err = importLegacyClaudeAccounts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadToggleConfig(t)
+	if cfg.ActiveProvider != "work" || cfg.DefaultClaudeProvider != "work" || cfg.Providers["work"].OAuthAccountCredential != candidate.ID() {
+		t.Fatalf("legacy selection: %+v", cfg)
+	}
+	if err = runProviderMove("work", "renamed", true); err != nil {
+		t.Fatal(err)
+	}
+	if err = importLegacyClaudeAccounts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cfg = loadToggleConfig(t)
+	if _, ok := cfg.Providers["work"]; ok {
+		t.Fatal("import recreated a renamed account")
+	}
+	if cfg.Providers["renamed"].OAuthAccountCredential != candidate.ID() {
+		t.Fatal("rename lost account profile")
+	}
+}
+
+func TestClaudeDefaultFlagAndProviderRename(t *testing.T) {
+	saveToggleFixture(t, &provider.Config{ActiveProvider: provider.DefaultProvider, Providers: map[string]provider.Provider{
+		"work":     claudeAccountProvider("work", "11111111111111111111111111111111"),
+		"personal": claudeAccountProvider("personal", "22222222222222222222222222222222"),
+		"gateway":  {Name: "gateway", Type: "anthropic"},
+	}})
+	command := newProviderUseCommand("use [provider]")
+	command.SetArgs([]string{"work", "--default"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadToggleConfig(t)
+	if cfg.ActiveProvider != "work" || cfg.DefaultClaudeProvider != "work" {
+		t.Fatalf("set default: %+v", cfg)
+	}
+	if err := runProviderUse("gateway", false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg = loadToggleConfig(t); cfg.DefaultClaudeProvider != "work" {
+		t.Fatal("switching provider changed default account")
+	}
+	if err := runProviderUseWithDefault("gateway", false, true); err == nil {
+		t.Fatal("a gateway was accepted as the default Claude account")
+	}
+	if err := runProviderMove("work", "office", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg = loadToggleConfig(t)
+	if cfg.DefaultClaudeProvider != "office" {
+		t.Fatal("rename lost default account")
+	}
+	if err := runProviderRemove("office", true, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg = loadToggleConfig(t)
+	if _, _, err := cfg.ResolveDefault(); err == nil {
+		t.Fatal("removed default silently fell back to another account")
+	}
+	if err := runProviderUseWithDefault("default", false, true); err != nil {
+		t.Fatal(err)
+	}
+	cfg = loadToggleConfig(t)
+	if cfg.DefaultClaudeProvider != "" || cfg.ActiveProvider != "default" {
+		t.Fatalf("restore native default: %+v", cfg)
 	}
 }

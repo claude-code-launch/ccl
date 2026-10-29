@@ -130,6 +130,32 @@ type DefaultAgentLaunch struct{}
 
 func (DefaultAgentLaunch) Close() {}
 
+// ClaudeAccountAgentLaunch uses Claude's native subscription inside the
+// selected profile; protocol and token refresh stay with the upstream SDK.
+type ClaudeAccountAgentLaunch struct{ ConfigDir string }
+
+func (ClaudeAccountAgentLaunch) Close() {}
+
+func (l ClaudeAccountAgentLaunch) Options(cwd string) (json.RawMessage, error) {
+	env := completeAgentEnv(settingsJSON{Env: map[string]string{}}, false)
+	for key := range env {
+		env[key] = ""
+		if strings.HasPrefix(key, "CLAUDE_CODE_USE_") {
+			env[key] = "0"
+		}
+	}
+	env["CLAUDE_CONFIG_DIR"] = l.ConfigDir
+	env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = l.ConfigDir
+	env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
+	env["CLAUDE_CODE_HOST_CREDS_FILE"] = ""
+	env["CLAUDE_CODE_HOST_AUTH_ENV_VAR"] = ""
+	env["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"] = ""
+	return json.Marshal(struct {
+		Env      map[string]string `json:"env"`
+		Settings map[string]any    `json:"settings"`
+	}{env, map[string]any{"env": env, "apiKeyHelper": ""}})
+}
+
 func (DefaultAgentLaunch) Options(cwd string) (json.RawMessage, error) {
 	env := completeAgentEnv(settingsJSON{Env: map[string]string{}}, false)
 	for key := range env {

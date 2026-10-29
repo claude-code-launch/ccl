@@ -1,7 +1,6 @@
 package claudeaccount_test
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -75,6 +74,7 @@ func TestRealClaudeAccountIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	providers := map[string]provider.Provider{}
 	for _, account := range []string{"work", "personal"} {
 		candidate, err := store.Prepare(account)
 		if err != nil {
@@ -93,15 +93,13 @@ func TestRealClaudeAccountIsolation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := store.Activate(context.Background(), candidate); err != nil {
-			t.Fatal(err)
-		}
+		providers[account] = provider.Provider{Name: account, Type: "anthropic", Endpoint: "oauth://claude", OAuthProvider: "claude", OAuthAccountCredential: candidate.ID()}
 	}
-	if err := config.Save(&provider.Config{ActiveProvider: "unchanged", Providers: map[string]provider.Provider{}}); err != nil {
+	if err := config.Save(&provider.Config{ActiveProvider: "work", DefaultClaudeProvider: "personal", Providers: providers}); err != nil {
 		t.Fatal(err)
 	}
 	for _, account := range []string{"work", "personal", "work"} {
-		cmd := exec.Command(binary, "--account", account, "auth", "status", "--json")
+		cmd := exec.Command(binary, "--provider", account, "auth", "status", "--json")
 		cmd.Dir = home
 		output, err := cmd.Output()
 		if err != nil {
@@ -119,13 +117,37 @@ func TestRealClaudeAccountIsolation(t *testing.T) {
 		if err := json.Unmarshal(output, &result); err != nil {
 			t.Fatalf("auth status is not JSON: %v: %s", err, output)
 		}
-		_, profile, err := store.Resolve(account)
+		profile, err := store.Profile(providers[account].OAuthAccountCredential)
 		if err != nil || !result.LoggedIn || result.AuthMethod != "claude.ai" || result.Email != account+"@test.invalid" || filepath.Clean(result.ConfigDirectory) != filepath.Clean(profile) {
 			t.Fatalf("wrong account for %s: %+v, profile=%q, err=%v", account, result, profile, err)
 		}
 	}
 	cfg, err := config.Load()
-	if err != nil || cfg.ActiveProvider != "unchanged" {
+	if err != nil || cfg.ActiveProvider != "work" {
 		t.Fatalf("one-shot account launch changed provider: %+v %v", cfg, err)
+	}
+	for _, step := range []struct {
+		args  []string
+		email string
+	}{
+		{[]string{"use", "default"}, "personal@test.invalid"},
+		{[]string{"use", "work", "--default"}, "work@test.invalid"},
+		{[]string{"use", "default"}, "work@test.invalid"},
+	} {
+		if output, err := exec.Command(binary, step.args...).CombinedOutput(); err != nil {
+			t.Fatalf("ccl %v: %v %s", step.args, err, output)
+		}
+		cmd := exec.Command(binary, "claude", "auth", "status", "--json")
+		cmd.Dir = home
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("auth status: %v", err)
+		}
+		var status struct {
+			Email string `json:"email"`
+		}
+		if err := json.Unmarshal(output, &status); err != nil || status.Email != step.email {
+			t.Fatalf("ccl %v selected %s, want %s; output=%s, err=%v", step.args, status.Email, step.email, output, err)
+		}
 	}
 }

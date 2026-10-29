@@ -43,6 +43,13 @@ func (t providerTarget) resolve(cfg *provider.Config) (string, error) {
 		))
 	}
 	if provider.IsDefaultProvider(name) {
+		p, managed, err := cfg.ResolveDefault()
+		if err != nil {
+			return "", err
+		}
+		if managed {
+			return p.Name, nil
+		}
 		return "", errors.New(locale.T(
 			"default 使用 Claude Code 自身配置，没有可修改的 ccl 设置；请加 --provider <name>",
 			"default uses Claude Code's own configuration and has no ccl settings to change; pass --provider <name>",

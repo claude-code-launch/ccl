@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -24,10 +25,9 @@ var rootCmd = &cobra.Command{
 Common commands:
   ccl                         Start Claude Code with the active provider
   ccl --provider <name>       Start once with a provider, without changing the selection
-  ccl --account <name>        Start once with a Claude subscription account
   ccl ls                      List providers and normal/ACP selections
   ccl use [name]              Switch the normal-mode provider; ccl use default
-                              runs Claude Code's own configuration (claude.ai)
+                              uses the default Claude account (latest login)
   ccl use --acp [name]        Select a shared provider configuration for ACP
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
   ccl proxy -p <name>         Connect direct claude invocations to a background proxy
@@ -69,6 +69,9 @@ func Execute() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "acp" {
 		acpQuietErrors = true // Include flag/argument errors before PreRun.
+	}
+	if err := importLegacyClaudeAccounts(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "ccl: could not import previous Claude accounts: %v\n", err)
 	}
 	// Every claude lookup (launch, default, doctor) must see an install
 	// the official installer left outside PATH.
@@ -174,7 +177,6 @@ func runClaude(args []string) error {
 
 type launchOptions struct {
 	provider string
-	account  string
 }
 
 // Only leading CCL options are consumed. Once the Claude argument list starts,
@@ -185,7 +187,7 @@ func parseLaunchOptions(args []string) (launchOptions, []string, bool, error) {
 	for consumed < len(args) {
 		arg := args[consumed]
 		key, value, hasValue := strings.Cut(arg, "=")
-		if key != "--provider" && key != "--account" {
+		if key != "--provider" {
 			break
 		}
 		consumed++
@@ -200,23 +202,13 @@ func parseLaunchOptions(args []string) (launchOptions, []string, bool, error) {
 		if value == "" {
 			return options, nil, true, fmt.Errorf("%s requires a name", key)
 		}
-		if key == "--provider" {
-			if options.provider != "" {
-				return options, nil, true, fmt.Errorf("--provider may be specified only once")
-			}
-			options.provider = value
-		} else {
-			if options.account != "" {
-				return options, nil, true, fmt.Errorf("--account may be specified only once")
-			}
-			options.account = value
+		if options.provider != "" {
+			return options, nil, true, fmt.Errorf("--provider may be specified only once")
 		}
+		options.provider = value
 	}
 	if consumed == 0 {
 		return options, args, false, nil
-	}
-	if options.account != "" && options.provider != "" && !provider.IsDefaultProvider(options.provider) {
-		return options, nil, true, fmt.Errorf("--account requires --provider default, or no --provider")
 	}
 	if consumed < len(args) && args[consumed] == "--" {
 		consumed++
@@ -233,21 +225,25 @@ func runClaudeWithOptions(args []string, options launchOptions) error {
 	if options.provider != "" {
 		name = options.provider
 	}
-	if options.account != "" {
-		name = provider.DefaultProvider
-	}
 	var p provider.Provider
+	accountDefault := false
 	if provider.IsDefaultProvider(name) {
-		store, err := claudeaccount.Open()
+		p, accountDefault, err = cfg.ResolveDefault()
 		if err != nil {
-			return err
-		}
-		if _, _, err := store.Resolve(options.account); err != nil {
 			return err
 		}
 	} else {
 		p, err = resolveProviderFromConfig(cfg, name)
 		if err != nil {
+			return err
+		}
+	}
+	if provider.IsClaudeAccount(p) {
+		store, err := claudeaccount.Open()
+		if err != nil {
+			return err
+		}
+		if _, err := store.Profile(p.OAuthAccountCredential); err != nil {
 			return err
 		}
 	}
@@ -260,8 +256,11 @@ func runClaudeWithOptions(args []string, options launchOptions) error {
 		}
 	}
 
-	if provider.IsDefaultProvider(name) {
-		return runClaudeWithoutProviderForAccount(applyBypassMode(args, cfg.BypassMode), options.account)
+	if provider.IsDefaultProvider(name) && !accountDefault {
+		return runClaudeWithoutProvider(applyBypassMode(args, cfg.BypassMode))
+	}
+	if provider.IsClaudeAccount(p) {
+		return runClaudeAccount(p, applyBypassMode(args, cfg.BypassMode))
 	}
 
 	// Record the configured threshold; claude.Run opens the uniquely named file

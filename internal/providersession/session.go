@@ -37,6 +37,9 @@ func PrepareProxy(ctx context.Context, configured provider.Provider) (*Session, 
 }
 
 func prepare(ctx context.Context, configured provider.Provider, forceProxy bool) (*Session, error) {
+	if provider.IsClaudeAccount(configured) {
+		return nil, fmt.Errorf("Claude subscription accounts use Claude Code's native login; use ccl --provider %s", configured.Name)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

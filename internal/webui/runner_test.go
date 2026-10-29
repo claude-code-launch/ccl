@@ -9,10 +9,52 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
+	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/provider"
 )
+
+func TestClaudeAccountDefaultLauncherUsesSelectedProfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("ANTHROPIC_API_KEY", "stale-fake-key")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "stale-fake-token")
+	store, _ := claudeaccount.Open()
+	candidate, err := store.PrepareNew("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := provider.Provider{Name: "work", Type: "anthropic", Endpoint: "oauth://claude", OAuthProvider: "claude", OAuthAccountCredential: candidate.ID()}
+	if err = config.Save(&provider.Config{ActiveProvider: "default", DefaultClaudeProvider: "work", Providers: map[string]provider.Provider{"work": p}}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err = os.WriteFile(filepath.Join(bin, name), []byte("fake"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	for _, name := range []string{"default", "work"} {
+		cmd, cleanup, err := DefaultLauncher(context.Background(), LaunchSpec{Provider: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleanup()
+		env := strings.Join(cmd.Env, "\n")
+		if !strings.Contains(env, "CLAUDE_CONFIG_DIR="+candidate.Path) || strings.Contains(env, "stale-fake-") {
+			t.Fatalf("wrong environment for %s: %s", name, env)
+		}
+	}
+}
 
 func TestBuildArgs(t *testing.T) {
 	args := buildArgs(LaunchSpec{Prompt: "hello world"})

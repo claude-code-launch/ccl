@@ -117,6 +117,9 @@ func RunProviderSet(args []string) error {
 		nameGenerated = true
 	}
 
+	if provider.IsClaudeAccount(p) {
+		return fmt.Errorf("Claude accounts use Claude Code's own settings; re-login with ccl oauth claude %s", p.Name)
+	}
 	// 🚀 运行基于特定域 v2 架构的超级大面板
 	m := NewAdvancedConfigModel(&p)
 	m.NameGenerated = nameGenerated

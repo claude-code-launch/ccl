@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -24,6 +25,11 @@ func resolveACPProvider() (acpProviderSnapshot, error) {
 	}
 	name := cfg.EffectiveACPProvider()
 	if provider.IsDefaultProvider(name) {
+		if p, ok, err := cfg.ResolveDefault(); err != nil {
+			return acpProviderSnapshot{}, err
+		} else if ok {
+			return acpProviderSnapshot{name: provider.DefaultProvider, provider: p.Clone()}, nil
+		}
 		return acpProviderSnapshot{name: provider.DefaultProvider, provider: provider.Provider{Name: provider.DefaultProvider}}, nil
 	}
 	if name == "" {
@@ -88,12 +94,25 @@ type acpLaunchManager struct {
 	generations    map[uint64]*acpLaunchGeneration
 	nextID         uint64
 	closed         bool
+	profileBound   bool
+	profileID      string
 }
 
 func newACPLaunchManager() *acpLaunchManager {
 	return newACPLaunchManagerWithContext(resolveACPProvider, func(ctx context.Context, p provider.Provider) (acpPreparedLaunch, error) {
 		if provider.IsDefaultProvider(p.Name) {
 			return claude.DefaultAgentLaunch{}, nil
+		}
+		if provider.IsClaudeAccount(p) {
+			store, err := claudeaccount.Open()
+			if err != nil {
+				return nil, err
+			}
+			profile, err := store.Profile(p.OAuthAccountCredential)
+			if err != nil {
+				return nil, err
+			}
+			return claude.ClaudeAccountAgentLaunch{ConfigDir: profile}, nil
 		}
 		return claude.PrepareAgentContext(ctx, p)
 	})
@@ -140,6 +159,15 @@ func (m *acpLaunchManager) acquireContext(ctx context.Context) (*acpLaunchLease,
 	if err != nil {
 		return nil, err
 	}
+	if m.profileBound {
+		id := ""
+		if provider.IsClaudeAccount(snapshot.provider) {
+			id = snapshot.provider.OAuthAccountCredential
+		}
+		if id != m.profileID {
+			return nil, fmt.Errorf("Claude account profile changed; restart ccl acp to use the selected provider")
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -178,6 +206,18 @@ func (m *acpLaunchManager) acquireContext(ctx context.Context) (*acpLaunchLease,
 		m.closeGenerationIfUnusedLocked(previous)
 	}
 	return newACPLaunchLease(m, next), nil
+}
+
+// Upstream stores session metadata in its process-wide Claude config dir. Do
+// not let a running ACP process silently resume through another account.
+func (m *acpLaunchManager) bindProfile(l *acpLaunchLease) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.profileBound = true
+	if provider.IsClaudeAccount(l.generation.snapshot.provider) {
+		m.profileID = l.generation.snapshot.provider.OAuthAccountCredential
+	}
+	return m.profileID
 }
 
 func equalACPProviderSnapshot(left, right acpProviderSnapshot) bool {

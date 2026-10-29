@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -175,6 +176,12 @@ type Provider struct {
 	Ultracode bool `yaml:"ultracode,omitempty"`
 }
 
+// IsClaudeAccount identifies a native Claude subscription profile. It is
+// launched by Claude Code itself, without an embedded OAuth proxy.
+func IsClaudeAccount(p Provider) bool {
+	return strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "claude")
+}
+
 // ModelsDevCatalogID returns the models.dev catalog ID behind p.
 func ModelsDevCatalogID(p Provider) string {
 	if id := strings.TrimSpace(p.ModelsDevProvider); id != "" {
@@ -208,6 +215,9 @@ func (c *Config) EffectiveACPProvider() string {
 
 type Config struct {
 	ActiveProvider string `yaml:"active_provider"`
+	// DefaultClaudeProvider names the account selected by `ccl use default`.
+	// Empty preserves Claude Code's original profile for existing installations.
+	DefaultClaudeProvider string `yaml:"default_claude_provider,omitempty"`
 	// ACPProvider is only the name selected by `ccl use --acp`. Its settings stay
 	// in the shared Providers map; ACP never owns a duplicate provider config.
 	// Empty means ACP follows ActiveProvider (see EffectiveACPProvider).
@@ -227,6 +237,22 @@ type Config struct {
 	// with empty texts, so commits get no Co-Authored-By trailer.
 	SignOn    bool                `yaml:"sign_on,omitempty"`
 	Providers map[string]Provider `yaml:"providers"`
+}
+
+// ResolveDefault resolves the reserved default selector. An absent account
+// retains the original native Claude configuration; an invalid reference is
+// an error so a removed account cannot silently switch billing identities.
+func (c *Config) ResolveDefault() (Provider, bool, error) {
+	name := strings.TrimSpace(c.DefaultClaudeProvider)
+	if name == "" {
+		return Provider{}, false, nil
+	}
+	p, ok := c.Providers[name]
+	if !ok || !IsClaudeAccount(p) {
+		return Provider{}, false, fmt.Errorf("default Claude account %q is unavailable; select another with ccl use <name> --default, or restore the original with ccl use default --default", name)
+	}
+	p.Name = name
+	return p, true, nil
 }
 
 // OAuthRuntimeType returns the internal compatibility type ccl persists for an

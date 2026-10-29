@@ -4,14 +4,79 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
+
+func TestClaudeAccountACPProfileBinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	store, _ := claudeaccount.Open()
+	work, err := store.PrepareNew("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.PrepareNew("other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &provider.Config{ActiveProvider: "work", Providers: map[string]provider.Provider{
+		"work": claudeAccountProvider("work", work.ID()), "other": claudeAccountProvider("other", other.ID()),
+	}}
+	if err = config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager := newACPLaunchManager()
+	defer manager.Close()
+	lease, err := manager.acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if got := manager.bindProfile(lease); got != work.ID() {
+		t.Fatalf("bound profile %q", got)
+	}
+	raw, err := lease.Options(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var options struct {
+		Env      map[string]string `json:"env"`
+		Settings map[string]any    `json:"settings"`
+	}
+	if err = json.Unmarshal(raw, &options); err != nil {
+		t.Fatal(err)
+	}
+	if options.Env["CLAUDE_CONFIG_DIR"] != work.Path || options.Env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] != work.Path || options.Env["ANTHROPIC_API_KEY"] != "" {
+		t.Fatalf("account SDK options: %+v", options.Env)
+	}
+	if err = config.Update(func(c *provider.Config) error {
+		c.ActiveProvider = "default"
+		c.DefaultClaudeProvider = "work"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	same, err := manager.acquire()
+	if err != nil {
+		t.Fatalf("default should resolve to the bound account: %v", err)
+	}
+	same.Release()
+	if err = config.Update(func(c *provider.Config) error { c.DefaultClaudeProvider = "other"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.acquire(); err == nil || !strings.Contains(err.Error(), "restart ccl acp") {
+		t.Fatalf("account changed without restart: %v", err)
+	}
+}
 
 type fakeACPPreparedLaunch struct {
 	closed atomic.Int32

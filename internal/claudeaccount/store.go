@@ -31,6 +31,68 @@ type Candidate struct {
 	id   string
 }
 
+func (c Candidate) ID() string { return c.id }
+
+// Profile resolves only an existing locally managed profile, never an
+// arbitrary filesystem path from a synced provider configuration.
+func (s *Store) Profile(id string) (string, error) {
+	if !validID(id) {
+		return "", fmt.Errorf("invalid Claude account profile id")
+	}
+	path := s.profile(id)
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("Claude account profile is unavailable on this device; sign in again with ccl oauth claude <name>")
+	}
+	return path, nil
+}
+
+// PrepareExisting keeps the stable profile id across provider renames and
+// copies, including accounts that need to be signed in again on this device.
+func (s *Store) PrepareExisting(name, id string) (Candidate, error) {
+	if err := validateName(name); err != nil {
+		return Candidate{}, err
+	}
+	if !validID(id) {
+		return Candidate{}, fmt.Errorf("invalid Claude account profile id")
+	}
+	path := s.profile(id)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return Candidate{}, err
+	}
+	return Candidate{Name: name, Path: path, id: id}, nil
+}
+
+// ImportLegacy transfers the previous local account selector once. The
+// registry and credentials remain untouched; the marker prevents a removed or
+// renamed provider from being recreated on subsequent launches.
+func (s *Store) ImportLegacy(ctx context.Context, importAccounts func(map[string]string, string) error) error {
+	if _, err := os.Stat(filepath.Join(s.root, "accounts.json")); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	unlock, err := fsutil.AcquireFileLock(ctx, filepath.Join(s.root, ".lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	marker := filepath.Join(s.root, ".providers-imported")
+	if _, err := os.Stat(marker); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	r, err := s.read()
+	if err != nil {
+		return err
+	}
+	if err := importAccounts(r.Accounts, r.Active); err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(marker, []byte("1\n"), 0o600)
+}
+
 func Open() (*Store, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -97,17 +159,30 @@ func (s *Store) profile(id string) string { return filepath.Join(s.root, "profil
 // Prepare reserves a private directory for a new login, or returns an existing
 // profile for re-authentication. A new profile is registered only on success.
 func (s *Store) Prepare(name string) (Candidate, error) {
+	return s.prepare(name, true)
+}
+
+// PrepareNew creates a distinct profile without consulting legacy aliases.
+func (s *Store) PrepareNew(name string) (Candidate, error) {
+	return s.prepare(name, false)
+}
+
+func (s *Store) prepare(name string, reuseLegacy bool) (Candidate, error) {
 	name = strings.TrimSpace(name)
 	if name != "" {
 		if err := validateName(name); err != nil {
 			return Candidate{}, err
 		}
 	}
-	r, err := s.read()
-	if err != nil {
-		return Candidate{}, err
+	var id string
+	if reuseLegacy {
+		r, err := s.read()
+		if err != nil {
+			return Candidate{}, err
+		}
+		id = r.Accounts[name]
 	}
-	if id := r.Accounts[name]; id != "" {
+	if id != "" {
 		path := s.profile(id)
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return Candidate{}, err
@@ -121,7 +196,7 @@ func (s *Store) Prepare(name string) (Candidate, error) {
 	if _, err := rand.Read(raw[:]); err != nil {
 		return Candidate{}, err
 	}
-	id := hex.EncodeToString(raw[:])
+	id = hex.EncodeToString(raw[:])
 	if name == "" {
 		name = "claude-" + id[:8]
 	}

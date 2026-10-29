@@ -37,34 +37,35 @@ ccl            # 用当前 provider 启动 Claude Code
 ccl --provider deepseek -p "你好"   # 仅本次使用 deepseek，不改变默认选择
 ```
 
-新安装默认使用 `default`，即 Claude Code 自身配置（claude.ai 订阅与 `~/.claude` 设置）：`ccl` 与 `ccl acp` 都直接以它启动。`ccl oauth`、`ccl set` 选择 Save & Activate 或 `ccl use <name>` 切换到 provider，`ccl use default` / `ccl use --acp default` 切回。`ccl proxy` 运行时，`default` 看到的就是代理写入的配置。
+新安装的 `default` 使用 Claude Code 原本的配置；登录 Claude 账号后，`default` 指向最后一次登录的账号，也可手动指定。`ccl oauth`、`ccl set` 选择 Save & Activate 或 `ccl use <name>` 切换 provider；`ccl use default` / `ccl use --acp default` 使用默认 Claude 账号。
 
 未知命令和参数会原样透传给 Claude Code（`ccl resume`、`ccl -p "hi"`），并启动真实会话。单次启动参数 `--provider` 必须放在 Claude 参数之前，支持 `--provider=deepseek`；`ccl --provider default` 使用 default。
 
 ### Claude 订阅多账号
 
 ```bash
-ccl oauth claude work          # 通过 Claude Code 登录工作账号
-ccl oauth claude personal      # 登录另一个账号
-ccl oauth claude               # 选择已有账号，或登录新账号
-ccl oauth claude list          # 查看账号与当前选择
-ccl oauth claude use work      # 默认使用工作账号（切换到 default）
-ccl --account personal         # 仅本次使用 personal，不改变默认选择
-ccl oauth claude use default   # 恢复原来的 Claude Code 配置
+ccl oauth claude work           # 登录工作账号，注册为 provider 并设为默认
+ccl oauth claude personal       # 登录另一个账号；最后登录的账号成为默认
+ccl ls                          # 显示所有 provider 和 default 指向的账号
+ccl use work                    # 切换到工作账号
+ccl --provider personal         # 仅本次使用 personal，不改变选择
+ccl use work --default          # 把 work 设置为默认账号并切换到它
+ccl use default                 # 使用当前默认 Claude 账号
+ccl use default --default       # 恢复 Claude Code 原来的配置和登录
 ```
 
-首次不带名称运行 `ccl oauth claude` 会登录，并优先用账号邮箱命名；再次运行可在终端选择账号。用 `ccl oauth claude add [name]` 增加账号，同名重新登录会保留该账号原有目录。如果已有一个账号登录了 Claude Code，它仍是 `default`，只需再登录另一个账号；选择 `default` 即可切回。需要支持 `claude auth login` 的 Claude Code 版本；Claude Code 自己处理登录与令牌刷新。每个账号拥有独立的设置和会话历史，保存在 `~/.ccl/claude-accounts/`（macOS 通常由 Claude Code 使用 Keychain 保存凭据）。这些账号不会被 `ccl cloud` 同步。
+不指定别名时，`ccl oauth claude` 会优先用 `claude-邮箱` 命名。重新登录相同 provider 会保留该账号的目录。Claude Code 自己处理登录与令牌刷新；各账号的设置和历史分别保存在 `~/.ccl/claude-accounts/`，不会覆盖原来的 `~/.claude`。macOS 的凭据通常由 Claude Code 使用 Keychain 保存。账号配置会同步，但账号目录与凭据不随 `ccl cloud` 同步，新设备需要再次登录。
 
-账号选择作用于终端 `ccl` 启动的 default 模式；`ccl acp` 和 `ccl serve` 的 default 仍使用它们自身的 Claude 配置。运行单次 provider 时不会修改账号选择。
+ACP 和网页模式也可选择这些账号。ACP 运行时跨 Claude 账号或切换到其他 provider 时，需要重启 ACP Agent；网页已有对话切换到不同账号时，请新建对话以使用该账号的历史。原先通过 `ccl oauth claude` 保存的账号会自动导入 provider 列表。
 
 ### 常用命令
 
 | 命令 | 作用 |
 |---|---|
 | `ccl set [name]` | 新增 / 修改 provider（TUI） |
-| `ccl ls [-a]` / `ccl use <name>` | 列出 / 切换 provider；`ccl use default` = Claude Code 自身配置 |
+| `ccl ls [-a]` / `ccl use <name>` | 列出 / 切换 provider；`ccl use default` 使用默认 Claude 账号 |
 | `ccl --provider <name> [Claude 参数]` | 本次启动指定 provider，不改变默认选择 |
-| `ccl oauth claude [name]` / `ccl --account <name>` | 登录、选择 Claude 账号 / 本次使用指定账号 |
+| `ccl oauth claude [name]` / `ccl use <name> --default` | 登录 Claude 账号 / 指定默认账号 |
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | 映射模型槽位；`ccl map auto` 自动填充 |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | 订阅登录 / 清理未使用凭据 |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
@@ -129,7 +130,7 @@ Claude Code 始终说 Anthropic Messages。Anthropic API-key 网关在普通启�
 
 ### 配置
 
-- `~/.ccl/config.yaml`：`active_provider`、`acp_provider`（空 = 跟随；`default` = Claude Code 自身配置）、`lang`、`bypass_mode`、`sign_on`、`log_level`、`providers`。**含明文 API Key，勿提交或外传。**
+- `~/.ccl/config.yaml`：`active_provider`、`acp_provider`（空 = 跟随）、`default_claude_provider`（`default` 指向的 Claude 账号）、`lang`、`bypass_mode`、`sign_on`、`log_level`、`providers`。**含明文 API Key，勿提交或外传。**
 - `~/.ccl/auth/*.json`：OAuth 凭据（0600）。
 - `provider.type`：`openai`（Chat）/ `openai_responses` / `anthropic`，由用户显式选择，不按 URL 猜测；Anthropic 直连的 `endpoint` 用裸域名（不带 `/v1`），Bearer 鉴权设 `anthropicAuth: bearer`。
 - `--settings` 优先级高于用户设置，因此 `outputStyle` / `language` / `statusLine` / `modelPicker` 仅在你自己没设置时由 ccl 提供。启动时会丢弃 shell 里继承的 `CLAUDE_CODE_USE_*`、`ANTHROPIC_*MODEL` 等变量；需要的值写进 provider（`ccl map` / `ccl provider env`）。
@@ -191,34 +192,35 @@ ccl            # launch Claude Code with the active provider
 ccl --provider deepseek -p "hello"  # use deepseek once without changing the selection
 ```
 
-A fresh install uses `default`, Claude Code's own configuration (claude.ai subscription and `~/.claude` settings), for both `ccl` and `ccl acp`. `ccl oauth`, Save & Activate in `ccl set`, or `ccl use <name>` switches to a provider; `ccl use default` / `ccl use --acp default` switches back. While `ccl proxy` runs, `default` sees the configuration the proxy wrote.
+A fresh install uses Claude Code's original configuration for `default`. After a Claude account login, `default` points to the most recently authenticated account and can also be set explicitly. `ccl oauth`, Save & Activate in `ccl set`, or `ccl use <name>` switches providers; `ccl use default` / `ccl use --acp default` selects the default Claude account.
 
 Unknown commands and flags are forwarded verbatim to Claude Code (`ccl resume`, `ccl -p "hi"`) and start a real session. The one-shot `--provider` must precede Claude arguments; `--provider=deepseek` and `--provider default` also work.
 
 ### Multiple Claude subscription accounts
 
 ```bash
-ccl oauth claude work          # sign in to the work account through Claude Code
-ccl oauth claude personal      # sign in to another account
-ccl oauth claude               # choose an account or sign in to another
-ccl oauth claude list          # show accounts and the selection
-ccl oauth claude use work      # select work and switch to default
-ccl --account personal         # use personal once without changing the selection
-ccl oauth claude use default   # restore the original Claude Code configuration
+ccl oauth claude work           # sign in and set work as the default provider
+ccl oauth claude personal       # sign in to another account; the latest login becomes default
+ccl ls                          # list providers and the default account
+ccl use work                    # switch to work
+ccl --provider personal         # use personal once without changing the selection
+ccl use work --default          # make work the default and switch to it
+ccl use default                 # use the current default Claude account
+ccl use default --default       # restore Claude Code's original profile
 ```
 
-On first use, `ccl oauth claude` signs in and uses the account email as its name when available; subsequent runs offer an account picker in a terminal. Add an account with `ccl oauth claude add [name]`; signing in with an existing name reuses its profile. If you already signed in to Claude Code, that account remains available as `default`, so you only need to sign in to the other account. A Claude Code version supporting `claude auth login` is required; Claude Code handles login and token refresh. Each account has separate settings and session history in `~/.ccl/claude-accounts/` (on macOS Claude Code usually uses Keychain for credentials). These accounts are not included in `ccl cloud` sync.
+Without an alias, `ccl oauth claude` uses `claude-<email>` when available. Re-login with the same provider name preserves its profile. Claude Code owns login and token refresh; each account has separate settings and history under `~/.ccl/claude-accounts/`, and the original `~/.claude` is not overwritten. On macOS Claude Code usually uses Keychain. Provider configuration is synced, but account profiles and credentials are not; sign in again on each device.
 
-Account selection applies to terminal `ccl` launches in default mode. `ccl acp` and `ccl serve` continue to use their own Claude configuration for default. One-shot provider launches do not change the account selection.
+ACP and the web UI can select these accounts. Restart the ACP agent when switching between a Claude account and another provider or account. In the web UI, start a new conversation when switching accounts because their histories are separate. Accounts saved by the previous selector are imported into the provider list automatically.
 
 ### Commands
 
 | Command | Purpose |
 |---|---|
 | `ccl set [name]` | Add / edit a provider (TUI) |
-| `ccl ls [-a]` / `ccl use <name>` | List / switch providers; `ccl use default` = Claude Code's own configuration |
+| `ccl ls [-a]` / `ccl use <name>` | List / switch providers; `ccl use default` selects the default Claude account |
 | `ccl --provider <name> [Claude args]` | Use a provider for one launch without changing the selection |
-| `ccl oauth claude [name]` / `ccl --account <name>` | Sign in and select a Claude account / use one for a single launch |
+| `ccl oauth claude [name]` / `ccl use <name> --default` | Sign in to Claude / select the default account |
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | Map model slots; `ccl map auto` fills them |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | Subscription login / remove unused credentials |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |
@@ -283,7 +285,7 @@ Claude Code always speaks Anthropic Messages. Anthropic API-key gateways are cal
 
 ### Configuration
 
-- `~/.ccl/config.yaml`: `active_provider`, `acp_provider` (empty = follow; `default` = Claude Code's own configuration), `lang`, `bypass_mode`, `sign_on`, `log_level`, `providers`. **Contains plaintext API keys — never commit or share it.**
+- `~/.ccl/config.yaml`: `active_provider`, `acp_provider` (empty = follow), `default_claude_provider` (the account selected by `default`), `lang`, `bypass_mode`, `sign_on`, `log_level`, `providers`. **Contains plaintext API keys — never commit or share it.**
 - `~/.ccl/auth/*.json`: OAuth credentials (0600).
 - `provider.type`: `openai` (Chat) / `openai_responses` / `anthropic`, chosen explicitly, never guessed from the URL. For direct Anthropic gateways use a bare-domain `endpoint` (no `/v1`) and set `anthropicAuth: bearer` for Bearer auth.
 - `--settings` outranks user settings, so `outputStyle` / `language` / `statusLine` / `modelPicker` are provided by ccl only when you have not set them yourself. Inherited shell variables such as `CLAUDE_CODE_USE_*` and `ANTHROPIC_*MODEL` are dropped at launch; put needed values in the provider (`ccl map` / `ccl provider env`).

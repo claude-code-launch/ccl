@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/cloudsync"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
@@ -166,6 +167,22 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 	}
 	doctorSection("Provider · " + name)
 	p := cfg.Providers[name]
+	if provider.IsClaudeAccount(p) {
+		doctorSection("Claude subscription account")
+		store, err := claudeaccount.Open()
+		if err != nil {
+			doctorErr(err.Error())
+			return nil
+		}
+		profile, err := store.Profile(p.OAuthAccountCredential)
+		if err != nil {
+			doctorErr(err.Error())
+			return nil
+		}
+		doctorOK("Local Claude profile: " + profile)
+		doctorHint("Claude Code manages sign-in, token refresh and model selection")
+		return nil
+	}
 
 	printDoctorProviderIdentity(p)
 	printDoctorProviderDetails(p)
