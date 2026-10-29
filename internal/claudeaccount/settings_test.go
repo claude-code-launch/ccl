@@ -3,6 +3,7 @@ package claudeaccount
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -24,7 +25,7 @@ func TestAccountSettingsRejectAuthenticationConflicts(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := CheckSettings(dir, "")
-			if err == nil || !strings.Contains(err.Error(), fixture.key) || !strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "secret-fixture") {
+			if err == nil || !strings.Contains(err.Error(), fixture.key) || !strings.Contains(err.Error(), strconv.Quote(path)) || strings.Contains(err.Error(), "secret-fixture") {
 				t.Fatalf("unsafe or missing error: %v", err)
 			}
 		})
@@ -47,7 +48,7 @@ func TestAccountSettingsSourcesAndNativePreferences(t *testing.T) {
 		if err := os.WriteFile(path, []byte(`{"apiKeyHelper":"echo fake"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := CheckSettings(profile, filepath.Join(project, "subdir")); err == nil || !strings.Contains(err.Error(), path) {
+		if err := CheckSettings(profile, filepath.Join(project, "subdir")); err == nil || !strings.Contains(err.Error(), strconv.Quote(path)) {
 			t.Fatalf("missed settings source %q: %v", path, err)
 		}
 		_ = os.Remove(path)
