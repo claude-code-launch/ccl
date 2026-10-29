@@ -54,6 +54,19 @@ func TestClaudeAccountDefaultLauncherUsesSelectedProfile(t *testing.T) {
 			t.Fatalf("wrong environment for %s: %s", name, env)
 		}
 	}
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".claude", "settings.json"), []byte(`{"env":{"ANTHROPIC_BASE_URL":"https://wrong.invalid"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"default", "work"} {
+		cmd, _, err := DefaultLauncher(context.Background(), LaunchSpec{Provider: name, Workspace: project})
+		if err == nil || cmd != nil || !strings.Contains(err.Error(), "ANTHROPIC_BASE_URL") {
+			t.Fatalf("web account routing was not refused: %v", err)
+		}
+	}
 }
 
 func TestBuildArgs(t *testing.T) {

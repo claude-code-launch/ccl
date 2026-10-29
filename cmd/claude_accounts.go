@@ -22,6 +22,13 @@ import (
 // Claude Code performs its own OAuth and token refresh, including macOS
 // Keychain integration. CCL never reads or copies the account's credentials.
 var runClaudeAccountLogin = func(ctx context.Context, profile string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := claudeaccount.CheckSettings(profile, cwd); err != nil {
+		return err
+	}
 	path, err := exec.LookPath("claude")
 	if err != nil {
 		return fmt.Errorf("Claude Code is required for account login: %w", err)
@@ -42,6 +49,10 @@ var runClaudeAccountLogin = func(ctx context.Context, profile string) error {
 // reading its credentials. Older CLIs that lack JSON status keep the generated
 // fallback name, and login is never failed by this optional lookup.
 var claudeAccountEmail = func(ctx context.Context, profile string) string {
+	cwd, err := os.Getwd()
+	if err != nil || claudeaccount.CheckSettings(profile, cwd) != nil {
+		return ""
+	}
 	path, err := exec.LookPath("claude")
 	if err != nil {
 		return ""
@@ -228,9 +239,13 @@ func importLegacyClaudeAccounts(ctx context.Context) error {
 				}
 				imported[name] = target
 			}
-			if target := imported[active]; target != "" && provider.IsDefaultProvider(cfg.ActiveProvider) {
-				cfg.ActiveProvider = target
-				cfg.DefaultClaudeProvider = target
+			if target := imported[active]; target != "" {
+				if cfg.DefaultClaudeProvider == "" {
+					cfg.DefaultClaudeProvider = target
+				}
+				if provider.IsDefaultProvider(cfg.ActiveProvider) {
+					cfg.ActiveProvider = target
+				}
 			}
 			return nil
 		})

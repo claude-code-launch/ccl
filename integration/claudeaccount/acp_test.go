@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,6 +135,17 @@ func TestRealACPClaudeAccountBoundary(t *testing.T) {
 	_ = json.Unmarshal(created["result"], &session)
 	if session.SessionID == "" {
 		t.Fatal("missing native session id")
+	}
+	conflictingProject := filepath.Join(home, "other-project")
+	if err := os.MkdirAll(filepath.Join(conflictingProject, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(conflictingProject, ".claude", "settings.json"), []byte(`{"apiKeyHelper":"echo fake-helper"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refusedProject := call(20, "session/new", map[string]any{"cwd": conflictingProject, "mcpServers": []any{}})
+	if !strings.Contains(string(refusedProject["error"]), "conflicts with apiKeyHelper") {
+		t.Fatalf("conflicting ACP project was accepted: %s", refusedProject)
 	}
 	if err := config.Update(func(c *provider.Config) error { c.DefaultClaudeProvider = "personal"; return nil }); err != nil {
 		t.Fatal(err)

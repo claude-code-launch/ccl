@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -96,6 +97,9 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	}
 
 	if err := updateProvider(providerName, func(latest *provider.Provider) error {
+		if provider.IsClaudeAccount(*latest) && (opts.opus != "" || opts.sonnet != "" || opts.haiku != "" || opts.fable != "" || opts.custom != "" || opts.subagent != "") {
+			return claudeaccount.OptionsError(providerName)
+		}
 		if cmd.Flags().Changed("opus") {
 			latest.OpusModel = opts.opus
 		}
@@ -166,6 +170,9 @@ func runMapAuto(ctx context.Context, args []string, probe bool) error {
 		return fmt.Errorf("provider %q not found", providerName)
 	}
 
+	if provider.IsClaudeAccount(p) {
+		return claudeaccount.OptionsError(providerName)
+	}
 	fmt.Printf("Fetching the model catalog for %q...\n", providerName)
 
 	runtimeProvider, models, metadata, cleanup, err := fetchMappingCatalog(ctx, p)

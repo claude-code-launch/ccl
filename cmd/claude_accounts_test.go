@@ -289,6 +289,110 @@ func TestLegacyClaudeAccountsImportedOnce(t *testing.T) {
 	}
 }
 
+func TestLegacyClaudeDefaultSurvivesActiveGateway(t *testing.T) {
+	for _, existingDefault := range []string{"", "other"} {
+		t.Run(existingDefault, func(t *testing.T) {
+			saveToggleFixture(t, &provider.Config{ActiveProvider: "gateway", DefaultClaudeProvider: existingDefault,
+				Providers: map[string]provider.Provider{"gateway": {Name: "gateway", Type: "anthropic"}}})
+			store, _ := claudeaccount.Open()
+			account, err := store.Prepare("work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Activate(context.Background(), account); err != nil {
+				t.Fatal(err)
+			}
+			if err = importLegacyClaudeAccounts(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			want := existingDefault
+			if want == "" {
+				want = "work"
+			}
+			cfg := loadToggleConfig(t)
+			if cfg.ActiveProvider != "gateway" || cfg.DefaultClaudeProvider != want {
+				t.Fatalf("migration changed selection: active=%s default=%s", cfg.ActiveProvider, cfg.DefaultClaudeProvider)
+			}
+		})
+	}
+}
+
+func TestClaudeAccountSwitchNeedsNoLoginOrClaudeExecutable(t *testing.T) {
+	saveToggleFixture(t, &provider.Config{ActiveProvider: "default"})
+	trace := useFakeClaude(t)
+	for _, name := range []string{"claude-work@example.test", "claude-personal@example.test"} {
+		if err := loginClaudeAccount(context.Background(), io.Discard, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", t.TempDir()) // Neither Claude nor a browser can be run.
+	for _, name := range []string{"claude-work@example.test", "claude-personal@example.test"} {
+		if err := runProviderUseWithDefault(name, false, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := runProviderUse("default", false); err != nil {
+			t.Fatal(err)
+		}
+		cfg := loadToggleConfig(t)
+		if cfg.ActiveProvider != "default" || cfg.DefaultClaudeProvider != name {
+			t.Fatalf("wrong default: %+v", cfg)
+		}
+	}
+	if got := len(readFakeTraces(t, trace)); got != 2 {
+		t.Fatalf("switching started another login: %d CLI calls", got)
+	}
+}
+
+func TestClaudeAccountRejectsProxyOptionsAndPreservesNativeLaunch(t *testing.T) {
+	saveToggleFixture(t, &provider.Config{ActiveProvider: "work"})
+	store, _ := claudeaccount.Open()
+	account, err := store.PrepareNew("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := claudeAccountProvider("work", account.ID())
+	if err := replaceProvider("work", p); err != nil {
+		t.Fatal(err)
+	}
+	trace := useFakeClaude(t)
+	project := t.TempDir()
+	t.Chdir(project)
+	if err := os.Mkdir(filepath.Join(project, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(project, ".claude", "settings.json")
+	for _, bad := range []string{`{"apiKeyHelper":"echo fake-secret"}`, `{"env":{"ANTHROPIC_BASE_URL":"https://wrong.invalid"}}`} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runClaude([]string{"-p", "do not send"}); err == nil || !strings.Contains(err.Error(), "conflicts") {
+			t.Fatalf("conflicting project was launched: %v", err)
+		}
+		if _, err := os.Stat(trace); !os.IsNotExist(err) {
+			t.Fatal("Claude was started before the conflict was refused")
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"effortLevel":"high","language":"English"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runEnvSet([]string{"CLAUDE_CODE_MAX_RETRIES", "0"}, providerTarget{}); err == nil {
+		t.Fatal("native account accepted an ignored Env setting")
+	}
+	if err := runProviderEffort(io.Discard, []string{"high"}, providerTarget{}); err == nil {
+		t.Fatal("native account accepted an ignored effort setting")
+	}
+	if err := runProviderUltracode(io.Discard, "on", providerTarget{}); err == nil {
+		t.Fatal("native account accepted an ignored ultracode setting")
+	}
+	if err := runClaude([]string{"auth", "status", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	got := readFakeTraces(t, trace)
+	if len(got) != 1 || got[0].Profile != account.Path || got[0].Settings != "" || !reflect.DeepEqual(got[0].Args, []string{"auth", "status", "--json"}) {
+		t.Fatalf("native launch changed: %+v", got)
+	}
+}
+
 func TestClaudeDefaultFlagAndProviderRename(t *testing.T) {
 	saveToggleFixture(t, &provider.Config{ActiveProvider: provider.DefaultProvider, Providers: map[string]provider.Provider{
 		"work":     claudeAccountProvider("work", "11111111111111111111111111111111"),

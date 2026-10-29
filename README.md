@@ -54,7 +54,9 @@ ccl use default                 # 使用当前默认 Claude 账号
 ccl use default --default       # 恢复 Claude Code 原来的配置和登录
 ```
 
-不指定别名时，`ccl oauth claude` 会优先用 `claude-邮箱` 命名。重新登录相同 provider 会保留该账号的目录。Claude Code 自己处理登录与令牌刷新；各账号的设置和历史分别保存在 `~/.ccl/claude-accounts/`，不会覆盖原来的 `~/.claude`。macOS 的凭据通常由 Claude Code 使用 Keychain 保存。账号配置会同步，但账号目录与凭据不随 `ccl cloud` 同步，新设备需要再次登录。
+不指定别名时，`ccl oauth claude` 会优先用 `claude-邮箱` 命名。重新登录相同 provider 会保留该账号的目录。账号登录保存后，`ccl use <账号> --default` 只更新本地选择，不启动浏览器或重新授权；后续由 Claude Code 自动刷新令牌。Claude Code 自己处理登录与令牌刷新；各账号的设置和历史分别保存在 `~/.ccl/claude-accounts/`，不会覆盖原来的 `~/.claude`。macOS 的凭据通常由 Claude Code 使用 Keychain 保存。账号配置会同步，但账号目录与凭据不随 `ccl cloud` 同步，新设备需要再次登录。
+
+模型、effort、环境变量等使用各账号的 Claude 原生配置（`/model`、`/effort`、`/config` 或账号目录中的 `settings.json`）；其他 provider 仍使用 CCL 的 env / effort / map 设置。为避免订阅凭据误发，原生账号启动前会检查账号、项目和额外 `--settings`：存在网关地址、API key helper 或其他认证冲突时会停止并指出配置来源，不会静默换账号。
 
 ACP 和网页模式也可选择这些账号。ACP 运行时跨 Claude 账号或切换到其他 provider 时，需要重启 ACP Agent；网页已有对话切换到不同账号时，请新建对话以使用该账号的历史。原先通过 `ccl oauth claude` 保存的账号会自动导入 provider 列表。
 
@@ -209,7 +211,9 @@ ccl use default                 # use the current default Claude account
 ccl use default --default       # restore Claude Code's original profile
 ```
 
-Without an alias, `ccl oauth claude` uses `claude-<email>` when available. Re-login with the same provider name preserves its profile. Claude Code owns login and token refresh; each account has separate settings and history under `~/.ccl/claude-accounts/`, and the original `~/.claude` is not overwritten. On macOS Claude Code usually uses Keychain. Provider configuration is synced, but account profiles and credentials are not; sign in again on each device.
+Without an alias, `ccl oauth claude` uses `claude-<email>` when available. Re-login with the same provider name preserves its profile. Once signed in, `ccl use <account> --default` only changes the local selection: it opens no browser and performs no new authorization. Claude Code owns subsequent token refresh. Claude Code owns login and token refresh; each account has separate settings and history under `~/.ccl/claude-accounts/`, and the original `~/.claude` is not overwritten. On macOS Claude Code usually uses Keychain. Provider configuration is synced, but account profiles and credentials are not; sign in again on each device.
+
+Models, effort and environment preferences use each account's native Claude configuration (`/model`, `/effort`, `/config` or its `settings.json`). Other provider types continue to use CCL provider env / effort / map settings. Before launching a native account, CCL checks profile, project and extra `--settings` inputs and refuses conflicting gateway endpoints, API key helpers or authentication settings, naming the source instead of silently changing identity.
 
 ACP and the web UI can select these accounts. Restart the ACP agent when switching between a Claude account and another provider or account. In the web UI, start a new conversation when switching accounts because their histories are separate. Accounts saved by the previous selector are imported into the provider list automatically.
 

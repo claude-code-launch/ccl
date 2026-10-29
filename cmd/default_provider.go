@@ -19,12 +19,25 @@ func runClaudeWithoutProvider(args []string) error {
 }
 
 func runClaudeAccount(p provider.Provider, args []string) error {
+	if err := claudeaccount.ValidateProvider(p); err != nil {
+		return err
+	}
+	if err := claudeaccount.CheckArgs(args); err != nil {
+		return err
+	}
 	store, err := claudeaccount.Open()
 	if err != nil {
 		return err
 	}
 	profile, err := store.Profile(p.OAuthAccountCredential)
 	if err != nil {
+		return err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := claudeaccount.CheckSettings(profile, cwd); err != nil {
 		return err
 	}
 	return runClaudeWithProfile(p.Name, profile, args)

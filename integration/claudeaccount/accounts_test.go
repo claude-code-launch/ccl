@@ -3,10 +3,14 @@ package claudeaccount_test
 import (
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/claudeaccount"
@@ -149,5 +153,50 @@ func TestRealClaudeAccountIsolation(t *testing.T) {
 		if err := json.Unmarshal(output, &status); err != nil || status.Email != step.email {
 			t.Fatalf("ccl %v selected %s, want %s; output=%s, err=%v", step.args, status.Email, step.email, output, err)
 		}
+	}
+
+	// The real CLI must never receive a subscription bearer through an old
+	// project gateway or key helper. The fixture would record such a request.
+	var requests atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "local fixture must not be reached", http.StatusBadRequest)
+	}))
+	defer endpoint.Close()
+	project := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(project, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, file, key string
+		settings        map[string]any
+	}{
+		{"project-gateway", "settings.json", "ANTHROPIC_BASE_URL", map[string]any{"env": map[string]string{"ANTHROPIC_BASE_URL": endpoint.URL}}},
+		{"project-helper", "settings.local.json", "apiKeyHelper", map[string]any{"apiKeyHelper": "echo fake-helper"}},
+		{"project-token", "settings.json", "ANTHROPIC_AUTH_TOKEN", map[string]any{"env": map[string]string{"ANTHROPIC_AUTH_TOKEN": "fake-other-token"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(project, ".claude", test.file)
+			data, _ := json.Marshal(test.settings)
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(path)
+			cmd := exec.Command(binary, "--provider", "work", "-p", "must not reach inference", "--max-turns", "1")
+			cmd.Dir = project
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "conflicts with "+test.key) || requests.Load() != 0 {
+				t.Fatalf("unsafe account launch: err=%v requests=%d output=%s", err, requests.Load(), output)
+			}
+		})
+	}
+	preferences := filepath.Join(project, "native-preferences.json")
+	if err := os.WriteFile(preferences, []byte(`{"effortLevel":"high"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binary, "--provider", "work", "--settings", preferences, "auth", "status", "--json")
+	cmd.Dir = project
+	if output, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(output), "work@test.invalid") {
+		t.Fatalf("native preferences changed authentication: %v: %s", err, output)
 	}
 }

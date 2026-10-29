@@ -112,7 +112,7 @@ func newACPLaunchManager() *acpLaunchManager {
 			if err != nil {
 				return nil, err
 			}
-			return claude.ClaudeAccountAgentLaunch{ConfigDir: profile}, nil
+			return claude.ClaudeAccountAgentLaunch{ConfigDir: profile, Provider: p.Clone()}, nil
 		}
 		return claude.PrepareAgentContext(ctx, p)
 	})

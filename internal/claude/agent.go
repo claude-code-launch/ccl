@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -132,11 +133,20 @@ func (DefaultAgentLaunch) Close() {}
 
 // ClaudeAccountAgentLaunch uses Claude's native subscription inside the
 // selected profile; protocol and token refresh stay with the upstream SDK.
-type ClaudeAccountAgentLaunch struct{ ConfigDir string }
+type ClaudeAccountAgentLaunch struct {
+	ConfigDir string
+	Provider  provider.Provider
+}
 
 func (ClaudeAccountAgentLaunch) Close() {}
 
 func (l ClaudeAccountAgentLaunch) Options(cwd string) (json.RawMessage, error) {
+	if err := claudeaccount.ValidateProvider(l.Provider); err != nil {
+		return nil, err
+	}
+	if err := claudeaccount.CheckSettings(l.ConfigDir, cwd); err != nil {
+		return nil, err
+	}
 	env := completeAgentEnv(settingsJSON{Env: map[string]string{}}, false)
 	for key := range env {
 		env[key] = ""
@@ -144,12 +154,9 @@ func (l ClaudeAccountAgentLaunch) Options(cwd string) (json.RawMessage, error) {
 			env[key] = "0"
 		}
 	}
-	env["CLAUDE_CONFIG_DIR"] = l.ConfigDir
-	env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = l.ConfigDir
-	env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
-	env["CLAUDE_CODE_HOST_CREDS_FILE"] = ""
-	env["CLAUDE_CODE_HOST_AUTH_ENV_VAR"] = ""
-	env["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"] = ""
+	for key, value := range claudeaccount.RoutingEnv(l.ConfigDir) {
+		env[key] = value
+	}
 	return json.Marshal(struct {
 		Env      map[string]string `json:"env"`
 		Settings map[string]any    `json:"settings"`

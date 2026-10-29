@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
@@ -74,9 +75,12 @@ func runEnvSet(args []string, target providerTarget) error {
 	if len(args) != 2 {
 		return errors.New(locale.T("期望 KEY 和 VALUE 参数，或子命令（ls、rm、mv）。见 `ccl provider env --help`", "expected KEY and VALUE arguments, or a subcommand (ls, rm, mv). See ccl provider env --help"))
 	}
-	name, _, err := target.load()
+	name, p, err := target.load()
 	if err != nil {
 		return err
+	}
+	if provider.IsClaudeAccount(p) {
+		return claudeaccount.OptionsError(name)
 	}
 
 	key := strings.TrimSpace(args[0])
@@ -91,6 +95,9 @@ func runEnvSet(args []string, target providerTarget) error {
 		), key, command)
 	}
 	if err := updateProvider(name, func(p *provider.Provider) error {
+		if provider.IsClaudeAccount(*p) {
+			return claudeaccount.OptionsError(name)
+		}
 		if p.Env == nil {
 			p.Env = make(map[string]string)
 		}
@@ -229,6 +236,9 @@ func runEnvMove(oldArg, newArg string, force bool, target providerTarget) error 
 		return err
 	}
 	val, exists := p.Env[oldKey]
+	if provider.IsClaudeAccount(p) {
+		return claudeaccount.OptionsError(name)
+	}
 	if !exists {
 		return fmt.Errorf(locale.T("键 %q 不存在于 %q", "key %q not found in %q"), oldKey, name)
 	}
@@ -242,6 +252,9 @@ func runEnvMove(oldArg, newArg string, force bool, target providerTarget) error 
 	}
 
 	if err := updateProvider(name, func(p *provider.Provider) error {
+		if provider.IsClaudeAccount(*p) {
+			return claudeaccount.OptionsError(name)
+		}
 		if p.Env == nil {
 			p.Env = make(map[string]string)
 		}

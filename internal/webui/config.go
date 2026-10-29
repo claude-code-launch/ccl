@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -646,6 +647,9 @@ func applyProviderInput(p *provider.Provider, input *ProviderInput, clearKey boo
 	}
 	if p.Name == "" {
 		p.Name = provider.DefaultProvider
+	}
+	if provider.IsClaudeAccount(*p) {
+		return claudeaccount.ValidateProvider(*p)
 	}
 	return nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +56,16 @@ func TestClaudeAccountACPProfileBinding(t *testing.T) {
 	}
 	if err = json.Unmarshal(raw, &options); err != nil {
 		t.Fatal(err)
+	}
+	badProject := t.TempDir()
+	if err := os.Mkdir(filepath.Join(badProject, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badProject, ".claude", "settings.json"), []byte(`{"apiKeyHelper":"echo fake-helper"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lease.Options(badProject); err == nil || !strings.Contains(err.Error(), "apiKeyHelper") {
+		t.Fatalf("ACP account accepted conflicting project authentication: %v", err)
 	}
 	if options.Env["CLAUDE_CONFIG_DIR"] != work.Path || options.Env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] != work.Path || options.Env["ANTHROPIC_API_KEY"] != "" {
 		t.Fatalf("account SDK options: %+v", options.Env)

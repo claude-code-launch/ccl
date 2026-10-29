@@ -78,6 +78,25 @@ func doJSON(t *testing.T, method, url, token, body string) (int, []byte) {
 	return response.StatusCode, payload
 }
 
+func TestClaudeAccountConfigRejectsIgnoredOptions(t *testing.T) {
+	isolateConfig(t)
+	seedConfig(t, func(cfg *provider.Config) {
+		cfg.ActiveProvider = "work"
+		cfg.Providers["work"] = provider.Provider{Name: "work", Type: "anthropic", Endpoint: "oauth://claude", OAuthProvider: "claude", OAuthAccountCredential: "11111111111111111111111111111111"}
+	})
+	server := newConfigServer(t)
+	for _, body := range []string{`{"effortLevel":"high"}`, `{"apiKey":"fake-must-not-appear"}`, `{"opusModel":"other-model"}`, `{"endpoint":"https://wrong.invalid"}`, `{"type":"openai"}`} {
+		status, response := doJSON(t, "PATCH", server.URL+"/api/config/providers/work", "secret", body)
+		if status != http.StatusBadRequest || !strings.Contains(string(response), "native profile") || strings.Contains(string(response), "fake-must-not-appear") {
+			t.Fatalf("native options were not rejected safely: %d %s", status, response)
+		}
+	}
+	cfg, err := config.Load()
+	if err != nil || cfg.Providers["work"].EffortLevel != "" || cfg.Providers["work"].APIKey != "" || cfg.Providers["work"].OpusModel != "" {
+		t.Fatalf("rejected native update was saved: %v", err)
+	}
+}
+
 func TestConfigMasksAPIKey(t *testing.T) {
 	isolateConfig(t)
 	seedConfig(t, func(cfg *provider.Config) {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -40,6 +41,9 @@ func runProviderEffort(out io.Writer, args []string, target providerTarget) erro
 		return err
 	}
 	if len(args) == 0 {
+		if provider.IsClaudeAccount(p) {
+			return claudeaccount.OptionsError(name)
+		}
 		fmt.Fprintf(out, "%s: effort %s\n", name, providerEffortSummary(p))
 		return nil
 	}
@@ -54,7 +58,13 @@ func runProviderEffort(out io.Writer, args []string, target providerTarget) erro
 	if level == "default" {
 		level = ""
 	}
+	if level != "" && provider.IsClaudeAccount(p) {
+		return claudeaccount.OptionsError(name)
+	}
 	if err := updateProvider(name, func(p *provider.Provider) error {
+		if level != "" && provider.IsClaudeAccount(*p) {
+			return claudeaccount.OptionsError(name)
+		}
 		p.EffortLevel = level
 		return nil
 	}); err != nil {
@@ -96,6 +106,9 @@ func runProviderUltracode(out io.Writer, value string, target providerTarget) er
 		return err
 	}
 	if err := updateProvider(name, func(p *provider.Provider) error {
+		if enabled && provider.IsClaudeAccount(*p) {
+			return claudeaccount.OptionsError(name)
+		}
 		p.Ultracode = enabled
 		return nil
 	}); err != nil {

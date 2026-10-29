@@ -134,12 +134,18 @@ func DefaultLauncher(ctx context.Context, spec LaunchSpec) (*exec.Cmd, func(), e
 	}
 	p.Name = name
 	if provider.IsClaudeAccount(p) {
+		if err := claudeaccount.ValidateProvider(p); err != nil {
+			return nil, nil, err
+		}
 		store, err := claudeaccount.Open()
 		if err != nil {
 			return nil, nil, err
 		}
 		profile, err := store.Profile(p.OAuthAccountCredential)
 		if err != nil {
+			return nil, nil, err
+		}
+		if err := claudeaccount.CheckSettings(profile, spec.Workspace); err != nil {
 			return nil, nil, err
 		}
 		path, err := exec.LookPath("claude")
