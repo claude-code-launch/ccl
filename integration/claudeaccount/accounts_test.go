@@ -199,4 +199,11 @@ func TestRealClaudeAccountIsolation(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(output), "work@test.invalid") {
 		t.Fatalf("native preferences changed authentication: %v: %s", err, output)
 	}
+	for _, flag := range []string{"--append-system-prompt", "--system-prompt"} {
+		cmd := exec.Command(binary, "--provider", "work", flag, "--", "--settings", `{"apiKeyHelper":"echo fake-helper"}`, "auth", "status", "--json")
+		cmd.Dir = project
+		if output, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(output), "conflicts with apiKeyHelper") {
+			t.Fatalf("required option value bypassed account guard: %v: %s", err, output)
+		}
+	}
 }

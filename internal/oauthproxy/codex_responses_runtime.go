@@ -103,7 +103,8 @@ type codexResponsesUpstreamError struct {
 
 // upstreamStatus implements the retry.go fast-retry probe against the raw
 // upstream status, before any client-facing mapping.
-func (e *codexResponsesUpstreamError) upstreamStatus() int { return e.status }
+func (e *codexResponsesUpstreamError) upstreamStatus() int        { return e.status }
+func (e *codexResponsesUpstreamError) upstreamRetryAfter() string { return e.retryAfter }
 
 type codexBufferedSSEWriter struct {
 	bytes.Buffer

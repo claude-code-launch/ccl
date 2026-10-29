@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -93,7 +94,7 @@ func TestLoginQoderUsesDirectBrowserOAuth(t *testing.T) {
 	if stored["type"] != ProviderQoder || stored["access_token"] != "qoder-access" || stored["refresh_token"] != "qoder-refresh" || stored["user_id"] != "user-42" {
 		t.Fatalf("stored credential = %+v", stored)
 	}
-	if info, err := os.Stat(result.Path); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(result.Path); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("credential permissions = %v, %v", info, err)
 	}
 }
@@ -162,6 +163,7 @@ func TestQoderAuthHeadersUseCOSYProtocolWithoutPlaintextToken(t *testing.T) {
 func TestQoderRuntimeRefreshesCredentialDiscoversModelsAndTranslatesMessages(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	authDir, err := ensureAuthDir()
 	if err != nil {
 		t.Fatal(err)

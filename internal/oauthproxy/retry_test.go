@@ -31,6 +31,23 @@ func staticFastRetryBackoff(t *testing.T) {
 	swapFastRetryBackoff(t, []time.Duration{time.Millisecond, time.Millisecond})
 }
 
+func TestRetryUpstreamDoesNotRushRetryAfter(t *testing.T) {
+	staticFastRetryBackoff(t)
+	for _, hint := range []string{"60", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)} {
+		attempts := 0
+		response, err := retryUpstream(context.Background(), "test", func() (*http.Response, error) {
+			attempts++
+			response := responseWithStatus(http.StatusTooManyRequests)
+			response.Header = http.Header{"Retry-After": []string{hint}}
+			return response, nil
+		})
+		if err != nil || attempts != 1 || response.Header.Get("Retry-After") != hint {
+			t.Fatalf("retry raced ahead of upstream cooldown: attempts=%d err=%v", attempts, err)
+		}
+		_ = response.Body.Close()
+	}
+}
+
 func TestRetryUpstreamRecoversWithinBudget(t *testing.T) {
 	staticFastRetryBackoff(t)
 	attempts := 0

@@ -285,7 +285,7 @@ func TestOpenAIChatErrorMapping(t *testing.T) {
 	if !strings.Contains(string(body), `"type":"rate_limit_error"`) {
 		t.Fatalf("error body = %s", body)
 	}
-	if attempts.Load() != 3 {
-		t.Fatalf("upstream attempts = %d, want 3 (initial + 2 fast retries)", attempts.Load())
+	if attempts.Load() != 1 {
+		t.Fatalf("upstream attempts = %d, want 1 when upstream requests a wait", attempts.Load())
 	}
 }

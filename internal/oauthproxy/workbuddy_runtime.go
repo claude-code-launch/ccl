@@ -63,7 +63,7 @@ func newWorkBuddyCredentialStore(deployment workbuddyDeployment, authDir, creden
 		deployment:     deployment,
 		authDir:        authDir,
 		credentialFile: filepath.Base(strings.TrimSpace(credentialFile)),
-		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
+		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second), CheckRedirect: checkCredentialRedirect},
 	}
 }
 
@@ -400,7 +400,7 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 		DebugHTTPBody(fmt.Sprintf("workbuddy request request_id=%s path=%s", requestLogID(ctx), path), body)
 	}
 	started := time.Now()
-	response, err := g.store.client.Do(request)
+	response, err := doCredentialRequest(g.store.client, request)
 	if err != nil {
 		return nil, err
 	}

@@ -176,6 +176,11 @@ func CheckArgs(args []string) error {
 		case strings.HasPrefix(arg, "--settings="):
 			value = strings.TrimPrefix(arg, "--settings=")
 		default:
+			// A required value may itself be "--" or "--settings". It is
+			// not an option boundary; Commander consumes it for that flag.
+			if claudeOptionRequiresValue(arg) && i+1 < len(args) {
+				i++
+			}
 			continue
 		}
 		if strings.HasPrefix(strings.TrimSpace(value), "{") {
@@ -192,4 +197,21 @@ func CheckArgs(args []string) error {
 		}
 	}
 	return nil
+}
+
+// Required-value options of the supported Claude CLI. Optional-value flags
+// (such as --resume and --debug) deliberately leave -- as an option boundary.
+func claudeOptionRequiresValue(arg string) bool {
+	switch arg {
+	case "--add-dir", "--agent", "--agents", "--allowedTools", "--allowed-tools",
+		"--append-system-prompt", "--append-system-prompt-file", "--autocompact", "--betas",
+		"--debug-file", "--disallowedTools", "--disallowed-tools", "--effort", "--environment",
+		"--fallback-model", "--file", "--input-format", "--json-schema", "--max-budget-usd",
+		"--max-turns", "--max-thinking-tokens", "--mcp-config", "--model", "-n", "--name",
+		"--output-format", "--permission-mode", "--permission-prompt-tool", "--permission-prompts",
+		"--plugin-dir", "--plugin-url", "--remote-control-session-name-prefix", "--session-id",
+		"--setting-sources", "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--tools":
+		return true
+	}
+	return false
 }

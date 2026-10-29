@@ -79,7 +79,7 @@ Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external pr
 | models.dev mixed | `mixed_runtime.go` + `anthropic_passthrough.go` | `ModelProtocols` map per model |
 | AutoClaw / ZCode | `autoclaw_*.go` | CCL-owned Anthropic-to-OpenAI Chat adapter to `{origin}/autoclaw-proxy/proxy/autoclaw`; `ccl oauth autoclaw` runs the Google browser login (importing the encrypted desktop `auth.json` is optional), refreshes the session, and sends desktop-compatible managed-proxy headers without starting AutoClaw |
 
-Shared 429/5xx fast retry is `retry.go` (500ms + 1s, then relay status/body/`Retry-After` untouched). Per-backend 401 refresh happens **inside** one attempt. Kiro has its own 1/2/4s loop; WorkBuddy/Zed inner gateways must not wrap the outer retry (would 3×3).
+Shared 429/5xx fast retry is `retry.go` (at most 500ms + 1s; a longer `Retry-After` returns immediately for the client to honor). Qoder and WorkBuddy credential HTTP clients enforce same-origin redirects and scrub login query values from network errors; Qoder reads exactly its bound credential and rechecks type/disabled under the refresh lock. Per-backend 401 refresh happens **inside** one attempt. Kiro has its own 1/2/4s loop; WorkBuddy/Zed inner gateways must not wrap the outer retry (would 3×3).
 
 `ccl set` Auto Configure only GETs `/models` metadata for generic gateways. OAuth subscriptions have no Auto Configure row at all: `configureOAuthRuntime` copies the catalog straight from the loopback runtime (`runtime.Models()`), so a subscription is never probed as a generic endpoint. Per-slot `[1m]` markers live in `live().oneMSlots`; a slot that kept its model keeps its marker, so re-detection cannot re-open a window the user closed.
 

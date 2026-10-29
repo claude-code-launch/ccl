@@ -9,10 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -44,71 +42,26 @@ type qoderCredentialPool struct {
 	authDir        string
 	credentialFile string
 	client         *http.Client
-	next           atomic.Uint64
 }
 
 func newQoderCredentialPool(authDir, credentialFile string) *qoderCredentialPool {
 	return &qoderCredentialPool{
 		authDir:        authDir,
 		credentialFile: strings.TrimSpace(credentialFile),
-		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
+		client:         &http.Client{Transport: newUpstreamTransport(90 * time.Second), CheckRedirect: checkCredentialRedirect},
 	}
 }
 
 func (pool *qoderCredentialPool) load() ([]*qoderCredential, error) {
-	entries, err := os.ReadDir(pool.authDir)
+	name := filepath.Base(pool.credentialFile)
+	if pool.credentialFile == "" || name == "." {
+		return nil, fmt.Errorf("Qoder runtime is not bound to a credential file")
+	}
+	credential, err := pool.loadCredential(filepath.Join(pool.authDir, name))
 	if err != nil {
-		return nil, fmt.Errorf("read Qoder auth directory: %w", err)
+		return nil, err
 	}
-	credentials := make([]*qoderCredential, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
-			continue
-		}
-		if pool.credentialFile != "" && !strings.EqualFold(entry.Name(), filepath.Base(pool.credentialFile)) {
-			continue
-		}
-		path := filepath.Join(pool.authDir, entry.Name())
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read Qoder credential %s: %w", entry.Name(), err)
-		}
-		var metadata map[string]any
-		if err := json.Unmarshal(raw, &metadata); err != nil {
-			LogWarnf("skip malformed Qoder credential file %s: %v", entry.Name(), err)
-			continue
-		}
-		credentialType, _ := metadata["type"].(string)
-		if !strings.EqualFold(strings.TrimSpace(credentialType), ProviderQoder) {
-			continue
-		}
-		disabled, _ := metadata["disabled"].(bool)
-		credential := &qoderCredential{
-			path:         path,
-			fileName:     entry.Name(),
-			accessToken:  firstMetadataString(metadata, "access_token", "token"),
-			refreshToken: firstMetadataString(metadata, "refresh_token"),
-			userID:       firstMetadataString(metadata, "user_id"),
-			email:        firstMetadataString(metadata, "email"),
-			name:         firstMetadataString(metadata, "name", "username"),
-			machineID:    firstMetadataString(metadata, "machine_id"),
-			expiresAt:    qoderMetadataExpiry(metadata["expires_at"]),
-			metadata:     metadata,
-			disabled:     disabled,
-		}
-		if credential.machineID == "" {
-			credential.machineID = firstMetadataString(metadata, "device_id")
-		}
-		if (!disabled && credential.accessToken == "") || credential.userID == "" || credential.machineID == "" {
-			LogWarnf("skip Qoder credential file %s: missing token, user_id, or machine_id", entry.Name())
-			continue
-		}
-		credentials = append(credentials, credential)
-	}
-	sort.Slice(credentials, func(i, j int) bool {
-		return strings.ToLower(credentials[i].fileName) < strings.ToLower(credentials[j].fileName)
-	})
-	return credentials, nil
+	return []*qoderCredential{credential}, nil
 }
 
 func activeQoderCredentials(credentials []*qoderCredential) []*qoderCredential {
@@ -124,19 +77,15 @@ func activeQoderCredentials(credentials []*qoderCredential) []*qoderCredential {
 
 func (pool *qoderCredentialPool) ordered() ([]*qoderCredential, error) {
 	credentials, err := pool.load()
-	credentials = activeQoderCredentials(credentials)
-	if err != nil || len(credentials) < 2 {
-		return credentials, err
-	}
-	start := int((pool.next.Add(1) - 1) % uint64(len(credentials)))
-	ordered := append([]*qoderCredential(nil), credentials[start:]...)
-	ordered = append(ordered, credentials[:start]...)
-	return ordered, nil
+	return activeQoderCredentials(credentials), err
 }
 
 func (pool *qoderCredentialPool) usable(ctx context.Context, credential *qoderCredential, force bool) (*qoderCredential, error) {
 	if credential == nil {
 		return nil, fmt.Errorf("Qoder credential is nil")
+	}
+	if credential.disabled {
+		return nil, fmt.Errorf("Qoder credential %s is disabled", credential.fileName)
 	}
 	if !force && (credential.expiresAt.IsZero() || time.Now().Before(credential.expiresAt)) {
 		return credential, nil
@@ -155,6 +104,9 @@ func (pool *qoderCredentialPool) usable(ctx context.Context, credential *qoderCr
 	if err != nil {
 		return nil, err
 	}
+	if latest.disabled {
+		return nil, fmt.Errorf("Qoder credential %s is disabled", latest.fileName)
+	}
 	if (!force || latest.accessToken != credential.accessToken) && (latest.expiresAt.IsZero() || time.Now().Before(latest.expiresAt)) {
 		return latest, nil
 	}
@@ -170,7 +122,12 @@ func (pool *qoderCredentialPool) loadCredential(path string) (*qoderCredential, 
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		return nil, err
 	}
-	return &qoderCredential{
+	credentialType, _ := metadata["type"].(string)
+	if !strings.EqualFold(strings.TrimSpace(credentialType), ProviderQoder) {
+		return nil, fmt.Errorf("credential %s is not a Qoder credential", filepath.Base(path))
+	}
+	disabled, _ := metadata["disabled"].(bool)
+	credential := &qoderCredential{
 		path:         path,
 		fileName:     filepath.Base(path),
 		accessToken:  firstMetadataString(metadata, "access_token", "token"),
@@ -181,7 +138,12 @@ func (pool *qoderCredentialPool) loadCredential(path string) (*qoderCredential, 
 		machineID:    firstMetadataString(metadata, "machine_id", "device_id"),
 		expiresAt:    qoderMetadataExpiry(metadata["expires_at"]),
 		metadata:     metadata,
-	}, nil
+		disabled:     disabled,
+	}
+	if (!disabled && credential.accessToken == "") || credential.userID == "" || credential.machineID == "" {
+		return nil, fmt.Errorf("Qoder credential %s is missing token, user_id or machine_id", credential.fileName)
+	}
+	return credential, nil
 }
 
 func (pool *qoderCredentialPool) refresh(ctx context.Context, credential *qoderCredential) (*qoderCredential, error) {
@@ -197,7 +159,7 @@ func (pool *qoderCredentialPool) refresh(ctx context.Context, credential *qoderC
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "ccl")
-	response, err := pool.client.Do(request)
+	response, err := doCredentialRequest(pool.client, request)
 	if err != nil {
 		return nil, fmt.Errorf("refresh Qoder credential %s: %w", credential.fileName, err)
 	}

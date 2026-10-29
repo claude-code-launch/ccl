@@ -12,14 +12,14 @@
 //
 // Error recovery follows the data-plane owner. Every CCL-owned data plane
 // first applies the shared fast-retry loop (retry.go): an upstream 429 or 5xx
-// outcome is retried twice more after 500ms and 1s — Retry-After hints are
-// not honored inside the loop, they are relayed on final failure so Claude
-// Code runs its own full backoff over the untouched status/body/Retry-After.
+// outcome is retried at most twice more after 500ms and 1s. A longer
+// Retry-After ends the fast loop immediately and is relayed so Claude Code
+// can honor the upstream wait without CCL sending more requests first.
 // Per-provider recovery happens INSIDE one attempt: Codex Responses, Grok, and
 // Kimi refresh once after a 401; WorkBuddy refreshes once after a 401/403;
 // Gemini also falls back from the daily to the prod Antigravity base on
 // network errors, 429s and 5xx responses (so one attempt is up to 2 upstream
-// calls); Qoder rotates credentials and re-signs COSY per attempt; the Zed
+// calls); Qoder uses its single bound credential and re-signs COSY per attempt; the Zed
 // gateway mints one fresh LLM token and resends once when the service reports
 // the cached one expired. Three layers are deliberately outside the loop: Kiro
 // keeps its own longer 1/2/4s budget with per-round credential rotation

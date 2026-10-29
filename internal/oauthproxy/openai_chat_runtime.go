@@ -86,7 +86,8 @@ func (e *chatCompletionsUpstreamError) Error() string {
 
 // upstreamStatus implements the retry.go fast-retry probe against the raw
 // upstream status, before any client-facing mapping.
-func (e *chatCompletionsUpstreamError) upstreamStatus() int { return e.status }
+func (e *chatCompletionsUpstreamError) upstreamStatus() int        { return e.status }
+func (e *chatCompletionsUpstreamError) upstreamRetryAfter() string { return e.retryAfter }
 
 // startOpenAIChatRuntime starts a CCL-owned Anthropic Messages entrypoint that
 // translates requests to OpenAI Chat Completions upstream. It mirrors

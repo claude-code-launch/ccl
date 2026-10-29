@@ -536,10 +536,9 @@ func TestZedRuntimeSurfacesUpstreamStatusAndRetriesOnlyOnce(t *testing.T) {
 	if gjson.Get(body, "error.type").String() != "overloaded_error" || !strings.Contains(gjson.Get(body, "error.message").String(), "overloaded") {
 		t.Fatalf("error body = %s", body)
 	}
-	// One outer fast-retry budget: 3 attempts total. The gateway adds no retries
-	// of its own, so nesting never multiplies them.
-	if got := len(cloud.callsTo("/completions")); got != 3 {
-		t.Fatalf("completions attempts = %d, want 3", got)
+	// Honor the explicit upstream wait without either layer retrying early.
+	if got := len(cloud.callsTo("/completions")); got != 1 {
+		t.Fatalf("completions attempts = %d, want 1", got)
 	}
 }
 

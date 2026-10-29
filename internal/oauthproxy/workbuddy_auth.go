@@ -25,9 +25,9 @@ const (
 	// /v2/plugin/auth/state and embedded in the login URL. It selects the login
 	// page brand; both deployments accept "workbuddy" (the desktop WorkBuddy
 	// app's platform). The Keycloak token is minted by the "console" client no
-	// matter what value is used here — that is expected and harmless: the chat
-	// gateway does not gate on the token's azp, only on the request fingerprint
-	// below (User-Agent + X-IDE-Type + X-Private-Data).
+	// matter what value is used here. The plugin API also expects the channel
+	// metadata below (User-Agent + X-IDE-Type + X-Private-Data). These wire
+	// fields do not establish permission for third-party subscription use.
 	workbuddyPlatform = "workbuddy"
 	// workbuddyClientVersion is the desktop WorkBuddy app version. It drives the
 	// login URL `version` parameter, X-IDE-Version, and the first two
@@ -169,7 +169,7 @@ func loginWorkBuddy(ctx context.Context, authDir, providerName string, opts Logi
 	}
 	loginCtx, cancel := context.WithTimeout(ctx, workbuddyLoginTimeout)
 	defer cancel()
-	client := &http.Client{Timeout: workbuddyHTTPTimeout}
+	client := &http.Client{Timeout: workbuddyHTTPTimeout, CheckRedirect: checkCredentialRedirect}
 
 	stateURL := strings.TrimRight(deployment.baseURL, "/") + "/v2/plugin/auth/state?platform=" + url.QueryEscape(workbuddyPlatform)
 	stateEnvelope, err := workbuddyJSON[workbuddyAuthState](loginCtx, client, http.MethodPost, stateURL, []byte(`{}`), deployment.anonymousHeaders())
@@ -392,7 +392,7 @@ func workbuddyJSON[T any](ctx context.Context, client *http.Client, method, endp
 			request.Header.Add(name, value)
 		}
 	}
-	response, err := client.Do(request)
+	response, err := doCredentialRequest(client, request)
 	if err != nil {
 		return result, err
 	}

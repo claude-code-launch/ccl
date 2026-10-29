@@ -4,17 +4,16 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // upstreamFastRetryBackoff is the wait before each fast retry of a 429/5xx
-// upstream outcome, shared by every CCL data plane. Three attempts total: the
-// initial one plus one retry per entry. Upstream Retry-After hints are
-// deliberately not honored inside this loop — they are routinely 30s+, which
-// is slower than handing the failure back to Claude Code, whose own backoff
-// reads the relayed Retry-After. The final failure relays the original
-// response byte-for-byte, so the client sees exactly what it would have seen
-// without this loop.
+// upstream outcome, shared by every CCL data plane. At most three attempts:
+// the initial one plus one per entry. A longer Retry-After ends the fast loop
+// immediately so Claude Code can honor the upstream wait instead of CCL
+// sending requests ahead of it. No long sleeps or account rotation are added.
 // Var (not const) so tests can shorten it; no test in this package runs in
 // parallel.
 var upstreamFastRetryBackoff = []time.Duration{500 * time.Millisecond, time.Second}
@@ -24,6 +23,10 @@ var upstreamFastRetryBackoff = []time.Duration{500 * time.Millisecond, time.Seco
 // Kiro does not implement it: its own callUpstream loop is its retry layer.
 type upstreamStatusError interface {
 	upstreamStatus() int
+}
+
+type upstreamRetryAfterError interface {
+	upstreamRetryAfter() string
 }
 
 // isFastRetryStatus reports whether an upstream HTTP status gets the fast
@@ -46,6 +49,11 @@ func retryUpstream(ctx context.Context, component string, attempt func() (*http.
 			return response, err
 		}
 		delay := backoff[index]
+		if hint, ok := retryAfterDelay(outcomeRetryAfter(response, err)); ok && hint > delay {
+			LogWarnEvent("upstream_retry", "component", component, "request_id", requestLogID(ctx),
+				"status", outcomeStatus(response, err), "action", "relay_retry_after")
+			return response, err
+		}
 		LogWarnEvent("upstream_retry", "component", component, "request_id", requestLogID(ctx),
 			"status", outcomeStatus(response, err), "retry", index+1, "retry_limit", len(backoff),
 			"wait", delay, "action", "fast_retry")
@@ -56,6 +64,33 @@ func retryUpstream(ctx context.Context, component string, attempt func() (*http.
 		}
 		drainAndClose(response)
 	}
+}
+
+func outcomeRetryAfter(response *http.Response, err error) string {
+	if response != nil {
+		return response.Header.Get("Retry-After")
+	}
+	var hint upstreamRetryAfterError
+	if errors.As(err, &hint) {
+		return hint.upstreamRetryAfter()
+	}
+	return ""
+}
+
+func retryAfterDelay(value string) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+		const maxDelay = time.Duration(1<<63 - 1)
+		if seconds > uint64(maxDelay/time.Second) {
+			return maxDelay, true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	return time.Until(when), true
 }
 
 func retryableUpstreamOutcome(response *http.Response, err error) bool {

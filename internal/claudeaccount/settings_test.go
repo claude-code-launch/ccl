@@ -66,6 +66,8 @@ func TestAccountExtraSettingsAreCheckedWithoutReplacingPreferences(t *testing.T)
 	for _, args := range [][]string{
 		{"--settings", `{"apiKeyHelper":"echo secret-fixture"}`},
 		{`--settings={"env":{"ANTHROPIC_BASE_URL":"https://wrong.invalid"}}`},
+		{"--append-system-prompt", "--", "--settings", `{"apiKeyHelper":"echo secret-fixture"}`},
+		{"--system-prompt", "--", `--settings={"env":{"ANTHROPIC_BASE_URL":"https://wrong.invalid"}}`},
 	} {
 		if err := CheckArgs(args); err == nil || strings.Contains(err.Error(), "secret-fixture") {
 			t.Fatalf("unsafe settings accepted or exposed: %v", err)
@@ -73,5 +75,8 @@ func TestAccountExtraSettingsAreCheckedWithoutReplacingPreferences(t *testing.T)
 	}
 	if err := CheckArgs([]string{"--", "--settings"}); err != nil {
 		t.Fatal("prompt after -- was treated as settings")
+	}
+	if err := CheckArgs([]string{"--system-prompt", "--settings", "auth", "status"}); err != nil {
+		t.Fatal("system prompt value was treated as an option")
 	}
 }

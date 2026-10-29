@@ -100,6 +100,8 @@ jobs:
         run: go test -race -v ./internal/claude -run 'Test(Agent|ModelPicker|ProviderModelPicker|BuildEnvUsesProviderCatalogDisplayNames|CatalogModelOverrides|ModelDisplayName|SettingsRespectTheUsersOwnPreferences|ProcessEnv)'
       - name: Test Claude accounts and one-shot provider selection
         run: go test -race -v ./cmd -run 'Test(LeadingLaunchOptions|ClaudeAccount|ClaudeDefault|FailedClaudeAccount|UnnamedClaudeLogin|LegacyClaude)'
+      - name: Test Qoder and WorkBuddy credential boundaries
+        run: go test -race -v ./internal/oauthproxy -run 'Test(LoginQoder|LoginWorkBuddy|Qoder|WorkBuddy|ProviderRefresh|ProviderCredential|ProviderNetwork|RetryUpstream)'
       - uses: actions/setup-node@v7
         with:
           node-version: '24'

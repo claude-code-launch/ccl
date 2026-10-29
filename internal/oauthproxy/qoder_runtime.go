@@ -27,8 +27,9 @@ type qoderService struct {
 }
 
 type qoderUpstreamError struct {
-	status int
-	body   string
+	status     int
+	body       string
+	retryAfter string
 }
 
 func (e *qoderUpstreamError) Error() string {
@@ -37,7 +38,8 @@ func (e *qoderUpstreamError) Error() string {
 
 // upstreamStatus implements the retry.go fast-retry probe against the raw
 // upstream status, before any client-facing mapping.
-func (e *qoderUpstreamError) upstreamStatus() int { return e.status }
+func (e *qoderUpstreamError) upstreamStatus() int        { return e.status }
+func (e *qoderUpstreamError) upstreamRetryAfter() string { return e.retryAfter }
 
 type qoderStreamUsage struct {
 	input      int64
@@ -294,6 +296,9 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 	upstream, err := service.callUpstream(requestCtx, converted)
 	if err != nil {
 		var upstreamErr *qoderUpstreamError
+		if errors.As(err, &upstreamErr) && upstreamErr.retryAfter != "" {
+			writer.Header().Set("Retry-After", upstreamErr.retryAfter)
+		}
 		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
 			LogUpstreamEvent(upstreamErr.status, "request_failed", "component", "qoder", "request_id", requestID,
 				"model", converted.model.ID, "status", upstreamErr.status, "returned_status", upstreamErr.status,
@@ -415,7 +420,8 @@ func (service *qoderService) callUpstream(ctx context.Context, converted *qoderC
 				continue
 			}
 			if response.StatusCode == http.StatusUnauthorized {
-				closeQoderResponse(response)
+				retryAfter := response.Header.Get("Retry-After")
+				originalBody := drainQoderResponse(ctx, response)
 				LogWarnEvent("credential_refresh", "component", "qoder", "request_id", requestLogID(ctx),
 					"attempt", attempt, "credential", credential.fileName, "status", http.StatusUnauthorized,
 					"action", "force_refresh")
@@ -423,8 +429,9 @@ func (service *qoderService) callUpstream(ctx context.Context, converted *qoderC
 				if usableErr != nil {
 					LogWarnEvent("credential_refresh_failed", "component", "qoder", "request_id", requestLogID(ctx),
 						"attempt", attempt, "credential", candidate.fileName, "error", usableErr)
-					lastErr = usableErr
-					continue
+					// Preserve an authentication rejection. Turning a failed
+					// refresh into 502 invites the client to retry indefinitely.
+					return nil, &qoderUpstreamError{status: http.StatusUnauthorized, body: originalBody, retryAfter: retryAfter}
 				}
 				response, requestErr = service.doUpstreamRequest(ctx, converted, credential)
 				if requestErr != nil {
@@ -459,8 +466,9 @@ func (service *qoderService) callUpstream(ctx context.Context, converted *qoderC
 		}
 		if lastResponse != nil {
 			status := lastResponse.StatusCode
+			retryAfter := lastResponse.Header.Get("Retry-After")
 			body := drainQoderResponse(ctx, lastResponse)
-			return nil, &qoderUpstreamError{status: status, body: body}
+			return nil, &qoderUpstreamError{status: status, body: body, retryAfter: retryAfter}
 		}
 		if lastErr == nil {
 			lastErr = fmt.Errorf("all Qoder credentials failed")
@@ -497,7 +505,7 @@ func (service *qoderService) doUpstreamRequest(ctx context.Context, converted *q
 		"encoded_bytes", len(encoded))
 	DebugHTTPBody(fmt.Sprintf("qoder request request_id=%s path=%s", requestLogID(ctx), request.URL.Path), raw)
 	started := time.Now()
-	response, err := service.client.Do(request)
+	response, err := doCredentialRequest(service.client, request)
 	if err != nil {
 		return nil, fmt.Errorf("send Qoder request: %w", err)
 	}
@@ -551,7 +559,7 @@ func (service *qoderService) discoverModelsWithCredential(ctx context.Context, c
 	request.Header = headers
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "ccl")
-	response, err := service.client.Do(request)
+	response, err := doCredentialRequest(service.client, request)
 	if err != nil {
 		return nil, 0, fmt.Errorf("discover Qoder models: %w", err)
 	}

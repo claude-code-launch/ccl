@@ -85,7 +85,7 @@ func loginQoder(ctx context.Context, authDir string, opts LoginOptions) (LoginRe
 
 	pollCtx, cancel := context.WithTimeout(ctx, qoderOAuthTimeout)
 	defer cancel()
-	client := &http.Client{Timeout: qoderHTTPTimeout}
+	client := &http.Client{Timeout: qoderHTTPTimeout, CheckRedirect: checkCredentialRedirect}
 	var token qoderDeviceToken
 	for {
 		if err := qoderWait(pollCtx, qoderPollInterval); err != nil {
@@ -97,7 +97,7 @@ func loginQoder(ctx context.Context, authDir string, opts LoginOptions) (LoginRe
 		}
 		request.Header.Set("Accept", "application/json")
 		request.Header.Set("User-Agent", "ccl")
-		response, err := client.Do(request)
+		response, err := doCredentialRequest(client, request)
 		if err != nil {
 			return LoginResult{}, fmt.Errorf("poll Qoder authorization: %w", err)
 		}
@@ -187,7 +187,7 @@ func fetchQoderUserInfo(ctx context.Context, client *http.Client, accessToken st
 	request.Header.Set("Authorization", "Bearer "+accessToken)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "ccl")
-	response, err := client.Do(request)
+	response, err := doCredentialRequest(client, request)
 	if err != nil {
 		return qoderUserInfo{}
 	}

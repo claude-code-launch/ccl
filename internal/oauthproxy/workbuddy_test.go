@@ -77,6 +77,7 @@ func TestLoginWorkBuddyPollsAndPersistsBoundCredential(t *testing.T) {
 	workbuddyPollInterval = time.Millisecond
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	authDir := filepath.Join(home, ".ccl", "auth")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -161,6 +162,7 @@ func TestWorkBuddyRuntimeUsesCCLChatAdapterAndRefreshesOnce(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	authDir := filepath.Join(home, ".ccl", "auth")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -253,9 +255,8 @@ func TestWorkBuddyGatewayPreservesProviderErrors(t *testing.T) {
 	}
 }
 
-// The outer chat service owns the shared fast-retry loop, so a 429/5xx is
-// retried twice more per request (3 upstream calls × 2 requests = 6). The
-// gateway inner hop must stay unwrapped or this would be 3×3 per request.
+// A provider Retry-After is relayed immediately by the outer retry loop.
+// The gateway inner hop must not add an independent retry/cooldown layer.
 func TestWorkBuddyRuntimePreservesProviderErrorsWithoutRetryOrCooldown(t *testing.T) {
 	swapWorkBuddyFastRetry(t)
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
@@ -289,6 +290,7 @@ func testWorkBuddyRuntimeProviderError(t *testing.T, upstreamStatus int) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	authDir := filepath.Join(home, ".ccl", "auth")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -314,12 +316,12 @@ func testWorkBuddyRuntimeProviderError(t *testing.T, upstreamStatus int) {
 		}
 		body, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
-		if response.StatusCode != upstreamStatus || !strings.Contains(string(body), "workbuddy busy") {
+		if response.StatusCode != upstreamStatus || !strings.Contains(string(body), "workbuddy busy") || response.Header.Get("Retry-After") != "9" {
 			t.Fatalf("attempt %d status=%d body=%s", attempt, response.StatusCode, body)
 		}
 	}
-	if chatAttempts.Load() != 6 {
-		t.Fatalf("chat attempts = %d, want one upstream call per attempt (3 fast-retries × 2 requests)", chatAttempts.Load())
+	if chatAttempts.Load() != 2 {
+		t.Fatalf("chat attempts = %d, want one upstream call per client request", chatAttempts.Load())
 	}
 }
 
@@ -444,6 +446,7 @@ func TestWorkBuddyChinaDeploymentIsSeparateAccountStore(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	authDir := filepath.Join(home, ".ccl", "auth")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatal(err)

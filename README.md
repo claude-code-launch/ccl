@@ -128,7 +128,7 @@ Claude Code 始终说 Anthropic Messages。Anthropic API-key 网关在普通启�
 | Kiro / Qoder | 各自的直接适配器（Amazon Q / COSY） |
 | AutoClaw | Messages → OpenAI Chat（managed proxy） |
 
-429 / 5xx 会快速重试两次（500ms、1s），仍失败则透传上游状态；401 由各后端刷新 OAuth 凭据。
+429 / 5xx 默认最多快速重试两次（500ms、1s）；上游提供更长的 `Retry-After` 时立即透传等待提示，不提前重试。401 由各后端刷新 OAuth 凭据，Qoder 刷新失败会保留原来的认证错误。Qoder / WorkBuddy 的认证 API、刷新和模型请求拒绝跨来源重定向；账号绑定到指定凭据文件，停用或变更类型后不继续刷新。
 
 ### 配置
 
@@ -285,7 +285,7 @@ Claude Code always speaks Anthropic Messages. Anthropic API-key gateways are cal
 | Kiro / Qoder | Dedicated adapters (Amazon Q / COSY) |
 | AutoClaw | Messages → OpenAI Chat (managed proxy) |
 
-429 / 5xx are retried twice quickly (500 ms, 1 s), then the upstream status is relayed; 401s are handled by each backend's OAuth refresh.
+429 / 5xx normally get at most two quick retries (500 ms, 1 s). A longer `Retry-After` is relayed immediately instead of retrying early. Each backend handles 401 with its OAuth refresh; Qoder preserves the original authentication error if refresh fails. Qoder / WorkBuddy refuse cross-origin redirects for credential API, refresh and model requests. Accounts stay bound to the selected credential file, and disabled or changed credential types are not refreshed.
 
 ### Configuration
 

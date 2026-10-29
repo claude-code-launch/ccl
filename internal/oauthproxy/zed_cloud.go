@@ -60,7 +60,8 @@ func (e *zedHTTPError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d: %s", e.operation, e.status, message)
 }
 
-func (e *zedHTTPError) upstreamStatus() int { return e.status }
+func (e *zedHTTPError) upstreamStatus() int        { return e.status }
+func (e *zedHTTPError) upstreamRetryAfter() string { return e.retryAfter }
 
 // zedErrorMessage extracts the human message from Zed's {code,message} error
 // body, falling back to a bounded copy of the raw text.
