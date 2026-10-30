@@ -529,7 +529,13 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 		lookup[strings.ToLower(model.ID)] = model
 		models = append(models, model.ID)
 		if strings.TrimSpace(model.Name) != "" {
-			names[model.ID] = strings.TrimSpace(model.Name)
+			name := strings.TrimSpace(model.Name)
+			names[model.ID] = name
+			// The model picker sends display names ("快速") as request IDs; map
+			// them back to the technical ID the upstream catalog expects.
+			if !strings.EqualFold(name, model.ID) {
+				add(model.ID, name)
+			}
 		}
 		if multiplier := workbuddyCreditMultiplier(model.Credits); multiplier != nil {
 			details[strings.ToLower(model.ID)] = protocol.ModelInfo{

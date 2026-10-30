@@ -510,3 +510,25 @@ func TestBuildWorkBuddyRoutesSkipsModelsWithdrawnFromCatalog(t *testing.T) {
 		t.Fatalf("catalog model lost its configured alias: %+v", routes)
 	}
 }
+
+func TestBuildWorkBuddyRoutesMapsDisplayNames(t *testing.T) {
+	catalog := []workbuddyModel{
+		{ID: "fast-model", Name: "快速"},
+		{ID: "balanced-model", Name: "均衡"},
+		{ID: "deep-model"},
+	}
+	routes, _, _, _ := buildWorkBuddyRoutes("", catalog)
+	for _, want := range []runtimeModelRoute{
+		{Name: "fast-model", Alias: "快速"},
+		{Name: "balanced-model", Alias: "均衡"},
+	} {
+		if !slices.Contains(routes, want) {
+			t.Fatalf("missing display-name route %v in %+v", want, routes)
+		}
+	}
+	if slices.ContainsFunc(routes, func(r runtimeModelRoute) bool {
+		return strings.EqualFold(r.Alias, "deep-model") && r.Alias != "deep-model"
+	}) {
+		t.Fatalf("empty name produced an alias: %+v", routes)
+	}
+}
