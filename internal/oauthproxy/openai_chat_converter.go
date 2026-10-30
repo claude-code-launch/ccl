@@ -171,10 +171,23 @@ func chatReasoningEffort(thinking *anthropicThinking, output *anthropicOutput) s
 // that upstream gateways reject.
 var claudeCodeGitPRLine = regexp.MustCompile(`(?m)^[ \t]*Main branch \(you will usually use this for PRs\):.*(?:\r?\n)?`)
 
-// claudeCodeIdentityLine is the Claude Code self-identification line prepended to
-// (or split out of) its system prompt. It carries no role/behavior information and
-// is a Claude Code fingerprint rather than a user instruction.
-const claudeCodeIdentityLine = "You are Claude Code, Anthropic's official CLI for Claude."
+// claudeCodeIdentityPrefixes are the Claude Code self-identification lines
+// prepended to (or split out of) its system prompt. Claude Code picks one per
+// entrypoint: the interactive CLI uses the plain form, while the Agent SDK —
+// which the VS Code extension runs — appends ", running within the Claude Agent
+// SDK." or uses the SDK-built-agent wording. None carries role/behavior
+// information; each is a Claude Code fingerprint rather than a user
+// instruction. Matching only the plain form lets a VS Code session be
+// identified upstream as Claude Code.
+var claudeCodeIdentityPrefixes = []string{
+	"You are Claude Code, Anthropic's official CLI for Claude",
+	"You are a Claude agent, built on Anthropic's Claude Agent SDK",
+}
+
+// claudeCodeIdentityLine removes an identity line from inside a larger block,
+// including its optional ", running within ..." suffix.
+var claudeCodeIdentityLine = regexp.MustCompile(
+	`You are (?:Claude Code, Anthropic's official CLI for Claude|a Claude agent, built on Anthropic's Claude Agent SDK)(?:, running within[^\n.]*)?\.`)
 
 // isClaudeCodeChatFingerprint reports whether a system text block consists solely
 // of Claude Code attribution that must not be forwarded upstream. The billing header
@@ -186,14 +199,26 @@ func isClaudeCodeChatFingerprint(text string) bool {
 	if strings.HasPrefix(trimmed, "x-anthropic-billing-header:") {
 		return true
 	}
-	return strings.TrimSpace(text) == claudeCodeIdentityLine
+	rest, matched := trimmed, false
+	for _, prefix := range claudeCodeIdentityPrefixes {
+		if after, ok := strings.CutPrefix(trimmed, prefix); ok {
+			rest, matched = strings.TrimSpace(after), true
+			break
+		}
+	}
+	if !matched {
+		return false
+	}
+	// An entrypoint suffix ("... running within the Claude Agent SDK.") may follow;
+	// anything else means the block carries more than the identity line.
+	return rest == "" || (strings.HasPrefix(rest, ",") && strings.HasSuffix(rest, ".") && !strings.Contains(rest, "\n"))
 }
 
 // sanitizeChatSystemText removes Claude Code attribution and git boilerplate from a
 // system text block so it reads as plain instructions to the upstream model.
 func sanitizeChatSystemText(text string) string {
 	text = claudeCodeGitPRLine.ReplaceAllString(text, "")
-	text = strings.ReplaceAll(text, claudeCodeIdentityLine, "")
+	text = claudeCodeIdentityLine.ReplaceAllString(text, "")
 	return text
 }
 

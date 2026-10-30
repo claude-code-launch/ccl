@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -103,6 +104,54 @@ func TestConvertAnthropicToChatCompletionsStripsClaudeCodeFingerprints(t *testin
 	}
 	if !strings.Contains(text, "You are an interactive agent.") || !strings.Contains(text, "Current branch: main") {
 		t.Fatalf("system content lost real instructions: %q", text)
+	}
+}
+
+// The VS Code extension launches Claude Code through the Agent SDK, which uses
+// a different identity line than the interactive CLI. Leaving it in the body
+// lets an upstream gateway recognize Claude Code (WorkBuddy: code 11128).
+func TestConvertAnthropicToChatCompletionsStripsAgentSDKIdentity(t *testing.T) {
+	cases := []string{
+		"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+		"You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+	}
+	for _, identity := range cases {
+		raw := []byte(`{"model":"gpt-test","max_tokens":32,"stream":false,
+			"system":[{"type":"text","text":` + strconv.Quote(identity) + `},
+				{"type":"text","text":"You are an interactive agent."}],
+			"messages":[{"role":"user","content":"hi"}]}`)
+		converted, err := convertAnthropicToChatCompletions(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(converted.body, &body); err != nil {
+			t.Fatal(err)
+		}
+		system := body["messages"].([]any)[0].(map[string]any)["content"].([]any)
+		if len(system) != 1 {
+			t.Fatalf("system blocks = %d, want 1: %#v", len(system), system)
+		}
+		text := system[0].(map[string]any)["text"].(string)
+		if strings.Contains(text, "You are Claude Code") || strings.Contains(text, "You are a Claude agent") {
+			t.Fatalf("system content still carries %q: %q", identity, text)
+		}
+		if !strings.Contains(text, "You are an interactive agent.") {
+			t.Fatalf("system content lost real instructions: %q", text)
+		}
+	}
+}
+
+// An identity line embedded in a larger instructions block is removed from it
+// without discarding the rest.
+func TestSanitizeChatSystemTextRemovesEmbeddedSDKIdentity(t *testing.T) {
+	text := "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.\n\nYou are an interactive agent."
+	got := sanitizeChatSystemText(text)
+	if strings.Contains(got, "You are Claude Code") {
+		t.Fatalf("sanitized text still carries the identity line: %q", got)
+	}
+	if !strings.Contains(got, "You are an interactive agent.") {
+		t.Fatalf("sanitized text lost real instructions: %q", got)
 	}
 }
 
