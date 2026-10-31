@@ -135,8 +135,11 @@ func TestWorkBuddyRuntimeUsesCCLChatAdapterAndRefreshesOnce(t *testing.T) {
 			}})
 		case "/v2/chat/completions":
 			attempt := chatAttempts.Add(1)
-			if request.Header.Get("X-IDE-Type") != workbuddyChatChannel || request.Header.Get("X-IDE-Name") != workbuddyChatChannel || request.Header.Get("X-IDE-Version") != workbuddyClientVersion || request.Header.Get("X-Private-Data") != "true" || request.Header.Get("X-Agent-Purpose") != "conversation" || request.Header.Get("x-requested-with") != "XMLHttpRequest" || request.Header.Get("X-Conversation-ID") == "" || request.Header.Get("X-Request-ID") == "" {
+			if request.Header.Get("X-IDE-Type") != workbuddyChatChannel || request.Header.Get("X-IDE-Name") != workbuddyChatChannel || request.Header.Get("X-IDE-Version") != workbuddyClientVersion || request.Header.Get("X-Private-Data") != "false" || request.Header.Get("X-Agent-Type") != "main" || request.Header.Get("X-Agent-Purpose") != "conversation" || request.Header.Get("x-requested-with") != "XMLHttpRequest" || request.Header.Get("X-Conversation-ID") == "" || request.Header.Get("X-Request-ID") == "" {
 				t.Fatalf("chat identity headers = %+v", request.Header)
+			}
+			if !strings.Contains(request.Header.Get("User-Agent"), "WorkBuddy AI/"+workbuddyClientVersion) {
+				t.Fatalf("international chat UA = %q", request.Header.Get("User-Agent"))
 			}
 			if attempt == 1 {
 				if request.Header.Get("Authorization") != "Bearer old-token" {
@@ -198,11 +201,13 @@ func TestWorkBuddyGatewayPreservesProviderErrors(t *testing.T) {
 	tests := []struct {
 		name          string
 		status        int
+		body          string
 		refreshStatus int
 		wantRefreshes int32
 	}{
-		{name: "rate limit is not retried", status: http.StatusTooManyRequests, wantRefreshes: 0},
-		{name: "failed auth refresh keeps original forbidden", status: http.StatusForbidden, refreshStatus: http.StatusInternalServerError, wantRefreshes: 1},
+		{name: "rate limit is not retried", status: http.StatusTooManyRequests, body: `{"error":{"message":"provider-owned"}}`, wantRefreshes: 0},
+		{name: "failed auth refresh keeps original forbidden", status: http.StatusForbidden, body: `{"error":{"message":"provider-owned"}}`, refreshStatus: http.StatusInternalServerError, wantRefreshes: 1},
+		{name: "restricted account is not refreshed", status: http.StatusForbidden, body: `{"code":11140,"msg":"request illegal"}`, wantRefreshes: 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -214,7 +219,7 @@ func TestWorkBuddyGatewayPreservesProviderErrors(t *testing.T) {
 					chats.Add(1)
 					writer.Header().Set("Retry-After", "7")
 					writer.WriteHeader(test.status)
-					_, _ = writer.Write([]byte(`{"error":{"message":"provider-owned"}}`))
+					_, _ = writer.Write([]byte(test.body))
 				case "/v2/plugin/auth/token/refresh":
 					refreshes.Add(1)
 					writer.WriteHeader(test.refreshStatus)
@@ -245,13 +250,51 @@ func TestWorkBuddyGatewayPreservesProviderErrors(t *testing.T) {
 			}
 			body, _ := io.ReadAll(response.Body)
 			_ = response.Body.Close()
-			if response.StatusCode != test.status || !strings.Contains(string(body), "provider-owned") || response.Header.Get("Retry-After") != "7" {
+			if response.StatusCode != test.status || !strings.Contains(string(body), test.body) || response.Header.Get("Retry-After") != "7" {
 				t.Fatalf("response status=%d retry=%q body=%s", response.StatusCode, response.Header.Get("Retry-After"), body)
 			}
 			if chats.Load() != 1 || refreshes.Load() != test.wantRefreshes {
 				t.Fatalf("chats=%d refreshes=%d", chats.Load(), refreshes.Load())
 			}
 		})
+	}
+}
+
+func TestWorkBuddyDiscoverModelsDoesNotRefreshRestrictedAccount(t *testing.T) {
+	var configs atomic.Int32
+	var refreshes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v3/config":
+			configs.Add(1)
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = writer.Write([]byte(`{"code":11140,"msg":"request illegal"}`))
+		case "/v2/plugin/auth/token/refresh":
+			refreshes.Add(1)
+			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{
+				"accessToken": "new-token", "refreshToken": "refresh-token", "expiresIn": 3600, "domain": request.Host,
+			}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	restoreWorkBuddyTestGlobals(t, server.URL)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkBuddyTestCredential(t, authDir, "workbuddy-user-1.json", "old-token", "refresh-token", time.Now().Add(time.Hour))
+	_, err := StartOAuth(context.Background(), ProviderWorkBuddy, "wb-chat", "workbuddy-user-1.json")
+	if err == nil || !strings.Contains(err.Error(), "11140") {
+		t.Fatalf("restricted catalog error = %v", err)
+	}
+	if configs.Load() != 1 || refreshes.Load() != 0 {
+		t.Fatalf("configs=%d refreshes=%d", configs.Load(), refreshes.Load())
 	}
 }
 
@@ -392,6 +435,19 @@ func swapWorkBuddyFastRetry(t *testing.T) {
 	})
 }
 
+func TestWorkBuddyUserAgentDiffersByDeployment(t *testing.T) {
+	ai := workbuddyDeployment{provider: ProviderWorkBuddy, baseURL: workbuddyDefaultBaseURL}
+	cn := workbuddyDeployment{provider: ProviderWorkBuddyCN, baseURL: workbuddyChinaDefaultBaseURL}
+	wantAI := "WorkBuddy/" + workbuddyClientVersion + " WorkBuddy AI/" + workbuddyClientVersion + " CLI/" + workbuddyCLIVersion
+	wantCN := "WorkBuddy/" + workbuddyClientVersion + " WorkBuddy/" + workbuddyClientVersion + " CLI/" + workbuddyCLIVersion
+	if got := ai.userAgent(); got != wantAI {
+		t.Fatalf("international UA = %q, want %q", got, wantAI)
+	}
+	if got := cn.userAgent(); got != wantCN {
+		t.Fatalf("cn UA = %q, want %q", got, wantCN)
+	}
+}
+
 // TestWorkBuddyChinaDeploymentIsSeparateAccountStore covers the second
 // WorkBuddy deployment (www.workbuddy.cn) end to end: login talks to the .cn
 // origin and types the credential workbuddycn, a credential minted by the
@@ -431,6 +487,12 @@ func TestWorkBuddyChinaDeploymentIsSeparateAccountStore(t *testing.T) {
 				"id": "cn-chat", "name": "WorkBuddy CN",
 			}}}})
 		case "/v2/chat/completions":
+			if ua := request.Header.Get("User-Agent"); strings.Contains(ua, "WorkBuddy AI") || !strings.Contains(ua, "WorkBuddy/"+workbuddyClientVersion+" WorkBuddy/"+workbuddyClientVersion) {
+				t.Fatalf("cn chat UA = %q", ua)
+			}
+			if request.Header.Get("X-Private-Data") != "false" || request.Header.Get("X-Agent-Type") != "main" {
+				t.Fatalf("cn chat identity headers = %+v", request.Header)
+			}
 			writer.Header().Set("Content-Type", "text/event-stream")
 			_, _ = fmt.Fprint(writer, "data: {\"id\":\"chatcmpl-cn\",\"object\":\"chat.completion.chunk\",\"model\":\"cn-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello from workbuddy.cn\"},\"finish_reason\":null}]}\n\n")
 			_, _ = fmt.Fprint(writer, "data: {\"id\":\"chatcmpl-cn\",\"object\":\"chat.completion.chunk\",\"model\":\"cn-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")

@@ -31,8 +31,8 @@ const (
 	workbuddyPlatform = "workbuddy"
 	// workbuddyClientVersion is the desktop WorkBuddy app version. It drives the
 	// login URL `version` parameter, X-IDE-Version, and the first two
-	// User-Agent tokens. Pinned to a real desktop release.
-	workbuddyClientVersion = "5.3.13"
+	// User-Agent tokens. Pinned to a real desktop 5.8.x release.
+	workbuddyClientVersion = "5.8.3"
 	// workbuddyChatChannel is the chat wire channel advertised in
 	// X-IDE-Type/X-IDE-Name. The chat gateway rejects unrecognized channels with
 	// code 11128 ("unapproved channel"); the real desktop client reports
@@ -40,14 +40,22 @@ const (
 	// Both deployments accept it: workbuddy.cn chat works with this same value,
 	// so the channel is not part of what separates the two deployments.
 	workbuddyChatChannel = "WorkBuddy"
+	// workbuddyInternationalPlatform is the middle User-Agent token on
+	// www.workbuddy.ai. The international gateway treats the CN brand
+	// "WorkBuddy" as an illegal client (403/11140).
+	workbuddyInternationalPlatform = "WorkBuddy AI"
 	// workbuddyCLIVersion is the trailing "CLI/<ver>" token in the User-Agent,
-	// matching the desktop client's dual-token UA shape
-	// ("WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>").
-	workbuddyCLIVersion     = "2.106.4"
+	// matching the desktop client's three-token UA shape
+	// ("WorkBuddy/<ver> <platform>/<ver> CLI/<ver>").
+	workbuddyCLIVersion     = "2.179.0"
 	workbuddyPendingToken   = 11217
 	workbuddyPendingAccount = 12151
-	workbuddyMaxErrorBytes  = int64(1 << 20)
-	workbuddyMaxJSONBytes   = int64(16 << 20)
+	// workbuddyRestrictedAccount is upstream code 11140 ("request illegal"):
+	// an account-level restriction, not an expired token. Refreshing and
+	// retrying it is treated as more unusual activity.
+	workbuddyRestrictedAccount = 11140
+	workbuddyMaxErrorBytes     = int64(1 << 20)
+	workbuddyMaxJSONBytes      = int64(16 << 20)
 )
 
 // workbuddyDeployment is one public WorkBuddy deployment. Both deployments
@@ -375,10 +383,23 @@ func (d workbuddyDeployment) clientHeaders() http.Header {
 	headers := make(http.Header)
 	headers.Set("Accept", "application/json")
 	headers.Set("Content-Type", "application/json")
-	headers.Set("User-Agent", "WorkBuddy/"+workbuddyClientVersion+" WorkBuddy/"+workbuddyClientVersion+" CLI/"+workbuddyCLIVersion)
+	headers.Set("User-Agent", d.userAgent())
 	headers.Set("X-Product", "SaaS")
 	headers.Set("X-Domain", d.domain())
 	return headers
+}
+
+// platformLabel is the middle User-Agent token. CN uses the product
+// channel; international requires a distinct brand.
+func (d workbuddyDeployment) platformLabel() string {
+	if d.provider == ProviderWorkBuddy {
+		return workbuddyInternationalPlatform
+	}
+	return workbuddyChatChannel
+}
+
+func (d workbuddyDeployment) userAgent() string {
+	return "WorkBuddy/" + workbuddyClientVersion + " " + d.platformLabel() + "/" + workbuddyClientVersion + " CLI/" + workbuddyCLIVersion
 }
 
 func workbuddyJSON[T any](ctx context.Context, client *http.Client, method, endpoint string, body []byte, headers http.Header) (workbuddyEnvelope[T], error) {

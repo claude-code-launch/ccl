@@ -342,6 +342,12 @@ func (g *workbuddyGateway) do(ctx context.Context, path, rawQuery string, header
 	if response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden {
 		return response, nil
 	}
+	if workbuddyAccountRestricted(response) {
+		LogWarnEvent("upstream_account_restricted", "component", "workbuddy", "request_id", requestLogID(ctx),
+			"path", path, "status", response.StatusCode, "credential", credential.fileName,
+			"code", workbuddyRestrictedAccount)
+		return response, nil
+	}
 	status := response.StatusCode
 	LogWarnEvent("upstream_auth_retry", "component", "workbuddy", "request_id", requestLogID(ctx),
 		"path", path, "status", status, "credential", credential.fileName)
@@ -379,7 +385,7 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 		}
 	}
 	traceID := strings.ReplaceAll(uuid.NewString(), "-", "")
-	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Conversation-ID", g.conversationID)
 	request.Header.Set("X-Conversation-Request-ID", traceID)
@@ -387,10 +393,11 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 	request.Header.Set("X-Request-ID", traceID)
 	request.Header.Set("X-Agent-Intent", "craft")
 	request.Header.Set("X-Agent-Purpose", "conversation")
+	request.Header.Set("X-Agent-Type", "main")
 	request.Header.Set("X-IDE-Type", workbuddyChatChannel)
 	request.Header.Set("X-IDE-Name", workbuddyChatChannel)
 	request.Header.Set("X-IDE-Version", workbuddyClientVersion)
-	request.Header.Set("X-Private-Data", "true")
+	request.Header.Set("X-Private-Data", "false")
 	request.Header.Set("x-requested-with", "XMLHttpRequest")
 	request.Header.Set("x-codebuddy-request", "1")
 	model := requestModelID(body)
@@ -412,20 +419,41 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 }
 
 func debugWorkBuddyFailureBody(ctx context.Context, path string, response *http.Response) {
-	if response == nil || response.Body == nil || response.StatusCode < 400 || !LogDebugEnabled() {
+	if response == nil || response.StatusCode < 400 || !LogDebugEnabled() {
 		return
 	}
-	prefix, err := io.ReadAll(io.LimitReader(response.Body, workbuddyMaxErrorBytes))
-	if err != nil {
-		LogDebugEvent("upstream_error_body_read_failed", "component", "workbuddy", "request_id", requestLogID(ctx),
-			"path", path, "status", response.StatusCode, "error", err)
+	prefix := peekWorkBuddyBody(response)
+	if len(prefix) == 0 {
 		return
 	}
 	DebugHTTPBody(fmt.Sprintf("workbuddy response request_id=%s path=%s status=%d", requestLogID(ctx), path, response.StatusCode), prefix)
+}
+
+func peekWorkBuddyBody(response *http.Response) []byte {
+	if response == nil || response.Body == nil {
+		return nil
+	}
+	prefix, err := io.ReadAll(io.LimitReader(response.Body, workbuddyMaxErrorBytes))
+	if err != nil && len(prefix) == 0 {
+		return nil
+	}
 	response.Body = struct {
 		io.Reader
 		io.Closer
 	}{Reader: io.MultiReader(bytes.NewReader(prefix), response.Body), Closer: response.Body}
+	return prefix
+}
+
+func peekWorkBuddyErrorCode(response *http.Response) int {
+	var envelope workbuddyEnvelope[json.RawMessage]
+	if err := json.Unmarshal(peekWorkBuddyBody(response), &envelope); err != nil {
+		return 0
+	}
+	return envelope.Code
+}
+
+func workbuddyAccountRestricted(response *http.Response) bool {
+	return peekWorkBuddyErrorCode(response) == workbuddyRestrictedAccount
 }
 
 func workbuddyUpstreamPath(path string) string {
@@ -470,7 +498,8 @@ func (g *workbuddyGateway) discoverModels(ctx context.Context) ([]workbuddyModel
 	envelope, err := workbuddyJSON[workbuddyProductConfig](ctx, g.store.client, http.MethodGet, endpoint, nil,
 		g.store.deployment.authenticatedHeaders(credential.token(), credential.account()))
 	var apiErr *workbuddyAPIError
-	if errors.As(err, &apiErr) && (apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden) {
+	if errors.As(err, &apiErr) && apiErr.Code != workbuddyRestrictedAccount &&
+		(apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden) {
 		refreshed, refreshErr := g.store.authorize(withRejectedOAuthToken(ctx, credential.token().AccessToken), true)
 		if refreshErr == nil {
 			credential = refreshed
