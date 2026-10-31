@@ -555,3 +555,29 @@ func TestBuildWorkBuddyRoutesKeepsFirstDisplayNameOwner(t *testing.T) {
 		t.Fatalf("distinct display name was dropped: %+v", routes)
 	}
 }
+
+func TestBuildWorkBuddyRoutesKeepsOnlyModelsWithCredits(t *testing.T) {
+	catalog := []workbuddyModel{
+		{ID: "fast-model", Name: "快速", Credits: "x0.15"},
+		{ID: "hy3", Name: "Hy3", Credits: "x0.00"},
+		{ID: "codewise-jump"},
+		{ID: "Kling-Video-V3", Name: "Kling-Video-V3"},
+		{ID: "deep-model", Name: "极致", Credits: "x1"},
+	}
+	routes, models, _, details := buildWorkBuddyRoutes("codewise-jump,fast-model", catalog)
+	if got := strings.Join(models, ","); got != "fast-model,hy3,deep-model" {
+		t.Fatalf("models = %q", got)
+	}
+	for _, route := range routes {
+		if strings.EqualFold(route.Name, "codewise-jump") || strings.EqualFold(route.Alias, "codewise-jump") ||
+			strings.EqualFold(route.Name, "Kling-Video-V3") {
+			t.Fatalf("uncredited model kept a route: %+v", routes)
+		}
+	}
+	if details["fast-model"].RateMultiplier == nil || *details["fast-model"].RateMultiplier != 0.15 {
+		t.Fatalf("fast-model details = %+v", details["fast-model"])
+	}
+	if details["hy3"].RateMultiplier == nil || *details["hy3"].RateMultiplier != 0 {
+		t.Fatalf("free model details = %+v", details["hy3"])
+	}
+}

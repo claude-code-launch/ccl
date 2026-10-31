@@ -511,6 +511,7 @@ func (g *workbuddyGateway) discoverModels(ctx context.Context) ([]workbuddyModel
 // runtime routes. details carries the catalog's per-model credit multiplier so
 // the model picker can show what each model costs.
 func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtimeModelRoute, []string, map[string]string, map[string]protocol.ModelInfo) {
+	catalog = workbuddyChatCatalog(catalog)
 	lookup := make(map[string]workbuddyModel, len(catalog))
 	routes := make([]runtimeModelRoute, 0, len(catalog)+len(runtimeModelRoutes(modelSpec)))
 	models := make([]string, 0, len(catalog))
@@ -573,6 +574,24 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 		add(model.ID, route.Alias)
 	}
 	return routes, models, names, details
+}
+
+// workbuddyChatCatalog keeps the rows WorkBuddy's own model picker lists:
+// those with a credits multiplier, including x0.00 free models. Completion,
+// image, and video ids publish no rate and are not offered for chat. If the
+// catalog has no rates at all, the full list is kept so a format change cannot
+// empty the pool.
+func workbuddyChatCatalog(catalog []workbuddyModel) []workbuddyModel {
+	offered := make([]workbuddyModel, 0, len(catalog))
+	for _, model := range catalog {
+		if workbuddyCreditMultiplier(model.Credits) != nil {
+			offered = append(offered, model)
+		}
+	}
+	if len(offered) == 0 {
+		return catalog
+	}
+	return offered
 }
 
 // workbuddyCreditMultiplier reads the catalog's `credits` field, which is a
