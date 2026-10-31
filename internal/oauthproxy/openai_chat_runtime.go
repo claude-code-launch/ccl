@@ -189,10 +189,13 @@ func newChatCompletionsServiceWithAuthorizer(apiKey, endpoint string, routes []r
 	modelRoute := make(map[string]string, len(routes))
 	seenModels := make(map[string]bool, len(routes))
 	for _, route := range routes {
-		modelRoute[strings.ToLower(route.Alias)] = route.Name
-		if !seenModels[strings.ToLower(route.Alias)] {
+		key := strings.ToLower(route.Alias)
+		if _, exists := modelRoute[key]; !exists {
+			modelRoute[key] = route.Name
+		}
+		if !seenModels[key] {
 			models = append(models, route.Alias)
-			seenModels[strings.ToLower(route.Alias)] = true
+			seenModels[key] = true
 		}
 	}
 	return &chatCompletionsService{

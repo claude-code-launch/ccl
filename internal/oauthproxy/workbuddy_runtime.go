@@ -517,25 +517,29 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 	names := make(map[string]string)
 	details := make(map[string]protocol.ModelInfo)
 	seenRoutes := make(map[string]bool)
+	// aliasOwner keeps the first technical ID that claimed a client-facing
+	// alias. Several catalog rows can share one display name ("Hy4 preview");
+	// the later variant must not steal the alias, or the picker sends a name
+	// that maps to an ID the chat API does not serve (11102).
+	aliasOwner := make(map[string]string)
 	add := func(name, alias string) {
 		key := strings.ToLower(name) + "\x00" + strings.ToLower(alias)
 		if seenRoutes[key] {
 			return
 		}
+		ownerKey := strings.ToLower(alias)
+		if owner, ok := aliasOwner[ownerKey]; ok && !strings.EqualFold(owner, name) {
+			return
+		}
 		seenRoutes[key] = true
+		aliasOwner[ownerKey] = name
 		routes = append(routes, runtimeModelRoute{Name: name, Alias: alias})
 	}
 	for _, model := range catalog {
 		lookup[strings.ToLower(model.ID)] = model
 		models = append(models, model.ID)
-		if strings.TrimSpace(model.Name) != "" {
-			name := strings.TrimSpace(model.Name)
+		if name := strings.TrimSpace(model.Name); name != "" {
 			names[model.ID] = name
-			// The model picker sends display names ("快速") as request IDs; map
-			// them back to the technical ID the upstream catalog expects.
-			if !strings.EqualFold(name, model.ID) {
-				add(model.ID, name)
-			}
 		}
 		if multiplier := workbuddyCreditMultiplier(model.Credits); multiplier != nil {
 			details[strings.ToLower(model.ID)] = protocol.ModelInfo{
@@ -544,7 +548,18 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 				RateUnit:       "credits",
 			}
 		}
+		// Technical IDs are registered before display names so a shared label
+		// cannot occupy another model's id.
 		add(model.ID, model.ID)
+	}
+	for _, model := range catalog {
+		name := strings.TrimSpace(model.Name)
+		if name == "" || strings.EqualFold(name, model.ID) {
+			continue
+		}
+		// The model picker sends display names ("快速") as request IDs; map
+		// them back to the technical ID the upstream catalog expects.
+		add(model.ID, name)
 	}
 	// The account catalog is authoritative: a saved model WorkBuddy has since
 	// withdrawn must not stop the runtime, or the stale pool could never be

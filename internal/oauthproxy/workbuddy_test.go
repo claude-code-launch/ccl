@@ -532,3 +532,26 @@ func TestBuildWorkBuddyRoutesMapsDisplayNames(t *testing.T) {
 		t.Fatalf("empty name produced an alias: %+v", routes)
 	}
 }
+
+func TestBuildWorkBuddyRoutesKeepsFirstDisplayNameOwner(t *testing.T) {
+	catalog := []workbuddyModel{
+		{ID: "hy4-preview", Name: "Hy4 preview"},
+		{ID: "hy4-preview-x", Name: "Hy4 preview"},
+		{ID: "hy4-preview-exp", Name: "Hy4 preview Exp"},
+	}
+	routes, _, _, _ := buildWorkBuddyRoutes("", catalog)
+	if !slices.Contains(routes, runtimeModelRoute{Name: "hy4-preview", Alias: "Hy4 preview"}) {
+		t.Fatalf("canonical model lost its display-name alias: %+v", routes)
+	}
+	if slices.ContainsFunc(routes, func(r runtimeModelRoute) bool {
+		return strings.EqualFold(r.Alias, "Hy4 preview") && !strings.EqualFold(r.Name, "hy4-preview")
+	}) {
+		t.Fatalf("later variant stole the shared display name: %+v", routes)
+	}
+	if !slices.Contains(routes, runtimeModelRoute{Name: "hy4-preview-x", Alias: "hy4-preview-x"}) {
+		t.Fatalf("variant lost its technical id: %+v", routes)
+	}
+	if !slices.Contains(routes, runtimeModelRoute{Name: "hy4-preview-exp", Alias: "Hy4 preview Exp"}) {
+		t.Fatalf("distinct display name was dropped: %+v", routes)
+	}
+}
