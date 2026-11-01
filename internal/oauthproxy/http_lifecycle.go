@@ -38,6 +38,8 @@ func authorizerHTTPClient(authorizer any) *http.Client {
 		return a.client
 	case *autoClawOAuthAuthorizer:
 		return a.client
+	case *cursorOAuthAuthorizer:
+		return a.client
 	default:
 		return nil
 	}

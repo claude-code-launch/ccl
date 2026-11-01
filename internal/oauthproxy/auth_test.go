@@ -55,7 +55,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed, ProviderCursor} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}

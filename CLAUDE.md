@@ -74,6 +74,7 @@ Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external pr
 | Grok OAuth | `xai_*.go` + `codex_responses_*.go` | cli-chat-proxy Responses; Grok Build identity headers; live `/models` catalog with 4.6/4.5 fallback |
 | Gemini OAuth | `gemini_*.go` | Antigravity conversion |
 | Zed | `zed_*.go` | zed.dev native-app login (RSA-encrypted loopback callback) → LLM token; per-model dispatch by catalog `provider` (anthropic→passthrough, open_ai→Responses, x_ai→Chat, google→`zedGeminiService`) behind an inner `zedGateway` that owns the `{provider,model,provider_request}` envelope; persisted `type` is only `openai_responses` for local dispatch |
+| Cursor | `cursor_*.go` | `ccl oauth cursor` PKCE sign-in → poll → tokens; Anthropic loopback over Cursor's Connect bidirectional agent stream (`Run` + `GetUsableModels`), parking the stream on a tool call so the next request continues it; built-in Cursor tools are rejected because Claude Code owns the tool loop; MCP provider identifier is `ccl` |
 | Kiro | `kiro_*.go` | Portal PKCE (default) or `--kiro-auth builder`; Amazon Q + EventStream |
 | Qoder | `qoder_*.go` | Browser OAuth, COSY, WAF; `session_type=qodercli` is a wire field only |
 | models.dev mixed | `mixed_runtime.go` + `anthropic_passthrough.go` | `ModelProtocols` map per model |
@@ -108,6 +109,6 @@ User-facing Chinese lives in `cmd/` via `locale.T`. `internal/` must not contain
 
 ccl is a launcher + protocol proxy, not a fork of Claude Code. Extra CLI args after a non-ccl command are passed through.
 
-OAuth public names: `gpt` `gemini` `grok` `qoder` `kimi` `kiro` `workbuddy` `workbuddycn` `autoclaw` `zed`. `workbuddy` is www.workbuddy.ai and `workbuddycn` is www.workbuddy.cn: same plugin API and chat protocol, different origin and credential `type` (see `workbuddyDeployment`). Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch).
+OAuth public names: `gpt` `gemini` `grok` `qoder` `kimi` `kiro` `workbuddy` `workbuddycn` `autoclaw` `zed` `cursor`. `workbuddy` is www.workbuddy.ai and `workbuddycn` is www.workbuddy.cn: same plugin API and chat protocol, different origin and credential `type` (see `workbuddyDeployment`). Slot defaults: `internal/provider/oauth_defaults.go` (empty slots only; missing catalog entries are cleared at launch).
 
 `bypass` injects `--dangerously-skip-permissions`, except when `--permission-mode` is given or the first arg is a Claude Code subcommand. Provider management lives under `ccl provider` and sync under `ccl cloud`; there are no root shortcuts for them. `ccl doctor` is read-only and bills nothing without `--probe`. `ccl update` verifies the `.gz` asset against `SHA256SUMS`; `--method self|npm|go` is required off a TTY.

@@ -34,7 +34,7 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "oauth <claude|gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed> [alias]",
+		Use:   "oauth <claude|gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed|cursor> [alias]",
 		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
 
@@ -43,7 +43,7 @@ Login:
   ccl oauth claude work         # Claude subscription; ccl oauth claude --help for account management
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed
+  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed|cursor
 
 Notes:
   - Claude Code manages its own credentials in separate local profiles;
@@ -63,6 +63,8 @@ Notes:
     in your Zed plan (Anthropic, OpenAI, Google, xAI); the Zed editor is not
     needed. Models Zed only offers with upstream data retention stay hidden
     unless CCL_ZED_ALLOW_DATA_RETENTION=1
+  - Cursor signs in through cursor.com's deep-control PKCE flow; ccl speaks
+    Cursor's agent stream directly, so the Cursor CLI is not needed
   - Flags: --no-browser, --callback-port, --kiro-auth, --from-desktop
   - ccl oauth prune deletes credentials no provider uses
 `,
@@ -237,7 +239,8 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderWorkBuddy,
 		oauthproxy.ProviderWorkBuddyCN,
 		oauthproxy.ProviderAutoClaw,
-		oauthproxy.ProviderZed:
+		oauthproxy.ProviderZed,
+		oauthproxy.ProviderCursor:
 		return true
 	default:
 		return false

@@ -217,6 +217,9 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	if backend == ProviderZed {
 		return startZedOAuth(parent, modelSpec, credentialFile)
 	}
+	if backend == ProviderCursor {
+		return startCursorOAuth(parent, modelSpec, credentialFile)
+	}
 	return nil, fmt.Errorf("unsupported subscription provider %q", providerName)
 }
 

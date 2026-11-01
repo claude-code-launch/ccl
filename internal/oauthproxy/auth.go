@@ -30,6 +30,10 @@ const (
 	// native-app browser sign-in, the LLM-token exchange, and a per-model router
 	// over Zed's Anthropic / OpenAI / Google / xAI models.
 	ProviderZed = "zed"
+	// ProviderCursor is the Cursor subscription backend. CCL owns the PKCE
+	// browser sign-in, its poll loop, token refresh, and the Connect-RPC
+	// AgentService adapter that speaks Anthropic Messages to Claude Code.
+	ProviderCursor = "cursor"
 	// backendXAI is the internal backend key for xAI/Grok credentials.
 	backendXAI = "xai"
 )
@@ -97,6 +101,8 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 		return loginAutoClaw(ctx, authDir, opts)
 	case ProviderZed:
 		return loginZed(ctx, authDir, opts)
+	case ProviderCursor:
+		return loginCursor(ctx, authDir, opts)
 	default:
 		return LoginResult{}, fmt.Errorf("unsupported OAuth provider %q", target)
 	}
@@ -127,10 +133,10 @@ func ImportCredential(ctx context.Context, providerName string) (LoginResult, er
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed:
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed, ProviderCursor:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, qoder, kimi, kiro, workbuddy, workbuddycn, autoclaw, or zed)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, qoder, kimi, kiro, workbuddy, workbuddycn, autoclaw, zed, or cursor)", providerName)
 	}
 }
 
@@ -156,6 +162,8 @@ func BackendProvider(providerName string) (string, error) {
 		return ProviderAutoClaw, nil
 	case ProviderZed:
 		return ProviderZed, nil
+	case ProviderCursor:
+		return ProviderCursor, nil
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}
