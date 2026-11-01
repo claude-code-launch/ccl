@@ -25,7 +25,7 @@ import (
 // ── subscription login ──────────────────────────────────────────────────────
 
 // OAuthProviders are the names `ccl oauth` accepts.
-var OAuthProviders = []string{"gpt", "gemini", "grok", "qoder", "kimi", "kiro", "workbuddy", "workbuddycn", "autoclaw", "zed"}
+var OAuthProviders = []string{"gpt", "gemini", "grok", "qoder", "kimi", "kiro", "workbuddy", "workbuddycn", "autoclaw", "zed", "cursor"}
 
 var (
 	aliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$`)

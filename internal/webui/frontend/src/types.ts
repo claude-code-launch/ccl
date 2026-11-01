@@ -283,7 +283,7 @@ export interface Schedule {
   text: string;
 }
 
-export const OAUTH_PROVIDERS = ["gpt", "gemini", "grok", "qoder", "kimi", "kiro", "workbuddy", "workbuddycn", "autoclaw", "zed"] as const;
+export const OAUTH_PROVIDERS = ["gpt", "gemini", "grok", "qoder", "kimi", "kiro", "workbuddy", "workbuddycn", "autoclaw", "zed", "cursor"] as const;
 
 export interface SessionWorktree {
   name: string;

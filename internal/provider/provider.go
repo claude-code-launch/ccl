@@ -265,7 +265,7 @@ func OAuthRuntimeType(oauthProvider string) (string, bool) {
 		return "openai_responses", true
 	case "gemini", "kimi", "workbuddy", "workbuddycn":
 		return "openai", true
-	case "kiro", "qoder":
+	case "kiro", "qoder", "cursor":
 		return "anthropic", true
 	case "autoclaw":
 		return "autoclaw", true
