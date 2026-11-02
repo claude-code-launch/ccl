@@ -30,11 +30,11 @@ func recoverStaleProxy() {
 	defer cancel()
 	restored, err := m.RecoverStale(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, locale.T("ccl: 无法恢复已退出代理的 Claude 配置：%v；请运行 ccl proxy stop\n", "ccl: could not restore Claude settings for an exited proxy: %v; run ccl proxy stop\n"), err)
+		fmt.Fprintf(os.Stderr, locale.T("ccl: 无法恢复已退出代理的客户端配置：%v；请运行 ccl proxy stop\n", "ccl: could not restore client settings for an exited proxy: %v; run ccl proxy stop\n"), err)
 		return
 	}
 	if restored {
-		fmt.Fprintln(os.Stderr, locale.T("ccl: 代理已意外退出，原有 Claude 配置已恢复", "ccl: the proxy had exited; previous Claude settings restored"))
+		fmt.Fprintln(os.Stderr, locale.T("ccl: 代理已意外退出，原有 Claude / Codex 配置已恢复", "ccl: the proxy had exited; previous Claude / Codex settings restored"))
 	}
 }
 
@@ -128,6 +128,9 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), locale.T("代理已开启 · %s · %s\n直接运行 claude 即可。停止：ccl proxy stop\n", "Proxy running · %s · %s\nRun claude directly. Stop with: ccl proxy stop\n"), s.Provider, s.BaseURL)
+	if s.Codex != nil {
+		fmt.Fprintln(cmd.OutOrStdout(), locale.T("Codex 模型目录已接入；重启 Codex 后可选择 CCL 模型。", "Codex model catalog connected; restart Codex to select CCL models."))
+	}
 	return nil
 }
 
@@ -172,12 +175,16 @@ func newProxyCommand() *cobra.Command {
   ccl proxy start default      Claude Code's own subscription needs no proxy:
                                stops a running one (also on the default selector)
   ccl proxy status             Show the running provider and local endpoint
-  ccl proxy stop               Stop and restore previous Claude settings
+  ccl proxy stop               Stop and restore previous Claude/Codex settings
 
 The proxy uses the current user's Claude settings (or CLAUDE_CONFIG_DIR).
 Provider changes require another start; starting a different provider switches
 the proxy. Existing Claude sessions should be restarted after switching.
-User edits to unrelated settings are retained when the proxy stops.`}
+If a Codex profile already exists, its picker also gains the selected provider's
+models. Native OpenAI models keep their own route and credentials. Restart Codex
+after starting, switching or stopping the proxy. macOS shows a menu bar icon.
+Stopping restores only unchanged owned fields in both Claude and Codex settings;
+user edits made while the proxy is running are retained.`}
 	command.PersistentFlags().StringP("provider", "p", "", "Provider name (defaults to the active provider)")
 	start := &cobra.Command{Use: "start [provider]", Args: cobra.MaximumNArgs(1), Short: "Start or switch the background proxy", RunE: runProxyStart}
 	stop := &cobra.Command{Use: "stop", Args: cobra.NoArgs, Short: "Stop the proxy and restore Claude settings", RunE: func(cmd *cobra.Command, _ []string) error {
@@ -190,7 +197,7 @@ User edits to unrelated settings are retained when the proxy stops.`}
 		if err := m.Stop(ctx); err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), locale.T("代理已停止，原有 Claude 配置已恢复", "Proxy stopped; previous Claude settings restored"))
+		fmt.Fprintln(cmd.OutOrStdout(), locale.T("代理已停止，原有 Claude / Codex 配置已恢复", "Proxy stopped; previous Claude / Codex settings restored"))
 		return nil
 	}}
 	status := &cobra.Command{Use: "status", Args: cobra.NoArgs, Short: "Show proxy status without revealing credentials", RunE: func(cmd *cobra.Command, _ []string) error {
@@ -211,6 +218,9 @@ User edits to unrelated settings are retained when the proxy stops.`}
 			return nil
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Provider: %s\nEndpoint: %s\nPID: %d\nClaude settings: %s\n", s.Provider, s.BaseURL, s.PID, s.SettingsPath)
+		if s.Codex != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Codex endpoint: %s\nCodex config: %s\n", s.Codex.BaseURL, s.Codex.Path)
+		}
 		return nil
 	}}
 	serve := &cobra.Command{Use: "serve", Hidden: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -239,7 +249,22 @@ User edits to unrelated settings are retained when the proxy stops.`}
 	for _, c := range []*cobra.Command{command, start, stop, status, serve} {
 		c.SilenceUsage, c.SilenceErrors = true, true
 	}
-	command.AddCommand(start, stop, status, serve)
+	menuBar := &cobra.Command{Use: "menubar", Hidden: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		id, _ := cmd.Flags().GetString("instance")
+		if id == "" {
+			return fmt.Errorf("internal menu bar requires a proxy instance")
+		}
+		m, err := proxymanager.Default()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := signal.NotifyContext(cmd.Context(), proxySignals...)
+		defer cancel()
+		return m.RunMenuBar(ctx, id)
+	}}
+	menuBar.Flags().String("instance", "", "Internal proxy identity")
+	command.AddCommand(start, stop, status, serve, menuBar)
+	addProxyMenuCommands(command)
 	return command
 }
 

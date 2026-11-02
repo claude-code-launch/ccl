@@ -1,0 +1,98 @@
+ObjC.import('AppKit');
+ObjC.import('Foundation');
+
+function run(argv) {
+  const executable = argv[0];
+  const provider = argv[1];
+  const app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+
+  function launch(args) {
+    const task = $.NSTask.alloc.init;
+    task.launchPath = $(executable);
+    task.arguments = $(args);
+    task.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
+    task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+    task.launch;
+  }
+
+  function readConfigurations() {
+    const task = $.NSTask.alloc.init;
+    const pipe = $.NSPipe.pipe;
+    task.launchPath = $(executable);
+    task.arguments = $(['proxy', 'menu-configs']);
+    task.standardOutput = pipe;
+    task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+    task.launch;
+    const data = pipe.fileHandleForReading.readDataToEndOfFile;
+    task.waitUntilExit;
+    if (task.terminationStatus !== 0) return {current: provider, providers: []};
+    return JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)));
+  }
+
+  ObjC.registerSubclass({
+    name: 'CCLProxyMenuAction',
+    superclass: 'NSObject',
+    methods: {
+      'stopProxy:': {
+        types: ['void', ['id']],
+        implementation: function () {
+          launch(['proxy', 'stop']);
+        }
+      },
+      'switchProvider:': {
+        types: ['void', ['id']],
+        implementation: function (sender) {
+          launch(['proxy', 'menu-switch', '--provider', ObjC.unwrap(sender.representedObject)]);
+        }
+      },
+      'menuNeedsUpdate:': {
+        types: ['void', ['id']],
+        implementation: function () {
+          refreshMenu();
+        }
+      }
+    }
+  });
+
+  const action = $.CCLProxyMenuAction.alloc.init;
+  const item = $.NSStatusBar.systemStatusBar.statusItemWithLength($.NSVariableStatusItemLength);
+  const image = $.NSImage.imageWithSystemSymbolNameAccessibilityDescription('arrow.triangle.branch', 'CCL Proxy');
+  if (image) {
+    image.template = true;
+    item.button.image = image;
+  } else {
+    item.button.title = $('CCL');
+  }
+  item.button.toolTip = $('CCL Proxy: ' + provider);
+  const menu = $.NSMenu.alloc.initWithTitle('CCL Proxy');
+  menu.autoenablesItems = false;
+  menu.delegate = action;
+
+  function refreshMenu() {
+    let config;
+    try { config = readConfigurations(); }
+    catch (_) { config = {current: provider, providers: []}; }
+    menu.removeAllItems;
+    const heading = $.NSMenuItem.alloc.init;
+    heading.title = $('CCL Proxy: ' + config.current);
+    heading.enabled = false;
+    menu.addItem(heading);
+    menu.addItem($.NSMenuItem.separatorItem);
+    for (const name of config.providers) {
+      const choice = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent(name, 'switchProvider:', '');
+      choice.representedObject = $(name);
+      choice.target = action;
+      choice.state = name === config.current ? $.NSControlStateValueOn : $.NSControlStateValueOff;
+      menu.addItem(choice);
+    }
+    menu.addItem($.NSMenuItem.separatorItem);
+    const stop = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent('Stop Proxy', 'stopProxy:', '');
+    stop.target = action;
+    menu.addItem(stop);
+  }
+
+  refreshMenu();
+  item.menu = menu;
+  app.run;
+}

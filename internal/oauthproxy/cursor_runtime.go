@@ -162,7 +162,7 @@ func (a *cursorOAuthAuthorizer) refresh(ctx context.Context, credential *cursorO
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
-	response, err := a.client.Do(request)
+	response, err := doCredentialRequest(a.client, request)
 	if err != nil {
 		return nil, fmt.Errorf("refresh Cursor token: %w", err)
 	}
@@ -726,7 +726,7 @@ func (s *cursorService) openStream(ctx context.Context, frame []byte) (*cursorSe
 		}
 	}()
 	started := time.Now()
-	response, err := s.client.Do(request)
+	response, err := doCredentialRequest(s.client, request)
 	if err != nil {
 		cancel()
 		_ = pipeWriter.CloseWithError(err)
@@ -1015,7 +1015,7 @@ func discoverCursorModels(ctx context.Context, authorizer *cursorOAuthAuthorizer
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-Cursor-Client-Version", cursorCLIVersion)
-	response, err := client.Do(request)
+	response, err := doCredentialRequest(client, request)
 	if err != nil {
 		return nil, err
 	}
@@ -1086,7 +1086,7 @@ func startCursorOAuth(parent context.Context, modelSpec, credentialFile string) 
 	path := filepath.Join(authDir, filepath.Base(credentialFile))
 	authorizer := &cursorOAuthAuthorizer{
 		path:   path,
-		client: &http.Client{Transport: newUpstreamTransport(60 * time.Second)},
+		client: &http.Client{Transport: newUpstreamTransport(60 * time.Second), CheckRedirect: checkCredentialRedirect},
 	}
 	credential, err := authorizer.load()
 	if err != nil {
@@ -1130,7 +1130,7 @@ func startCursorOAuth(parent context.Context, modelSpec, credentialFile string) 
 		models:     models,
 		modelRoute: routes,
 		authorizer: authorizer,
-		client:     &http.Client{Transport: newUpstreamTransport(60 * time.Second)},
+		client:     &http.Client{Transport: newUpstreamTransport(60 * time.Second), CheckRedirect: checkCredentialRedirect},
 		usage:      usage,
 		ctx:        runCtx,
 	}

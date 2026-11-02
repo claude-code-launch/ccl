@@ -71,7 +71,7 @@ ACP 和网页模式也可选择这些账号。ACP 运行时跨 Claude 账号或�
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | 映射模型槽位；`ccl map auto` 自动填充 |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | 订阅登录 / 清理未使用凭据 |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
-| `ccl proxy -p <name>` / `status` / `stop` | 后台代理，让直接运行的 `claude` 使用指定 provider |
+| `ccl proxy start` / `-p <name>` / `status` / `stop` | 共用后台代理：连接 Claude，并向 Codex 加入当前配置的模型 |
 | `ccl acp [install]` | Agent Client Protocol（Xcode 27 等） |
 | `ccl serve [--port <port> \| --socket [path]]` | 浏览器里使用 ccl 会话（HTTP + SSE；默认只监听回环地址、随机端口；`--socket` 改用 Unix socket） |
 | `ccl cloud login\|push\|pull\|status\|remote` | 加密云同步（iCloud / Google Drive） |
@@ -86,13 +86,19 @@ ACP 和网页模式也可选择这些账号。ACP 运行时跨 Claude 账号或�
 ### 后台代理
 
 ```bash
-ccl proxy -p deepseek   # 改写 ~/.claude/settings.json（支持 CLAUDE_CONFIG_DIR）
+ccl proxy start        # 使用 ccl use 当前选择的配置
+ccl proxy -p deepseek  # 或显式指定本次代理的 provider
 claude                  # 任意终端直接运行，共用该代理
 ccl proxy stop          # 逐字段恢复原配置
 ```
 
 - 修改 provider（`set` / `map` / `provider env`）后需重新 `ccl proxy start -p <name>`；切换或停止后重启已打开的 Claude 会话。
 - `ccl use` 只影响 `ccl` 启动，不会切换运行中的代理。
+- 已使用过 Codex 时，启动代理也会更新 `~/.codex/config.toml`（支持 `CODEX_HOME`）。重启 Codex 后，同一模型选择器中同时显示原生模型和带 `CCL: provider` 标记的第三方模型，可直接切换。
+- Codex 保留原生 OpenAI Provider 与登录。原生请求继续走原有 ChatGPT / OpenAI 服务，只有独立白名单中的 `ccl/<provider>/<model>` 发往 CCL；转发到 CCL 时移除 Codex 凭据，WebSocket 用 426 回退 HTTP Responses。原生 Claude 订阅账号不加入该目录。
+- 原生模型信息来自现有目录或 `models_cache.json`，必要时读取已安装 Codex 的 `debug models --bundled`，不写死原生模型名称。缺少缓存时需安装较新的 Codex CLI，或让 CCL 能找到桌面 App 自带的 Codex。原有自定义 Provider 或默认 profile 的目录覆盖会明确报错，避免改变其路由。
+- macOS 启动后显示状态栏图标，菜单勾选当前配置，可直接切换并同步 CCL 当前选择，也可停止代理；新配置启动失败会恢复原代理并提示错误。代理退出或异常停止后图标消失。无桌面环境可用 `CCL_PROXY_NO_MENUBAR=1` 关闭图标。
+- 停止或异常恢复时，Claude 与 Codex 只恢复仍等于代理写入值的字段，保留后续用户修改；启动、切换或停止后重启 Codex 以重新载入目录。
 - 异常退出后，下次运行任意 `ccl` 命令会按 `~/.ccl/proxy/state.json` 自动恢复；启动诊断见 `~/.ccl/proxy/proxy.log`。
 
 ### Xcode 27 / ACP
@@ -228,7 +234,7 @@ ACP and the web UI can select these accounts. Restart the ACP agent when switchi
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | Map model slots; `ccl map auto` fills them |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | Subscription login / remove unused credentials |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |
-| `ccl proxy -p <name>` / `status` / `stop` | Background proxy so a plain `claude` uses the chosen provider |
+| `ccl proxy start` / `-p <name>` / `status` / `stop` | Shared background proxy for Claude and the selected provider's models in Codex |
 | `ccl acp [install]` | Agent Client Protocol (Xcode 27, …) |
 | `ccl serve [--port <port> \| --socket [path]]` | ccl conversations in a browser (HTTP + SSE; loopback and a free port by default; `--socket` for a Unix socket) |
 | `ccl cloud login\|push\|pull\|status\|remote` | Encrypted sync (iCloud / Google Drive) |
@@ -243,13 +249,19 @@ Every subcommand supports `--help`.
 ### Background proxy
 
 ```bash
-ccl proxy -p deepseek   # rewrites ~/.claude/settings.json (honors CLAUDE_CONFIG_DIR)
+ccl proxy start        # use the provider selected with ccl use
+ccl proxy -p deepseek  # or explicitly select this proxy's provider
 claude                  # run it from any terminal; they share the proxy
 ccl proxy stop          # restores your original settings field by field
 ```
 
 - After changing a provider (`set` / `map` / `provider env`), run `ccl proxy start -p <name>` again; restart open Claude sessions after switching or stopping.
 - `ccl use` only affects `ccl` launches, not a running proxy.
+- If Codex has already been used, startup also updates `~/.codex/config.toml` (honors `CODEX_HOME`). Restart Codex to see native models and third-party models labeled `CCL: provider` in one picker, with direct switching.
+- Codex retains its native OpenAI provider and login. Native requests keep their original ChatGPT / OpenAI route; only the separate `ccl/<provider>/<model>` allow-list goes to CCL, with native credentials removed. WebSockets receive 426 to fall back to HTTP Responses. Native Claude subscription accounts are excluded.
+- Native metadata comes from an existing catalog or `models_cache.json`, with the installed Codex's `debug models --bundled` as fallback; native names are never hardcoded. Without a cache, install a recent Codex CLI or make the desktop app's bundled Codex discoverable. A conflicting custom provider or default-profile catalog override is reported instead of changing its routing.
+- macOS shows a menu bar icon with the checked current provider, direct configuration switching and Stop Proxy. A successful switch also updates the CCL selection; a failed start restores the previous proxy and reports the error. The icon exits with the proxy, including crashes. Set `CCL_PROXY_NO_MENUBAR=1` in a headless environment to disable it.
+- Stop and crash recovery restore only unchanged fields owned by the proxy in both Claude and Codex configuration. Later user edits are retained. Restart Codex after starting, switching or stopping to reload its catalog.
 - After a crash, the next `ccl` command restores settings from `~/.ccl/proxy/state.json`; startup diagnostics are in `~/.ccl/proxy/proxy.log`.
 
 ### Xcode 27 / ACP

@@ -23,6 +23,8 @@ func isolatedManager(t *testing.T) (*Manager, string) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("CCL_PROXY_NO_MENUBAR", "1")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	locale.SetLanguage("en")
 	path := filepath.Join(home, ".claude", "settings.json")

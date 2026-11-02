@@ -289,6 +289,8 @@ func (s *codexResponsesService) handler() http.Handler {
 	mux := anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
 	mux.HandleFunc("/v1/responses", s.handleRawResponses)
 	mux.HandleFunc("/responses", s.handleRawResponses)
+	mux.HandleFunc("/v1/responses/compact", s.handleRawResponses)
+	mux.HandleFunc("/responses/compact", s.handleRawResponses)
 	return mux
 }
 
@@ -660,7 +662,7 @@ func (s *codexResponsesService) call(ctx context.Context, body []byte, sessionID
 	}
 	return retryUpstream(ctx, "codex_responses", func() (*http.Response, error) {
 		var err error
-		if !s.xai {
+		if !s.xai && ctx.Value(codexCompactRequest{}) != true {
 			body, err = s.addClientMetadata(body, sessionID)
 			if err != nil {
 				return nil, err
@@ -706,6 +708,9 @@ func (s *codexResponsesService) call(ctx context.Context, body []byte, sessionID
 
 func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessionID string, auth codexResponsesAuthorization, dumpPayload bool) (*http.Response, error) {
 	target := protocol.NormalizeOpenAIResponsesURL(s.endpoint)
+	if ctx.Value(codexCompactRequest{}) == true {
+		target = strings.TrimRight(target, "/") + "/compact"
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -717,7 +722,11 @@ func (s *codexResponsesService) callOnce(ctx context.Context, body []byte, sessi
 	}
 	request.Header.Set("Authorization", "Bearer "+auth.token)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "text/event-stream")
+	if ctx.Value(codexCompactRequest{}) == true {
+		request.Header.Set("Accept", "application/json")
+	} else {
+		request.Header.Set("Accept", "text/event-stream")
+	}
 	if auth.accountID != "" {
 		request.Header.Set("Chatgpt-Account-Id", auth.accountID)
 	}
@@ -816,38 +825,57 @@ func firstHeader(headers http.Header, names ...string) string {
 	return ""
 }
 
-// handleRawResponses keeps the local Responses surface useful for diagnostics
-// while applying the exact same CCL-owned Codex identity and OAuth behavior.
+type codexCompactRequest struct{}
+
+// handleRawResponses is also the native Responses hop used by the standalone
+// Codex router. It shares authorization/refresh/retry with Messages requests.
 func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, request *http.Request) {
 	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		writeResponsesError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
 	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		writeResponsesError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
 	body, err := readAnthropicInboundBody(writer, request, codexResponsesMaxBodyBytes)
 	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeResponsesError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	var payload map[string]any
 	if decodeProtocolJSON(body, &payload) != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Responses request JSON")
+		writeResponsesError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Responses request JSON")
 		return
 	}
-	payload["stream"] = true
-	payload["store"] = false
-	if payload["include"] == nil {
-		payload["include"] = []string{"reasoning.encrypted_content"}
+	model, _ := payload["model"].(string)
+	resolved, ok := s.modelRoute[strings.ToLower(strings.TrimSpace(model))]
+	if !ok {
+		writeResponsesError(writer, 400, "invalid_request_error", "model is not in the provider catalog")
+		return
 	}
-	sessionID := uuidString()
-	if payload["prompt_cache_key"] == nil {
+	payload["model"] = resolved
+	compact := strings.HasSuffix(request.URL.Path, "/compact")
+	wantsStream, _ := payload["stream"].(bool)
+	if !compact {
+		payload["stream"] = true
+		payload["store"] = false
+		if payload["include"] == nil {
+			payload["include"] = []string{"reasoning.encrypted_content"}
+		}
+	}
+	sessionID := strings.TrimSpace(request.Header.Get("Session_id"))
+	if sessionID == "" || len(sessionID) > 256 {
+		sessionID = uuidString()
+	}
+	if !compact && payload["prompt_cache_key"] == nil {
 		payload["prompt_cache_key"] = sessionID
 	}
 	body, _ = json.Marshal(payload)
 	ctx, _ := withRequestLogID(request.Context())
+	if compact {
+		ctx = context.WithValue(ctx, codexCompactRequest{}, true)
+	}
 	response, err := s.call(ctx, body, sessionID, true)
 	if err != nil {
 		var upstreamErr *codexResponsesUpstreamError
@@ -855,23 +883,66 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 			if upstreamErr.retryAfter != "" {
 				writer.Header().Set("Retry-After", upstreamErr.retryAfter)
 			}
-			writeAnthropicError(writer, upstreamErr.status, anthropicErrorType(upstreamErr.status), upstreamErr.Error())
+			writeResponsesError(writer, upstreamErr.status, anthropicErrorType(upstreamErr.status), upstreamErr.Error())
 			return
 		}
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeResponsesError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer response.Body.Close()
-	for name, values := range response.Header {
-		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Content-Encoding") {
-			continue
-		}
-		for _, value := range values {
-			writer.Header().Add(name, value)
+	for _, name := range []string{"Content-Type", "Retry-After", "X-Request-Id"} {
+		if value := response.Header.Get(name); value != "" {
+			writer.Header().Set(name, value)
 		}
 	}
+	if !compact && !wantsStream && strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
+		var completed json.RawMessage
+		err := readChatCompletionsSSE(response.Body, func(raw []byte) error {
+			var event struct {
+				Type     string          `json:"type"`
+				Response json.RawMessage `json:"response"`
+			}
+			if json.Unmarshal(raw, &event) != nil {
+				return fmt.Errorf("invalid Responses stream event")
+			}
+			if event.Type == "response.completed" || event.Type == "response.incomplete" {
+				completed = append(json.RawMessage(nil), event.Response...)
+			}
+			if event.Type == "response.failed" || event.Type == "error" {
+				return fmt.Errorf("upstream Responses stream failed")
+			}
+			return nil
+		})
+		if err != nil || len(completed) == 0 {
+			writeResponsesError(writer, 502, "api_error", "upstream Responses stream did not complete")
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(response.StatusCode)
+		_, _ = writer.Write(completed)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-cache")
 	writer.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(writer, response.Body)
+	buffer := make([]byte, 32<<10)
+	for {
+		n, err := response.Body.Read(buffer)
+		if n > 0 {
+			if _, writeErr := writer.Write(buffer[:n]); writeErr != nil {
+				return
+			}
+			_ = http.NewResponseController(writer).Flush()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func writeResponsesError(writer http.ResponseWriter, status int, kind, message string) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{"type": kind, "message": message, "param": nil, "code": nil}})
 }
 
 func (a *codexOAuthAuthorizer) isOAuth() bool { return true }

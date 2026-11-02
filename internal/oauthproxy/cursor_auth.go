@@ -99,7 +99,7 @@ func loginCursor(ctx context.Context, authDir string, opts LoginOptions) (LoginR
 		_ = openBrowser(params.LoginURL)
 	}
 	fmt.Println("Waiting for authorization...")
-	client := &http.Client{Transport: newUpstreamTransport(30 * time.Second)}
+	client := &http.Client{Transport: newUpstreamTransport(30 * time.Second), CheckRedirect: checkCredentialRedirect}
 	tokens, err := pollCursorTokens(ctx, client, params)
 	if err != nil {
 		return LoginResult{}, err
@@ -200,7 +200,7 @@ func pollCursorOnce(ctx context.Context, client *http.Client, params cursorLogin
 		return cursorTokenPair{}, false, fmt.Errorf("create Cursor poll request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
-	response, err := client.Do(request)
+	response, err := doCredentialRequest(client, request)
 	if err != nil {
 		return cursorTokenPair{}, false, err
 	}

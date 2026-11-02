@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
+	"github.com/claude-code-launch/ccl/internal/codex"
 	"github.com/claude-code-launch/ccl/internal/fsutil"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -39,6 +40,8 @@ type State struct {
 	ConfigHash   string          `json:"config_hash"`
 	EnvBefore    json.RawMessage `json:"env_before,omitempty"`
 	Changes      []Change        `json:"changes"`
+	CodexHome    string          `json:"codex_home,omitempty"`
+	Codex        *codex.Overlay  `json:"codex,omitempty"`
 }
 
 type Manager struct{ Dir string }
@@ -143,8 +146,8 @@ func (m *Manager) RecoverStale(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	defer releaseDaemon()
-	if err := restoreSettings(ctx, s); err != nil {
-		return false, fmt.Errorf("restore Claude settings: %w", err)
+	if err := restoreState(ctx, s); err != nil {
+		return false, fmt.Errorf("restore client settings: %w", err)
 	}
 	return true, os.Remove(m.statePath())
 }
@@ -174,7 +177,7 @@ func (m *Manager) stop(ctx context.Context) error {
 	if current.ID != s.ID {
 		return fmt.Errorf("proxy changed during shutdown")
 	}
-	if err := restoreSettings(ctx, current); err != nil {
+	if err := restoreState(ctx, current); err != nil {
 		return fmt.Errorf("restore Claude settings: %w", err)
 	}
 	return os.Remove(m.statePath())
@@ -200,7 +203,13 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 	if err != nil {
 		return nil, err
 	}
-	if m.Running(ctx, existing) && existing.ConfigHash == providerHash(p) && existing.SettingsPath == settingsPath {
+	codexHome, err := codex.Home()
+	if err != nil {
+		return nil, err
+	}
+	_, codexExists := os.Stat(codexHome)
+	if m.Running(ctx, existing) && existing.ConfigHash == providerHash(p) && existing.SettingsPath == settingsPath &&
+		existing.CodexHome == codexHome && (existing.Codex != nil || errors.Is(codexExists, os.ErrNotExist)) {
 		return existing, nil
 	}
 	if err := m.stop(ctx); err != nil {
@@ -274,6 +283,23 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 		return err
 	}
 	defer proxy.Close()
+	codexGateway, err := codex.New(ctx, proxy.Runtime, p, codex.Options{Desktop: true})
+	if err != nil {
+		return err
+	}
+	defer codexGateway.Close()
+	codexOverlay, err := codex.Plan(ctx, codexGateway, m.Dir)
+	if err != nil {
+		return fmt.Errorf("configure Codex: %w", err)
+	}
+	journaled := false
+	defer func() {
+		if !journaled && codexOverlay != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = codexOverlay.Restore(cleanupCtx)
+		}
+	}()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -285,30 +311,40 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 	}
 	s := &State{ID: id, Provider: p.Name, PID: os.Getpid(), BaseURL: proxy.Runtime.ClaudeBaseURL(),
 		ControlURL: "http://" + listener.Addr().String(), ControlToken: token, SettingsPath: settingsPath, StartedAt: time.Now().UTC()}
+	s.CodexHome, _ = codex.Home()
+	s.Codex = codexOverlay
 	s.ConfigHash = providerHash(p)
 	if err := applySettings(ctx, s, proxy.Settings, m.statePath()); err != nil {
 		// The journal may already exist if the settings write failed.
 		if current, _ := m.Read(); current != nil && current.ID == id {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			restoreErr := restoreSettings(cleanupCtx, current)
+			restoreErr := restoreState(cleanupCtx, current)
 			cancel()
 			if restoreErr == nil {
 				_ = os.Remove(m.statePath())
 			}
 			return errors.Join(err, restoreErr)
 		}
+		if codexOverlay != nil {
+			_ = codexOverlay.Restore(ctx)
+		}
 		return err
 	}
 	defer func() {
+		codexGateway.Close()
 		proxy.Close()
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := restoreSettings(cleanupCtx, s); err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("restore Claude settings: %w", err))
+		if err := restoreState(cleanupCtx, s); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("restore client settings: %w", err))
 			return // Keep the journal for the next stop/start to retry.
 		}
 		runErr = errors.Join(runErr, os.Remove(m.statePath()))
 	}()
+	journaled = true
+	if err := codexOverlay.Apply(ctx); err != nil {
+		return fmt.Errorf("apply Codex proxy configuration: %w", err)
+	}
 	stop := make(chan struct{})
 	var stopOnce sync.Once
 	mux := http.NewServeMux()
@@ -334,6 +370,8 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	defer server.Close()
+	stopMenuBar := m.startMenuBar(id)
+	defer stopMenuBar()
 	select {
 	case <-ctx.Done():
 		return nil
@@ -347,6 +385,10 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 		}
 		return err
 	}
+}
+
+func restoreState(ctx context.Context, s *State) error {
+	return errors.Join(restoreSettings(ctx, s), s.Codex.Restore(ctx))
 }
 
 func providerHash(p provider.Provider) string {

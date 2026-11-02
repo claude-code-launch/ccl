@@ -47,6 +47,8 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("CCL_PROXY_NO_MENUBAR", "1")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "Claude settings \u914d\u7f6e"))
 	t.Setenv("CCL_LANG", "en")
 	settingsPath := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "settings.json")
@@ -261,7 +263,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		t.Fatalf("crash not detected: %s", out)
 	}
 	// Any other ccl command undoes the dead proxy's overlay on its way in.
-	if out := cli("ls"); !strings.Contains(out, "previous Claude settings restored") {
+	if out := cli("ls"); !strings.Contains(out, "previous Claude / Codex settings restored") {
 		t.Fatalf("stale overlay not recovered: %s", out)
 	}
 	assertRestored(t, settingsPath)
@@ -270,6 +272,34 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	cli("proxy", "stop")
 	t.Log("forced process termination and automatic recovery passed")
+
+	// The menu uses this same private command. Selection is persisted only
+	// after readiness; a rejected replacement brings the original proxy back.
+	cli("proxy", "menu-switch", "--provider", chat.Name)
+	if cfg, err := config.Load(); err != nil || cfg.ActiveProvider != chat.Name || state().Provider != chat.Name {
+		t.Fatalf("menu selection was not persisted: %v", err)
+	}
+	inference("chat-ok")
+	if out := cli("proxy", "menu-configs"); strings.Contains(out, chat.APIKey) || strings.Contains(out, native.APIKey) || !strings.Contains(out, chat.Name) {
+		t.Fatalf("invalid menu data: %s", out)
+	}
+	cli("proxy", "menu-switch", "--provider", native.Name)
+	inference("native-ok")
+	if err := config.Update(func(cfg *provider.Config) error {
+		cfg.Providers["broken-fixture"] = provider.Provider{Name: "broken-fixture", Type: "openai", Endpoint: upstream.URL + "/bad", APIKey: "fake-broken-key"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("proxy", "menu-switch", "--provider", "broken-fixture"); err == nil {
+		t.Fatalf("invalid menu replacement succeeded: %s", out)
+	}
+	if cfg, err := config.Load(); err != nil || cfg.ActiveProvider != native.Name || state().Provider != native.Name || !manager.Running(context.Background(), state()) {
+		t.Fatalf("failed menu switch did not restore the original provider: %v", err)
+	}
+	inference("native-ok")
+	cli("proxy", "stop")
+	t.Log("menu selection, persistence and failed-switch rollback passed")
 
 	broken := []byte("{broken settings")
 	if err := os.WriteFile(settingsPath, broken, 0o600); err != nil {
