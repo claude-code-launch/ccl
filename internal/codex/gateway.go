@@ -41,6 +41,7 @@ type Route struct {
 	Alias           string
 	Model           string
 	NativeResponses bool
+	ThinkingBudget  bool
 }
 
 type Gateway struct {
@@ -83,11 +84,16 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	p.Type = provider.EffectiveType(p)
 	native := len(p.ModelProtocols) == 0 && ((p.OAuthProvider == "" && provider.IsOpenAIResponsesType(p.Type)) ||
 		p.OAuthProvider == "gpt" || p.OAuthProvider == "grok")
+	details, names := runtime.ModelDetails(), runtime.ModelDisplayNames()
 	for _, model := range runtime.Models() {
 		alias := "ccl/" + url.PathEscape(p.Name) + "/" + model
-		g.routes[alias] = Route{Alias: alias, Model: model, NativeResponses: native}
-		g.models = append(g.models, newModel(alias, model, p.Name, runtime.ModelDetails(), runtime.ModelDisplayNames()))
+		g.routes[alias] = Route{Alias: alias, Model: model, NativeResponses: native, ThinkingBudget: p.OAuthProvider == "" && provider.IsAnthropicType(p.Type)}
+		g.models = append(g.models, newModel(alias, model, details, names))
 	}
+	if p.OAuthProvider == oauthproxy.ProviderWorkBuddy || p.OAuthProvider == oauthproxy.ProviderWorkBuddyCN {
+		g.models = uniqueWorkBuddyModels(g.models, g.routes)
+	}
+	disambiguateModelNames(g.models, g.routes)
 	if len(g.models) == 0 {
 		_ = listener.Close()
 		return nil, fmt.Errorf("provider %q has no models for Codex", p.Name)

@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -88,6 +89,10 @@ func (r *Runtime) ModelDetails() map[string]protocol.ModelInfo {
 	}
 	details := make(map[string]protocol.ModelInfo, len(r.modelDetails))
 	maps.Copy(details, r.modelDetails)
+	for id, info := range details {
+		info.ReasoningLevels = slices.Clone(info.ReasoningLevels)
+		details[id] = info
+	}
 	return details
 }
 

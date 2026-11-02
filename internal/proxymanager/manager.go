@@ -29,6 +29,7 @@ import (
 )
 
 type State struct {
+	ProxyVersion int             `json:"proxy_version,omitempty"`
 	ID           string          `json:"id"`
 	Provider     string          `json:"provider"`
 	PID          int             `json:"pid"`
@@ -45,6 +46,9 @@ type State struct {
 }
 
 type Manager struct{ Dir string }
+
+// Bump when a running older daemon cannot serve the current client contract.
+const proxyVersion = 1
 
 func Default() (*Manager, error) {
 	home, err := os.UserHomeDir()
@@ -209,6 +213,7 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 	}
 	_, codexExists := os.Stat(codexHome)
 	if m.Running(ctx, existing) && existing.ConfigHash == providerHash(p) && existing.SettingsPath == settingsPath &&
+		existing.ProxyVersion == proxyVersion &&
 		existing.CodexHome == codexHome && (existing.Codex != nil || errors.Is(codexExists, os.ErrNotExist)) {
 		return existing, nil
 	}
@@ -311,6 +316,7 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 	}
 	s := &State{ID: id, Provider: p.Name, PID: os.Getpid(), BaseURL: proxy.Runtime.ClaudeBaseURL(),
 		ControlURL: "http://" + listener.Addr().String(), ControlToken: token, SettingsPath: settingsPath, StartedAt: time.Now().UTC()}
+	s.ProxyVersion = proxyVersion
 	s.CodexHome, _ = codex.Home()
 	s.Codex = codexOverlay
 	s.ConfigHash = providerHash(p)

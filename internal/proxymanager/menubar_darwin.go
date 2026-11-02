@@ -14,6 +14,9 @@ import (
 //go:embed menubar.jxa
 var menuBarScript string
 
+//go:embed codex_refresh.jxa
+var codexRefreshScript string
+
 // The helper owns AppKit's event loop. Watching authenticated readiness also
 // removes the icon when the daemon is killed without running its defers.
 func (m *Manager) RunMenuBar(ctx context.Context, id string) error {
@@ -90,4 +93,20 @@ func ShowMenuError(message string) {
 	command := exec.Command("/usr/bin/osascript", "-l", "JavaScript", "-", message)
 	command.Stdin = strings.NewReader(script)
 	_ = command.Run()
+}
+
+// Codex's local catalog is startup-only. A normal application quit lets it
+// save its own state or decline; force termination is never used here.
+func RefreshCodex(ctx context.Context) error {
+	if os.Getenv("CCL_PROXY_NO_MENUBAR") == "1" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/usr/bin/osascript", "-l", "JavaScript", "-")
+	command.Stdin = strings.NewReader(codexRefreshScript)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("configuration switched; Codex models need a restart: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
 }

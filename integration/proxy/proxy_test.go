@@ -207,6 +207,24 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	t.Log("background start, authentication, status and concurrent starts passed")
 
+	// Installing a fixed client must replace an already-running legacy daemon,
+	// even when the selected provider and configuration have not changed.
+	legacy := state()
+	legacy.ProxyVersion = 0
+	legacyJSON, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteFileAtomic(filepath.Join(manager.Dir, "state.json"), legacyJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli("proxy", "start", chat.Name)
+	upgraded := state()
+	if upgraded.ID == first.ID || upgraded.ProxyVersion == 0 {
+		t.Fatal("start reused a legacy daemon without the fixed catalog contract")
+	}
+	first = upgraded
+
 	if err := config.Update(func(cfg *provider.Config) error {
 		p := cfg.Providers[chat.Name]
 		p.SonnetModel = "model-b"

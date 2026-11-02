@@ -106,7 +106,8 @@ func proxyMenuSwitch(cmd *cobra.Command, _ []string) (switchErr error) {
 		}
 		return err
 	}
-	return config.Update(func(current *provider.Config) error {
+	changed := false
+	if err := config.Update(func(current *provider.Config) error {
 		state, err := m.Read()
 		if err != nil {
 			return err
@@ -117,9 +118,16 @@ func proxyMenuSwitch(cmd *cobra.Command, _ []string) (switchErr error) {
 		if _, exists := current.Providers[name]; !exists {
 			return fmt.Errorf("selected provider was removed while switching")
 		}
+		changed = previous == nil || previous.ID != state.ID
 		current.ActiveProvider = name
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return proxymanager.RefreshCodex(cmd.Context())
 }
 
 func addProxyMenuCommands(command *cobra.Command) {

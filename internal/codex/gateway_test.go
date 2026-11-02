@@ -27,6 +27,8 @@ func fixtureGateway(t *testing.T, handler http.HandlerFunc, protocol string, opt
 	var err error
 	if protocol == "openai_responses" {
 		runtime, err = oauthproxy.StartOpenAIResponsesAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a")
+	} else if protocol == "openai" {
+		runtime, err = oauthproxy.StartOpenAIChatAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a")
 	} else {
 		runtime, err = oauthproxy.StartAnthropicAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a", "")
 	}

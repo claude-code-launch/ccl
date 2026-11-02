@@ -161,7 +161,8 @@ func startCodexOAuth(parent context.Context, modelSpec, credentialFile string) (
 		return nil, fmt.Errorf("Codex credential %s has no access or refresh token", filepath.Base(path))
 	}
 	discoveryCtx, cancelDiscovery := context.WithTimeout(parent, 20*time.Second)
-	models, discoverErr := discoverCodexModels(discoveryCtx, codexOAuthBaseURL, authorizer)
+	modelInfos, discoverErr := discoverCodexModelInfos(discoveryCtx, codexOAuthBaseURL, authorizer)
+	models := codexModelIDs(modelInfos)
 	cancelDiscovery()
 	catalogFallback := discoverErr != nil
 	if catalogFallback {
@@ -187,6 +188,10 @@ func startCodexOAuth(parent context.Context, modelSpec, credentialFile string) (
 		return nil, err
 	}
 	runtime.listAuths = authorizer.listAuths
+	runtime.modelDetails = make(map[string]protocol.ModelInfo, len(modelInfos))
+	for _, info := range modelInfos {
+		runtime.modelDetails[strings.ToLower(info.ID)] = info
+	}
 	runtime.catalogFallback = catalogFallback
 	LogInfof("runtime start oauth provider=gpt backend=codex protocol=codex_responses port=%s credential_file=%s model_count=%d",
 		strings.TrimPrefix(strings.TrimSuffix(runtime.endpoint, "/v1"), "http://"), filepath.Base(path), len(runtime.models))

@@ -94,11 +94,12 @@ ccl proxy stop          # 逐字段恢复原配置
 
 - 修改 provider（`set` / `map` / `provider env`）后需重新 `ccl proxy start -p <name>`；切换或停止后重启已打开的 Claude 会话。
 - `ccl use` 只影响 `ccl` 启动，不会切换运行中的代理。
-- 已使用过 Codex 时，启动代理也会更新 `~/.codex/config.toml`（支持 `CODEX_HOME`）。重启 Codex 后，同一模型选择器中同时显示原生模型和带 `CCL: provider` 标记的第三方模型，可直接切换。
+- 已使用过 Codex 时，启动代理也会更新 `~/.codex/config.toml`（支持 `CODEX_HOME`）。重启 Codex 后，同一模型选择器中同时显示原生模型和当前配置的第三方模型。列表只显示模型名称；与原生模型同名时加简短的 `CCL` 标记。WorkBuddy 的同名内部版本合并为一项。
+- 上游明确支持推理的模型会显示强度选项；WorkBuddy 提供低、中、高三档，GPT 账号保留上游公布的档位，所选强度会传到上游。未声明支持的模型不显示推理选项。
 - Codex 保留原生 OpenAI Provider 与登录。原生请求继续走原有 ChatGPT / OpenAI 服务，只有独立白名单中的 `ccl/<provider>/<model>` 发往 CCL；转发到 CCL 时移除 Codex 凭据，WebSocket 用 426 回退 HTTP Responses。原生 Claude 订阅账号不加入该目录。
 - 原生模型信息来自现有目录或 `models_cache.json`，必要时读取已安装 Codex 的 `debug models --bundled`，不写死原生模型名称。缺少缓存时需安装较新的 Codex CLI，或让 CCL 能找到桌面 App 自带的 Codex。原有自定义 Provider 或默认 profile 的目录覆盖会明确报错，避免改变其路由。
-- macOS 启动后显示状态栏图标，菜单勾选当前配置，可直接切换并同步 CCL 当前选择，也可停止代理；新配置启动失败会恢复原代理并提示错误。代理退出或异常停止后图标消失。无桌面环境可用 `CCL_PROXY_NO_MENUBAR=1` 关闭图标。
-- 停止或异常恢复时，Claude 与 Codex 只恢复仍等于代理写入值的字段，保留后续用户修改；启动、切换或停止后重启 Codex 以重新载入目录。
+- macOS 状态栏菜单可切换配置或停止代理。切换成功后同步更新 CCL 的当前选择，并正常退出、重新打开正在运行的 Codex 以刷新目录（会短暂关闭窗口）；选择相同且未变更的配置不会重启。Codex 拒绝退出时提示手动重启，不强制结束进程。新配置启动失败会恢复原代理并提示错误。代理退出或异常停止后图标消失。无桌面环境可用 `CCL_PROXY_NO_MENUBAR=1` 关闭图标。
+- 停止或异常恢复时，Claude 与 Codex 只恢复仍等于代理写入值的字段，保留后续用户修改。通过命令行启动、切换或停止后，请重启 Codex 以重新载入目录。
 - 异常退出后，下次运行任意 `ccl` 命令会按 `~/.ccl/proxy/state.json` 自动恢复；启动诊断见 `~/.ccl/proxy/proxy.log`。
 
 ### Xcode 27 / ACP
@@ -257,11 +258,12 @@ ccl proxy stop          # restores your original settings field by field
 
 - After changing a provider (`set` / `map` / `provider env`), run `ccl proxy start -p <name>` again; restart open Claude sessions after switching or stopping.
 - `ccl use` only affects `ccl` launches, not a running proxy.
-- If Codex has already been used, startup also updates `~/.codex/config.toml` (honors `CODEX_HOME`). Restart Codex to see native models and third-party models labeled `CCL: provider` in one picker, with direct switching.
+- If Codex has already been used, startup also updates `~/.codex/config.toml` (honors `CODEX_HOME`). Restart Codex to see native models and the selected provider's models in one picker. Labels show only model names, with a short `CCL` marker for a collision with a native name. WorkBuddy's internal revisions sharing a name appear once.
+- Models with explicit upstream reasoning support expose effort controls. WorkBuddy offers low, medium and high; GPT accounts retain their advertised levels. The selected effort reaches the upstream provider. Models without advertised support have no reasoning controls.
 - Codex retains its native OpenAI provider and login. Native requests keep their original ChatGPT / OpenAI route; only the separate `ccl/<provider>/<model>` allow-list goes to CCL, with native credentials removed. WebSockets receive 426 to fall back to HTTP Responses. Native Claude subscription accounts are excluded.
 - Native metadata comes from an existing catalog or `models_cache.json`, with the installed Codex's `debug models --bundled` as fallback; native names are never hardcoded. Without a cache, install a recent Codex CLI or make the desktop app's bundled Codex discoverable. A conflicting custom provider or default-profile catalog override is reported instead of changing its routing.
-- macOS shows a menu bar icon with the checked current provider, direct configuration switching and Stop Proxy. A successful switch also updates the CCL selection; a failed start restores the previous proxy and reports the error. The icon exits with the proxy, including crashes. Set `CCL_PROXY_NO_MENUBAR=1` in a headless environment to disable it.
-- Stop and crash recovery restore only unchanged fields owned by the proxy in both Claude and Codex configuration. Later user edits are retained. Restart Codex after starting, switching or stopping to reload its catalog.
+- macOS shows a menu bar icon with the checked current provider, configuration switching and Stop Proxy. A successful switch updates the CCL selection and normally quits and reopens a running Codex to reload its catalog (its windows briefly close). Choosing an unchanged provider does not restart it. A refused quit prompts a manual restart; CCL never forces termination. A failed proxy start restores the previous proxy and reports the error. The icon exits with the proxy, including crashes. Set `CCL_PROXY_NO_MENUBAR=1` in a headless environment to disable it.
+- Stop and crash recovery restore only unchanged fields owned by the proxy in both Claude and Codex configuration. Later user edits are retained. After starting, switching or stopping from the command line, restart Codex to reload its catalog.
 - After a crash, the next `ccl` command restores settings from `~/.ccl/proxy/state.json`; startup diagnostics are in `~/.ccl/proxy/proxy.log`.
 
 ### Xcode 27 / ACP

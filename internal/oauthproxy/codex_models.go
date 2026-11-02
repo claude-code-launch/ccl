@@ -10,25 +10,36 @@ import (
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 func discoverCodexModels(ctx context.Context, endpoint string, authorizer *codexOAuthAuthorizer) ([]string, error) {
+	models, err := discoverCodexModelInfos(ctx, endpoint, authorizer)
+	return codexModelIDs(models), err
+}
+
+func discoverCodexModelInfos(ctx context.Context, endpoint string, authorizer *codexOAuthAuthorizer) ([]protocol.ModelInfo, error) {
 	auth, err := authorizer.authorize(ctx, false)
 	if err != nil {
 		return nil, fmt.Errorf("discover GPT models: %w", err)
 	}
-	models, status, err := requestCodexModels(ctx, authorizer.client, endpoint, auth)
+	models, status, err := requestCodexModelInfos(ctx, authorizer.client, endpoint, auth)
 	if status == http.StatusUnauthorized {
 		auth, refreshErr := authorizer.authorize(withRejectedOAuthToken(ctx, auth.token), true)
 		if refreshErr != nil {
 			return nil, fmt.Errorf("discover GPT models: refresh rejected credential: %w", refreshErr)
 		}
-		models, _, err = requestCodexModels(ctx, authorizer.client, endpoint, auth)
+		models, _, err = requestCodexModelInfos(ctx, authorizer.client, endpoint, auth)
 	}
 	return models, err
 }
 
 func requestCodexModels(ctx context.Context, client *http.Client, endpoint string, auth codexResponsesAuthorization) ([]string, int, error) {
+	models, status, err := requestCodexModelInfos(ctx, client, endpoint, auth)
+	return codexModelIDs(models), status, err
+}
+
+func requestCodexModelInfos(ctx context.Context, client *http.Client, endpoint string, auth codexResponsesAuthorization) ([]protocol.ModelInfo, int, error) {
 	target := strings.TrimRight(normalizeOpenAIBaseURL(endpoint), "/") + "/models?" + url.Values{
 		"client_version": {codexidentity.ClientVersion},
 	}.Encode()
@@ -56,14 +67,19 @@ func requestCodexModels(ctx context.Context, client *http.Client, endpoint strin
 	}
 	var catalog struct {
 		Models []struct {
-			Slug       string `json:"slug"`
-			Visibility string `json:"visibility"`
+			Slug                  string                    `json:"slug"`
+			Visibility            string                    `json:"visibility"`
+			DisplayName           string                    `json:"display_name"`
+			ContextWindow         int                       `json:"context_window"`
+			MaxContextWindow      int                       `json:"max_context_window"`
+			ReasoningLevels       []protocol.ReasoningLevel `json:"supported_reasoning_levels"`
+			DefaultReasoningLevel string                    `json:"default_reasoning_level"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &catalog); err != nil {
 		return nil, response.StatusCode, fmt.Errorf("decode GPT model catalog: %w", err)
 	}
-	models := make([]string, 0, len(catalog.Models))
+	models := make([]protocol.ModelInfo, 0, len(catalog.Models))
 	seen := make(map[string]bool, len(catalog.Models))
 	for _, model := range catalog.Models {
 		id := strings.TrimSpace(model.Slug)
@@ -72,10 +88,22 @@ func requestCodexModels(ctx context.Context, client *http.Client, endpoint strin
 			continue
 		}
 		seen[strings.ToLower(id)] = true
-		models = append(models, id)
+		window := model.ContextWindow
+		if window == 0 {
+			window = model.MaxContextWindow
+		}
+		models = append(models, protocol.ModelInfo{ID: id, DisplayName: model.DisplayName, ContextWindow: window, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
 	}
 	if len(models) == 0 {
 		return nil, response.StatusCode, fmt.Errorf("discover GPT models: response contained no visible models")
 	}
 	return models, response.StatusCode, nil
+}
+
+func codexModelIDs(models []protocol.ModelInfo) []string {
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		ids = append(ids, model.ID)
+	}
+	return ids
 }

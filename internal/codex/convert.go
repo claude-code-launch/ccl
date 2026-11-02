@@ -271,11 +271,27 @@ func toMessages(request responseRequest, items []map[string]any, route Route) ([
 	default:
 		return nil, nil, fmt.Errorf("unsupported tool_choice")
 	}
+	outputConfig := make(map[string]any)
 	if effort, ok := request.Reasoning["effort"].(string); ok && effort != "" && effort != "none" {
-		body["output_config"] = map[string]any{"effort": effort}
+		if route.ThinkingBudget {
+			budget := map[string]int{"minimal": 1024, "low": 1024, "medium": 2048, "high": 4096, "xhigh": 8192, "max": 16384, "ultra": 32768}[effort]
+			if budget == 0 {
+				return nil, nil, fmt.Errorf("unsupported reasoning effort")
+			}
+			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
+			if maxTokens <= budget {
+				body["max_tokens"] = budget + 4096
+			}
+		} else {
+			body["thinking"] = map[string]any{"type": "adaptive"}
+			outputConfig["effort"] = effort
+		}
 	}
 	if format, ok := request.Text["format"].(map[string]any); ok && format["type"] == "json_schema" {
-		body["output_config"] = map[string]any{"format": map[string]any{"type": "json_schema", "schema": format["schema"]}}
+		outputConfig["format"] = map[string]any{"type": "json_schema", "schema": format["schema"]}
+	}
+	if len(outputConfig) > 0 {
+		body["output_config"] = outputConfig
 	}
 	raw, err := json.Marshal(body)
 	return raw, registry, err

@@ -16,14 +16,16 @@ import (
 // ContextWindow is advisory only — third-party catalogs are often wrong or
 // missing; callers must not treat a reported 1M window as a guarantee.
 type ModelInfo struct {
-	ID                 string
-	DisplayName        string
-	ContextWindow      int
-	MaxOutputTokens    int
-	RateMultiplier     *float64
-	RateUnit           string
-	IsNew              bool
-	PromotionAvailable bool
+	ID                    string
+	DisplayName           string
+	ContextWindow         int
+	MaxOutputTokens       int
+	RateMultiplier        *float64
+	RateUnit              string
+	IsNew                 bool
+	PromotionAvailable    bool
+	ReasoningLevels       []ReasoningLevel
+	DefaultReasoningLevel string
 }
 
 // ModelResponse is the OpenAI-compatible /models list payload.
@@ -50,12 +52,14 @@ type ModelResponse struct {
 				SessionCache bool `json:"session_cache"`
 			} `json:"cache,omitempty"`
 		} `json:"features"`
-		Id            string `json:"id"`
-		Name          string `json:"name"`
-		Object        string `json:"object"`
-		Status        string `json:"status,omitempty"`
-		Version       string `json:"version"`
-		ContextWindow int    `json:"context_window,omitempty"`
+		Id                    string           `json:"id"`
+		Name                  string           `json:"name"`
+		Object                string           `json:"object"`
+		Status                string           `json:"status,omitempty"`
+		Version               string           `json:"version"`
+		ContextWindow         int              `json:"context_window,omitempty"`
+		ReasoningLevels       []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
+		DefaultReasoningLevel string           `json:"default_reasoning_level,omitempty"`
 		// Anthropic-shaped extensions some Anthropic-compatible gateways and
 		// CCL runtimes publish alongside the OpenAI list fields.
 		RateMultiplier     *float64 `json:"rate_multiplier,omitempty"`
@@ -149,13 +153,15 @@ func GetOpenAIModelInfosContext(ctx context.Context, baseURL, apiKey string) ([]
 			window = m.ContextWindow
 		}
 		models = append(models, ModelInfo{
-			ID:                 m.Id,
-			DisplayName:        strings.TrimSpace(m.Name),
-			ContextWindow:      window,
-			RateMultiplier:     m.RateMultiplier,
-			RateUnit:           strings.TrimSpace(m.RateUnit),
-			IsNew:              m.IsNew,
-			PromotionAvailable: m.PromotionAvailable,
+			ID:                    m.Id,
+			DisplayName:           strings.TrimSpace(m.Name),
+			ContextWindow:         window,
+			RateMultiplier:        m.RateMultiplier,
+			RateUnit:              strings.TrimSpace(m.RateUnit),
+			IsNew:                 m.IsNew,
+			PromotionAvailable:    m.PromotionAvailable,
+			ReasoningLevels:       m.ReasoningLevels,
+			DefaultReasoningLevel: m.DefaultReasoningLevel,
 		})
 	}
 	return models, nil
@@ -169,10 +175,12 @@ const codexClientVersionQuery = codexidentity.ClientVersion
 // the Codex model template, where the id lives in "slug".
 type codexClientModelsResponse struct {
 	Models []struct {
-		ID               string `json:"id"`
-		Slug             string `json:"slug"`
-		ContextWindow    int    `json:"context_window,omitempty"`
-		MaxContextWindow int    `json:"max_context_window,omitempty"`
+		ID                    string           `json:"id"`
+		Slug                  string           `json:"slug"`
+		ContextWindow         int              `json:"context_window,omitempty"`
+		MaxContextWindow      int              `json:"max_context_window,omitempty"`
+		ReasoningLevels       []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
+		DefaultReasoningLevel string           `json:"default_reasoning_level,omitempty"`
 	} `json:"models"`
 }
 
@@ -208,7 +216,7 @@ func GetCodexClientModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 		if window == 0 {
 			window = model.MaxContextWindow
 		}
-		models = append(models, ModelInfo{ID: id, ContextWindow: window})
+		models = append(models, ModelInfo{ID: id, ContextWindow: window, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
 	}
 	return models, nil
 }

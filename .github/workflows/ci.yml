@@ -102,21 +102,23 @@ jobs:
         run: go test -race -v ./cmd -run 'Test(LeadingLaunchOptions|ClaudeAccount|ClaudeDefault|FailedClaudeAccount|UnnamedClaudeLogin|LegacyClaude)'
       - name: Test Qoder and WorkBuddy credential boundaries
         run: go test -race -v ./internal/oauthproxy -run 'Test(LoginQoder|LoginWorkBuddy|Qoder|WorkBuddy|Cursor|LoginCursor|ProviderRefresh|ProviderCredential|ProviderNetwork|RetryUpstream)'
-      - name: Compile macOS menu bar script
+      - name: Compile macOS menu bar and Codex refresh scripts
         if: runner.os == 'macOS'
-        run: osacompile -l JavaScript -o "$RUNNER_TEMP/ccl-menubar.scpt" internal/proxymanager/menubar.jxa
+        run: |
+          osacompile -l JavaScript -o "$RUNNER_TEMP/ccl-menubar.scpt" internal/proxymanager/menubar.jxa
+          osacompile -l JavaScript -o "$RUNNER_TEMP/ccl-codex-refresh.scpt" internal/proxymanager/codex_refresh.jxa
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Test npm packaging and ACP configuration decorators
-        run: node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs
+        run: node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs scripts/codex-refresh.test.js
       - name: Install pinned Codex for shared proxy verification
         run: npm install --prefix "${{ runner.temp }}/ccl-codex" --no-audit --no-fund @openai/codex@0.166.0
       - name: Test real Codex catalog and local tool loop
         env:
           CCL_TEST_BINARY: ${{ github.workspace }}/ccl-verify${{ runner.os == 'Windows' && '.exe' || '' }}
           CCL_TEST_CODEX: ${{ runner.temp }}/ccl-codex/node_modules/.bin/codex${{ runner.os == 'Windows' && '.cmd' || '' }}
-        run: go test -race -v ./integration/codex
+        run: go test -race -v ./integration/codex ./internal/codex
       - name: Install pinned upstream ACP adapter
         run: npm install --prefix "${{ runner.temp }}/ccl-acp-adapter" --ignore-scripts --no-audit --no-fund @agentclientprotocol/claude-agent-acp@0.90.0
       - name: Test real ACP adapter and SDK with local providers

@@ -571,13 +571,16 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 		if name := strings.TrimSpace(model.Name); name != "" {
 			names[model.ID] = name
 		}
+		info := protocol.ModelInfo{ID: model.ID, DisplayName: strings.TrimSpace(model.Name), MaxOutputTokens: int(model.MaxOutputTokens)}
 		if multiplier := workbuddyCreditMultiplier(model.Credits); multiplier != nil {
-			details[strings.ToLower(model.ID)] = protocol.ModelInfo{
-				ID:             model.ID,
-				RateMultiplier: multiplier,
-				RateUnit:       "credits",
-			}
+			info.RateMultiplier = multiplier
+			info.RateUnit = "credits"
 		}
+		if model.SupportsReasoning {
+			info.ReasoningLevels = protocol.ChatReasoningLevels()
+			info.DefaultReasoningLevel = "medium"
+		}
+		details[strings.ToLower(model.ID)] = info
 		// Technical IDs are registered before display names so a shared label
 		// cannot occupy another model's id.
 		add(model.ID, model.ID)
