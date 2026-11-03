@@ -572,6 +572,9 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 			names[model.ID] = name
 		}
 		info := protocol.ModelInfo{ID: model.ID, DisplayName: strings.TrimSpace(model.Name), MaxOutputTokens: int(model.MaxOutputTokens)}
+		if model.SupportsImages {
+			info.InputModalities = []string{"text", "image"}
+		}
 		if multiplier := workbuddyCreditMultiplier(model.Credits); multiplier != nil {
 			info.RateMultiplier = multiplier
 			info.RateUnit = "credits"

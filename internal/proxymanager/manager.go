@@ -1,5 +1,5 @@
-// Package proxymanager owns a standalone provider runtime and a reversible
-// Claude Code settings overlay. Its control API only listens on loopback.
+// Package proxymanager owns a standalone Codex provider runtime and reversible
+// Codex configuration overlay. Its control API only listens on loopback.
 package proxymanager
 
 import (
@@ -22,33 +22,44 @@ import (
 	"sync"
 	"time"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/codex"
 	"github.com/claude-code-launch/ccl/internal/fsutil"
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/providersession"
 )
 
 type State struct {
-	ProxyVersion int             `json:"proxy_version,omitempty"`
-	ID           string          `json:"id"`
-	Provider     string          `json:"provider"`
-	PID          int             `json:"pid"`
-	BaseURL      string          `json:"base_url"`
-	ControlURL   string          `json:"control_url"`
-	ControlToken string          `json:"control_token"`
-	SettingsPath string          `json:"settings_path"`
-	StartedAt    time.Time       `json:"started_at"`
-	ConfigHash   string          `json:"config_hash"`
-	EnvBefore    json.RawMessage `json:"env_before,omitempty"`
-	Changes      []Change        `json:"changes"`
-	CodexHome    string          `json:"codex_home,omitempty"`
-	Codex        *codex.Overlay  `json:"codex,omitempty"`
+	ProxyVersion int    `json:"proxy_version,omitempty"`
+	ID           string `json:"id"`
+	Provider     string `json:"provider"`
+	PID          int    `json:"pid"`
+	BaseURL      string `json:"base_url"`
+	ControlURL   string `json:"control_url"`
+	ControlToken string `json:"control_token"`
+	// Legacy Claude overlay fields are read only to restore pre-Codex-only daemons.
+	SettingsPath  string          `json:"settings_path,omitempty"`
+	StartedAt     time.Time       `json:"started_at"`
+	ConfigHash    string          `json:"config_hash"`
+	MetadataStamp string          `json:"metadata_stamp,omitempty"`
+	CodexMode     string          `json:"codex_mode,omitempty"`
+	EnvBefore     json.RawMessage `json:"env_before,omitempty"`
+	Changes       []Change        `json:"changes,omitempty"`
+	CodexHome     string          `json:"codex_home,omitempty"`
+	Codex         *codex.Overlay  `json:"codex,omitempty"`
 }
 
-type Manager struct{ Dir string }
+type Manager struct {
+	Dir string
+	// CodexListenAddress pins replacements, including a failed menu switch rollback.
+	CodexListenAddress string
+	// Empty inherits the running daemon's mode, or uses shared on first start.
+	CodexMode string
+}
 
-// Bump when a running older daemon cannot serve the current client contract.
-const proxyVersion = 1
+// Bump when an existing daemon must be replaced to pick up a protocol fix.
+// Version 12 completes independent provider auth and native context migration.
+const proxyVersion = 12
 
 func Default() (*Manager, error) {
 	home, err := os.UserHomeDir()
@@ -72,7 +83,7 @@ func (m *Manager) Read() (*State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("read proxy state: %w", err)
 	}
-	if s.ID == "" || s.SettingsPath == "" {
+	if s.ID == "" || (s.Codex == nil && s.SettingsPath == "") {
 		return nil, fmt.Errorf("incomplete proxy state; recovery journal retained at %s", m.statePath())
 	}
 	return &s, nil
@@ -128,8 +139,8 @@ func (m *Manager) Stop(ctx context.Context) error {
 }
 
 // RecoverStale restores the settings overlay of a proxy that died without
-// cleaning up (kill -9, power loss), so a plain claude stops pointing at a
-// closed port. It never waits: a start or stop in progress owns the command
+// cleaning up (kill -9, power loss), including legacy Claude overlays.
+// It never waits: a start or stop in progress owns the command
 // lock and recovers on its own, and a held daemon lock means the proxy is
 // alive. Reports whether it restored anything.
 func (m *Manager) RecoverStale(ctx context.Context) (bool, error) {
@@ -182,7 +193,7 @@ func (m *Manager) stop(ctx context.Context) error {
 		return fmt.Errorf("proxy changed during shutdown")
 	}
 	if err := restoreState(ctx, current); err != nil {
-		return fmt.Errorf("restore Claude settings: %w", err)
+		return fmt.Errorf("restore client settings: %w", err)
 	}
 	return os.Remove(m.statePath())
 }
@@ -197,7 +208,7 @@ func randomID() (string, error) {
 
 // Start serializes starts and provider switches. The child is detached from
 // the launching terminal and reports readiness only after the settings apply.
-func (m *Manager) Start(ctx context.Context, executable string, p provider.Provider, settingsPath string) (*State, error) {
+func (m *Manager) Start(ctx context.Context, executable string, p provider.Provider) (*State, error) {
 	release, err := m.lock(ctx)
 	if err != nil {
 		return nil, err
@@ -207,15 +218,39 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 	if err != nil {
 		return nil, err
 	}
+	mode := m.CodexMode
+	if mode == "" && existing != nil {
+		mode = existing.CodexMode
+	}
+	if mode == "" {
+		mode = "shared"
+	}
+	if mode != "shared" && mode != "independent" {
+		return nil, fmt.Errorf("invalid Codex proxy mode")
+	}
 	codexHome, err := codex.Home()
 	if err != nil {
 		return nil, err
 	}
-	_, codexExists := os.Stat(codexHome)
-	if m.Running(ctx, existing) && existing.ConfigHash == providerHash(p) && existing.SettingsPath == settingsPath &&
+	if info, err := os.Stat(codexHome); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("Codex profile not found; open Codex once before starting its proxy")
+	}
+	if m.Running(ctx, existing) && existing.ConfigHash == providerHash(p) &&
+		(existing.CodexMode == mode || existing.CodexMode == "" && mode == "shared") &&
+		existing.MetadataStamp == modelsdev.CacheStamp() &&
 		existing.ProxyVersion == proxyVersion &&
-		existing.CodexHome == codexHome && (existing.Codex != nil || errors.Is(codexExists, os.ErrNotExist)) {
+		existing.CodexHome == codexHome && existing.Codex != nil {
 		return existing, nil
+	}
+	// Codex retains its endpoint in memory. Replacing a daemon must bind the
+	// same port so retries from already-open native and CCL chats can recover.
+	codexAddress := m.CodexListenAddress
+	if existing != nil && existing.Codex != nil && existing.CodexHome == codexHome {
+		endpoint, err := url.Parse(existing.Codex.BaseURL)
+		if err != nil || endpoint.Scheme != "http" || endpoint.Hostname() != "127.0.0.1" || endpoint.Port() == "" || endpoint.User != nil || endpoint.Path != "/v1" || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			return nil, fmt.Errorf("invalid previous Codex proxy endpoint")
+		}
+		codexAddress = endpoint.Host
 	}
 	if err := m.stop(ctx); err != nil {
 		return nil, err
@@ -230,7 +265,11 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 		return nil, err
 	}
 	defer log.Close()
-	child := exec.Command(executable, "proxy", "serve", "--provider", p.Name, "--instance", id, "--settings-path", settingsPath)
+	args := []string{"proxy", "serve", "--provider", p.Name, "--instance", id, "--codex-mode", mode}
+	if codexAddress != "" {
+		args = append(args, "--codex-listen-address", codexAddress)
+	}
+	child := exec.Command(executable, args...)
 	child.Stdout, child.Stderr = log, log
 	detach(child)
 	if err := child.Start(); err != nil {
@@ -266,7 +305,14 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 
 // Run owns the entire runtime lifetime. The caller cancels ctx for signals;
 // the authenticated local stop endpoint uses the same cleanup path.
-func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id string) (runErr error) {
+func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runErr error) {
+	mode := m.CodexMode
+	if mode == "" {
+		mode = "shared"
+	}
+	if mode != "shared" && mode != "independent" {
+		return fmt.Errorf("invalid Codex proxy mode")
+	}
 	if err := os.MkdirAll(m.Dir, 0o700); err != nil {
 		return err
 	}
@@ -283,12 +329,13 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 		}
 		return fmt.Errorf("a previous proxy needs recovery; run ccl proxy stop")
 	}
-	proxy, err := claude.PrepareProxy(ctx, p)
+	proxy, err := providersession.PrepareProxy(ctx, p)
 	if err != nil {
 		return err
 	}
 	defer proxy.Close()
-	codexGateway, err := codex.New(ctx, proxy.Runtime, p, codex.Options{Desktop: true})
+	metadataStamp := modelsdev.CacheStamp()
+	codexGateway, err := codex.New(ctx, proxy.Runtime, p, codex.Options{Desktop: mode == "shared", Independent: mode == "independent", ListenAddress: m.CodexListenAddress})
 	if err != nil {
 		return err
 	}
@@ -296,6 +343,9 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 	codexOverlay, err := codex.Plan(ctx, codexGateway, m.Dir)
 	if err != nil {
 		return fmt.Errorf("configure Codex: %w", err)
+	}
+	if codexOverlay == nil {
+		return fmt.Errorf("Codex profile not found; open Codex once before starting its proxy")
 	}
 	journaled := false
 	defer func() {
@@ -314,26 +364,17 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 	if err != nil {
 		return err
 	}
-	s := &State{ID: id, Provider: p.Name, PID: os.Getpid(), BaseURL: proxy.Runtime.ClaudeBaseURL(),
-		ControlURL: "http://" + listener.Addr().String(), ControlToken: token, SettingsPath: settingsPath, StartedAt: time.Now().UTC()}
+	s := &State{ID: id, Provider: p.Name, PID: os.Getpid(), BaseURL: codexGateway.BaseURL(),
+		ControlURL: "http://" + listener.Addr().String(), ControlToken: token, StartedAt: time.Now().UTC()}
 	s.ProxyVersion = proxyVersion
 	s.CodexHome, _ = codex.Home()
 	s.Codex = codexOverlay
 	s.ConfigHash = providerHash(p)
-	if err := applySettings(ctx, s, proxy.Settings, m.statePath()); err != nil {
-		// The journal may already exist if the settings write failed.
-		if current, _ := m.Read(); current != nil && current.ID == id {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			restoreErr := restoreState(cleanupCtx, current)
-			cancel()
-			if restoreErr == nil {
-				_ = os.Remove(m.statePath())
-			}
-			return errors.Join(err, restoreErr)
-		}
-		if codexOverlay != nil {
-			_ = codexOverlay.Restore(ctx)
-		}
+	s.MetadataStamp = metadataStamp
+	s.CodexMode = mode
+	// Journal before applying Codex's overlay; fresh daemons never read or
+	// write Claude's settings, even if that file is malformed or inaccessible.
+	if err := writeJSON(m.statePath(), s); err != nil {
 		return err
 	}
 	defer func() {
@@ -394,7 +435,11 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, settingsPath, id
 }
 
 func restoreState(ctx context.Context, s *State) error {
-	return errors.Join(restoreSettings(ctx, s), s.Codex.Restore(ctx))
+	var legacyErr error
+	if s.SettingsPath != "" && len(s.Changes) > 0 {
+		legacyErr = restoreSettings(ctx, s)
+	}
+	return errors.Join(legacyErr, s.Codex.Restore(ctx))
 }
 
 func providerHash(p provider.Provider) string {

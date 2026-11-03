@@ -41,6 +41,22 @@ func TestGeminiForwardsSystemTurnsInsideTheConversationAsUserText(t *testing.T) 
 	}
 }
 
+func TestGeminiThinkingLevelClampsGPTRungs(t *testing.T) {
+	for _, tc := range []struct{ effort, want string }{
+		{"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"minimal", "minimal"},
+		{"xhigh", "high"}, {"max", "high"}, {"ultra", "high"}, {"XHIGH", "high"},
+	} {
+		raw := []byte(fmt.Sprintf(`{"model":"gemini","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":%q}}`, tc.effort))
+		converted, err := convertAnthropicToGemini(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := gjson.GetBytes(converted.geminiBody, "generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.want {
+			t.Fatalf("effort %s thinkingLevel=%s want %s", tc.effort, got, tc.want)
+		}
+	}
+}
+
 func TestGeminiGenerationLimitsPreserved(t *testing.T) {
 	for _, maxTokens := range []int{17, 32000} {
 		request := fmt.Sprintf(`{"model":"gemini","max_tokens":%d,"stop_sequences":["END","STOP"],"messages":[{"role":"user","content":"hi"}]}`, maxTokens)

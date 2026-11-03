@@ -102,16 +102,14 @@ jobs:
         run: go test -race -v ./cmd -run 'Test(LeadingLaunchOptions|ClaudeAccount|ClaudeDefault|FailedClaudeAccount|UnnamedClaudeLogin|LegacyClaude)'
       - name: Test Qoder and WorkBuddy credential boundaries
         run: go test -race -v ./internal/oauthproxy -run 'Test(LoginQoder|LoginWorkBuddy|Qoder|WorkBuddy|Cursor|LoginCursor|ProviderRefresh|ProviderCredential|ProviderNetwork|RetryUpstream)'
-      - name: Compile macOS menu bar and Codex refresh scripts
+      - name: Compile macOS menu bar script
         if: runner.os == 'macOS'
-        run: |
-          osacompile -l JavaScript -o "$RUNNER_TEMP/ccl-menubar.scpt" internal/proxymanager/menubar.jxa
-          osacompile -l JavaScript -o "$RUNNER_TEMP/ccl-codex-refresh.scpt" internal/proxymanager/codex_refresh.jxa
+        run: osacompile -l JavaScript -o "$RUNNER_TEMP/ccl-menubar.scpt" internal/proxymanager/menubar.jxa
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Test npm packaging and ACP configuration decorators
-        run: node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs scripts/codex-refresh.test.js
+        run: node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs
       - name: Install pinned Codex for shared proxy verification
         run: npm install --prefix "${{ runner.temp }}/ccl-codex" --no-audit --no-fund @openai/codex@0.166.0
       - name: Test real Codex catalog and local tool loop

@@ -38,8 +38,8 @@ func TestProxyRejectsAmbiguousProviderSelection(t *testing.T) {
 	}
 }
 
-// default is Claude Code's own subscription: starting the proxy for it, by
-// name or as the active selection, starts nothing and needs no provider.
+// The default selector restores Codex's own route: by name or as the active
+// selection, it starts nothing and needs no third-party provider.
 func TestProxyStartOnDefaultStartsNothing(t *testing.T) {
 	saveToggleFixture(t, &provider.Config{ActiveProvider: provider.DefaultProvider, Providers: map[string]provider.Provider{
 		"a": {Name: "a", Type: "openai", Endpoint: "https://example.com/v1", Model: "m"},

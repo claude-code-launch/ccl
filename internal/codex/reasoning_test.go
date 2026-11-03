@@ -19,6 +19,9 @@ func TestCodexCatalogPublishesReasoningControls(t *testing.T) {
 	if levels := unknown["supported_reasoning_levels"].([]protocol.ReasoningLevel); len(levels) != 0 || unknown["default_reasoning_level"] != nil {
 		t.Fatal("reasoning support was invented for an unknown model")
 	}
+	if model["node_repl_disabled"] != false || unknown["node_repl_disabled"] != false {
+		t.Fatal("node repl disabled, so Codex will not attach the local computer-use tool")
+	}
 	info.ReasoningLevels = []protocol.ReasoningLevel{{Effort: "high"}, {Effort: "invalid"}, {Effort: "high"}, {Effort: "xhigh"}}
 	levels, defaultLevel := reasoningLevels(info)
 	if len(levels) != 2 || defaultLevel != "high" {
@@ -26,8 +29,66 @@ func TestCodexCatalogPublishesReasoningControls(t *testing.T) {
 	}
 }
 
+func TestCodexCatalogDefaultsToGPTEffortWhenNoneAreAdvertised(t *testing.T) {
+	filled := withGPTReasoningDefaults([]string{"only"}, nil)
+	levels := filled["only"].ReasoningLevels
+	if len(levels) != 6 || levels[0].Effort != "low" || levels[5].Effort != "ultra" || filled["only"].DefaultReasoningLevel != "low" || levels[0].Description == "" {
+		t.Fatalf("gpt ladder missing: %+v", filled["only"])
+	}
+	levels[0].Effort = "changed"
+	if protocol.GPTReasoningLevels()[0].Effort != "low" {
+		t.Fatal("gpt ladder slice is shared")
+	}
+	kept := withGPTReasoningDefaults([]string{"reasoner", "plain"}, map[string]protocol.ModelInfo{
+		"reasoner": {ContextWindow: 1000, ReasoningLevels: protocol.ChatReasoningLevels(), DefaultReasoningLevel: "medium"},
+		"plain":    {ContextWindow: 2000},
+	})
+	if len(kept["reasoner"].ReasoningLevels) != 3 || kept["reasoner"].DefaultReasoningLevel != "medium" || len(kept["plain"].ReasoningLevels) != 0 || kept["plain"].ContextWindow != 2000 {
+		t.Fatalf("advertised catalog was rewritten: %+v", kept)
+	}
+	cased := withGPTReasoningDefaults([]string{"Model-A"}, map[string]protocol.ModelInfo{"model-a": {ContextWindow: 8192, DisplayName: "A"}})
+	info := cased["model-a"]
+	if _, shadow := cased["Model-A"]; shadow || info.ContextWindow != 8192 || info.DisplayName != "A" || len(info.ReasoningLevels) != 6 || info.DefaultReasoningLevel != protocol.GPTDefaultReasoningLevel {
+		t.Fatalf("lowercase metadata was shadowed or dropped: %+v", cased)
+	}
+}
+
+func TestCodexBridgeSkipsHostedTools(t *testing.T) {
+	request := responseRequest{Model: "alias", Input: json.RawMessage(`"fixture"`), Tools: []map[string]any{
+		{"type": "web_search", "external_web_access": true},
+		{"type": "web_search_preview"},
+		{"type": "image_generation"},
+		{"type": "tool_search"},
+		{"type": "function", "name": "read_file", "description": "Read a file", "parameters": map[string]any{"type": "object"}},
+	}}
+	items, err := inputItems(request.Input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, registry, err := toMessages(request, items, Route{Model: "actual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if json.Unmarshal(raw, &body) != nil {
+		t.Fatal("invalid Messages JSON")
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 1 || len(registry) != 1 {
+		t.Fatalf("hosted tools were forwarded: %s", raw)
+	}
+	tool, _ := tools[0].(map[string]any)
+	if tool["description"] != "Read a file" {
+		t.Fatalf("local tool was dropped: %s", raw)
+	}
+	request.Tools = []map[string]any{{"type": "mystery"}}
+	if _, _, err := toMessages(request, items, Route{Model: "actual"}); err == nil || !strings.Contains(err.Error(), `"mystery"`) {
+		t.Fatalf("unknown tool type was accepted: %v", err)
+	}
+}
+
 func TestCodexReasoningSurvivesChatAndStructuredOutputConversion(t *testing.T) {
-	for _, effort := range []string{"low", "medium", "high"} {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
 		request := responseRequest{Model: "alias", Input: json.RawMessage(`"fixture"`), Reasoning: map[string]any{"effort": effort}, Text: map[string]any{"format": map[string]any{"type": "json_schema", "schema": map[string]any{"type": "object"}}}}
 		items, _ := inputItems(request.Input)
 		raw, _, err := toMessages(request, items, Route{Model: "actual"})

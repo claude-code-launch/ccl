@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,13 @@ import (
 const maxBodyBytes = 32 << 20
 
 type Options struct {
-	Desktop bool
+	// Independent selects a custom provider with its own loopback credential,
+	// rather than sharing OpenAI's provider/account state in the desktop app.
+	Independent bool
+	Desktop     bool
+	// ListenAddress preserves the desktop endpoint across daemon replacement.
+	// It may only name an explicit IPv4 loopback port; empty chooses a free one.
+	ListenAddress string
 	// Native upstream overrides are for local integration fixtures. Commands
 	// never populate them from client requests or environment variables.
 	OpenAIURL  string
@@ -45,16 +52,21 @@ type Route struct {
 }
 
 type Gateway struct {
-	runtime   *oauthproxy.Runtime
-	listener  net.Listener
-	server    *http.Server
-	client    *http.Client
-	token     string
-	routes    map[string]Route
-	models    []Model
-	options   Options
-	history   responseHistory
-	closeOnce sync.Once
+	runtime          *oauthproxy.Runtime
+	listener         net.Listener
+	server           *http.Server
+	client           *http.Client
+	token            string
+	routes           map[string]Route
+	models           []Model
+	options          Options
+	history          responseHistory
+	migrations       responseHistory
+	migrationNotices responseHistory
+	// Only compaction of a catalogued previous native model may use the
+	// independent provider's selected default. Normal unknown routes still fail.
+	legacyCompaction map[string]Route
+	closeOnce        sync.Once
 }
 
 func randomID(prefix string) string {
@@ -71,7 +83,17 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	if provider.IsClaudeAccount(configured) || provider.IsDefaultProvider(configured.Name) {
 		return nil, fmt.Errorf("native Claude accounts cannot be used by Codex; select a CCL API or OAuth provider")
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	address := options.ListenAddress
+	if address == "" {
+		address = "127.0.0.1:0"
+	} else {
+		host, port, err := net.SplitHostPort(address)
+		n, portErr := strconv.Atoi(port)
+		if err != nil || host != "127.0.0.1" || portErr != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("Codex listener requires an explicit 127.0.0.1 port")
+		}
+	}
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -85,10 +107,24 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	native := len(p.ModelProtocols) == 0 && ((p.OAuthProvider == "" && provider.IsOpenAIResponsesType(p.Type)) ||
 		p.OAuthProvider == "gpt" || p.OAuthProvider == "grok")
 	details, names := runtime.ModelDetails(), runtime.ModelDisplayNames()
-	for _, model := range runtime.Models() {
+	models := runtime.Models()
+	if !native {
+		details, err = withModelsDevReasoning(models, details, names, p)
+		if err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
+	}
+	details = withGPTReasoningDefaults(models, details)
+	for _, model := range models {
 		alias := "ccl/" + url.PathEscape(p.Name) + "/" + model
 		g.routes[alias] = Route{Alias: alias, Model: model, NativeResponses: native, ThinkingBudget: p.OAuthProvider == "" && provider.IsAnthropicType(p.Type)}
-		g.models = append(g.models, newModel(alias, model, details, names))
+		entry := newModel(alias, model, details, names)
+		if native {
+			entry["supports_search_tool"] = false
+		}
+		applyProviderContext(entry, model, p)
+		g.models = append(g.models, entry)
 	}
 	if p.OAuthProvider == oauthproxy.ProviderWorkBuddy || p.OAuthProvider == oauthproxy.ProviderWorkBuddyCN {
 		g.models = uniqueWorkBuddyModels(g.models, g.routes)
@@ -111,7 +147,13 @@ func (g *Gateway) Close() {
 	if g == nil {
 		return
 	}
-	g.closeOnce.Do(func() { _ = g.server.Close(); g.client.CloseIdleConnections() })
+	g.closeOnce.Do(func() {
+		_ = g.server.Close()
+		// Close may run before Serve registers its listener with the server.
+		// Release it synchronously so the replacement can reuse this port.
+		_ = g.listener.Close()
+		g.client.CloseIdleConnections()
+	})
 }
 
 func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
@@ -148,16 +190,47 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	route, ok := g.routes[request.Model]
+	if !ok && g.options.Independent {
+		items, _ := inputItems(request.Input)
+		if isClientCompaction(r, request, items, path) {
+			if replacement, allowed := g.legacyCompaction[request.Model]; allowed {
+				route, ok = replacement, true
+				request.Model = route.Alias
+				request.Reasoning = nil
+				for _, model := range g.models {
+					if model["slug"] == route.Alias {
+						if effort, _ := model["default_reasoning_level"].(string); effort != "" {
+							request.Reasoning = map[string]any{"effort": effort}
+						}
+						break
+					}
+				}
+				var fields map[string]json.RawMessage
+				_ = json.Unmarshal(body, &fields)
+				fields["model"], _ = json.Marshal(request.Model)
+				if request.Reasoning == nil {
+					delete(fields, "reasoning")
+				} else {
+					fields["reasoning"], _ = json.Marshal(request.Reasoning)
+				}
+				body, _ = json.Marshal(fields)
+			}
+		}
+	}
 	if !ok {
 		if !g.options.Desktop || strings.HasPrefix(strings.ToLower(request.Model), "ccl/") {
-			writeError(w, http.StatusBadRequest, "invalid_request_error", "model is not in the CCL routing catalog", "model_not_found")
+			name := request.Model
+			if len(name) > 128 {
+				name = name[:128] + "..."
+			}
+			writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model is not in the CCL routing catalog: %q", name), "model_not_found")
 			return
 		}
-		g.serveNative(w, r, body, path)
+		g.serveNative(w, r, nativeHistory(body), path)
 		return
 	}
 	if route.NativeResponses {
-		g.forwardResponses(w, r, body, route, path)
+		g.forwardResponses(w, r, nativeHistory(body), route, path)
 		return
 	}
 	g.serveBridge(w, r, request, route, path == "/responses/compact")

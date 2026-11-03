@@ -71,7 +71,7 @@ ACP 和网页模式也可选择这些账号。ACP 运行时跨 Claude 账号或�
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | 映射模型槽位；`ccl map auto` 自动填充 |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | 订阅登录 / 清理未使用凭据 |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | provider 管理；`preview` 查看注入的 settings |
-| `ccl proxy start` / `-p <name>` / `status` / `stop` | 共用后台代理：连接 Claude，并向 Codex 加入当前配置的模型 |
+| `ccl proxy start` / `-p <name>` / `status` / `stop` | Codex 后台代理：向模型选择器加入当前配置的模型 |
 | `ccl acp [install]` | Agent Client Protocol（Xcode 27 等） |
 | `ccl serve [--port <port> \| --socket [path]]` | 浏览器里使用 ccl 会话（HTTP + SSE；默认只监听回环地址、随机端口；`--socket` 改用 Unix socket） |
 | `ccl cloud login\|push\|pull\|status\|remote` | 加密云同步（iCloud / Google Drive） |
@@ -88,18 +88,22 @@ ACP 和网页模式也可选择这些账号。ACP 运行时跨 Claude 账号或�
 ```bash
 ccl proxy start        # 使用 ccl use 当前选择的配置
 ccl proxy -p deepseek  # 或显式指定本次代理的 provider
-claude                  # 任意终端直接运行，共用该代理
-ccl proxy stop          # 逐字段恢复原配置
+# 重启 Codex 后选择 CCL 模型
+ccl proxy stop          # 恢复 Codex 原配置
 ```
 
-- 修改 provider（`set` / `map` / `provider env`）后需重新 `ccl proxy start -p <name>`；切换或停止后重启已打开的 Claude 会话。
+- 修改 provider（`set` / `map` / `provider env`）后需重新 `ccl proxy start -p <name>`。
+- OpenAI 额度耗尽后要使用其他提供商，可运行 `ccl proxy start --independent` 并重启 Codex。独立模式使用 CCL 自己的 provider 和会话凭据，列表只显示 CCL 模型；`ccl proxy start --shared` 切回原生与 CCL 共用的列表。后续启动、菜单切换沿用当前模式。已有本地会话可继续使用。
 - `ccl use` 只影响 `ccl` 启动，不会切换运行中的代理。
-- 已使用过 Codex 时，启动代理也会更新 `~/.codex/config.toml`（支持 `CODEX_HOME`）。重启 Codex 后，同一模型选择器中同时显示原生模型和当前配置的第三方模型。列表只显示模型名称；与原生模型同名时加简短的 `CCL` 标记。WorkBuddy 的同名内部版本合并为一项。
-- 上游明确支持推理的模型会显示强度选项；WorkBuddy 提供低、中、高三档，GPT 账号保留上游公布的档位，所选强度会传到上游。未声明支持的模型不显示推理选项。
+- 先打开 Codex 一次建立配置；启动代理会更新 `~/.codex/config.toml`（支持 `CODEX_HOME`）。重启 Codex 后，同一模型选择器中同时显示原生模型和当前配置的第三方模型。列表只显示模型名称；与原生模型同名时加简短的 `CCL` 标记。WorkBuddy 的同名内部版本合并为一项。
+- Codex 的 CCL 模型沿用“上下文与压缩”设置：Default 为 200K，模型池或槽位中带 `[1m]` 的模型为 1M；Balanced 为所选的 500K / 800K，均在 85% 自动压缩。转换协议的模型由 CCL 生成可回放摘要，原生 Responses 模型保留上游压缩。
+- 转换协议的模型支持 Codex 客户端工具搜索：CCL 将搜索转换为普通函数调用，由 Codex 检索本地工具并返回选中的定义，避免一次发送全部延迟加载工具。实际工具仍由 Codex 执行并检查权限；模型需要能正确使用搜索函数和返回的工具定义。
+- 支持图片的模型按上游声明开放截图读取；转换模型沿用本机原生目录提供的客户端工具模式，computer use 仍由 Codex 客户端执行并检查权限。常规对话可在转换模型与原生 GPT 之间切换；GPT 的原生加密压缩内容无法解密；转换模型会校验同一会话的本地记录与压缩项，再恢复有边界的可见历史摘录，并提示旧细节可能缺失。缺少匹配记录时明确报错。
+- 转换模型的 effort 档位来自 models.dev 元数据缓存，按模型匹配，不再统一为低、中、高。OAuth 登录和 `ccl set` 保存时按需刷新；也可运行 `ccl set --refresh-models` 单独更新。网络失败使用 `~/.ccl/cache/modelsdev.json`；未匹配或尚无缓存时保留兼容设置。刷新后重新运行 `ccl proxy start` 并重启 Codex 加载新目录。原生 Responses 模型保留自身元数据。
 - Codex 保留原生 OpenAI Provider 与登录。原生请求继续走原有 ChatGPT / OpenAI 服务，只有独立白名单中的 `ccl/<provider>/<model>` 发往 CCL；转发到 CCL 时移除 Codex 凭据，WebSocket 用 426 回退 HTTP Responses。原生 Claude 订阅账号不加入该目录。
 - 原生模型信息来自现有目录或 `models_cache.json`，必要时读取已安装 Codex 的 `debug models --bundled`，不写死原生模型名称。缺少缓存时需安装较新的 Codex CLI，或让 CCL 能找到桌面 App 自带的 Codex。原有自定义 Provider 或默认 profile 的目录覆盖会明确报错，避免改变其路由。
-- macOS 状态栏菜单可切换配置或停止代理。切换成功后同步更新 CCL 的当前选择，并正常退出、重新打开正在运行的 Codex 以刷新目录（会短暂关闭窗口）；选择相同且未变更的配置不会重启。Codex 拒绝退出时提示手动重启，不强制结束进程。新配置启动失败会恢复原代理并提示错误。代理退出或异常停止后图标消失。无桌面环境可用 `CCL_PROXY_NO_MENUBAR=1` 关闭图标。
-- 停止或异常恢复时，Claude 与 Codex 只恢复仍等于代理写入值的字段，保留后续用户修改。通过命令行启动、切换或停止后，请重启 Codex 以重新载入目录。
+- macOS 状态栏菜单可切换配置或停止代理。切换成功后同步更新 CCL 的当前选择；Codex 保持运行，需要手动重启以加载新目录。新配置启动失败会恢复原代理并提示错误。代理退出或异常停止后图标消失。无桌面环境可用 `CCL_PROXY_NO_MENUBAR=1` 关闭图标。
+- 代理仅管理 Codex 配置，普通 `ccl` / Claude Code 启动独立运行。停止或异常恢复时只恢复仍等于代理写入值的 Codex 字段，保留后续用户修改；升级旧版共用代理时会先恢复其遗留的 Claude 设置。启动、切换或停止后，请重启 Codex 以重新载入目录。
 - 异常退出后，下次运行任意 `ccl` 命令会按 `~/.ccl/proxy/state.json` 自动恢复；启动诊断见 `~/.ccl/proxy/proxy.log`。
 
 ### Xcode 27 / ACP
@@ -143,7 +147,7 @@ Claude Code 始终说 Anthropic Messages。Anthropic API-key 网关在普通启�
 - `~/.ccl/auth/*.json`：OAuth 凭据（0600）。
 - `provider.type`：`openai`（Chat）/ `openai_responses` / `anthropic`，由用户显式选择，不按 URL 猜测；Anthropic 直连的 `endpoint` 用裸域名（不带 `/v1`），Bearer 鉴权设 `anthropicAuth: bearer`。
 - `--settings` 优先级高于用户设置，因此 `outputStyle` / `language` / `statusLine` / `modelPicker` 仅在你自己没设置时由 ccl 提供。启动时会丢弃 shell 里继承的 `CLAUDE_CODE_USE_*`、`ANTHROPIC_*MODEL` 等变量；需要的值写进 provider（`ccl map` / `ccl provider env`）。
-- 上下文预设：Default / Balanced 500K / Balanced 800K（在 80% 自动压缩）。
+- 上下文预设：Default / Balanced 500K / Balanced 800K（在 85% 自动压缩）。
 
 ### 云同步
 
@@ -235,7 +239,7 @@ ACP and the web UI can select these accounts. Restart the ACP agent when switchi
 | `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | Map model slots; `ccl map auto` fills them |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | Subscription login / remove unused credentials |
 | `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort\|ultracode` | Provider management; `preview` shows the injected settings |
-| `ccl proxy start` / `-p <name>` / `status` / `stop` | Shared background proxy for Claude and the selected provider's models in Codex |
+| `ccl proxy start` / `-p <name>` / `status` / `stop` | Background proxy for the selected provider's models in Codex |
 | `ccl acp [install]` | Agent Client Protocol (Xcode 27, …) |
 | `ccl serve [--port <port> \| --socket [path]]` | ccl conversations in a browser (HTTP + SSE; loopback and a free port by default; `--socket` for a Unix socket) |
 | `ccl cloud login\|push\|pull\|status\|remote` | Encrypted sync (iCloud / Google Drive) |
@@ -252,18 +256,22 @@ Every subcommand supports `--help`.
 ```bash
 ccl proxy start        # use the provider selected with ccl use
 ccl proxy -p deepseek  # or explicitly select this proxy's provider
-claude                  # run it from any terminal; they share the proxy
-ccl proxy stop          # restores your original settings field by field
+# restart Codex and select a CCL model
+ccl proxy stop          # restores your original Codex settings
 ```
 
-- After changing a provider (`set` / `map` / `provider env`), run `ccl proxy start -p <name>` again; restart open Claude sessions after switching or stopping.
+- After changing a provider (`set` / `map` / `provider env`), run `ccl proxy start -p <name>` again.
+- To use another provider after OpenAI quota is exhausted, run `ccl proxy start --independent` and restart Codex. The custom CCL provider has its own session credential and a CCL-only picker. `ccl proxy start --shared` restores the merged native/CCL picker. Subsequent starts and menu switches retain the current mode. Existing local chats can resume.
 - `ccl use` only affects `ccl` launches, not a running proxy.
-- If Codex has already been used, startup also updates `~/.codex/config.toml` (honors `CODEX_HOME`). Restart Codex to see native models and the selected provider's models in one picker. Labels show only model names, with a short `CCL` marker for a collision with a native name. WorkBuddy's internal revisions sharing a name appear once.
-- Models with explicit upstream reasoning support expose effort controls. WorkBuddy offers low, medium and high; GPT accounts retain their advertised levels. The selected effort reaches the upstream provider. Models without advertised support have no reasoning controls.
+- Open Codex once to create its profile; startup updates `~/.codex/config.toml` (honors `CODEX_HOME`). Restart Codex to see native models and the selected provider's models in one picker. Labels show only model names, with a short `CCL` marker for a collision with a native name. WorkBuddy's internal revisions sharing a name appear once.
+- CCL models in Codex follow the provider's context/compaction setting: Default uses 200K, or 1M for models marked `[1m]` in the saved pool or slots; Balanced uses the selected 500K / 800K budget. All compact at 85%. CCL generates replayable summaries for translated protocols; native Responses models retain upstream compaction.
+- Translated models support Codex client tool search: CCL adapts search to an ordinary function call, Codex searches local tools, and CCL loads the returned definitions instead of sending all deferred tools up front. Codex executes actual tools and enforces permissions. The model must be able to use the search function and the discovered definitions correctly.
+- Models that advertise image input can read screenshots. Translated models follow the installed native catalog's client tool mode; Codex still executes computer use and checks permissions. Normal conversation history can switch between translated models and native GPT. Native GPT compaction cannot be decrypted. Converted models can validate the matching local chat/checkpoint and recover a bounded visible-history excerpt with a notice that older details may be missing. Missing or mismatched records fail explicitly.
+- Translated models use per-model effort tiers from the models.dev metadata cache. OAuth login and confirmed `ccl set` saves refresh it; `ccl set --refresh-models` updates metadata alone. Network failures use `~/.ccl/cache/modelsdev.json`; missing/unmatched metadata retains compatibility settings. After refreshing, run `ccl proxy start` and restart Codex to load its updated catalog. Native Responses models retain their own metadata.
 - Codex retains its native OpenAI provider and login. Native requests keep their original ChatGPT / OpenAI route; only the separate `ccl/<provider>/<model>` allow-list goes to CCL, with native credentials removed. WebSockets receive 426 to fall back to HTTP Responses. Native Claude subscription accounts are excluded.
 - Native metadata comes from an existing catalog or `models_cache.json`, with the installed Codex's `debug models --bundled` as fallback; native names are never hardcoded. Without a cache, install a recent Codex CLI or make the desktop app's bundled Codex discoverable. A conflicting custom provider or default-profile catalog override is reported instead of changing its routing.
-- macOS shows a menu bar icon with the checked current provider, configuration switching and Stop Proxy. A successful switch updates the CCL selection and normally quits and reopens a running Codex to reload its catalog (its windows briefly close). Choosing an unchanged provider does not restart it. A refused quit prompts a manual restart; CCL never forces termination. A failed proxy start restores the previous proxy and reports the error. The icon exits with the proxy, including crashes. Set `CCL_PROXY_NO_MENUBAR=1` in a headless environment to disable it.
-- Stop and crash recovery restore only unchanged fields owned by the proxy in both Claude and Codex configuration. Later user edits are retained. After starting, switching or stopping from the command line, restart Codex to reload its catalog.
+- macOS shows a menu bar icon with the checked current provider, configuration switching and Stop Proxy. A switch updates the CCL selection and leaves Codex running; restart Codex yourself to load the new catalog. A failed proxy start restores the previous proxy and reports the error. The icon exits with the proxy, including crashes. Set `CCL_PROXY_NO_MENUBAR=1` in a headless environment to disable it.
+- The proxy manages only Codex configuration; ordinary ccl/Claude Code launches remain independent. Stop and crash recovery restore only unchanged Codex fields owned by the proxy, retaining later edits. Upgrading an older shared proxy also restores its legacy Claude settings once. Restart Codex after starting, switching or stopping to reload its catalog.
 - After a crash, the next `ccl` command restores settings from `~/.ccl/proxy/state.json`; startup diagnostics are in `~/.ccl/proxy/proxy.log`.
 
 ### Xcode 27 / ACP
@@ -307,7 +315,7 @@ Claude Code always speaks Anthropic Messages. Anthropic API-key gateways are cal
 - `~/.ccl/auth/*.json`: OAuth credentials (0600).
 - `provider.type`: `openai` (Chat) / `openai_responses` / `anthropic`, chosen explicitly, never guessed from the URL. For direct Anthropic gateways use a bare-domain `endpoint` (no `/v1`) and set `anthropicAuth: bearer` for Bearer auth.
 - `--settings` outranks user settings, so `outputStyle` / `language` / `statusLine` / `modelPicker` are provided by ccl only when you have not set them yourself. Inherited shell variables such as `CLAUDE_CODE_USE_*` and `ANTHROPIC_*MODEL` are dropped at launch; put needed values in the provider (`ccl map` / `ccl provider env`).
-- Context presets: Default / Balanced 500K / Balanced 800K (auto-compact at 80%).
+- Context presets: Default / Balanced 500K / Balanced 800K (auto-compact at 85%).
 
 ### Cloud sync
 

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,10 +66,13 @@ type qoderStreamError struct {
 }
 
 func (err *qoderStreamError) Error() string {
-	if err.queue == nil || !err.queue.IsQueued {
+	if err.queue == nil {
 		return fmt.Sprintf("Qoder stream returned status %d: %s", err.status, err.body)
 	}
 	detail := "Qoder model is temporarily queued"
+	if !err.queue.IsQueued {
+		detail = "Qoder model is temporarily resource limited"
+	}
 	if err.queue.QueueCount > 0 {
 		detail += fmt.Sprintf(" (%d requests ahead", err.queue.QueueCount)
 		if err.queue.RetryAfterSeconds > 0 {
@@ -136,15 +140,11 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 		if name := strings.TrimSpace(model.Name); name != "" {
 			modelNames[model.ID] = name
 		}
-		if model.PriceFactor != nil {
-			modelDetails[strings.ToLower(model.ID)] = protocol.ModelInfo{
-				ID:                 model.ID,
-				RateMultiplier:     model.PriceFactor,
-				RateUnit:           "credits",
-				IsNew:              model.IsNew,
-				PromotionAvailable: model.PromotionAvailable,
-			}
+		info, ok := qoderModelDetail(model)
+		if !ok {
+			continue
 		}
+		modelDetails[strings.ToLower(model.ID)] = info
 	}
 	started := make(chan struct{})
 	close(started)
@@ -320,9 +320,6 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 		writer.Header().Set("Cache-Control", "no-cache")
 		writer.Header().Set("Connection", "keep-alive")
 		assembler := newAnthropicResponseAssembler(converted.anthropic, writer)
-		if err := assembler.start(); err != nil {
-			return
-		}
 		usage, streamErr := processQoderEventStream(requestCtx, upstream.Body, assembler)
 		if streamErr == nil {
 			service.recordUsage(converted.model, usage)
@@ -334,8 +331,19 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 				LogErrorEvent("stream_conversion_failed", "component", "qoder", "request_id", requestID,
 					"model", converted.model.ID, "stream", true, "duration", logDuration(started), "error", streamErr)
 			}
+			// Qoder returns capacity failures inside HTTP 200 SSE envelopes.
+			// Until actual output starts, preserve HTTP 429 and Retry-After
+			// instead of committing a successful stream followed by an error.
+			if !assembler.started {
+				writeQoderStreamError(writer, streamErr)
+				return
+			}
+			detail := map[string]any{"type": qoderAnthropicErrorType(streamErr), "message": streamErr.Error()}
+			if seconds := qoderRetryAfterSeconds(streamErr); seconds > 0 {
+				detail["retry_after_seconds"] = seconds
+			}
 			_ = assembler.emit("error", map[string]any{
-				"type": "error", "error": map[string]any{"type": qoderAnthropicErrorType(streamErr), "message": streamErr.Error()},
+				"type": "error", "error": detail,
 			})
 		}
 		if streamErr == nil {
@@ -346,22 +354,17 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 	}
 
 	assembler := newAnthropicResponseAssembler(converted.anthropic, nil)
-	if err := assembler.start(); err != nil {
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
-		return
-	}
 	usage, err := processQoderEventStream(requestCtx, upstream.Body, assembler)
 	if err != nil {
-		status := http.StatusBadGateway
+		status := qoderStreamHTTPStatus(err)
 		if qoderAnthropicErrorType(err) == "rate_limit_error" {
-			status = http.StatusTooManyRequests
 			logQoderQueue(requestCtx, converted.model.ID, err)
 		} else {
 			LogErrorEvent("stream_conversion_failed", "component", "qoder", "request_id", requestID,
 				"model", converted.model.ID, "stream", false, "returned_status", status,
 				"duration", logDuration(started), "error", err)
 		}
-		writeAnthropicError(writer, status, qoderAnthropicErrorType(err), err.Error())
+		writeQoderStreamError(writer, err)
 		return
 	}
 	service.recordUsage(converted.model, usage)
@@ -628,6 +631,111 @@ func qoderModelsFromCatalog(entries []map[string]any) []qoderModel {
 	return models
 }
 
+// qoderModelDetail is the picker metadata for one catalog entry. A model with
+// no credit rate, effort rungs, context window or vision contributes nothing.
+// Effort rungs are published even when the catalog leaves is_reasoning false,
+// because Kimi and Performance advertise efforts that way. Retain advertised
+// image and token capabilities alongside rates and reasoning controls.
+func qoderModelDetail(model qoderModel) (protocol.ModelInfo, bool) {
+	levels, defaultLevel := qoderReasoningLevels(model.Config)
+	if model.PriceFactor == nil && len(levels) == 0 && model.ContextWindow <= 0 && !model.Vision {
+		return protocol.ModelInfo{}, false
+	}
+	info := protocol.ModelInfo{
+		ID: model.ID, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxTokens,
+		ReasoningLevels: levels, DefaultReasoningLevel: defaultLevel,
+	}
+	if model.Vision {
+		info.InputModalities = []string{"text", "image"}
+	}
+	if model.PriceFactor != nil {
+		info.RateMultiplier = model.PriceFactor
+		info.RateUnit = "credits"
+		info.IsNew = model.IsNew
+		info.PromotionAvailable = model.PromotionAvailable
+	}
+	return info, true
+}
+
+// qoderEffortOrder is the Codex picker order. Catalog maps are unordered, and
+// the desktop slider follows this sequence.
+var qoderEffortOrder = []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+
+var qoderEffortDescription = map[string]string{
+	"low":    "Fast responses with lighter reasoning",
+	"medium": "Balances speed and reasoning depth for everyday tasks",
+	"high":   "Greater reasoning depth for complex problems",
+	"xhigh":  "Extra high reasoning depth for complex problems",
+	"max":    "Maximum reasoning depth for the hardest problems",
+	"ultra":  "Maximum reasoning with automatic task delegation",
+}
+
+// qoderReasoningLevels reads the effort rungs Qoder publishes in
+// thinking_config.enabled.efforts. A model with no rungs gets none, so Codex
+// does not invent a slider. The default is the rung marked is_default.
+func qoderReasoningLevels(config map[string]any) ([]protocol.ReasoningLevel, string) {
+	thinking, _ := config["thinking_config"].(map[string]any)
+	enabled, _ := thinking["enabled"].(map[string]any)
+	efforts, _ := enabled["efforts"].(map[string]any)
+	if len(efforts) == 0 {
+		return nil, ""
+	}
+	byEffort := make(map[string]map[string]any, len(efforts))
+	for key, raw := range efforts {
+		effort := strings.ToLower(strings.TrimSpace(key))
+		rung, _ := raw.(map[string]any)
+		byEffort[effort] = rung
+	}
+	levels := make([]protocol.ReasoningLevel, 0, len(byEffort))
+	chosen := ""
+	for _, effort := range qoderEffortOrder {
+		rung, ok := byEffort[effort]
+		if !ok {
+			continue
+		}
+		description := qoderEffortDescription[effort]
+		if text, _ := rung["description"].(string); strings.TrimSpace(text) != "" {
+			description = strings.TrimSpace(text)
+		}
+		levels = append(levels, protocol.ReasoningLevel{Effort: effort, Description: description})
+		if def, _ := rung["is_default"].(bool); def && chosen == "" {
+			chosen = effort
+		}
+	}
+	return levels, chosen
+}
+
+// qoderMatchEffort returns the catalog rung Codex asked for. An unknown rung
+// maps onto a rung this model actually lists, and an empty result means the
+// request should keep Qoder's own default.
+func qoderMatchEffort(levels []protocol.ReasoningLevel, asked string) string {
+	asked = strings.ToLower(strings.TrimSpace(asked))
+	switch asked {
+	case "", "none", "off", "disabled":
+		return ""
+	}
+	allowed := make(map[string]bool, len(levels))
+	for _, level := range levels {
+		allowed[level.Effort] = true
+	}
+	if allowed[asked] {
+		return asked
+	}
+	aliases := map[string][]string{
+		"minimal": {"low"},
+		"min":     {"low"},
+		"high":    {"xhigh", "max", "medium"},
+		"max":     {"xhigh", "high"},
+		"xhigh":   {"max", "high"},
+	}
+	for _, candidate := range aliases[asked] {
+		if allowed[candidate] {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func qoderMaxContextConfig(entry map[string]any) map[string]any {
 	configurations, ok := entry["context_config"].(map[string]any)
 	if !ok {
@@ -799,6 +907,9 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 		for _, choice := range event.Choices {
 			delta := choice.Delta
 			if reasoning := qoderStripThinkingTags(delta.ReasoningContent); reasoning != "" {
+				if err := assembler.start(); err != nil {
+					return usage, err
+				}
 				assembler.nativeReasoning = true
 				if err := assembler.flushInlineContent(); err != nil {
 					return usage, err
@@ -813,6 +924,9 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 				}
 			}
 			if delta.Content != "" {
+				if err := assembler.start(); err != nil {
+					return usage, err
+				}
 				content := delta.Content
 				if assembler.nativeReasoning {
 					content = qoderStripThinkingTags(content)
@@ -854,6 +968,9 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 	}
 	if err := scanner.Err(); err != nil {
 		return usage, fmt.Errorf("read Qoder event stream: %w", err)
+	}
+	if err := assembler.start(); err != nil {
+		return usage, err
 	}
 	indexes := make([]int, 0, len(tools))
 	for index := range tools {
@@ -912,10 +1029,43 @@ func qoderEnvelopeBody(data []byte) ([]byte, error) {
 
 func qoderAnthropicErrorType(err error) string {
 	var streamErr *qoderStreamError
-	if errors.As(err, &streamErr) && streamErr.queue != nil && streamErr.queue.IsQueued {
-		return "rate_limit_error"
+	if errors.As(err, &streamErr) {
+		if streamErr.queue != nil {
+			return "rate_limit_error"
+		}
+		if streamErr.status >= 400 && streamErr.status < 500 {
+			return anthropicErrorType(streamErr.status)
+		}
 	}
 	return "api_error"
+}
+
+func qoderStreamHTTPStatus(err error) int {
+	var streamErr *qoderStreamError
+	if errors.As(err, &streamErr) {
+		if streamErr.queue != nil {
+			return http.StatusTooManyRequests
+		}
+		if streamErr.status >= 400 && streamErr.status < 500 {
+			return streamErr.status
+		}
+	}
+	return http.StatusBadGateway
+}
+
+func qoderRetryAfterSeconds(err error) int {
+	var streamErr *qoderStreamError
+	if errors.As(err, &streamErr) && streamErr.queue != nil {
+		return max(0, streamErr.queue.RetryAfterSeconds)
+	}
+	return 0
+}
+
+func writeQoderStreamError(writer http.ResponseWriter, err error) {
+	if seconds := qoderRetryAfterSeconds(err); seconds > 0 {
+		writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
+	writeAnthropicError(writer, qoderStreamHTTPStatus(err), qoderAnthropicErrorType(err), err.Error())
 }
 
 func logQoderQueue(ctx context.Context, model string, err error) {
@@ -949,10 +1099,12 @@ func qoderQueueFromValue(value any, depth int) *qoderQueueInfo {
 	case string:
 		return qoderQueueFromJSON([]byte(typed), depth+1)
 	case map[string]any:
-		if queued, _ := typed["isQueued"].(bool); queued {
+		if queued, present := typed["isQueued"].(bool); present {
 			raw, _ := json.Marshal(typed)
 			var info qoderQueueInfo
-			if json.Unmarshal(raw, &info) == nil {
+			// RESOURCE_LIMIT can explicitly say isQueued=false: the request
+			// was rejected before joining the queue and still carries a wait.
+			if json.Unmarshal(raw, &info) == nil && (queued || info.RetryAfterSeconds > 0) {
 				return &info
 			}
 		}

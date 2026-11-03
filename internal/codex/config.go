@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -22,16 +23,20 @@ import (
 )
 
 type ConfigChange struct {
-	Key     string  `json:"key"`
-	Before  *string `json:"before"`
-	Applied *string `json:"applied"`
+	Scope   []string `json:"scope,omitempty"`
+	Key     string   `json:"key"`
+	Before  *string  `json:"before"`
+	Applied *string  `json:"applied"`
 }
 type Overlay struct {
-	Path        string         `json:"path"`
-	CatalogPath string         `json:"catalog_path"`
-	BaseURL     string         `json:"base_url"`
-	Changes     []ConfigChange `json:"changes"`
+	Path          string         `json:"path"`
+	CatalogPath   string         `json:"catalog_path"`
+	BaseURL       string         `json:"base_url"`
+	Changes       []ConfigChange `json:"changes"`
+	ProviderBlock string         `json:"provider_block,omitempty"`
 }
+
+const IndependentProviderID = "ccl_proxy"
 
 func Home() (string, error) {
 	if directory := strings.TrimSpace(os.Getenv("CODEX_HOME")); directory != "" {
@@ -66,6 +71,7 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 		return nil, err
 	}
 	selected, _ := fields["model_provider"].(string)
+	var profileScope []string
 	if profile, _ := fields["profile"].(string); profile != "" {
 		profiles, _ := fields["profiles"].(map[string]any)
 		active, _ := profiles[profile].(map[string]any)
@@ -76,11 +82,21 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 			selected = override
 		}
 		if override, _ := active["model_catalog_json"].(string); override != "" {
-			return nil, fmt.Errorf("Codex's default profile overrides model_catalog_json; use its root catalog setting for the shared proxy")
+			if !g.options.Independent {
+				return nil, fmt.Errorf("Codex's default profile overrides model_catalog_json; use its root catalog setting for the shared proxy")
+			}
 		}
+		profileScope = []string{"profiles", profile}
 	}
-	if selected != "" && selected != "openai" {
+	if !g.options.Independent && selected != "" && selected != "openai" {
 		return nil, fmt.Errorf("Codex uses a custom model_provider; select Codex's native OpenAI provider before enabling its CCL proxy")
+	}
+	if g.options.Independent {
+		providers, _ := fields["model_providers"].(map[string]any)
+		if _, exists := providers[IndependentProviderID]; exists {
+			return nil, fmt.Errorf("Codex provider %q already exists; rename that provider before enabling independent CCL mode", IndependentProviderID)
+		}
+		g.options.Desktop = false
 	}
 	if original, _ := fields["openai_base_url"].(string); original != "" {
 		target, err := url.Parse(original)
@@ -93,9 +109,13 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 	if err != nil {
 		return nil, err
 	}
+	g.inheritClientToolMode(native)
 	combined, err := MergeCatalog(native, g.Models())
 	if err != nil {
 		return nil, err
+	}
+	if g.options.Independent {
+		combined = Catalog{Models: g.Models()}
 	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, err
@@ -110,20 +130,56 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 	}
 	base := g.BaseURL()
 	overlay := &Overlay{Path: path, CatalogPath: catalogPath, BaseURL: base}
-	for key, value := range map[string]string{"openai_base_url": base, "model_catalog_json": catalogPath} {
-		var before *string
-		if previous, exists := fields[key]; exists {
-			v, ok := previous.(string)
-			if !ok {
-				_ = os.Remove(catalogPath)
-				return nil, fmt.Errorf("Codex %s must be a string", key)
+	values := map[string]string{"openai_base_url": base, "model_catalog_json": catalogPath}
+	if g.options.Independent {
+		delete(values, "openai_base_url")
+		model, _ := fields["model"].(string)
+		if len(profileScope) > 0 {
+			if selected, _ := scopeFields(fields, profileScope)["model"].(string); selected != "" {
+				model = selected
 			}
-			before = &v
 		}
-		v := value
-		overlay.Changes = append(overlay.Changes, ConfigChange{Key: key, Before: before, Applied: &v})
+		if _, ok := g.routes[model]; !ok {
+			model, _ = g.models[0]["slug"].(string)
+		}
+		g.legacyCompaction = make(map[string]Route)
+		for _, entry := range native.Models {
+			if slug, _ := entry["slug"].(string); slug != "" && !strings.HasPrefix(strings.ToLower(slug), "ccl/") {
+				g.legacyCompaction[slug] = g.routes[model]
+			}
+		}
+		values["model_provider"], values["model"] = IndependentProviderID, model
+		quote := func(value string) string { encoded, _ := json.Marshal(value); return string(encoded) }
+		overlay.ProviderBlock = fmt.Sprintf("\n# CCL temporary provider\n[model_providers.%s]\nname = \"CCL\"\nbase_url = %s\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\nexperimental_bearer_token = %s\n# End CCL temporary provider\n", IndependentProviderID, quote(base), quote(g.Token()))
 	}
-	sort.Slice(overlay.Changes, func(i, j int) bool { return overlay.Changes[i].Key < overlay.Changes[j].Key })
+	addChanges := func(scope []string, source map[string]any, values map[string]string) error {
+		for key, value := range values {
+			var before *string
+			if previous, exists := source[key]; exists {
+				v, ok := previous.(string)
+				if !ok {
+					return fmt.Errorf("Codex %s must be a string", key)
+				}
+				before = &v
+			}
+			v := value
+			overlay.Changes = append(overlay.Changes, ConfigChange{Scope: scope, Key: key, Before: before, Applied: &v})
+		}
+		return nil
+	}
+	if err := addChanges(nil, fields, values); err != nil {
+		_ = os.Remove(catalogPath)
+		return nil, err
+	}
+	if g.options.Independent && len(profileScope) > 0 {
+		if err := addChanges(profileScope, scopeFields(fields, profileScope), values); err != nil {
+			_ = os.Remove(catalogPath)
+			return nil, err
+		}
+	}
+	sort.Slice(overlay.Changes, func(i, j int) bool {
+		return strings.Join(overlay.Changes[i].Scope, ".")+overlay.Changes[i].Key < strings.Join(overlay.Changes[j].Scope, ".")+overlay.Changes[j].Key
+	})
 	return overlay, nil
 }
 
@@ -252,6 +308,17 @@ func (b *limitedBuffer) Write(data []byte) (int, error) {
 // editRoot changes string-valued root keys by byte ranges. Comments, tables,
 // key quoting, CRLFs and every unrelated field keep their original bytes.
 func editRoot(data []byte, values map[string]*string) ([]byte, error) {
+	return editScope(data, nil, values)
+}
+
+func scopeFields(fields map[string]any, scope []string) map[string]any {
+	for _, key := range scope {
+		fields, _ = fields[key].(map[string]any)
+	}
+	return fields
+}
+
+func editScope(data []byte, scope []string, values map[string]*string) ([]byte, error) {
 	if _, err := configFields(data); err != nil {
 		return nil, err
 	}
@@ -263,13 +330,31 @@ func editRoot(data []byte, values map[string]*string) ([]byte, error) {
 	seen := make(map[string]bool)
 	parser := unstable.Parser{}
 	parser.Reset(data)
-	inRoot := true
+	var currentScope []string
+	insertAt := 0
+	foundScope := len(scope) == 0
 	for parser.NextExpression() {
 		node := parser.Expression()
 		if node.Kind == unstable.Table || node.Kind == unstable.ArrayTable {
-			inRoot = false
+			currentScope = nil
+			keys := node.Key()
+			for keys.Next() {
+				currentScope = append(currentScope, string(keys.Node().Data))
+			}
+			if slices.Equal(currentScope, scope) {
+				foundScope = true
+				keys = node.Key()
+				keys.Next()
+				start := int(keys.Node().Raw.Offset)
+				end := bytes.IndexByte(data[start:], '\n')
+				if end < 0 {
+					insertAt = len(data)
+				} else {
+					insertAt = start + end + 1
+				}
+			}
 		}
-		if !inRoot || node.Kind != unstable.KeyValue {
+		if !slices.Equal(currentScope, scope) || node.Kind != unstable.KeyValue {
 			continue
 		}
 		key := node.Key()
@@ -301,6 +386,9 @@ func editRoot(data []byte, values map[string]*string) ([]byte, error) {
 	if err := parser.Error(); err != nil {
 		return nil, fmt.Errorf("cannot parse Codex configuration")
 	}
+	if !foundScope {
+		return nil, fmt.Errorf("Codex configuration table changed during startup")
+	}
 	sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
 	result := append([]byte(nil), data...)
 	for _, item := range edits {
@@ -318,7 +406,11 @@ func editRoot(data []byte, values map[string]*string) ([]byte, error) {
 			fmt.Fprintf(&prefix, "%s = %s\n", key, raw)
 		}
 	}
-	result = append([]byte(prefix.String()), result...)
+	insert := []byte(prefix.String())
+	if len(insert) > 0 && insertAt > 0 && result[insertAt-1] != '\n' {
+		insert = append([]byte{'\n'}, insert...)
+	}
+	result = append(append(append([]byte(nil), result[:insertAt]...), insert...), result[insertAt:]...)
 	if _, err := configFields(result); err != nil {
 		return nil, err
 	}
@@ -357,15 +449,26 @@ func (o *Overlay) Apply(ctx context.Context) error {
 		return nil
 	}
 	return withConfig(ctx, o.Path, func(data []byte, fields map[string]any) ([]byte, error) {
-		values := make(map[string]*string)
+		if o.ProviderBlock != "" {
+			providers, _ := fields["model_providers"].(map[string]any)
+			if _, exists := providers[IndependentProviderID]; exists {
+				return nil, fmt.Errorf("CCL provider table changed during startup")
+			}
+		}
 		for _, change := range o.Changes {
-			current, exists := fields[change.Key]
+			current, exists := scopeFields(fields, change.Scope)[change.Key]
 			if (change.Before == nil && exists) || (change.Before != nil && current != *change.Before) {
 				return nil, fmt.Errorf("Codex %s changed during proxy startup; retry", change.Key)
 			}
-			values[change.Key] = change.Applied
 		}
-		return editRoot(data, values)
+		var err error
+		for _, change := range o.Changes {
+			data, err = editScope(data, change.Scope, map[string]*string{change.Key: change.Applied})
+			if err != nil {
+				return nil, err
+			}
+		}
+		return append(data, []byte(o.ProviderBlock)...), nil
 	})
 }
 func (o *Overlay) Restore(ctx context.Context) error {
@@ -373,14 +476,23 @@ func (o *Overlay) Restore(ctx context.Context) error {
 		return nil
 	}
 	err := withConfig(ctx, o.Path, func(data []byte, fields map[string]any) ([]byte, error) {
-		values := make(map[string]*string)
+		if o.ProviderBlock != "" {
+			data = bytes.Replace(data, []byte(o.ProviderBlock), nil, 1)
+		}
 		for _, change := range o.Changes {
-			current, exists := fields[change.Key]
+			current, exists := scopeFields(fields, change.Scope)[change.Key]
 			if change.Applied == nil && !exists || change.Applied != nil && current == *change.Applied {
-				values[change.Key] = change.Before
+				if len(change.Scope) > 0 && scopeFields(fields, change.Scope) == nil {
+					continue
+				}
+				var err error
+				data, err = editScope(data, change.Scope, map[string]*string{change.Key: change.Before})
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
-		return editRoot(data, values)
+		return data, nil
 	})
 	if err != nil {
 		return err

@@ -1,7 +1,7 @@
 // Package modelsdev fetches and parses the models.dev public model database
-// (https://models.dev/api.json). It is a read-only wire-format layer: it knows
-// how to decode the catalog and resolve each model's AI SDK provider, but it
-// does not know anything about ccl's provider model or protocol dispatch.
+// (https://models.dev/api.json). It owns the catalog wire format and an optional offline metadata cache.
+// It resolves model capabilities and AI SDK providers without knowing CCL's
+// provider configuration, credentials or protocol dispatch.
 //
 // models.dev is the metadata source OpenCode itself uses to decide which AI SDK
 // provider (and therefore which wire protocol) each model speaks. A provider
@@ -25,7 +25,7 @@ const defaultAPIURL = "https://models.dev/api.json"
 var apiURL = defaultAPIURL
 
 // Provider is one entry in the models.dev catalog, keyed by its id at the top
-// level. Fields we do not consume (cost, modalities, reasoning options, …) are
+// level. Fields we do not consume (cost, modalities, …) are
 // intentionally omitted.
 type Provider struct {
 	ID     string           `json:"id"`
@@ -40,11 +40,44 @@ type Provider struct {
 // Model is a single model under a provider. Status is optional ("deprecated",
 // "beta", …); most models omit it.
 type Model struct {
-	ID       string         `json:"id"`
-	Name     string         `json:"name"`
-	Status   string         `json:"status"`
-	Provider *ModelProvider `json:"provider"`
-	Limit    ModelLimit     `json:"limit"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Status           string            `json:"status"`
+	Provider         *ModelProvider    `json:"provider"`
+	Limit            ModelLimit        `json:"limit"`
+	CanonicalID      string            `json:"canonical_model_id"`
+	Reasoning        bool              `json:"reasoning"`
+	ReasoningOptions []ReasoningOption `json:"reasoning_options"`
+}
+
+// ReasoningOption distinguishes selectable effort tiers from thinking switches
+// and token budgets. A reasoning model need not support selectable efforts.
+type ReasoningOption struct {
+	Type   string   `json:"type"`
+	Values []string `json:"values"`
+}
+
+// Efforts returns reasoning tiers in slider order. Off/none is a thinking
+// switch, not a reasoning tier; toggle and budget options do not invent tiers.
+func (m Model) Efforts() []string {
+	if !m.Reasoning {
+		return nil
+	}
+	values := make(map[string]bool)
+	for _, option := range m.ReasoningOptions {
+		if option.Type == "effort" {
+			for _, value := range option.Values {
+				values[strings.ToLower(strings.TrimSpace(value))] = true
+			}
+		}
+	}
+	var efforts []string
+	for _, effort := range []string{"minimal", "low", "medium", "high", "xhigh", "max", "ultra"} {
+		if values[effort] {
+			efforts = append(efforts, effort)
+		}
+	}
+	return efforts
 }
 
 // ModelProvider carries a model-level npm override. Absent means the model
@@ -79,7 +112,10 @@ func Fetch(ctx context.Context) (map[string]Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeCatalog(body)
+}
 
+func decodeCatalog(body []byte) (map[string]Provider, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("decode models.dev catalog: %w", err)

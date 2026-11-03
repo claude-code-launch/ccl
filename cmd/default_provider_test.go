@@ -90,8 +90,7 @@ func fakeRunningProxy(t *testing.T, name string, running bool) {
 }
 
 // TestUseDefaultForNormalAndACP covers ccl use default in both modes. A
-// running proxy does not block it: default is Claude Code's configuration as
-// it stands, proxy overlay included.
+// running Codex proxy does not block it: Claude Code uses its own configuration.
 func TestUseDefaultForNormalAndACP(t *testing.T) {
 	saveToggleFixture(t, &provider.Config{ActiveProvider: "a", Providers: map[string]provider.Provider{
 		"a": {Name: "a", Type: "openai", Endpoint: "https://example.com/v1", Model: "m"},

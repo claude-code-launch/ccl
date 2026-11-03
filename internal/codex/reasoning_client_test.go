@@ -20,6 +20,15 @@ import (
 // The real client must accept the reasoning catalog, honor the selected effort,
 // and carry it across both protocol conversions into the local Chat provider.
 func TestRealCodexReasoningOptionsReachChatProvider(t *testing.T) {
+	for _, effort := range []string{"high", "xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			testRealCodexReasoningEffort(t, effort)
+		})
+	}
+}
+
+func testRealCodexReasoningEffort(t *testing.T, effort string) {
+	t.Helper()
 	executable := os.Getenv("CCL_TEST_CODEX")
 	if executable == "" {
 		t.Skip("set CCL_TEST_CODEX to the pinned official Codex client")
@@ -44,7 +53,7 @@ func TestRealCodexReasoningOptionsReachChatProvider(t *testing.T) {
 			http.Error(w, "invalid JSON", 400)
 			return
 		}
-		if body["reasoning_effort"] != "high" || body["model"] != "model-a" {
+		if body["reasoning_effort"] != effort || body["model"] != "model-a" {
 			t.Errorf("selected effort lost: effort=%v model=%v", body["reasoning_effort"], body["model"])
 		}
 		if r.Header.Get("Authorization") != "Bearer fake-provider-key" || r.Header.Get("Chatgpt-Account-Id") != "" {
@@ -54,7 +63,9 @@ func TestRealCodexReasoningOptionsReachChatProvider(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"id\":\"chat_fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"reasoning-fixture-done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chat_fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}, "openai", Options{Desktop: true})
-	info := protocol.ModelInfo{ID: "model-a", DisplayName: "Reasoner", ReasoningLevels: protocol.ChatReasoningLevels(), DefaultReasoningLevel: "medium"}
+	// Space-Bunny advertises five tiers and defaults to max. The max case
+	// leaves the CLI override unset to verify that the catalog default works.
+	info := protocol.ModelInfo{ID: "model-a", DisplayName: "Reasoner", ReasoningLevels: protocol.GPTReasoningLevels()[:5], DefaultReasoningLevel: "max"}
 	g.models = []Model{newModel("ccl/chosen/model-a", "model-a", map[string]protocol.ModelInfo{"model-a": info}, nil)}
 	overlay, err := Plan(context.Background(), g, filepath.Join(home, "proxy"))
 	if err != nil {
@@ -63,7 +74,12 @@ func TestRealCodexReasoningOptionsReachChatProvider(t *testing.T) {
 	if err := overlay.Apply(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	command := process.Command(executable, "-m", "ccl/chosen/model-a", "-c", `model_reasoning_effort="high"`, "-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Answer reasoning-fixture-done.")
+	args := []string{"-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`}
+	if effort != "max" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	}
+	args = append(args, "exec", "--json", "--skip-git-repo-check", "Answer reasoning-fixture-done.")
+	command := process.Command(executable, args...)
 	command.Dir = home
 	process.ConfigureGroup(command)
 	var output bytes.Buffer

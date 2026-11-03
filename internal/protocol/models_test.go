@@ -254,6 +254,26 @@ func TestGetOpenAIModelInfosIncludesContextWindow(t *testing.T) {
 	}
 }
 
+func TestGetOpenAIModelInfosPreservesInputModalities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"direct","input_modalities":["text","image"]},{"id":"nested","modalities":{"input_modalities":["text","image"]}},{"id":"anthropic","supported_input_types":["text","image"]},{"id":"unknown"}]}`))
+	}))
+	t.Cleanup(server.Close)
+	infos, err := protocol.GetOpenAIModelInfos(server.URL, "fake-key")
+	if err != nil || len(infos) != 4 {
+		t.Fatalf("infos=%+v err=%v", infos, err)
+	}
+	for _, info := range infos {
+		if info.ID == "unknown" {
+			if len(info.InputModalities) != 0 {
+				t.Fatal("invented unknown model capabilities")
+			}
+		} else if strings.Join(info.InputModalities, ",") != "text,image" {
+			t.Fatalf("image capability lost: %+v", info)
+		}
+	}
+}
+
 func TestGetOpenAIModelInfosAcceptsTopLevelContextWindow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"sdk-model","context_window":1000000},{"id":"nested","token_limits":{"context_window":200000}}]}`))

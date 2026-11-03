@@ -17,7 +17,7 @@ import (
 )
 
 func TestStandaloneProxyAddsCodexModelsAndRestoresUserEdits(t *testing.T) {
-	m, claudePath := isolatedManager(t)
+	m, _ := isolatedManager(t)
 	home := os.Getenv("CODEX_HOME")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestStandaloneProxyAddsCodexModelsAndRestoresUserEdits(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- m.Run(ctx, p, claudePath, "codex-fixture") }()
+	go func() { done <- m.Run(ctx, p, "codex-fixture") }()
 	t.Cleanup(func() {
 		cancel()
 		select {

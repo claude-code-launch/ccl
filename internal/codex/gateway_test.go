@@ -7,27 +7,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/klauspost/compress/zstd"
 )
 
 func fixtureGateway(t *testing.T, handler http.HandlerFunc, protocol string, options Options) *Gateway {
 	t.Helper()
+	return fixtureProviderGateway(t, handler, provider.Provider{Name: "chosen", Type: protocol, Model: "model-a"}, options)
+}
+
+func fixtureProviderGateway(t *testing.T, handler http.HandlerFunc, configured provider.Provider, options Options) *Gateway {
+	t.Helper()
 	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 	var runtime *oauthproxy.Runtime
 	var err error
-	if protocol == "openai_responses" {
+	if configured.Type == "openai_responses" {
 		runtime, err = oauthproxy.StartOpenAIResponsesAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a")
-	} else if protocol == "openai" {
+	} else if configured.Type == "openai" {
 		runtime, err = oauthproxy.StartOpenAIChatAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a")
 	} else {
 		runtime, err = oauthproxy.StartAnthropicAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a", "")
@@ -36,7 +44,7 @@ func fixtureGateway(t *testing.T, handler http.HandlerFunc, protocol string, opt
 		t.Fatal(err)
 	}
 	t.Cleanup(runtime.Stop)
-	g, err := New(context.Background(), runtime, provider.Provider{Name: "chosen", Type: protocol, Model: "model-a"}, options)
+	g, err := New(context.Background(), runtime, configured, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +83,158 @@ func responseObject(t *testing.T, response *http.Response) map[string]any {
 func writeMessage(w http.ResponseWriter, content []map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg_fixture", "type": "message", "role": "assistant", "content": content, "stop_reason": "end_turn", "usage": map[string]any{"input_tokens": 3, "output_tokens": 2}})
+}
+
+func TestCodexReplacementListenerKeepsEndpoint(t *testing.T) {
+	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "anthropic", Options{Desktop: true})
+	base := g.BaseURL()
+	u, _ := url.Parse(base)
+	options := Options{Desktop: true, ListenAddress: u.Host}
+	if _, err := New(context.Background(), nil, provider.Provider{Name: "chosen"}, options); err == nil {
+		t.Fatal("occupied endpoint silently moved to another port")
+	}
+	g.Close()
+	replacement, err := New(context.Background(), g.runtime, provider.Provider{Name: "chosen", Type: "anthropic"}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(replacement.Close)
+	if replacement.BaseURL() != base {
+		t.Fatalf("replacement endpoint changed: %s -> %s", base, replacement.BaseURL())
+	}
+	for _, address := range []string{"0.0.0.0:1234", "localhost:1234", "[::1]:1234", "127.0.0.1:0", "127.0.0.1:http", "127.0.0.1:65536"} {
+		if _, err := New(context.Background(), nil, provider.Provider{Name: "chosen"}, Options{ListenAddress: address}); err == nil {
+			t.Fatalf("unsafe or unstable listener accepted: %s", address)
+		}
+	}
+}
+
+func TestCodexCloseReleasesListenerBeforeServeStarts(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	g := &Gateway{listener: listener, server: &http.Server{}, client: &http.Client{}}
+	// Model the scheduling window between New returning and Serve registering
+	// its listener. http.Server.Close cannot close an unregistered listener.
+	g.Close()
+	replacement, err := net.Listen("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Close retained the replacement endpoint: %v", err)
+	}
+	_ = replacement.Close()
+}
+
+func TestCodexBridgeRelaysRateLimitBeforeResponseStarts(t *testing.T) {
+	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "2")
+		writeJSON(w, 429, map[string]any{"type": "error", "error": map[string]any{"type": "rate_limit_error", "message": "model temporarily resource limited (retry after 2s)"}})
+	}, "anthropic", Options{})
+	response := postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "fixture", "stream": true})
+	raw, _ := io.ReadAll(response.Body)
+	if response.StatusCode != 429 || response.Header.Get("Retry-After") != "2" || !strings.Contains(string(raw), "rate_limit_error") || strings.Contains(string(raw), "response.created") {
+		t.Fatalf("retryable HTTP rejection became a disconnected Responses stream: %d %s", response.StatusCode, raw)
+	}
+}
+
+func TestCodexGatewayPublishesGPTEffortForUnadvertisedModels(t *testing.T) {
+	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "openai", Options{})
+	models := g.Models()
+	if len(models) != 1 {
+		t.Fatalf("models: %+v", models)
+	}
+	levels, _ := models[0]["supported_reasoning_levels"].([]protocol.ReasoningLevel)
+	if len(levels) != 6 || levels[0].Effort != "low" || levels[5].Effort != "ultra" || models[0]["default_reasoning_level"] != "low" || levels[1].Description == "" {
+		t.Fatalf("picker ladder: %+v", models[0])
+	}
+}
+
+func TestCodexBridgeCompactionTriggerReturnsReplayableSummary(t *testing.T) {
+	var phase atomic.Int32
+	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		raw, _ := json.Marshal(body["messages"])
+		switch phase.Add(1) {
+		case 1:
+			if !strings.Contains(string(raw), "keep-this-goal") {
+				t.Errorf("summary request dropped the conversation: %s", raw)
+			}
+			writeMessage(w, []map[string]any{{"type": "text", "text": "kept-goal"}})
+		default:
+			if !strings.Contains(string(raw), "Conversation summary:") || !strings.Contains(string(raw), "kept-goal") || strings.Contains(string(raw), "keep-this-goal") {
+				t.Errorf("compaction was not replayed: %s", raw)
+			}
+			writeMessage(w, []map[string]any{{"type": "text", "text": "continued"}})
+		}
+	}, "anthropic", Options{})
+	first := responseObject(t, postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": []any{
+		map[string]any{"type": "message", "role": "user", "content": "keep-this-goal"},
+		map[string]any{"type": "compaction_trigger"},
+	}}))
+	output, _ := first["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("output = %+v", first["output"])
+	}
+	item, _ := output[0].(map[string]any)
+	if item["type"] != "compaction" || item["encrypted_content"] == "" {
+		t.Fatalf("compaction item = %+v", item)
+	}
+	second := responseObject(t, postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": []any{
+		item,
+		map[string]any{"type": "message", "role": "user", "content": "continue"},
+	}}))
+	if second["status"] != "completed" || phase.Load() != 2 {
+		t.Fatalf("replay status=%v phase=%d", second["status"], phase.Load())
+	}
+}
+
+func TestCodexCompactionSummarizesToolHistoryWithoutLiveCalls(t *testing.T) {
+	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		raw, _ := json.Marshal(body)
+		for _, want := range []string{"read_file", "file-contents", "patch-contents", "patch-result", "tool_search", "shipping_eta", "Return only the summary"} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("summary lost %q: %s", want, raw)
+			}
+		}
+		if body["tools"] != nil || strings.Contains(string(raw), `"type":"tool_use"`) || strings.Contains(string(raw), `"type":"tool_result"`) {
+			t.Errorf("summary requires live tool definitions: %s", raw)
+		}
+		messages, _ := body["messages"].([]any)
+		last, _ := messages[len(messages)-1].(map[string]any)
+		if last["role"] != "user" || !strings.Contains(textValue(last["content"]), "Return only the summary") {
+			t.Error("summary request is not the final user instruction")
+		}
+		writeMessage(w, []map[string]any{{"type": "text", "text": "summarized tools"}})
+	}, "anthropic", Options{})
+	result := responseObject(t, postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": []any{
+		map[string]any{"role": "user", "content": "inspect and patch"},
+		map[string]any{"type": "tool_search_call", "call_id": "call_search", "execution": "client", "arguments": map[string]any{"query": "shipping_eta"}},
+		map[string]any{"type": "tool_search_output", "call_id": "call_search", "execution": "client", "tools": []any{largeToolCatalog()[1]}},
+		map[string]any{"type": "function_call", "call_id": "call_read", "name": "read_file", "arguments": `{"path":"file.txt"}`},
+		map[string]any{"type": "function_call_output", "call_id": "call_read", "output": "file-contents"},
+		map[string]any{"type": "custom_tool_call", "call_id": "call_patch", "name": "apply_patch", "input": "patch-contents"},
+		map[string]any{"type": "custom_tool_call_output", "call_id": "call_patch", "output": "patch-result"},
+		map[string]any{"type": "compaction_trigger"},
+	}}))
+	if output := result["output"].([]any); len(output) != 1 || output[0].(map[string]any)["type"] != "compaction" {
+		t.Fatalf("compaction response: %+v", result)
+	}
+}
+
+func TestCodexStreamErrorKeepsProviderMessage(t *testing.T) {
+	stream := newResponseStream(httptest.NewRecorder(), "model", false, nil)
+	err := stream.event([]byte(`{"type":"error","error":{"type":"api_error","message":"Qoder stream returned status 400: unsupported reasoning_effort"}}`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported reasoning_effort") {
+		t.Fatal(err)
+	}
+	err = stream.event([]byte(`{"type":"error"}`))
+	if err == nil || err.Error() != "provider reported a stream error" {
+		t.Fatal(err)
+	}
 }
 
 func TestCodexBridgeToolsContinueWithoutNativeCredentialLeak(t *testing.T) {
@@ -126,7 +286,7 @@ func TestCodexBridgeFlushesBeforeProviderCompletes(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	}, "anthropic", Options{Desktop: true})
-	response := postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "fixture", "stream": true})
+	response := postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "fixture", "stream": true, "tools": largeToolCatalog()})
 	delta := make(chan string, 1)
 	go func() {
 		scanner := bufio.NewScanner(response.Body)

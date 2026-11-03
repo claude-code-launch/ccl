@@ -30,8 +30,8 @@ func Prepare(ctx context.Context, configured provider.Provider) (*Session, error
 	return prepare(ctx, configured, false)
 }
 
-// PrepareProxy always provides a local Messages endpoint, including for native
-// Anthropic gateways that normal launches can contact directly.
+// PrepareProxy provides the local Messages endpoint used by Codex's protocol
+// adapter, including native Anthropic gateways that Claude can contact directly.
 func PrepareProxy(ctx context.Context, configured provider.Provider) (*Session, error) {
 	return prepare(ctx, configured, true)
 }

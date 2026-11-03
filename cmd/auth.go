@@ -146,6 +146,7 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 	if supportsFastMode(target) {
 		fmt.Fprintf(out, "Fast: %s (toggle with /fast or ccl set Review & Apply)\n", providerFastSummary(p))
 	}
+	_ = refreshModelsDevMetadata(ctx, out)
 	return nil
 }
 

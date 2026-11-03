@@ -27,6 +27,8 @@ func claudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
+func UserSettingsPath() string { return filepath.Join(claudeConfigDir(), "settings.json") }
+
 // userDefinedSettings returns the top-level keys set in the user's Claude Code
 // settings and in the project's (.claude/settings.json and
 // settings.local.json under cwd). Unreadable files count as empty.

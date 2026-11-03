@@ -77,6 +77,12 @@ func TestProxyProcessLifecycle(t *testing.T) {
 				http.Error(w, "wrong chat auth", 401)
 				return
 			}
+			if stream, _ := body["stream"].(bool); stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"chat-ok\"},\"finish_reason\":null}]}\n\n")
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\ndata: [DONE]\n\n")
+				return
+			}
 			_, _ = io.WriteString(w, `{"id":"chat-fake","object":"chat.completion","model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"chat-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)
 		case "/native/v1/messages":
 			if r.Header.Get("Authorization") != "Bearer fake-native-key" || r.Header.Get("X-Api-Key") != "" {
@@ -96,6 +102,28 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	writeObject(t, settingsPath, map[string]any{"model": "original-model", "env": map[string]string{"ANTHROPIC_BASE_URL": "https://original.invalid", "KEEP": "original"}})
 	manager := &proxymanager.Manager{Dir: filepath.Join(home, ".ccl", "proxy")}
+	codexHome := os.Getenv("CODEX_HOME")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(`{"models":[{"slug":"native-fixture"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Upgrade a dead shared-proxy journal, restoring its Claude fields once.
+	legacyFields := readObject(t, settingsPath)
+	legacyFields["model"] = json.RawMessage(`"legacy-proxy-model"`)
+	legacyFields["env"] = json.RawMessage(`{"ANTHROPIC_BASE_URL":"https://original.invalid","KEEP":"original","ANTHROPIC_AUTH_TOKEN":"legacy-local-key"}`)
+	writeObject(t, settingsPath, legacyFields)
+	if err := os.MkdirAll(manager.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeObject(t, filepath.Join(manager.Dir, "state.json"), &proxymanager.State{
+		ID: "legacy-shared-proxy", ProxyVersion: 8, SettingsPath: settingsPath,
+		Changes: []proxymanager.Change{
+			{Key: "model", Before: json.RawMessage(`"original-model"`), Applied: json.RawMessage(`"legacy-proxy-model"`)},
+			{Env: true, Key: "ANTHROPIC_AUTH_TOKEN", Applied: json.RawMessage(`"legacy-local-key"`)},
+		},
+	})
 	run := func(args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
@@ -129,9 +157,10 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 5 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
-	request := func(url, token string) (int, []byte) {
+	request := func(url, model, token string) (int, []byte) {
 		t.Helper()
-		r, err := http.NewRequest(http.MethodPost, url+"/v1/messages", strings.NewReader(`{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"test"}]}`))
+		payload, _ := json.Marshal(map[string]any{"model": model, "max_output_tokens": 8, "input": "fixture"})
+		r, err := http.NewRequest(http.MethodPost, url+"/responses", bytes.NewReader(payload))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -152,12 +181,8 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	inference := func(want string) {
 		t.Helper()
-		fields := readObject(t, settingsPath)
-		var env map[string]string
-		if err := json.Unmarshal(fields["env"], &env); err != nil {
-			t.Fatal(err)
-		}
-		status, body := request(env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_AUTH_TOKEN"])
+		s := state()
+		status, body := request(s.BaseURL, "ccl/"+s.Provider+"/model-a", "fake-native-key")
 		if status != 200 || !bytes.Contains(body, []byte(`"text":"`+want+`"`)) {
 			t.Fatalf("inference status=%d body=%s", status, body)
 		}
@@ -170,15 +195,21 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	if first.Provider != chat.Name || first.PID <= 0 || !manager.Running(context.Background(), first) {
 		t.Fatal("background proxy not running")
 	}
+	if first.Codex == nil || first.SettingsPath != "" || len(first.Changes) != 0 {
+		t.Fatal("fresh daemon retained Claude settings ownership")
+	}
 	inference("chat-ok")
-	if status, _ := request(first.BaseURL, ""); status != 401 {
-		t.Fatalf("unauthenticated inference status=%d", status)
+	if status, _ := request(first.BaseURL, "native-fixture", ""); status != 401 {
+		t.Fatalf("native route accepted missing native credentials: %d", status)
 	}
 	fields := readObject(t, settingsPath)
 	var env map[string]string
 	_ = json.Unmarshal(fields["env"], &env)
+	if string(fields["model"]) != `"original-model"` || env["ANTHROPIC_AUTH_TOKEN"] != "" {
+		t.Fatal("upgrade did not restore legacy Claude settings")
+	}
 	status := cli("proxy", "status")
-	for _, secret := range []string{chat.APIKey, native.APIKey, env["ANTHROPIC_AUTH_TOKEN"], first.ControlToken} {
+	for _, secret := range []string{chat.APIKey, native.APIKey, "legacy-local-key", first.ControlToken} {
 		if strings.Contains(status, secret) {
 			t.Fatal("status disclosed a credential")
 		}
@@ -210,7 +241,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	// Installing a fixed client must replace an already-running legacy daemon,
 	// even when the selected provider and configuration have not changed.
 	legacy := state()
-	legacy.ProxyVersion = 0
+	legacy.ProxyVersion = first.ProxyVersion - 1
 	legacyJSON, err := json.Marshal(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +251,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	cli("proxy", "start", chat.Name)
 	upgraded := state()
-	if upgraded.ID == first.ID || upgraded.ProxyVersion == 0 {
+	if upgraded.ID == first.ID || upgraded.ProxyVersion != first.ProxyVersion {
 		t.Fatal("start reused a legacy daemon without the fixed catalog contract")
 	}
 	first = upgraded
@@ -239,8 +270,8 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}
 	fields = readObject(t, settingsPath)
 	_ = json.Unmarshal(fields["env"], &env)
-	if env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "model-b" {
-		t.Fatal("updated mapping not applied")
+	if _, exists := env["ANTHROPIC_DEFAULT_SONNET_MODEL"]; exists {
+		t.Fatal("provider reload injected Claude model mappings")
 	}
 	cli("use", native.Name)
 	cli("proxy")
@@ -281,7 +312,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		t.Fatalf("crash not detected: %s", out)
 	}
 	// Any other ccl command undoes the dead proxy's overlay on its way in.
-	if out := cli("ls"); !strings.Contains(out, "previous Claude / Codex settings restored") {
+	if out := cli("ls"); !strings.Contains(out, "previous client settings restored") {
 		t.Fatalf("stale overlay not recovered: %s", out)
 	}
 	assertRestored(t, settingsPath)
@@ -309,11 +340,15 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	beforeFailure := state().BaseURL
 	if out, err := run("proxy", "menu-switch", "--provider", "broken-fixture"); err == nil {
 		t.Fatalf("invalid menu replacement succeeded: %s", out)
 	}
 	if cfg, err := config.Load(); err != nil || cfg.ActiveProvider != native.Name || state().Provider != native.Name || !manager.Running(context.Background(), state()) {
 		t.Fatalf("failed menu switch did not restore the original provider: %v", err)
+	}
+	if state().BaseURL != beforeFailure {
+		t.Fatal("failed switch rollback stranded clients on the previous Codex port")
 	}
 	inference("native-ok")
 	cli("proxy", "stop")
@@ -323,16 +358,16 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	if err := os.WriteFile(settingsPath, broken, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := run("proxy", "-p", chat.Name); err == nil {
-		t.Fatalf("malformed settings accepted: %s", out)
-	}
+	cli("proxy", "-p", chat.Name)
+	inference("chat-ok")
+	cli("proxy", "stop")
 	if actual, err := os.ReadFile(settingsPath); err != nil || !bytes.Equal(actual, broken) {
 		t.Fatal("malformed settings overwritten")
 	}
 	if s, err := manager.Read(); err != nil || s != nil {
-		t.Fatalf("failed start left state: %v", err)
+		t.Fatalf("stop left state: %v", err)
 	}
-	t.Log("startup failure retains malformed settings and leaves no running proxy")
+	t.Log("Codex starts and stops independently of malformed Claude settings")
 }
 
 func readObject(t *testing.T, path string) map[string]json.RawMessage {

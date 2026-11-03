@@ -20,12 +20,16 @@ type ModelInfo struct {
 	DisplayName           string
 	ContextWindow         int
 	MaxOutputTokens       int
+	InputModalities       []string
 	RateMultiplier        *float64
 	RateUnit              string
 	IsNew                 bool
 	PromotionAvailable    bool
 	ReasoningLevels       []ReasoningLevel
 	DefaultReasoningLevel string
+	// ReasoningKnown distinguishes an authoritative empty effort list from
+	// missing metadata, so compatibility defaults do not invent controls.
+	ReasoningKnown bool
 }
 
 // ModelResponse is the OpenAI-compatible /models list payload.
@@ -58,6 +62,8 @@ type ModelResponse struct {
 		Status                string           `json:"status,omitempty"`
 		Version               string           `json:"version"`
 		ContextWindow         int              `json:"context_window,omitempty"`
+		InputModalities       []string         `json:"input_modalities,omitempty"`
+		SupportedInputTypes   []string         `json:"supported_input_types,omitempty"`
 		ReasoningLevels       []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
 		DefaultReasoningLevel string           `json:"default_reasoning_level,omitempty"`
 		// Anthropic-shaped extensions some Anthropic-compatible gateways and
@@ -156,6 +162,7 @@ func GetOpenAIModelInfosContext(ctx context.Context, baseURL, apiKey string) ([]
 			ID:                    m.Id,
 			DisplayName:           strings.TrimSpace(m.Name),
 			ContextWindow:         window,
+			InputModalities:       modelInputModalities(m.InputModalities, m.SupportedInputTypes, m.Modalities.InputModalities),
 			RateMultiplier:        m.RateMultiplier,
 			RateUnit:              strings.TrimSpace(m.RateUnit),
 			IsNew:                 m.IsNew,
@@ -165,6 +172,15 @@ func GetOpenAIModelInfosContext(ctx context.Context, baseURL, apiKey string) ([]
 		})
 	}
 	return models, nil
+}
+
+func modelInputModalities(candidates ...[]string) []string {
+	for _, modalities := range candidates {
+		if len(modalities) > 0 {
+			return modalities
+		}
+	}
+	return nil
 }
 
 // codexClientVersionQuery selects the Codex client catalog, which is the only
@@ -179,6 +195,7 @@ type codexClientModelsResponse struct {
 		Slug                  string           `json:"slug"`
 		ContextWindow         int              `json:"context_window,omitempty"`
 		MaxContextWindow      int              `json:"max_context_window,omitempty"`
+		InputModalities       []string         `json:"input_modalities,omitempty"`
 		ReasoningLevels       []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
 		DefaultReasoningLevel string           `json:"default_reasoning_level,omitempty"`
 	} `json:"models"`
@@ -216,7 +233,7 @@ func GetCodexClientModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 		if window == 0 {
 			window = model.MaxContextWindow
 		}
-		models = append(models, ModelInfo{ID: id, ContextWindow: window, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
+		models = append(models, ModelInfo{ID: id, ContextWindow: window, InputModalities: model.InputModalities, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
 	}
 	return models, nil
 }

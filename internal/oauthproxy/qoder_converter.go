@@ -92,6 +92,18 @@ func convertAnthropicToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedR
 	if _, exists := modelConfig["source"]; !exists {
 		modelConfig["source"] = model.Source
 	}
+	parameters := map[string]any{"max_tokens": maxTokens}
+	if levels, _ := qoderReasoningLevels(model.Config); len(levels) > 0 {
+		asked := ""
+		if request.OutputConfig != nil {
+			asked = request.OutputConfig.Effort
+		}
+		thinkingOff := request.Thinking != nil && strings.EqualFold(request.Thinking.Type, "disabled")
+		if matched := qoderMatchEffort(levels, asked); matched != "" && !thinkingOff {
+			parameters["enable_thinking"] = true
+			parameters["reasoning_effort"] = matched
+		}
+	}
 	recordID := qoderStableID("qoder-record", request.Model, string(raw), fmt.Sprintf("mt=%d", maxTokens))
 	sessionSeed := ""
 	if request.Metadata != nil {
@@ -122,7 +134,7 @@ func convertAnthropicToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedR
 		"system":           "",
 		"messages":         messages,
 		"tools":            tools,
-		"parameters":       map[string]any{"max_tokens": maxTokens},
+		"parameters":       parameters,
 		"chat_context": map[string]any{
 			"chatPrompt": "",
 			"imageUrls":  nil,
@@ -286,6 +298,7 @@ func qoderTransformUserMessage(raw json.RawMessage) ([]any, string, error) {
 	}
 	messages := make([]any, 0, len(blocks))
 	parts := make([]any, 0, len(blocks))
+	var toolImages []any
 	var allText strings.Builder
 	flushUser := func() {
 		if len(parts) == 0 {
@@ -316,6 +329,24 @@ func qoderTransformUserMessage(raw json.RawMessage) ([]any, string, error) {
 		case "tool_result":
 			flushUser()
 			content := qoderRawContentText(block.Content)
+			contentBlocks, _ := chatParseContent(block.Content)
+			var toolText []string
+			hasImage := false
+			// Tool messages carry text. Preserve screenshots as a subsequent
+			// user message, after all tool replies, like the Chat adapter.
+			for _, part := range contentBlocks {
+				if part.blockType == "text" {
+					toolText = append(toolText, part.text)
+				}
+				if part.blockType == "image" && part.imageURL != "" {
+					hasImage = true
+					toolText = append(toolText, "[image attached in the following user message]")
+					toolImages = append(toolImages, map[string]any{"type": "text", "text": "Image from tool result " + block.ToolUseID + ":"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": part.imageURL}})
+				}
+			}
+			if hasImage {
+				content = strings.Join(toolText, "\n")
+			}
 			messages = append(messages, map[string]any{
 				"role":         "tool",
 				"tool_call_id": block.ToolUseID,
@@ -325,6 +356,7 @@ func qoderTransformUserMessage(raw json.RawMessage) ([]any, string, error) {
 			// Cache-control and other client-only blocks are intentionally omitted.
 		}
 	}
+	parts = append(parts, toolImages...)
 	flushUser()
 	if len(messages) == 0 {
 		messages = append(messages, map[string]any{"role": "user", "content": ""})

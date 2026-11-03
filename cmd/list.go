@@ -198,7 +198,7 @@ func init() {
 
 func defaultProviderDescription() string {
 	return locale.T(
-		"Claude Code 自身配置（claude.ai 登录与 ~/.claude 设置；ccl proxy 运行时含其设置）",
-		"Claude Code's own configuration (claude.ai login and ~/.claude settings, including a running ccl proxy's)",
+		"Claude Code 自身配置（claude.ai 登录与 ~/.claude 设置）",
+		"Claude Code's own configuration (claude.ai login and ~/.claude settings)",
 	)
 }

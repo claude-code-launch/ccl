@@ -35,6 +35,12 @@ var setCmd = &cobra.Command{
 	Use:   "set [name]",
 	Short: "Add or update an LLM provider configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if refresh, _ := cmd.Flags().GetBool("refresh-models"); refresh {
+			if len(args) != 0 {
+				return fmt.Errorf("--refresh-models takes no provider name")
+			}
+			return refreshModelsDevMetadata(cmd.Context(), cmd.OutOrStdout())
+		}
 		return RunProviderSet(args)
 	},
 }
@@ -245,6 +251,7 @@ func RunProviderSet(args []string) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 	setDebugf("config saved provider=%q active=%t", p.Name, updatedModel.IsActiveChosen)
+	_ = refreshModelsDevMetadata(context.Background(), os.Stdout)
 
 	fmt.Println("")
 	if isUpdate {
@@ -266,6 +273,7 @@ func providerConfigurationComplete(p provider.Provider) bool {
 }
 
 func init() {
+	setCmd.Flags().Bool("refresh-models", false, "Refresh models.dev metadata and its offline cache without editing providers")
 	rootCmd.AddCommand(setCmd)
 }
 

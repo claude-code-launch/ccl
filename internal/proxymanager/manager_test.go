@@ -31,6 +31,12 @@ func isolatedManager(t *testing.T) (*Manager, string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(os.Getenv("CODEX_HOME"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "models_cache.json"), []byte(`{"models":[{"slug":"native-fixture"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return &Manager{Dir: filepath.Join(home, ".ccl", "proxy")}, path
 }
 
@@ -51,120 +57,105 @@ func awaitRunning(t *testing.T, m *Manager) *State {
 	return nil
 }
 
-func TestStandaloneProxyRoutesAndRestoresUserEdits(t *testing.T) {
+func TestCodexProxyRequiresCodexProfile(t *testing.T) {
+	m, claudePath := isolatedManager(t)
+	if err := os.RemoveAll(os.Getenv("CODEX_HOME")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Start(context.Background(), "must-not-execute", provider.Provider{Name: "chosen"})
+	if err == nil || !strings.Contains(err.Error(), "Codex profile not found") {
+		t.Fatalf("missing profile: %v", err)
+	}
+	if state, err := m.Read(); err != nil || state != nil {
+		t.Fatal("missing Codex profile left a proxy journal")
+	}
+	if _, err := os.Stat(claudePath); !os.IsNotExist(err) {
+		t.Fatal("missing Codex profile created Claude settings")
+	}
+}
+
+func TestStandaloneCodexProxyLeavesClaudeSettingsAlone(t *testing.T) {
 	for _, auth := range []string{"", "bearer"} {
-		t.Run("anthropic-"+auth, func(t *testing.T) {
-			m, path := isolatedManager(t)
-			original := map[string]any{"env": map[string]string{"ANTHROPIC_BASE_URL": "https://original.invalid", "ANTHROPIC_AUTH_TOKEN": "original-token", "KEEP": "old"}, "model": "original-model", "permissions": map[string]any{"allow": []string{"Read"}}}
-			if err := writeJSON(path, original); err != nil {
-				t.Fatal(err)
-			}
-			requests := make(chan string, 2)
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				key := r.Header.Get("X-Api-Key")
-				if auth == "bearer" {
-					key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		for _, initial := range []string{"", "{broken Claude settings", `{"model":"original","env":{"KEEP":"original"}}`} {
+			t.Run(auth+"/"+initial, func(t *testing.T) {
+				m, path := isolatedManager(t)
+				if initial != "" {
+					if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
-				if key != "upstream-fake-key" {
-					http.Error(w, "wrong upstream key", 401)
-					return
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					key := r.Header.Get("X-Api-Key")
+					if auth == "bearer" {
+						key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+					}
+					if key != "fake-upstream-key" || (auth == "bearer" && r.Header.Get("X-Api-Key") != "") || (auth == "" && r.Header.Get("Authorization") != "") {
+						t.Error("incorrect provider credentials")
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"msg_fixture","type":"message","role":"assistant","content":[{"type":"text","text":"codex-ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+				}))
+				defer upstream.Close()
+				p := provider.Provider{Name: "chosen", Type: "anthropic", Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream-key", Model: "model-a", AnthropicAuth: auth}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- m.Run(ctx, p, "codex-only-fixture") }()
+				t.Cleanup(func() {
+					cancel()
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("proxy did not exit")
+					}
+				})
+				state := awaitRunning(t, m)
+				if state.Codex == nil || state.BaseURL != state.Codex.BaseURL || state.SettingsPath != "" || len(state.Changes) != 0 || len(state.EnvBefore) != 0 {
+					t.Fatal("new daemon retained a Claude settings overlay")
 				}
-				if (auth == "bearer" && r.Header.Get("X-Api-Key") != "") || (auth == "" && r.Header.Get("Authorization") != "") {
-					http.Error(w, "leaked local auth", 400)
-					return
+				data, err := os.ReadFile(path)
+				if initial == "" {
+					if !os.IsNotExist(err) {
+						t.Fatal("proxy created Claude settings")
+					}
+				} else if err != nil || string(data) != initial {
+					t.Fatal("proxy touched Claude settings")
 				}
-				body, _ := io.ReadAll(r.Body)
-				requests <- r.URL.Path + " " + string(body)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"id":"msg_test","type":"message","role":"assistant","model":"model-a","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}`)
-			}))
-			defer upstream.Close()
-			p := provider.Provider{Name: "provider1", Type: "anthropic", Endpoint: upstream.URL + "/v1", APIKey: "upstream-fake-key", Model: "model-a", CustomModelID: "model-a", AnthropicAuth: auth}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			done := make(chan error, 1)
-			go func() { done <- m.Run(ctx, p, path, "test-instance"); close(done) }()
-			t.Cleanup(func() {
-				cancel()
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
+				response, err := http.Get(state.ControlURL + "/health")
+				if err != nil {
+					t.Fatal(err)
+				}
+				response.Body.Close()
+				if response.StatusCode != 401 {
+					t.Fatal("control endpoint accepted missing credentials")
+				}
+				request, _ := http.NewRequest(http.MethodPost, state.BaseURL+"/responses", strings.NewReader(`{"model":"ccl/chosen/model-a","input":"fixture"}`))
+				request.Header.Set("Authorization", "Bearer fake-native-key")
+				response, err = http.DefaultClient.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, _ = io.ReadAll(response.Body)
+				response.Body.Close()
+				if response.StatusCode != 200 || !bytes.Contains(data, []byte("codex-ok")) {
+					t.Fatalf("Codex inference failed: %d %s", response.StatusCode, data)
+				}
+				edited := []byte("{later user edit, still not valid JSON")
+				if err := os.WriteFile(path, edited, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := m.Stop(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				data, err = os.ReadFile(path)
+				if err != nil || !bytes.Equal(data, edited) {
+					t.Fatal("stop changed later Claude edits")
+				}
+				if _, err := os.Stat(m.statePath()); !os.IsNotExist(err) {
+					t.Fatal("state retained after stop")
 				}
 			})
-			s := awaitRunning(t, m)
-			settings, err := readSettings(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			env, err := settingsEnv(settings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var token string
-			if err := json.Unmarshal(env["ANTHROPIC_AUTH_TOKEN"], &token); err != nil {
-				t.Fatal(err)
-			}
-			data, _ := os.ReadFile(path)
-			if bytes.Contains(data, []byte(p.APIKey)) {
-				t.Fatal("upstream key leaked into Claude settings")
-			}
-			// The management socket and inference socket both require local auth.
-			response, err := http.Get(s.ControlURL + "/health")
-			if err != nil {
-				t.Fatal(err)
-			}
-			response.Body.Close()
-			if response.StatusCode != 401 {
-				t.Fatalf("unauthenticated control status=%d", response.StatusCode)
-			}
-			request, _ := http.NewRequest(http.MethodPost, s.BaseURL+"/v1/messages", strings.NewReader(`{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`))
-			request.Header.Set("Authorization", "Bearer "+token)
-			response, err = http.DefaultClient.Do(request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			body, _ := io.ReadAll(response.Body)
-			response.Body.Close()
-			if response.StatusCode != 200 || !bytes.Contains(body, []byte(`"text":"ok"`)) {
-				t.Fatalf("status=%d body=%s", response.StatusCode, body)
-			}
-			select {
-			case got := <-requests:
-				if !strings.HasPrefix(got, "/v1/messages ") {
-					t.Fatalf("route=%s", got)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("no upstream request")
-			}
-			// Simulate unrelated settings edits and an explicit model override.
-			settings["permissions"] = json.RawMessage(`{"allow":["Read","Write"]}`)
-			settings["model"] = json.RawMessage(`"user-edited-model"`)
-			env["KEEP"] = json.RawMessage(`"edited"`)
-			env["NEW"] = json.RawMessage(`"new"`)
-			settings["env"], _ = json.Marshal(env)
-			if err := writeJSON(path, settings); err != nil {
-				t.Fatal(err)
-			}
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stopCancel()
-			if err := m.Stop(stopCtx); err != nil {
-				t.Fatal(err)
-			}
-			if err := <-done; err != nil {
-				t.Fatal(err)
-			}
-			settings, _ = readSettings(path)
-			env, _ = settingsEnv(settings)
-			if string(env["ANTHROPIC_BASE_URL"]) != `"https://original.invalid"` || string(env["ANTHROPIC_AUTH_TOKEN"]) != `"original-token"` {
-				t.Fatal("previous transport settings were not restored")
-			}
-			if string(settings["model"]) != `"user-edited-model"` || string(env["KEEP"]) != `"edited"` || string(env["NEW"]) != `"new"` {
-				t.Fatal("user edits were lost")
-			}
-			if _, err := os.Stat(m.statePath()); !os.IsNotExist(err) {
-				t.Fatalf("state not removed: %v", err)
-			}
-		})
+		}
 	}
 }
 
@@ -181,6 +172,14 @@ func TestDeadProxyRecoveryRestoresJournal(t *testing.T) {
 	if err := applySettings(context.Background(), s, settings, m.statePath()); err != nil {
 		t.Fatal(err)
 	}
+	edited, err := readSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited["model"] = json.RawMessage(`"user-edited-model"`)
+	if err := writeJSON(path, edited); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +187,7 @@ func TestDeadProxyRecoveryRestoresJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fields) != 1 || string(fields["language"]) != `"English"` {
+	if len(fields) != 2 || string(fields["language"]) != `"English"` || string(fields["model"]) != `"user-edited-model"` {
 		t.Fatalf("restored fields=%v", fields)
 	}
 }
@@ -246,24 +245,27 @@ func TestRecoverStaleRestoresOnlyADeadProxy(t *testing.T) {
 	}
 }
 
-func TestProxyRejectsMalformedSettingsWithoutOverwriting(t *testing.T) {
+func TestLegacyRecoveryRejectsMalformedSettingsWithoutOverwriting(t *testing.T) {
 	m, path := isolatedManager(t)
-	original := []byte("{broken json")
+	original := []byte("{broken JSON after an old proxy changed the file")
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	state := &State{ID: "legacy", SettingsPath: path, Changes: []Change{{Key: "model", Applied: json.RawMessage(`"old-proxy"`)}}}
 	if err := os.MkdirAll(m.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	err := applySettings(context.Background(), &State{ID: "invalid", SettingsPath: path}, map[string]json.RawMessage{"env": json.RawMessage(`{}`)}, m.statePath())
-	if err == nil {
-		t.Fatal("malformed settings accepted")
+	if err := writeJSON(m.statePath(), state); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := m.RecoverStale(context.Background()); err == nil || restored {
+		t.Fatal("unsafe legacy recovery succeeded")
 	}
 	got, _ := os.ReadFile(path)
 	if !bytes.Equal(got, original) {
-		t.Fatal("malformed settings overwritten")
+		t.Fatal("malformed legacy settings overwritten")
 	}
-	if _, err := os.Stat(m.statePath()); !os.IsNotExist(err) {
-		t.Fatal("journal created without valid settings")
+	if _, err := os.Stat(m.statePath()); err != nil {
+		t.Fatal("legacy recovery journal discarded")
 	}
 }

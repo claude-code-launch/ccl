@@ -360,8 +360,8 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 			}
 		case "adaptive", "auto":
 			thinkingEnabled = true
-			if effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(raw, "output_config.effort").String())); effort != "" {
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", effort)
+			if effort := strings.TrimSpace(gjson.GetBytes(raw, "output_config.effort").String()); effort != "" {
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", geminiThinkingLevel(effort))
 			} else {
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "high")
 			}
@@ -391,6 +391,18 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 		model:      upstreamModel,
 		geminiBody: out,
 	}, nil
+}
+
+// geminiThinkingLevel maps a client effort onto Gemini's thinkingLevel.
+// minimal, low, medium and high pass through. GPT rungs above high
+// (xhigh, max, ultra) share high so the request is not rejected.
+func geminiThinkingLevel(effort string) string {
+	switch effort = strings.ToLower(strings.TrimSpace(effort)); effort {
+	case "minimal", "low", "medium", "high":
+		return effort
+	default:
+		return "high"
+	}
 }
 
 // geminiContentWithParts builds one Gemini content object from a role and its raw

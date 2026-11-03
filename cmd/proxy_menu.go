@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -101,12 +102,19 @@ func proxyMenuSwitch(cmd *cobra.Command, _ []string) (switchErr error) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			_, restoreErr := m.Start(ctx, executable, *rollback, previous.SettingsPath)
+			if previous.Codex != nil {
+				endpoint, parseErr := url.Parse(previous.Codex.BaseURL)
+				if parseErr != nil {
+					return errors.Join(err, parseErr)
+				}
+				m.CodexListenAddress = endpoint.Host
+			}
+			m.CodexMode = previous.CodexMode
+			_, restoreErr := m.Start(ctx, executable, *rollback)
 			return errors.Join(err, restoreErr)
 		}
 		return err
 	}
-	changed := false
 	if err := config.Update(func(current *provider.Config) error {
 		state, err := m.Read()
 		if err != nil {
@@ -118,16 +126,14 @@ func proxyMenuSwitch(cmd *cobra.Command, _ []string) (switchErr error) {
 		if _, exists := current.Providers[name]; !exists {
 			return fmt.Errorf("selected provider was removed while switching")
 		}
-		changed = previous == nil || previous.ID != state.ID
+		// Codex reads its model catalog only at startup. Leave a running app
+		// alone; the user restarts it when they want the new list.
 		current.ActiveProvider = name
 		return nil
 	}); err != nil {
 		return err
 	}
-	if !changed {
-		return nil
-	}
-	return proxymanager.RefreshCodex(cmd.Context())
+	return nil
 }
 
 func addProxyMenuCommands(command *cobra.Command) {

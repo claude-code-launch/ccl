@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,6 +23,7 @@ type responseStream struct {
 	id, model              string
 	created                int64
 	stream, started, ended bool
+	suppress               bool
 	seq                    int
 	tools                  toolRegistry
 	blocks                 []*responseBlock
@@ -29,11 +31,16 @@ type responseStream struct {
 	usage                  map[string]any
 	stopReason             string
 	retained               int
+	notice                 string
+}
+
+func responseUsage() map[string]any {
+	return map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens_details": map[string]any{"reasoning_tokens": 0}}
 }
 
 func newResponseStream(w http.ResponseWriter, model string, stream bool, tools toolRegistry) *responseStream {
 	return &responseStream{w: w, id: randomID("resp_"), model: model, created: time.Now().Unix(), stream: stream,
-		tools: tools, indexes: make(map[int]int), usage: map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens_details": map[string]any{"reasoning_tokens": 0}}}
+		tools: tools, indexes: make(map[int]int), usage: responseUsage()}
 }
 
 func (s *responseStream) response(status string) map[string]any {
@@ -48,7 +55,7 @@ func (s *responseStream) response(status string) map[string]any {
 	return result
 }
 func (s *responseStream) emit(event string, data map[string]any) error {
-	if !s.stream {
+	if !s.stream || s.suppress {
 		return nil
 	}
 	data["type"] = event
@@ -71,7 +78,18 @@ func (s *responseStream) start() error {
 	if err := s.emit("response.created", map[string]any{"response": s.response("in_progress")}); err != nil {
 		return err
 	}
-	return s.emit("response.in_progress", map[string]any{"response": s.response("in_progress")})
+	if err := s.emit("response.in_progress", map[string]any{"response": s.response("in_progress")}); err != nil {
+		return err
+	}
+	if s.notice != "" && !s.suppress {
+		text := s.notice
+		s.notice = ""
+		if err := s.addBlock(4096, map[string]any{"type": "text", "text": text}); err != nil {
+			return err
+		}
+		return s.closeBlock(4096)
+	}
+	return nil
 }
 
 func (s *responseStream) item(index int, complete bool) map[string]any {
@@ -82,6 +100,11 @@ func (s *responseStream) item(index int, complete bool) map[string]any {
 	}
 	switch b.kind {
 	case "tool_use":
+		if b.spec.Kind == "tool_search" {
+			arguments := map[string]any{}
+			_ = json.Unmarshal([]byte(b.args.String()), &arguments)
+			return map[string]any{"id": "tsc_" + strings.TrimPrefix(b.id, "fc_"), "type": "tool_search_call", "call_id": strings.TrimPrefix(b.id, "fc_"), "execution": "client", "arguments": arguments, "status": status}
+		}
 		result := map[string]any{"id": b.id, "type": "function_call", "call_id": strings.TrimPrefix(b.id, "fc_"), "name": b.spec.Name, "arguments": b.args.String(), "status": status}
 		if b.spec.Namespace != "" {
 			result["namespace"] = b.spec.Namespace
@@ -129,7 +152,20 @@ func (s *responseStream) addBlock(source int, block map[string]any) error {
 		name, _ := block["name"].(string)
 		spec, ok := s.tools[name]
 		if !ok {
-			return fmt.Errorf("provider called a tool outside the declared tool list")
+			// Include names only: callers need to distinguish a stale history
+			// name from a malformed provider name, without logging arguments.
+			declared := make([]string, 0, len(s.tools))
+			for wire := range s.tools {
+				declared = append(declared, wire)
+			}
+			sort.Strings(declared)
+			if len(declared) > 16 {
+				declared = append(declared[:16], "...")
+			}
+			if len(name) > 128 {
+				name = name[:128] + "..."
+			}
+			return fmt.Errorf("provider called a tool outside the declared tool list: %q (declared: %s)", name, strings.Join(declared, ", "))
 		}
 		b.spec = spec
 		id, _ := block["id"].(string)
@@ -139,7 +175,7 @@ func (s *responseStream) addBlock(source int, block map[string]any) error {
 		b.id = "fc_" + id
 	}
 	if kind == "thinking" {
-		b.id = randomID("rs_")
+		b.id = randomID("rs_ccl_")
 	}
 	i := len(s.blocks)
 	s.indexes[source] = i
@@ -207,7 +243,7 @@ func (s *responseStream) delta(source int, delta map[string]any) error {
 	}
 	if b.kind == "tool_use" {
 		b.args.WriteString(value)
-		if b.spec.Kind == "custom" {
+		if b.spec.Kind == "custom" || b.spec.Kind == "tool_search" {
 			return nil
 		}
 	} else {
@@ -253,7 +289,10 @@ func (s *responseStream) closeBlock(source int) error {
 		if json.Unmarshal([]byte(b.args.String()), &input) != nil || input == nil {
 			return fmt.Errorf("provider returned invalid tool arguments")
 		}
-		if b.spec.Kind == "custom" {
+		if b.spec.Kind == "tool_search" {
+			// Search arguments are carried in the native output item. Codex
+			// executes the search and sends tool_search_output next turn.
+		} else if b.spec.Kind == "custom" {
 			value, ok := input["input"].(string)
 			if !ok {
 				return fmt.Errorf("provider returned invalid custom tool input")
@@ -331,7 +370,16 @@ func (s *responseStream) event(raw []byte) error {
 	case "message_stop":
 		s.ended = true
 	case "error":
-		return fmt.Errorf("provider reported a stream error")
+		message := "provider reported a stream error"
+		if nested, ok := event["error"].(map[string]any); ok {
+			if text, _ := nested["message"].(string); strings.TrimSpace(text) != "" {
+				message = strings.TrimSpace(text)
+			}
+		}
+		if len(message) > 500 {
+			message = message[:500]
+		}
+		return fmt.Errorf("%s", message)
 	}
 	return nil
 }
@@ -420,7 +468,51 @@ func (s *responseStream) finish() {
 		writeJSON(s.w, 200, s.response(status))
 	}
 }
+
+func (s *responseStream) summaryText() string {
+	var summary strings.Builder
+	for _, block := range s.blocks {
+		if block.kind != "text" && block.kind != "thinking" {
+			continue
+		}
+		text := strings.TrimSpace(block.text.String())
+		if text == "" {
+			continue
+		}
+		if summary.Len() > 0 {
+			summary.WriteByte('\n')
+		}
+		summary.WriteString(text)
+	}
+	return summary.String()
+}
+
+func (s *responseStream) writeCompaction(summary string) error {
+	s.suppress = false
+	s.blocks = nil
+	item := map[string]any{"id": randomID("cmp_"), "type": "compaction", "encrypted_content": encodeCompactionSummary(summary)}
+	if !s.stream {
+		response := s.response("completed")
+		response["output"] = []any{item}
+		writeJSON(s.w, 200, response)
+		return nil
+	}
+	if err := s.emit("response.created", map[string]any{"response": s.response("in_progress")}); err != nil {
+		return err
+	}
+	if err := s.emit("response.output_item.added", map[string]any{"output_index": 0, "item": item}); err != nil {
+		return err
+	}
+	if err := s.emit("response.output_item.done", map[string]any{"output_index": 0, "item": item}); err != nil {
+		return err
+	}
+	response := s.response("completed")
+	response["output"] = []any{item}
+	return s.emit("response.completed", map[string]any{"response": response})
+}
+
 func (s *responseStream) fail(err error) {
+	s.suppress = false
 	if s.stream && s.started {
 		response := s.response("failed")
 		response["error"] = map[string]any{"code": "upstream_stream_error", "message": err.Error()}

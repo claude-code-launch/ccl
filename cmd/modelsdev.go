@@ -2,24 +2,52 @@ package cmd
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
+var modelsDevRefresh = modelsdev.Refresh
+
+// Refresh after configuration succeeds; metadata failure never undoes a saved
+// provider or a successful OAuth login. The public request has no account key.
+func refreshModelsDevMetadata(parent context.Context, out io.Writer) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	fmt.Fprintln(out, locale.T("正在刷新模型元数据…", "Refreshing model metadata..."))
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	snapshot, err := modelsDevRefresh(ctx)
+	if err != nil {
+		fmt.Fprintln(out, locale.T("模型元数据暂不可用，保留兼容设置；可通过 ccl set 重试。", "Model metadata unavailable; keeping compatibility settings. Retry with ccl set."))
+		return err
+	}
+	if snapshot.Offline {
+		fmt.Fprintln(out, locale.T("已使用离线模型元数据缓存。", "Using the offline model metadata cache."))
+	} else {
+		fmt.Fprintln(out, locale.T("模型元数据已更新。", "Model metadata is up to date."))
+	}
+	return nil
+}
+
 // modelsDevProviders fetches the models.dev catalog and returns it as a stable,
 // name-sorted slice. The entry point is a single unfiltered list so the user
 // can pick any provider models.dev knows about.
 func modelsDevProviders(ctx context.Context) ([]modelsdev.Provider, error) {
-	catalog, err := modelsdev.Fetch(ctx)
+	snapshot, err := modelsDevRefresh(ctx)
 	if err != nil {
 		return nil, err
 	}
-	providers := make([]modelsdev.Provider, 0, len(catalog))
-	for _, p := range catalog {
+	providers := make([]modelsdev.Provider, 0, len(snapshot.Providers))
+	for _, p := range snapshot.Providers {
 		providers = append(providers, p)
 	}
 	sort.Slice(providers, func(i, j int) bool {

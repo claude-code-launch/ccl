@@ -41,7 +41,8 @@ func sameSetting(a, b json.RawMessage) bool {
 	return bytes.Equal(ax, by)
 }
 
-// standaloneChanges returns only fields still equal to the proxy's value.
+// standaloneChanges handles legacy shared-proxy journals, returning only fields
+// still equal to the old proxy's value. Codex-only daemons install no such fields.
 // Fields changed by the user since startup remain authoritative.
 func standaloneChanges() []standaloneChange {
 	home, err := os.UserHomeDir()

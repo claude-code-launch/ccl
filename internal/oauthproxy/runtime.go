@@ -91,6 +91,7 @@ func (r *Runtime) ModelDetails() map[string]protocol.ModelInfo {
 	maps.Copy(details, r.modelDetails)
 	for id, info := range details {
 		info.ReasoningLevels = slices.Clone(info.ReasoningLevels)
+		info.InputModalities = slices.Clone(info.InputModalities)
 		details[id] = info
 	}
 	return details

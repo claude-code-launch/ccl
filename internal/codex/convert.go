@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -25,10 +26,21 @@ type responseRequest struct {
 	MaxOutputTokens    int              `json:"max_output_tokens"`
 	Reasoning          map[string]any   `json:"reasoning"`
 	Text               map[string]any   `json:"text"`
+	ClientMetadata     map[string]any   `json:"client_metadata"`
 }
 
 type toolSpec struct{ Name, Namespace, Kind, WireName string }
 type toolRegistry map[string]toolSpec
+
+func hostedResponsesTool(kind string) bool {
+	switch kind {
+	case "web_search", "web_search_preview", "image_generation", "code_interpreter", "file_search",
+		"computer", "computer_use_preview", "tool_search", "mcp", "local_shell":
+		return true
+	default:
+		return strings.HasPrefix(kind, "web_search") || strings.HasPrefix(kind, "computer_use")
+	}
+}
 
 func toolWireName(namespace, name string) string {
 	sum := sha256.Sum256([]byte(namespace + "\x00" + name))
@@ -46,11 +58,19 @@ func toolWireName(namespace, name string) string {
 	return out.String() + "_" + hex.EncodeToString(sum[:6])
 }
 
-func convertTools(tools []map[string]any) ([]map[string]any, toolRegistry, error) {
+func convertTools(tools []map[string]any, discovered ...[]map[string]any) ([]map[string]any, toolRegistry, error) {
 	registry := make(toolRegistry)
 	var result []map[string]any
-	var add func(map[string]any, string) error
-	add = func(tool map[string]any, namespace string) error {
+	positions := make(map[string]int)
+	explicit := make(map[string]bool)
+	hasSearch := false
+	for _, tool := range tools {
+		if tool["type"] == "tool_search" && tool["execution"] == "client" {
+			hasSearch = true
+		}
+	}
+	var add func(map[string]any, string, bool) error
+	add = func(tool map[string]any, namespace string, loaded bool) error {
 		kind, _ := tool["type"].(string)
 		name, _ := tool["name"].(string)
 		if kind == "namespace" {
@@ -60,23 +80,44 @@ func convertTools(tools []map[string]any) ([]map[string]any, toolRegistry, error
 				if !ok {
 					return fmt.Errorf("invalid namespaced tool")
 				}
-				if err := add(item, name); err != nil {
+				if err := add(item, name, loaded); err != nil {
 					return err
 				}
 			}
 			return nil
 		}
+		specKind := kind
+		if kind == "tool_search" && tool["execution"] == "client" {
+			kind, name = "function", "tool_search"
+		}
 		if kind != "function" && kind != "custom" {
+			// A translated provider cannot execute OpenAI-hosted tools.
+			// Client tool search is adapted above; retain the local function
+			// tools and drop unsupported hosted declarations.
+			if hostedResponsesTool(kind) {
+				return nil
+			}
 			return fmt.Errorf("tool type %q is not supported by this CCL provider; use local function tools", kind)
 		}
 		if name == "" {
 			return fmt.Errorf("tool name is required")
 		}
+		if deferred, _ := tool["defer_loading"].(bool); deferred && hasSearch && !loaded {
+			return nil
+		}
 		wire := toolWireName(namespace, name)
 		if _, exists := registry[wire]; exists {
-			return fmt.Errorf("duplicate tool definition")
+			if !loaded {
+				return fmt.Errorf("duplicate tool definition")
+			}
+			if explicit[wire] {
+				return nil
+			}
 		}
-		registry[wire] = toolSpec{Name: name, Namespace: namespace, Kind: kind, WireName: wire}
+		registry[wire] = toolSpec{Name: name, Namespace: namespace, Kind: specKind, WireName: wire}
+		if !loaded {
+			explicit[wire] = true
+		}
 		schema := tool["parameters"]
 		if schema == nil {
 			schema = map[string]any{"type": "object", "properties": map[string]any{}}
@@ -89,18 +130,95 @@ func convertTools(tools []map[string]any) ([]map[string]any, toolRegistry, error
 				description += "\nThe input must follow this format: " + string(raw)
 			}
 		}
-		result = append(result, map[string]any{"name": wire, "description": description, "input_schema": schema})
+		definition := map[string]any{"name": wire, "description": description, "input_schema": schema}
+		if position, exists := positions[wire]; exists {
+			result[position] = definition
+		} else {
+			positions[wire] = len(result)
+			result = append(result, definition)
+		}
 		if len(result) > 1024 {
 			return fmt.Errorf("too many tool definitions")
 		}
 		return nil
 	}
 	for _, tool := range tools {
-		if err := add(tool, ""); err != nil {
+		if err := add(tool, "", false); err != nil {
 			return nil, nil, err
 		}
 	}
+	for _, group := range discovered {
+		for _, tool := range group {
+			if err := add(tool, "", true); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	return result, registry, nil
+}
+
+const compactionSummaryPrefix = "ccl1:"
+
+func encodeCompactionSummary(summary string) string {
+	return compactionSummaryPrefix + base64.StdEncoding.EncodeToString([]byte(summary))
+}
+
+func decodeCompactionSummary(encoded string) (string, bool) {
+	raw, ok := strings.CutPrefix(encoded, compactionSummaryPrefix)
+	if !ok || raw == "" {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(decoded) == 0 {
+		return "", false
+	}
+	return string(decoded), true
+}
+
+// hoistCompactionTrigger drops Codex remote-compaction markers. The marker is
+// not model input; the caller summarizes the remaining items and returns one
+// compaction item. A marker that is not last is still removed.
+func hoistCompactionTrigger(items []map[string]any) ([]map[string]any, bool) {
+	triggered := false
+	rest := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if kind, _ := item["type"].(string); kind == "compaction_trigger" {
+			triggered = true
+			continue
+		}
+		rest = append(rest, item)
+	}
+	return rest, triggered
+}
+
+// Summarization has no live tools. Preserve historical calls/results as text
+// so Messages backends do not require tool definitions or resume a tool loop.
+func compactionItems(items []map[string]any) []map[string]any {
+	result := make([]map[string]any, 0, len(items)+1)
+	for _, item := range items {
+		kind, _ := item["type"].(string)
+		switch kind {
+		case "function_call", "custom_tool_call", "tool_search_call":
+			input := item["arguments"]
+			if kind == "custom_tool_call" {
+				input = item["input"]
+			}
+			name := textValue(item["name"])
+			if kind == "tool_search_call" {
+				name = "tool_search"
+			}
+			result = append(result, map[string]any{"type": "message", "role": "assistant", "content": fmt.Sprintf("Previous tool call %s (%s):\n%s", name, textValue(item["call_id"]), textValue(input))})
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
+			output := item["output"]
+			if kind == "tool_search_output" {
+				output = item["tools"]
+			}
+			result = append(result, map[string]any{"type": "message", "role": "user", "content": fmt.Sprintf("Previous tool result (%s):\n%s", textValue(item["call_id"]), textValue(output))})
+		default:
+			result = append(result, item)
+		}
+	}
+	return append(result, map[string]any{"type": "message", "role": "user", "content": "Summarize the conversation above for another assistant to continue. Preserve the goals, constraints, decisions, tool results, changed files, and outstanding tasks. Return only the summary; do not continue the task or call tools."})
 }
 
 func inputItems(raw json.RawMessage) ([]map[string]any, error) {
@@ -162,11 +280,35 @@ func messageContent(value any) ([]map[string]any, error) {
 }
 
 func toMessages(request responseRequest, items []map[string]any, route Route) ([]byte, toolRegistry, error) {
-	tools, registry, err := convertTools(request.Tools)
+	discovered, err := discoveredResponseTools(items)
+	if err != nil {
+		return nil, nil, err
+	}
+	tools, registry, err := convertTools(request.Tools, discovered)
 	if err != nil {
 		return nil, nil, err
 	}
 	system := request.Instructions
+	// Model/tool-mode switches can leave calls to tools that this request no
+	// longer declares. Retain their contents as history, not callable examples.
+	unavailableCalls := make(map[string]bool)
+	for _, item := range items {
+		switch item["type"] {
+		case "function_call", "custom_tool_call", "tool_search_call":
+			name, _ := item["name"].(string)
+			namespace, _ := item["namespace"].(string)
+			if item["type"] == "tool_search_call" {
+				name, namespace = "tool_search", ""
+			}
+			id, _ := item["call_id"].(string)
+			if _, ok := registry[toolWireName(namespace, name)]; !ok && id != "" {
+				unavailableCalls[id] = true
+			}
+		}
+	}
+	if len(unavailableCalls) > 0 {
+		system += "\nOnly tools in the current tools list may be called. Historical tool records are conversation context, not tool definitions."
+	}
 	messages := make([]map[string]any, 0, len(items))
 	appendMessage := func(role string, content []map[string]any) {
 		if len(content) == 0 {
@@ -201,34 +343,97 @@ func toMessages(request responseRequest, items []map[string]any, route Route) ([
 				return nil, nil, fmt.Errorf("unsupported Responses message role")
 			}
 			appendMessage(role, content)
-		case "function_call", "custom_tool_call":
+		case "function_call", "custom_tool_call", "tool_search_call":
 			id, _ := item["call_id"].(string)
 			name, _ := item["name"].(string)
 			ns, _ := item["namespace"].(string)
+			if kind == "tool_search_call" {
+				name, ns = "tool_search", ""
+			}
 			if id == "" || name == "" {
 				return nil, nil, fmt.Errorf("tool call requires call_id and name")
 			}
 			input := make(map[string]any)
 			if kind == "custom_tool_call" {
 				input["input"] = textValue(item["input"])
+			} else if args, ok := item["arguments"].(map[string]any); ok && kind == "tool_search_call" {
+				input = args
 			} else if args, _ := item["arguments"].(string); args != "" {
 				if json.Unmarshal([]byte(args), &input) != nil || input == nil {
 					return nil, nil, fmt.Errorf("function arguments must be a JSON object")
 				}
 			}
+			if unavailableCalls[id] {
+				appendMessage("assistant", []map[string]any{{"type": "text", "text": fmt.Sprintf("Historical tool call %s (%s), unavailable in the current tool list:\n%s", name, id, textValue(input))}})
+				continue
+			}
 			appendMessage("assistant", []map[string]any{{"type": "tool_use", "id": id, "name": toolWireName(ns, name), "input": input}})
-		case "function_call_output", "custom_tool_call_output":
+		case "tool_search_output":
 			id, _ := item["call_id"].(string)
 			if id == "" {
-				return nil, nil, fmt.Errorf("tool output requires call_id")
+				return nil, nil, fmt.Errorf("tool search output requires call_id")
 			}
-			appendMessage("user", []map[string]any{{"type": "tool_result", "tool_use_id": id, "content": textValue(item["output"])}})
+			found, err := discoveredResponseTools([]map[string]any{item})
+			if err != nil {
+				return nil, nil, err
+			}
+			definitions, _, err := convertTools(nil, found)
+			if err != nil {
+				return nil, nil, err
+			}
+			if definitions == nil {
+				definitions = []map[string]any{}
+			}
+			if unavailableCalls[id] {
+				appendMessage("user", []map[string]any{{"type": "text", "text": fmt.Sprintf("Historical tool result (%s):\n%s", id, textValue(definitions))}})
+			} else {
+				appendMessage("user", []map[string]any{{"type": "tool_result", "tool_use_id": id, "content": textValue(definitions)}})
+			}
+		case "function_call_output", "custom_tool_call_output":
+			id, _ := item["call_id"].(string)
+			var content any = textValue(item["output"])
+			if parts, ok := item["output"].([]any); ok {
+				converted, err := messageContent(parts)
+				if err != nil {
+					return nil, nil, err
+				}
+				content = converted
+			}
+			if id == "" || unavailableCalls[id] {
+				label := fmt.Sprintf("Historical tool result (%s):", id)
+				if id == "" {
+					// Desktop-delivered messages carry a named output without a
+					// preceding model call. Do not invent a tool_use_id for them.
+					name, _ := item["name"].(string)
+					if name == "" {
+						return nil, nil, fmt.Errorf("tool output requires call_id or a notification name")
+					}
+					namespace, _ := item["namespace"].(string)
+					if namespace != "" {
+						name = namespace + "." + name
+					}
+					label = "Tool notification from " + name + ":"
+				}
+				parts := []map[string]any{{"type": "text", "text": label}}
+				if typed, ok := content.([]map[string]any); ok {
+					parts = append(parts, typed...)
+				} else {
+					parts = append(parts, map[string]any{"type": "text", "text": textValue(content)})
+				}
+				appendMessage("user", parts)
+				continue
+			}
+			appendMessage("user", []map[string]any{{"type": "tool_result", "tool_use_id": id, "content": content}})
 		case "reasoning":
-			if value, _ := item["encrypted_content"].(string); value != "" {
-				return nil, nil, fmt.Errorf("opaque reasoning from a different backend cannot be replayed to this provider")
-			}
+			// Reasoning belongs to its backend. Keep the messages and tool
+			// history when switching from native GPT to a converted model.
 		case "compaction":
-			return nil, nil, fmt.Errorf("opaque native compaction cannot be replayed to this provider")
+			encoded, _ := item["encrypted_content"].(string)
+			summary, ok := decodeCompactionSummary(encoded)
+			if !ok {
+				return nil, nil, fmt.Errorf("opaque native compaction cannot be replayed to this provider")
+			}
+			appendMessage("user", []map[string]any{{"type": "text", "text": "Conversation summary:\n" + summary}})
 		default:
 			return nil, nil, fmt.Errorf("unsupported Responses input item %q", kind)
 		}
@@ -261,6 +466,9 @@ func toMessages(request responseRequest, items []map[string]any, route Route) ([
 		}
 	case map[string]any:
 		name, _ := choice["name"].(string)
+		if choice["type"] == "tool_search" {
+			name = "tool_search"
+		}
 		ns, _ := choice["namespace"].(string)
 		wire := toolWireName(ns, name)
 		if _, ok := registry[wire]; !ok {
@@ -312,10 +520,29 @@ func (g *Gateway) serveBridge(w http.ResponseWriter, r *http.Request, request re
 		}
 		items = append(previous, items...)
 	}
-	if compact {
+	var migrated bool
+	items, migrated, err = g.migrateNativeContext(r, route, items, request.ClientMetadata)
+	if err != nil {
+		writeError(w, 400, "invalid_request_error", err.Error(), "context_migration_unavailable")
+		return
+	}
+	compactionRequest := isClientCompaction(r, request, items, r.URL.Path)
+	noticeID := migrationSessionID(r, request.ClientMetadata)
+	if migrated {
+		g.migrationNotices.put(noticeID, "migration-notice", owner, []map[string]any{{"pending": true}})
+	}
+	_, pendingNotice := g.migrationNotices.get(noticeID, "migration-notice", owner)
+	items, triggered := hoistCompactionTrigger(items)
+	if compact || triggered {
+		// Codex remote compaction v2 appends compaction_trigger to an ordinary
+		// Responses request and expects exactly one compaction output item.
+		// /responses/compact uses the same summary.
 		request.Instructions = "Summarize the conversation for another coding assistant to continue. Retain the user's goals, constraints, decisions, tool results, changed files, and outstanding tasks. Do not perform the tasks or call tools.\n" + request.Instructions
 		request.Tools = nil
 		request.ToolChoice = nil
+		items = compactionItems(items)
+	}
+	if compact {
 		request.Stream = false
 	}
 	body, tools, err := toMessages(request, items, route)
@@ -323,62 +550,31 @@ func (g *Gateway) serveBridge(w http.ResponseWriter, r *http.Request, request re
 		writeError(w, 400, "invalid_request_error", err.Error(), "")
 		return
 	}
-	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, g.runtime.ClaudeBaseURL()+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		writeError(w, 502, "api_error", "invalid CCL runtime", "")
-		return
-	}
-	upstream.Header.Set("X-Api-Key", g.runtime.APIKey())
-	upstream.Header.Set("Content-Type", "application/json")
-	upstream.Header.Set("Accept", "text/event-stream")
-	response, err := g.client.Do(upstream)
-	if err != nil {
-		writeError(w, 502, "api_error", "CCL provider connection failed", "")
-		return
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if hint := response.Header.Get("Retry-After"); hint != "" {
-			w.Header().Set("Retry-After", hint)
-		}
-		raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		var failure struct {
-			Error struct {
-				Message string `json:"message"`
-				Type    string `json:"type"`
-			} `json:"error"`
-		}
-		_ = json.Unmarshal(raw, &failure)
-		if failure.Error.Message == "" {
-			failure.Error.Message = http.StatusText(response.StatusCode)
-		}
-		writeError(w, response.StatusCode, "api_error", failure.Error.Message, "")
-		return
-	}
 	stream := newResponseStream(w, request.Model, request.Stream, tools)
-	if request.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+	if pendingNotice && !compactionRequest {
+		stream.notice = "CCL context migration: resumed from a bounded local transcript excerpt. The encrypted summary was not decrypted; older details may be missing.\n\n"
 	}
-	reader := bufio.NewReader(response.Body)
-	for {
-		first, peekErr := reader.Peek(1)
-		if peekErr != nil || !strings.ContainsRune(" \r\n\t", rune(first[0])) {
-			break
-		}
-		_, _ = reader.ReadByte()
-	}
-	first, _ := reader.Peek(1)
-	if strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") && (len(first) == 0 || first[0] != '{') {
-		err = stream.read(reader)
-	} else {
-		err = stream.readJSON(reader)
-	}
-	if err != nil {
-		stream.fail(err)
+	stream.suppress = triggered && !compact
+	stream = g.readBridgeResponse(w, r, body, stream)
+	if stream == nil {
 		return
+	}
+	if pendingNotice && !compactionRequest {
+		g.migrationNotices.remove(noticeID, "migration-notice", owner)
 	}
 	output := stream.outputItems()
+	if triggered && !compact {
+		summary := stream.summaryText()
+		if summary == "" {
+			writeError(w, 502, "api_error", "provider returned no compaction summary", "")
+			return
+		}
+		if err := stream.writeCompaction(summary); err != nil {
+			return
+		}
+		g.history.put(stream.id, route.Alias, owner, []map[string]any{{"type": "message", "role": "user", "content": "Conversation summary:\n" + summary}})
+		return
+	}
 	if compact {
 		var summary strings.Builder
 		for _, item := range output {
@@ -399,6 +595,74 @@ func (g *Gateway) serveBridge(w http.ResponseWriter, r *http.Request, request re
 	}
 	g.history.put(stream.id, route.Alias, owner, append(items, output...))
 	stream.finish()
+}
+
+func (g *Gateway) readBridgeResponse(w http.ResponseWriter, r *http.Request, body []byte, stream *responseStream) *responseStream {
+	fail := func(status int, message string) {
+		if stream.stream && stream.started && !stream.suppress {
+			stream.fail(fmt.Errorf("%s", message))
+		} else {
+			writeError(w, status, "api_error", message, "")
+		}
+	}
+	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, g.runtime.ClaudeBaseURL()+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		fail(502, "invalid CCL runtime")
+		return nil
+	}
+	upstream.Header.Set("X-Api-Key", g.runtime.APIKey())
+	upstream.Header.Set("Content-Type", "application/json")
+	upstream.Header.Set("Accept", "text/event-stream")
+	response, err := g.client.Do(upstream)
+	if err != nil {
+		fail(502, "CCL provider connection failed")
+		return nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if hint := response.Header.Get("Retry-After"); hint != "" {
+			w.Header().Set("Retry-After", hint)
+		}
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		var failure struct {
+			Error struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &failure)
+		if failure.Error.Message == "" {
+			failure.Error.Message = http.StatusText(response.StatusCode)
+		}
+		if failure.Error.Type == "" {
+			failure.Error.Type = "api_error"
+		}
+		writeError(w, response.StatusCode, failure.Error.Type, failure.Error.Message, "")
+		return nil
+	}
+	if stream.stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	reader := bufio.NewReader(response.Body)
+	for {
+		first, peekErr := reader.Peek(1)
+		if peekErr != nil || !strings.ContainsRune(" \r\n\t", rune(first[0])) {
+			break
+		}
+		_, _ = reader.ReadByte()
+	}
+	first, _ := reader.Peek(1)
+	if strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") && (len(first) == 0 || first[0] != '{') {
+		err = stream.read(reader)
+	} else {
+		err = stream.readJSON(reader)
+	}
+	if err != nil {
+		fail(502, err.Error())
+		return nil
+	}
+	return stream
 }
 
 type historyEntry struct {
@@ -452,4 +716,13 @@ func (h *responseHistory) put(id, route, owner string, items []map[string]any) {
 	}
 	h.entries[id] = historyEntry{Route: route, Owner: owner, Items: raw, At: time.Now()}
 	h.bytes += len(raw)
+}
+
+func (h *responseHistory) remove(id, route, owner string) {
+	h.Lock()
+	defer h.Unlock()
+	if e, ok := h.entries[id]; ok && e.Route == route && e.Owner == owner {
+		h.bytes -= len(e.Items)
+		delete(h.entries, id)
+	}
 }

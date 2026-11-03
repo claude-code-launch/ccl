@@ -72,6 +72,7 @@ func requestCodexModelInfos(ctx context.Context, client *http.Client, endpoint s
 			DisplayName           string                    `json:"display_name"`
 			ContextWindow         int                       `json:"context_window"`
 			MaxContextWindow      int                       `json:"max_context_window"`
+			InputModalities       []string                  `json:"input_modalities"`
 			ReasoningLevels       []protocol.ReasoningLevel `json:"supported_reasoning_levels"`
 			DefaultReasoningLevel string                    `json:"default_reasoning_level"`
 		} `json:"models"`
@@ -92,7 +93,7 @@ func requestCodexModelInfos(ctx context.Context, client *http.Client, endpoint s
 		if window == 0 {
 			window = model.MaxContextWindow
 		}
-		models = append(models, protocol.ModelInfo{ID: id, DisplayName: model.DisplayName, ContextWindow: window, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
+		models = append(models, protocol.ModelInfo{ID: id, DisplayName: model.DisplayName, ContextWindow: window, InputModalities: model.InputModalities, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
 	}
 	if len(models) == 0 {
 		return nil, response.StatusCode, fmt.Errorf("discover GPT models: response contained no visible models")

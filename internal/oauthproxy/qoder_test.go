@@ -266,6 +266,9 @@ func TestQoderRuntimeRefreshesCredentialDiscoversModelsAndTranslatesMessages(t *
 	if names := runtime.ModelDisplayNames(); names["qmodel"] != "Qwen Plus" {
 		t.Fatalf("runtime model display names = %#v", names)
 	}
+	if info := runtime.ModelDetails()["qmodel"]; info.ContextWindow != 1_000_000 || info.MaxOutputTokens != 32768 {
+		t.Fatalf("model detail context = %+v", info)
+	}
 	if modelCatalog.Data[0].RateMultiplier == nil || *modelCatalog.Data[0].RateMultiplier != 0.5 || !modelCatalog.Data[0].IsNew || !modelCatalog.Data[0].PromotionAvailable {
 		t.Fatalf("local model metadata = %#v", modelCatalog.Data[0])
 	}

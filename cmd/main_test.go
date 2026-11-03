@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/locale"
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
 )
 
 // TestMain keeps the whole package away from the developer's real ~/.ccl and
@@ -23,6 +25,11 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("USERPROFILE", home)
 	_ = os.Setenv("CLAUDE_CONFIG_DIR", home+"/.claude")
 	locale.SetLanguage("en")
+	// Metadata refresh tests inject local services explicitly. OAuth/config
+	// tests must never contact the public catalog as a side effect.
+	modelsDevRefresh = func(context.Context) (*modelsdev.Snapshot, error) {
+		return &modelsdev.Snapshot{}, nil
+	}
 	code := m.Run()
 	_ = os.RemoveAll(home)
 	os.Exit(code)
