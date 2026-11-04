@@ -13,7 +13,7 @@ import (
 
 // runClaudeWithoutProvider starts Claude Code exactly as its own
 // configuration stands (the "default" selector), apart from ccl's launcher
-// flags (bypass). A running ccl proxy's overlay is part of that configuration.
+// flags (bypass). Codex model integration manages its configuration separately.
 func runClaudeWithoutProvider(args []string) error {
 	return runClaudeWithProfile("", "", args)
 }

@@ -143,7 +143,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		return out
 	}
 	t.Cleanup(func() {
-		if out, err := run("proxy", "stop"); err != nil {
+		if out, err := run("codex", "stop"); err != nil {
 			t.Errorf("cleanup stop: %v\n%s", err, out)
 		}
 	})
@@ -190,7 +190,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 
 	// The launching CLI exits before inference: this exercises actual detached
 	// child processes, Windows creation flags and paths with spaces/Unicode.
-	cli("proxy", "-p", chat.Name)
+	cli("codex", "-p", chat.Name)
 	first := state()
 	if first.Provider != chat.Name || first.PID <= 0 || !manager.Running(context.Background(), first) {
 		t.Fatal("background proxy not running")
@@ -208,20 +208,20 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	if string(fields["model"]) != `"original-model"` || env["ANTHROPIC_AUTH_TOKEN"] != "" {
 		t.Fatal("upgrade did not restore legacy Claude settings")
 	}
-	status := cli("proxy", "status")
+	status := cli("codex", "status")
 	for _, secret := range []string{chat.APIKey, native.APIKey, "legacy-local-key", first.ControlToken} {
 		if strings.Contains(status, secret) {
 			t.Fatal("status disclosed a credential")
 		}
 	}
-	cli("proxy", "start", chat.Name)
+	cli("codex", "start", chat.Name)
 	if state().ID != first.ID {
 		t.Fatal("identical start did not reuse proxy")
 	}
 	concurrent := make(chan error, 3)
 	for i := 0; i < 3; i++ {
 		go func() {
-			out, err := run("proxy", "-p", chat.Name)
+			out, err := run("codex", "-p", chat.Name)
 			if err != nil {
 				err = fmt.Errorf("%w: %s", err, out)
 			}
@@ -249,7 +249,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	if err := fsutil.WriteFileAtomic(filepath.Join(manager.Dir, "state.json"), legacyJSON, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cli("proxy", "start", chat.Name)
+	cli("codex", "start", chat.Name)
 	upgraded := state()
 	if upgraded.ID == first.ID || upgraded.ProxyVersion != first.ProxyVersion {
 		t.Fatal("start reused a legacy daemon without the fixed catalog contract")
@@ -264,7 +264,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	cli("proxy", "start", "-p", chat.Name)
+	cli("codex", "start", "-p", chat.Name)
 	if state().ID == first.ID {
 		t.Fatal("updated provider did not reload")
 	}
@@ -274,7 +274,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		t.Fatal("provider reload injected Claude model mappings")
 	}
 	cli("use", native.Name)
-	cli("proxy")
+	cli("codex")
 	if state().Provider != native.Name {
 		t.Fatal("active provider not used for switching")
 	}
@@ -285,15 +285,15 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	fields["env"], _ = json.Marshal(env)
 	fields["permissions"] = json.RawMessage(`{"allow":["Read"]}`)
 	writeObject(t, settingsPath, fields)
-	cli("proxy", "stop")
+	cli("codex", "stop")
 	assertRestored(t, settingsPath)
 	if s, err := manager.Read(); err != nil || s != nil {
 		t.Fatalf("state retained after stop: %v", err)
 	}
-	cli("proxy", "stop")
+	cli("codex", "stop")
 	t.Log("provider reload, switching, direct settings access and restoration passed")
 
-	cli("proxy", "-p", chat.Name)
+	cli("codex", "-p", chat.Name)
 	crashed := state()
 	process, err := os.FindProcess(crashed.PID)
 	if err != nil {
@@ -308,7 +308,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	for manager.Running(context.Background(), crashed) && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if out := cli("proxy", "status"); !strings.Contains(out, "not responding") {
+	if out := cli("codex", "status"); !strings.Contains(out, "not responding") {
 		t.Fatalf("crash not detected: %s", out)
 	}
 	// Any other ccl command undoes the dead proxy's overlay on its way in.
@@ -319,20 +319,20 @@ func TestProxyProcessLifecycle(t *testing.T) {
 	if s, err := manager.Read(); err != nil || s != nil {
 		t.Fatalf("journal retained after recovery: %v", err)
 	}
-	cli("proxy", "stop")
+	cli("codex", "stop")
 	t.Log("forced process termination and automatic recovery passed")
 
 	// The menu uses this same private command. Selection is persisted only
 	// after readiness; a rejected replacement brings the original proxy back.
-	cli("proxy", "menu-switch", "--provider", chat.Name)
+	cli("codex", "menu-switch", "--provider", chat.Name)
 	if cfg, err := config.Load(); err != nil || cfg.ActiveProvider != chat.Name || state().Provider != chat.Name {
 		t.Fatalf("menu selection was not persisted: %v", err)
 	}
 	inference("chat-ok")
-	if out := cli("proxy", "menu-configs"); strings.Contains(out, chat.APIKey) || strings.Contains(out, native.APIKey) || !strings.Contains(out, chat.Name) {
+	if out := cli("codex", "menu-configs"); strings.Contains(out, chat.APIKey) || strings.Contains(out, native.APIKey) || !strings.Contains(out, chat.Name) {
 		t.Fatalf("invalid menu data: %s", out)
 	}
-	cli("proxy", "menu-switch", "--provider", native.Name)
+	cli("codex", "menu-switch", "--provider", native.Name)
 	inference("native-ok")
 	if err := config.Update(func(cfg *provider.Config) error {
 		cfg.Providers["broken-fixture"] = provider.Provider{Name: "broken-fixture", Type: "openai", Endpoint: upstream.URL + "/bad", APIKey: "fake-broken-key"}
@@ -341,7 +341,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeFailure := state().BaseURL
-	if out, err := run("proxy", "menu-switch", "--provider", "broken-fixture"); err == nil {
+	if out, err := run("codex", "menu-switch", "--provider", "broken-fixture"); err == nil {
 		t.Fatalf("invalid menu replacement succeeded: %s", out)
 	}
 	if cfg, err := config.Load(); err != nil || cfg.ActiveProvider != native.Name || state().Provider != native.Name || !manager.Running(context.Background(), state()) {
@@ -351,16 +351,16 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		t.Fatal("failed switch rollback stranded clients on the previous Codex port")
 	}
 	inference("native-ok")
-	cli("proxy", "stop")
+	cli("codex", "stop")
 	t.Log("menu selection, persistence and failed-switch rollback passed")
 
 	broken := []byte("{broken settings")
 	if err := os.WriteFile(settingsPath, broken, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cli("proxy", "-p", chat.Name)
+	cli("codex", "-p", chat.Name)
 	inference("chat-ok")
-	cli("proxy", "stop")
+	cli("codex", "stop")
 	if actual, err := os.ReadFile(settingsPath); err != nil || !bytes.Equal(actual, broken) {
 		t.Fatal("malformed settings overwritten")
 	}

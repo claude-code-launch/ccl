@@ -265,7 +265,7 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 		return nil, err
 	}
 	defer log.Close()
-	args := []string{"proxy", "serve", "--provider", p.Name, "--instance", id, "--codex-mode", mode}
+	args := []string{"codex", "serve", "--provider", p.Name, "--instance", id, "--codex-mode", mode}
 	if codexAddress != "" {
 		args = append(args, "--codex-listen-address", codexAddress)
 	}
@@ -327,7 +327,7 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 		if err != nil {
 			return err
 		}
-		return fmt.Errorf("a previous proxy needs recovery; run ccl proxy stop")
+		return fmt.Errorf("a previous proxy needs recovery; run ccl codex stop")
 	}
 	proxy, err := providersession.PrepareProxy(ctx, p)
 	if err != nil {

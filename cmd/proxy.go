@@ -27,7 +27,7 @@ func recoverStaleProxy() {
 	defer cancel()
 	restored, err := m.RecoverStale(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, locale.T("ccl: 无法恢复已退出代理的客户端配置：%v；请运行 ccl proxy stop\n", "ccl: could not restore client settings for an exited proxy: %v; run ccl proxy stop\n"), err)
+		fmt.Fprintf(os.Stderr, locale.T("ccl: 无法恢复已退出代理的客户端配置：%v；请运行 ccl codex stop\n", "ccl: could not restore client settings for an exited proxy: %v; run ccl codex stop\n"), err)
 		return
 	}
 	if restored {
@@ -119,11 +119,11 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), locale.T("Codex 代理已开启 · %s · %s\n停止：ccl proxy stop\n", "Codex proxy running · %s · %s\nStop with: ccl proxy stop\n"), s.Provider, s.BaseURL)
+	fmt.Fprintf(cmd.OutOrStdout(), locale.T("Codex 模型接入已开启 · %s · %s\n停止：ccl codex stop\n", "Codex model integration running · %s · %s\nStop with: ccl codex stop\n"), s.Provider, s.BaseURL)
 	if s.Codex != nil {
 		fmt.Fprintln(cmd.OutOrStdout(), locale.T("Codex 模型目录已接入；重启 Codex 后可选择 CCL 模型。", "Codex model catalog connected; restart Codex to select CCL models."))
 		if s.CodexMode == "independent" {
-			fmt.Fprintln(cmd.OutOrStdout(), locale.T("独立提供商模式：不依赖 OpenAI 登录。恢复共享目录：ccl proxy start --shared", "Independent provider mode: OpenAI login is not required. Restore the shared catalog: ccl proxy start --shared"))
+			fmt.Fprintln(cmd.OutOrStdout(), locale.T("独立提供商模式：不依赖 OpenAI 登录。恢复共享目录：ccl codex start --shared", "Independent provider mode: OpenAI login is not required. Restore the shared catalog: ccl codex start --shared"))
 		}
 	}
 	return nil
@@ -141,8 +141,8 @@ func runProxyDefault(cmd *cobra.Command) error {
 	}
 	if s == nil {
 		fmt.Fprintln(cmd.OutOrStdout(), locale.T(
-			"default 无需 CCL 代理；Codex 使用原有配置",
-			"default needs no proxy; Codex uses its original configuration",
+			"default 无需 CCL 模型接入；Codex 使用原有配置",
+			"default needs no CCL integration; Codex uses its original configuration",
 		))
 		return nil
 	}
@@ -152,32 +152,34 @@ func runProxyDefault(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), locale.T(
-		"已停止 %s 的代理，Codex 恢复原有配置\n",
-		"Stopped the proxy for %s; Codex is back on its original configuration\n",
+		"已停止 %s 的 Codex 模型接入，Codex 恢复原有配置\n",
+		"Disconnected %s from Codex; Codex is back on its original configuration\n",
 	), s.Provider)
 	return nil
 }
 
-func newProxyCommand() *cobra.Command {
-	command := &cobra.Command{Use: "proxy [provider]", Short: "Run a background provider proxy for Codex", Args: cobra.MaximumNArgs(1), RunE: runProxyStart,
-		Long: `Start a background CCL proxy for Codex.
+func newCodexCommand() *cobra.Command {
+	command := &cobra.Command{Use: "codex [provider]", Short: "Connect provider models to Codex", Args: cobra.MaximumNArgs(1), RunE: runProxyStart,
+		Long: `Connect a CCL provider's models to Codex.
 
-  ccl proxy -p provider1        Start with a named provider
-  ccl proxy start provider1     Equivalent explicit command
-  ccl proxy start --independent Use CCL without OpenAI account authentication
-  ccl proxy start --shared      Restore native OpenAI + CCL shared picker
-  ccl proxy                    Start with the active provider
-  ccl proxy start default      Stop the proxy and restore Codex's original route
-  ccl proxy status             Show the running provider and local endpoint
-  ccl proxy stop               Stop and restore previous Codex settings
+  ccl codex -p provider1        Start with a named provider
+  ccl codex start provider1     Equivalent explicit command
+  ccl codex start --independent Use CCL without OpenAI account authentication
+  ccl codex start --shared      Restore native OpenAI + CCL shared picker
+  ccl codex                    Start with the active provider
+  ccl codex start default      Disconnect CCL and restore Codex's original route
+  ccl codex status             Show the running provider and local endpoint
+  ccl codex stop               Stop and restore previous Codex settings
 
 Open Codex once to create its profile (CODEX_HOME is supported). The proxy adds
 the selected provider's models to Codex's picker. Native OpenAI models keep their
 own route and credentials. Restart Codex after starting, switching or stopping
 the proxy to reload the catalog. macOS shows a menu bar icon.
-Independent mode exposes only CCL models through a custom provider. Existing
-local chats can resume after restarting Codex; use --shared to return to native
-models. Starts and menu switches retain the current mode unless explicitly changed.
+Independent mode exposes only CCL models through a custom provider. Chats resume
+with their saved model provider: restore --independent for ccl_proxy chats, or
+fork a chat to continue its history on a different provider. Use --shared to
+return to native models. Starts and menu switches inherit the running mode;
+after stopping the proxy, a start without either mode flag defaults to shared.
 Only Codex configuration is managed; ordinary ccl/Claude Code launches remain
 independent. Stopping restores only unchanged owned fields, retaining user edits.
 Upgrading an older shared proxy also restores its legacy Claude settings once.`}
@@ -185,8 +187,8 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 	command.PersistentFlags().Bool("independent", false, "Use a separate Codex provider without OpenAI account authentication")
 	command.PersistentFlags().Bool("shared", false, "Use the native OpenAI provider and merged model catalog")
 	command.MarkFlagsMutuallyExclusive("independent", "shared")
-	start := &cobra.Command{Use: "start [provider]", Args: cobra.MaximumNArgs(1), Short: "Start or switch the background proxy", RunE: runProxyStart}
-	stop := &cobra.Command{Use: "stop", Args: cobra.NoArgs, Short: "Stop the proxy and restore Codex settings", RunE: func(cmd *cobra.Command, _ []string) error {
+	start := &cobra.Command{Use: "start [provider]", Args: cobra.MaximumNArgs(1), Short: "Start or switch Codex model integration", RunE: runProxyStart}
+	stop := &cobra.Command{Use: "stop", Args: cobra.NoArgs, Short: "Disconnect CCL models and restore Codex settings", RunE: func(cmd *cobra.Command, _ []string) error {
 		m, err := proxymanager.Default()
 		if err != nil {
 			return err
@@ -196,10 +198,10 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 		if err := m.Stop(ctx); err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), locale.T("代理已停止，原有 Codex 配置已恢复", "Proxy stopped; previous Codex settings restored"))
+		fmt.Fprintln(cmd.OutOrStdout(), locale.T("Codex 模型接入已停止，原有配置已恢复", "Codex model integration stopped; previous settings restored"))
 		return nil
 	}}
-	status := &cobra.Command{Use: "status", Args: cobra.NoArgs, Short: "Show proxy status without revealing credentials", RunE: func(cmd *cobra.Command, _ []string) error {
+	status := &cobra.Command{Use: "status", Args: cobra.NoArgs, Short: "Show Codex model integration status without revealing credentials", RunE: func(cmd *cobra.Command, _ []string) error {
 		m, err := proxymanager.Default()
 		if err != nil {
 			return err
@@ -209,11 +211,11 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 			return err
 		}
 		if s == nil {
-			fmt.Fprintln(cmd.OutOrStdout(), locale.T("代理未开启", "Proxy is stopped"))
+			fmt.Fprintln(cmd.OutOrStdout(), locale.T("Codex 模型接入未开启", "Codex model integration is stopped"))
 			return nil
 		}
 		if !m.Running(cmd.Context(), s) {
-			fmt.Fprintln(cmd.OutOrStdout(), locale.T("代理未响应；运行 ccl proxy stop 恢复客户端配置", "Proxy is not responding; run ccl proxy stop to restore client settings"))
+			fmt.Fprintln(cmd.OutOrStdout(), locale.T("Codex 模型接入未响应；运行 ccl codex stop 恢复配置", "Codex model integration is not responding; run ccl codex stop to restore settings"))
 			return nil
 		}
 		endpoint := s.BaseURL
@@ -230,7 +232,7 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 		name, _ := cmd.Flags().GetString("provider")
 		id, _ := cmd.Flags().GetString("instance")
 		if id == "" {
-			return fmt.Errorf("internal proxy serve requires an instance; use ccl proxy start")
+			return fmt.Errorf("internal proxy serve requires an instance; use ccl codex start")
 		}
 		p, err := proxyProvider(name)
 		if err != nil {
@@ -273,4 +275,4 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 	return command
 }
 
-func init() { rootCmd.AddCommand(newProxyCommand()) }
+func init() { rootCmd.AddCommand(newCodexCommand()) }

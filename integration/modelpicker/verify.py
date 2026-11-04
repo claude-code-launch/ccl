@@ -136,7 +136,7 @@ def main():
 
             try:
                 if mode == "proxy":
-                    subprocess.run([str(ccl), "proxy", "-p", "fixture"], env=env, cwd=project,
+                    subprocess.run([str(ccl), "codex", "-p", "fixture"], env=env, cwd=project,
                                    check=True, timeout=30, capture_output=True)
                 if os.name == "nt":
                     from winpty import PtyProcess
@@ -172,7 +172,7 @@ def main():
                         except ProcessLookupError:
                             pass
                 if mode == "proxy":
-                    subprocess.run([str(ccl), "proxy", "stop"], env=env, cwd=project,
+                    subprocess.run([str(ccl), "codex", "stop"], env=env, cwd=project,
                                    check=True, timeout=30, capture_output=True)
     finally:
         server.shutdown()

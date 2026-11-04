@@ -15,7 +15,7 @@ func TestProxyMenuListsOnlyCompatibleNames(t *testing.T) {
 		"second":   {Type: "anthropic", Endpoint: "https://private-second.invalid", APIKey: "another-secret", Model: "m"},
 		"personal": {OAuthProvider: "claude", OAuthAccountCredential: "private-profile"},
 	}})
-	command := newProxyCommand()
+	command := newCodexCommand()
 	var output bytes.Buffer
 	command.SetOut(&output)
 	command.SetArgs([]string{"menu-configs"})

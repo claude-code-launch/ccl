@@ -20,7 +20,7 @@ function run(argv) {
     const task = $.NSTask.alloc.init;
     const pipe = $.NSPipe.pipe;
     task.launchPath = $(executable);
-    task.arguments = $(['proxy', 'menu-configs']);
+    task.arguments = $(['codex', 'menu-configs']);
     task.standardOutput = pipe;
     task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
     task.launch;
@@ -37,13 +37,13 @@ function run(argv) {
       'stopProxy:': {
         types: ['void', ['id']],
         implementation: function () {
-          launch(['proxy', 'stop']);
+          launch(['codex', 'stop']);
         }
       },
       'switchProvider:': {
         types: ['void', ['id']],
         implementation: function (sender) {
-          launch(['proxy', 'menu-switch', '--provider', ObjC.unwrap(sender.representedObject)]);
+          launch(['codex', 'menu-switch', '--provider', ObjC.unwrap(sender.representedObject)]);
         }
       },
       'menuNeedsUpdate:': {
@@ -57,15 +57,15 @@ function run(argv) {
 
   const action = $.CCLProxyMenuAction.alloc.init;
   const item = $.NSStatusBar.systemStatusBar.statusItemWithLength($.NSVariableStatusItemLength);
-  const image = $.NSImage.imageWithSystemSymbolNameAccessibilityDescription('arrow.triangle.branch', 'CCL Proxy');
+  const image = $.NSImage.imageWithSystemSymbolNameAccessibilityDescription('arrow.triangle.branch', 'CCL Codex');
   if (image) {
     image.template = true;
     item.button.image = image;
   } else {
     item.button.title = $('CCL');
   }
-  item.button.toolTip = $('CCL Proxy: ' + provider);
-  const menu = $.NSMenu.alloc.initWithTitle('CCL Proxy');
+  item.button.toolTip = $('CCL Codex: ' + provider);
+  const menu = $.NSMenu.alloc.initWithTitle('CCL Codex');
   menu.autoenablesItems = false;
   menu.delegate = action;
 
@@ -75,7 +75,7 @@ function run(argv) {
     catch (_) { config = {current: provider, providers: []}; }
     menu.removeAllItems;
     const heading = $.NSMenuItem.alloc.init;
-    heading.title = $('CCL Proxy: ' + config.current);
+    heading.title = $('CCL Codex: ' + config.current);
     heading.enabled = false;
     menu.addItem(heading);
     menu.addItem($.NSMenuItem.separatorItem);
@@ -87,7 +87,7 @@ function run(argv) {
       menu.addItem(choice);
     }
     menu.addItem($.NSMenuItem.separatorItem);
-    const stop = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent('Stop Proxy', 'stopProxy:', '');
+    const stop = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent('Disconnect Codex', 'stopProxy:', '');
     stop.target = action;
     menu.addItem(stop);
   }

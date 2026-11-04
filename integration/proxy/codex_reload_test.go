@@ -77,7 +77,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 			t.Fatalf("ccl %v: %v\n%s", args, err, output)
 		}
 	}
-	t.Cleanup(func() { run("proxy", "stop") })
+	t.Cleanup(func() { run("codex", "stop") })
 	m := &proxymanager.Manager{Dir: filepath.Join(home, ".ccl", "proxy")}
 	state := func() *proxymanager.State {
 		t.Helper()
@@ -87,7 +87,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 		}
 		return s
 	}
-	run("proxy", "start", p.Name)
+	run("codex", "start", p.Name)
 	first := state()
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 3 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
@@ -127,7 +127,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if err := fsutil.WriteFileAtomic(metadataPath, []byte(`{"fixture":{"api":"https://example.invalid","models":{"model-a":{"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","max"]}]}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run("proxy", "start", p.Name)
+	run("codex", "start", p.Name)
 	refreshed := state()
 	if refreshed.ID == first.ID || refreshed.MetadataStamp == "" {
 		t.Fatal("metadata refresh did not replace the daemon")
@@ -157,7 +157,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 		t.Fatal("refreshed effort metadata did not reach the client catalog")
 	}
 	check(p.Name)
-	run("proxy", "start", p.Name)
+	run("codex", "start", p.Name)
 	if state().ID != refreshed.ID {
 		t.Fatal("unchanged metadata needlessly restarted the proxy")
 	}
@@ -167,7 +167,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if err := fsutil.WriteFileAtomic(filepath.Join(m.Dir, "state.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run("proxy", "start", p.Name)
+	run("codex", "start", p.Name)
 	if state().ID == refreshed.ID {
 		t.Fatal("legacy daemon was not replaced")
 	}
@@ -181,14 +181,14 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	run("proxy", "start", p.Name)
+	run("codex", "start", p.Name)
 	if state().ID == beforeReload {
 		t.Fatal("provider configuration change did not replace the daemon")
 	}
 	check(p.Name)
-	run("proxy", "start", other.Name)
+	run("codex", "start", other.Name)
 	check(other.Name)
-	run("proxy", "start", "--independent", other.Name)
+	run("codex", "start", "--independent", other.Name)
 	independent := state()
 	if independent.CodexMode != "independent" || independent.Codex.BaseURL != first.Codex.BaseURL {
 		t.Fatal("independent mode lost its state or port")
@@ -200,11 +200,11 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if !strings.Contains(string(configBytes), `model_provider = "ccl_proxy"`) || !strings.Contains(string(configBytes), "requires_openai_auth = false") {
 		t.Fatal("independent provider is not active")
 	}
-	run("proxy", "start", other.Name)
+	run("codex", "start", other.Name)
 	if state().ID != independent.ID {
 		t.Fatal("implicit start did not retain independent mode")
 	}
-	run("proxy", "start", "--shared", other.Name)
+	run("codex", "start", "--shared", other.Name)
 	if state().CodexMode != "shared" {
 		t.Fatal("explicit shared switch was ignored")
 	}

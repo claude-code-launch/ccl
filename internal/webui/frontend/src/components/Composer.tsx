@@ -5,6 +5,8 @@ import type { Attachment, Capabilities, ProjectDefaults, ProviderView, Schedule,
 import { EFFORT_LEVELS, PERMISSION_MODES } from "../types";
 import { basename, fileSize } from "../format";
 import { useI18n } from "../i18n";
+import { MobileEffortMenu, MobileModelMenu } from "./MobileModelMenu";
+import { MobileChoiceMenu, MobileMenu, MobileMenuOption } from "./MobileMenu";
 
 interface Pending {
   key: string;
@@ -295,7 +297,7 @@ export function Composer(props: Props) {
 
   const hasHistory = (props.session?.turns || 0) > 0;
   return (
-    <footer className="pb-2.5">
+    <footer className="pb-2.5 max-sm:pb-[max(8px,env(safe-area-inset-bottom))]">
       <div ref={box} className="relative pl-6 pr-8 max-sm:px-3">
         {menu === "main" && (
           <Popover>
@@ -363,7 +365,7 @@ export function Composer(props: Props) {
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => choose(value)}
                   onMouseEnter={() => setPick(index)}
-                  className={"flex w-full min-w-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-[14px] text-ink " + (index === pick ? "bg-active" : "")}
+                  className={"flex w-full min-w-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-[14px] text-ink max-sm:min-h-11 max-sm:text-base " + (index === pick ? "bg-active" : "")}
                 >
                   {slashOpen ? <span className="font-mono text-ink-3">/</span> : <AtSign size={13} className="shrink-0 text-ink-3" />}
                   <span className="truncate">{value}</span>
@@ -422,7 +424,7 @@ export function Composer(props: Props) {
             ))}
           </div>
         )}
-        <div className="rounded-[14px] border border-line bg-surface p-2 transition focus-within:border-line-strong">
+        <div className="rounded-[14px] border border-line bg-surface p-2 transition focus-within:border-line-strong max-sm:rounded-3xl">
           {pending.length > 0 && (
             <div className="flex flex-wrap gap-2 px-1 pb-2 pt-1">
               {pending.map((item) => (
@@ -430,16 +432,16 @@ export function Composer(props: Props) {
               ))}
             </div>
           )}
-          <div className="flex items-end gap-1.5">
+          <div className="flex items-end gap-1.5 max-sm:flex-wrap max-sm:gap-2">
             <button
               type="button"
               onClick={() => setMenu(menu ? null : "main")}
               title={t("addFiles")}
               aria-label={t("addFiles")}
               aria-expanded={!!menu}
-              className={"grid size-7 shrink-0 place-items-center rounded-lg text-ink-2 transition hover:bg-hover hover:text-ink " + (menu ? "bg-active text-ink" : "")}
+              className={"grid size-7 shrink-0 place-items-center rounded-lg text-ink-2 transition hover:bg-hover hover:text-ink max-sm:size-11 max-sm:rounded-full " + (menu ? "bg-active text-ink" : "")}
             >
-              <Plus size={17} className={"transition " + (menu ? "rotate-45" : "")} />
+              <Plus size={17} className={"transition max-sm:size-5 " + (menu ? "rotate-45" : "")} />
             </button>
             <input
               ref={picker}
@@ -464,60 +466,62 @@ export function Composer(props: Props) {
               onKeyDown={onKeyDown}
               onPaste={onPaste}
               placeholder={hasHistory ? t("placeholderCommand") : t("placeholder")}
-              className="block max-h-[40vh] min-h-7 flex-1 resize-none bg-transparent px-1 py-1 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-3"
+              className="block max-h-[40vh] min-h-7 min-w-0 flex-1 resize-none bg-transparent px-1 py-1 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-3 max-sm:order-first max-sm:min-h-[60px] max-sm:w-full max-sm:flex-none max-sm:px-2 max-sm:py-2 max-sm:text-base max-sm:leading-6"
             />
-            {SpeechRecognitionImpl && !running && (
-              <button
-                type="button"
-                title={listening ? t("voiceStop") : t("voiceInput")}
-                aria-label={listening ? t("voiceStop") : t("voiceInput")}
-                onClick={() => {
-                  if (listening) {
-                    recognition.current?.stop();
-                    return;
-                  }
-                  const recognizer = new SpeechRecognitionImpl();
-                  recognizer.lang = lang === "zh" ? "zh-CN" : "en-US";
-                  recognizer.interimResults = false;
-                  recognizer.continuous = true;
-                  recognizer.onresult = (event) => {
-                    let heard = "";
-                    for (let i = event.resultIndex; i < event.results.length; i++) {
-                      if (event.results[i].isFinal) heard += event.results[i][0].transcript;
+            <div className="flex shrink-0 items-center gap-1.5 max-sm:ml-auto max-sm:gap-2">
+              {SpeechRecognitionImpl && !running && (
+                <button
+                  type="button"
+                  title={listening ? t("voiceStop") : t("voiceInput")}
+                  aria-label={listening ? t("voiceStop") : t("voiceInput")}
+                  onClick={() => {
+                    if (listening) {
+                      recognition.current?.stop();
+                      return;
                     }
-                    if (heard) setText((current) => (current && !/\s$/.test(current) ? current + " " : current) + heard);
-                  };
-                  recognizer.onend = () => setListening(false);
-                  recognition.current = recognizer;
-                  recognizer.start();
-                  setListening(true);
-                }}
-                className={"grid size-7 shrink-0 place-items-center rounded-lg transition " + (listening ? "bg-red-500/15 text-red-500" : "text-ink-3 hover:bg-hover hover:text-ink")}
-              >
-                {listening ? <MicOff size={15} /> : <Mic size={15} />}
-              </button>
-            )}
-            {(canSend || sending || uploading) && (
-              <button
-                onClick={submit}
-                disabled={!canSend}
-                title={running ? t("queueSend") : t("send")}
-                aria-label={running ? t("queueSend") : t("send")}
-                className={"grid size-7 shrink-0 place-items-center rounded-lg text-white transition disabled:opacity-50 " + (running ? "bg-ink-3 hover:bg-ink-2" : "bg-clay hover:bg-clay-hover")}
-              >
-                {sending || uploading ? <LoaderCircle size={15} className="animate-spin" /> : running ? <Clock size={15} /> : <ArrowUp size={16} strokeWidth={2.4} />}
-              </button>
-            )}
-            {running && (
-              <button
-                onClick={onStop}
-                title={t("stop")}
-                aria-label={t("stop")}
-                className="grid size-7 shrink-0 place-items-center rounded-lg bg-ink text-canvas transition hover:opacity-85"
-              >
-                <Square size={11} fill="currentColor" />
-              </button>
-            )}
+                    const recognizer = new SpeechRecognitionImpl();
+                    recognizer.lang = lang === "zh" ? "zh-CN" : "en-US";
+                    recognizer.interimResults = false;
+                    recognizer.continuous = true;
+                    recognizer.onresult = (event) => {
+                      let heard = "";
+                      for (let i = event.resultIndex; i < event.results.length; i++) {
+                        if (event.results[i].isFinal) heard += event.results[i][0].transcript;
+                      }
+                      if (heard) setText((current) => (current && !/\s$/.test(current) ? current + " " : current) + heard);
+                    };
+                    recognizer.onend = () => setListening(false);
+                    recognition.current = recognizer;
+                    recognizer.start();
+                    setListening(true);
+                  }}
+                  className={"grid size-7 shrink-0 place-items-center rounded-lg transition max-sm:size-11 max-sm:rounded-full max-sm:[&>svg]:size-5 " + (listening ? "bg-red-500/15 text-red-500" : "text-ink-3 hover:bg-hover hover:text-ink")}
+                >
+                  {listening ? <MicOff size={15} /> : <Mic size={15} />}
+                </button>
+              )}
+              {(canSend || sending || uploading) && (
+                <button
+                  onClick={submit}
+                  disabled={!canSend}
+                  title={running ? t("queueSend") : t("send")}
+                  aria-label={running ? t("queueSend") : t("send")}
+                  className={"grid size-7 shrink-0 place-items-center rounded-lg text-white transition disabled:opacity-50 max-sm:size-11 max-sm:rounded-full max-sm:[&>svg]:size-5 " + (running ? "bg-ink-3 hover:bg-ink-2" : "bg-clay hover:bg-clay-hover")}
+                >
+                  {sending || uploading ? <LoaderCircle size={15} className="animate-spin" /> : running ? <Clock size={15} /> : <ArrowUp size={16} strokeWidth={2.4} />}
+                </button>
+              )}
+              {running && (
+                <button
+                  onClick={onStop}
+                  title={t("stop")}
+                  aria-label={t("stop")}
+                  className="grid size-7 shrink-0 place-items-center rounded-lg bg-ink text-canvas transition hover:opacity-85 max-sm:size-11 max-sm:rounded-full max-sm:[&>svg]:size-4"
+                >
+                  <Square size={11} fill="currentColor" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
         {/* One line: chips shrink and truncate rather than wrap. */}
@@ -538,7 +542,7 @@ function ContextRing({ tokens, window: size }: { tokens: number; window: number 
   const length = 2 * Math.PI * radius;
   const color = ratio > 0.85 ? "#dc2626" : ratio > 0.6 ? "#d97706" : "#3b82f6";
   return (
-    <span title={t("contextUsed", { used: tokens.toLocaleString(), total: size.toLocaleString(), percent: Math.round(ratio * 100) })} className="ml-1 grid size-6 shrink-0 place-items-center">
+    <span title={t("contextUsed", { used: tokens.toLocaleString(), total: size.toLocaleString(), percent: Math.round(ratio * 100) })} className="ml-1 grid size-6 shrink-0 place-items-center max-sm:order-12 max-sm:ml-0">
       <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
         <circle cx="8" cy="8" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2" />
         <circle cx="8" cy="8" r={radius} fill="none" stroke={color} strokeWidth="2" strokeDasharray={`${ratio * length} ${length}`} strokeLinecap="round" transform="rotate(-90 8 8)" />
@@ -562,7 +566,7 @@ function Popover({ children, wide }: { children: ReactNode; wide?: boolean }) {
 
 function MenuItem({ icon, label, shortcut, onClick }: { icon: ReactNode; label: string; shortcut?: string; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} className="flex w-full items-center gap-3 rounded-[10px] px-3 py-2 text-left text-[15px] text-ink hover:bg-active">
+    <button type="button" onClick={onClick} className="flex w-full items-center gap-3 rounded-[10px] px-3 py-2 text-left text-[15px] text-ink hover:bg-active max-sm:min-h-11 max-sm:text-base">
       <span className="text-ink-2">{icon}</span>
       <span className="flex-1">{label}</span>
       {shortcut && <span className="text-sm text-ink-3">{shortcut}</span>}
@@ -623,14 +627,26 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
   const knownModel = !model || choices.some((choice) => choice.value === model);
   const locked = !route || running;
   const title = running ? t("routeLocked") : t("routeHint");
+  const permissionMode = route?.permissionMode || capabilities.defaultPermissionMode || "default";
   return (
     <>
-      <Chip icon={<Cloud size={14} />} label={t("provider")} title={title} disabled={locked} value={route?.provider || "default"} onChange={(value) => onRoute({ provider: value, model: "" })}>
-        <option value="default">default</option>
-        {providers.map((item) => (
-          <option key={item.name} value={item.name}>{item.name}</option>
-        ))}
-      </Chip>
+      <MobileChoiceMenu
+        label={t("provider")}
+        title={title}
+        disabled={locked}
+        icon={<Cloud size={18} className="shrink-0 text-ink-3" />}
+        value={route?.provider || "default"}
+        choices={[{ value: "default", label: "default" }, ...providers.map((item) => ({ value: item.name, label: item.name }))]}
+        onChange={(value) => onRoute({ provider: value, model: "" })}
+      />
+      <div className="hidden sm:contents">
+        <Chip icon={<Cloud size={14} />} label={t("provider")} title={title} disabled={locked} value={route?.provider || "default"} onChange={(value) => onRoute({ provider: value, model: "" })}>
+          <option value="default">default</option>
+          {providers.map((item) => (
+            <option key={item.name} value={item.name}>{item.name}</option>
+          ))}
+        </Chip>
+      </div>
       {session?.worktree ? (
         <span title={`${workspace} · ${session.worktree.branch}`} className="flex max-w-[10rem] shrink-0 items-center gap-1.5 px-2 py-1 max-sm:hidden">
           <GitBranch size={14} className="shrink-0 text-ink-3" />
@@ -642,20 +658,45 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
           <span className="truncate">{basename(workspace) || "."}</span>
         </span>
       ) : (
-        <Chip
-          compact
-          icon={<FolderGit2 size={14} />}
-          label={t("workspace")}
-          title={workspace}
-          disabled={false}
-          value={workspaceId}
-          onChange={(value) => (value === OPEN_FOLDER ? onOpenFolder?.() : onWorkspace(value))}
-        >
-          {workspaces.map((item) => (
-            <option key={item.id} value={item.id}>{item.name}</option>
-          ))}
-          {onOpenFolder && <option value={OPEN_FOLDER}>{t("openFolder")}</option>}
-        </Chip>
+        <>
+          <MobileMenu
+            label={t("workspace")}
+            title={workspace}
+            disabled={false}
+            className="shrink-0"
+            align="start"
+            width={280}
+            compact
+            triggerContent={<FolderGit2 size={18} className="text-ink-3" />}
+          >
+            {(close) => <>
+              <div role="group" aria-label={t("workspace")} className="min-h-9 overflow-y-auto overscroll-contain p-1">
+                {workspaces.map((item) => <MobileMenuOption key={item.id} text={item.name} selected={workspaceId === item.id} onClick={() => { onWorkspace(item.id); close(); }} />)}
+              </div>
+              {onOpenFolder && (
+                <div className="shrink-0 border-t border-line p-1">
+                  <MobileMenuOption text={t("openFolder")} onClick={() => { onOpenFolder(); close(); }} />
+                </div>
+              )}
+            </>}
+          </MobileMenu>
+          <div className="hidden sm:contents">
+            <Chip
+              compact
+              icon={<FolderGit2 size={14} />}
+              label={t("workspace")}
+              title={workspace}
+              disabled={false}
+              value={workspaceId}
+              onChange={(value) => (value === OPEN_FOLDER ? onOpenFolder?.() : onWorkspace(value))}
+            >
+              {workspaces.map((item) => (
+                <option key={item.id} value={item.id}>{item.name}</option>
+              ))}
+              {onOpenFolder && <option value={OPEN_FOLDER}>{t("openFolder")}</option>}
+            </Chip>
+          </div>
+        </>
       )}
       {!session && worktree && (
         <button
@@ -664,7 +705,7 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
           onClick={worktree.onToggle}
           title={t("worktreeHint")}
           className={
-            "flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 max-sm:px-1.5 " +
+            "flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 max-sm:size-11 max-sm:justify-center max-sm:p-0 " +
             (worktree.on ? "bg-clay/10 text-clay" : "hover:bg-hover hover:text-ink")
           }
         >
@@ -672,47 +713,75 @@ function Route({ session, providers, running, workspace, workspaces, workspaceId
           <span className="max-sm:hidden">{t("worktreeToggle")}</span>
         </button>
       )}
-      <Chip
-        compact
-        icon={<ShieldCheck size={14} />}
+      <MobileMenu
         label={t("permissionMode")}
         title={title}
         disabled={locked}
-        value={route?.permissionMode || capabilities.defaultPermissionMode || "default"}
-        onChange={(value) => onRoute({ permissionMode: value })}
-      >
-        {PERMISSION_MODES.map((mode) => (
-          <option key={mode} value={mode}>{t(("mode" + mode[0].toUpperCase() + mode.slice(1)) as "modeDefault")}</option>
-        ))}
-      </Chip>
-      <span className="flex-1" />
-      <Chip label={t("model")} title={title} disabled={locked} value={model} onChange={(value) => onRoute({ model: value })}>
-        <option value="">{t("auto")}</option>
-        {choices.map((choice) => (
-          <option key={choice.value} value={choice.value}>{choice.label}</option>
-        ))}
-        {!knownModel && <option value={model}>{model}</option>}
-      </Chip>
-      <Chip
+        className="order-10 shrink-0"
+        width={240}
         compact
-        icon={<Gauge size={14} className="sm:hidden" />}
-        label={t("effort")}
-        title={title}
-        disabled={locked}
-        value={route?.effort || ""}
-        onChange={(value) => onRoute({ effort: value })}
-        muted
+        triggerContent={<ShieldCheck size={18} className="text-ink-3" />}
       >
-        <option value="">{t("effortDefault")}</option>
-        {EFFORT_LEVELS.map((level) => (
-          <option key={level} value={level}>{level}</option>
-        ))}
-      </Chip>
+        {(close) => (
+          <div role="group" aria-label={t("permissionMode")} className="min-h-9 overflow-y-auto overscroll-contain p-1">
+            {PERMISSION_MODES.map((mode) => (
+              <MobileMenuOption
+                key={mode}
+                text={t(("mode" + mode[0].toUpperCase() + mode.slice(1)) as "modeDefault")}
+                selected={permissionMode === mode}
+                onClick={() => { onRoute({ permissionMode: mode }); close(); }}
+              />
+            ))}
+          </div>
+        )}
+      </MobileMenu>
+      <div className="hidden sm:contents">
+        <Chip
+          compact
+          icon={<ShieldCheck size={14} />}
+          label={t("permissionMode")}
+          title={title}
+          disabled={locked}
+          value={permissionMode}
+          onChange={(value) => onRoute({ permissionMode: value })}
+        >
+          {PERMISSION_MODES.map((mode) => (
+            <option key={mode} value={mode}>{t(("mode" + mode[0].toUpperCase() + mode.slice(1)) as "modeDefault")}</option>
+          ))}
+        </Chip>
+      </div>
+      <span className="flex-1 max-sm:hidden" />
+      <MobileModelMenu choices={choices} model={model} disabled={locked} title={title} onChange={onRoute} />
+      <MobileEffortMenu effort={route?.effort || ""} disabled={locked} title={title} onChange={onRoute} />
+      <div className="hidden sm:contents">
+        <Chip label={t("model")} title={title} disabled={locked} value={model} onChange={(value) => onRoute({ model: value })}>
+          <option value="">{t("auto")}</option>
+          {choices.map((choice) => (
+            <option key={choice.value} value={choice.value}>{choice.label}</option>
+          ))}
+          {!knownModel && <option value={model}>{model}</option>}
+        </Chip>
+        <Chip
+          compact
+          icon={<Gauge size={14} className="sm:hidden" />}
+          label={t("effort")}
+          title={title}
+          disabled={locked}
+          value={route?.effort || ""}
+          onChange={(value) => onRoute({ effort: value })}
+          muted
+        >
+          <option value="">{t("effortDefault")}</option>
+          {EFFORT_LEVELS.map((level) => (
+            <option key={level} value={level}>{level}</option>
+          ))}
+        </Chip>
+      </div>
     </>
   );
 }
 
-function Chip({ icon, label, title, value, disabled, muted, compact, onChange, children }: {
+function Chip({ icon, label, title, value, disabled, muted, compact, className = "", onChange, children }: {
   icon?: ReactNode;
   label: string;
   title: string;
@@ -721,6 +790,7 @@ function Chip({ icon, label, title, value, disabled, muted, compact, onChange, c
   muted?: boolean;
   // compact shows only the icon on a phone; the menu still opens from it.
   compact?: boolean;
+  className?: string;
   onChange: (value: string) => void;
   children: ReactNode;
 }) {
@@ -728,10 +798,10 @@ function Chip({ icon, label, title, value, disabled, muted, compact, onChange, c
     <label
       title={`${label} · ${title}`}
       className={
-        "relative flex min-w-0 items-center gap-1.5 rounded-md pl-2 " +
-        (compact ? "shrink-0 max-sm:px-1.5 max-sm:py-1 " : "") +
+        "relative flex min-w-0 items-center gap-1.5 rounded-md pl-2 max-sm:min-h-11 max-sm:[&>span>svg]:size-[18px] " +
+        (compact ? "shrink-0 max-sm:size-11 max-sm:justify-center max-sm:p-0 " : "max-sm:max-w-[42%] ") +
         (muted ? "text-ink-3 " : "") +
-        (disabled ? "opacity-70" : "hover:bg-hover hover:text-ink")
+        (disabled ? "opacity-70 " : "hover:bg-hover hover:text-ink ") + className
       }
     >
       {icon && <span className="shrink-0 text-ink-3">{icon}</span>}
@@ -741,7 +811,7 @@ function Chip({ icon, label, title, value, disabled, muted, compact, onChange, c
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         className={
-          "min-w-[3.5rem] max-w-[180px] cursor-pointer appearance-none truncate bg-transparent py-1 pr-5 outline-none [field-sizing:content] disabled:cursor-default [&>option]:bg-surface [&>option]:text-ink " +
+          "min-w-[3.5rem] max-w-[180px] cursor-pointer appearance-none truncate bg-transparent py-1 pr-5 outline-none [field-sizing:content] disabled:cursor-default [&>option]:bg-surface [&>option]:text-ink max-sm:min-h-11 max-sm:min-w-0 " +
           (compact ? "max-sm:absolute max-sm:inset-0 max-sm:min-w-0 max-sm:opacity-0" : "")
         }
       >

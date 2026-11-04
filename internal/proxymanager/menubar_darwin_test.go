@@ -24,7 +24,7 @@ func TestMacMenuBarNativeActions(t *testing.T) {
 	chosen := "second config \"quoted\" $(not-a-command)"
 	config, _ := json.Marshal(map[string]any{"current": "first", "providers": []string{"first", chosen}})
 	quoted := "'" + strings.ReplaceAll(string(config), "'", "'\"'\"'") + "'"
-	script := "#!/bin/sh\ncase \"$2\" in\nmenu-configs) printf '%s' " + quoted + ";;\nmenu-switch) printf '%s' \"$4\" > \"$CCL_MENU_TEST_LOG.switch\";;\nstop) printf stop > \"$CCL_MENU_TEST_LOG.stop\";;\nesac\n"
+	script := "#!/bin/sh\n[ \"$1\" = codex ] || exit 2\ncase \"$2\" in\nmenu-configs) printf '%s' " + quoted + ";;\nmenu-switch) printf '%s' \"$4\" > \"$CCL_MENU_TEST_LOG.switch\";;\nstop) printf stop > \"$CCL_MENU_TEST_LOG.stop\";;\nesac\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

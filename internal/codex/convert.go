@@ -443,7 +443,13 @@ func toMessages(request responseRequest, items []map[string]any, route Route) ([
 	}
 	maxTokens := request.MaxOutputTokens
 	if maxTokens <= 0 {
-		maxTokens = 4096
+		// Codex normally leaves this unset. Reasoning consumes the same output
+		// budget as the answer, so a 4K fallback can truncate before any text
+		// or tool call is produced. Prefer the model's advertised capacity.
+		maxTokens = route.MaxOutputTokens
+		if maxTokens <= 0 {
+			maxTokens = 32768
+		}
 	}
 	body := map[string]any{"model": route.Model, "max_tokens": maxTokens, "stream": true, "messages": messages}
 	if system != "" {
@@ -486,10 +492,17 @@ func toMessages(request responseRequest, items []map[string]any, route Route) ([
 			if budget == 0 {
 				return nil, nil, fmt.Errorf("unsupported reasoning effort")
 			}
-			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
 			if maxTokens <= budget {
-				body["max_tokens"] = budget + 4096
+				if request.MaxOutputTokens <= 0 && route.MaxOutputTokens > 0 {
+					if maxTokens <= 1024 {
+						return nil, nil, fmt.Errorf("model output limit is too small for the selected reasoning effort")
+					}
+					budget = max(1024, maxTokens-4096)
+				} else {
+					body["max_tokens"] = budget + 4096
+				}
 			}
+			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
 		} else {
 			body["thinking"] = map[string]any{"type": "adaptive"}
 			outputConfig["effort"] = effort

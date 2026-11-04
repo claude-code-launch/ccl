@@ -18,7 +18,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-// The real Codex reads the exact config written by ccl proxy start. The native
+// The real Codex reads the exact config written by ccl codex start. The native
 // login is fake, model requests can reach only the local provider fixture, and
 // the command tool runs inside Codex itself rather than an emulated client.
 func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
@@ -155,11 +155,11 @@ func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
 					return output.String(), fmt.Errorf("client timed out")
 				}
 			}
-			if output, err := run(binary, "proxy", "start"); err != nil {
+			if output, err := run(binary, "codex", "start"); err != nil {
 				t.Fatalf("proxy start: %v\n%s", err, output)
 			}
 			t.Cleanup(func() {
-				if output, err := run(binary, "proxy", "stop"); err != nil {
+				if output, err := run(binary, "codex", "stop"); err != nil {
 					t.Errorf("proxy cleanup: %v %s", err, output)
 				}
 			})
@@ -167,7 +167,7 @@ func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
 			if err != nil || !strings.Contains(output, "codex-fixture-done") || calls.Load() < 2 || !sawResult.Load() {
 				t.Fatalf("real Codex tool loop: %v calls=%d result=%v\n%s", err, calls.Load(), sawResult.Load(), output)
 			}
-			if output, err := run(binary, "proxy", "stop"); err != nil {
+			if output, err := run(binary, "codex", "stop"); err != nil {
 				t.Fatalf("proxy stop: %v %s", err, output)
 			}
 			data, _ := os.ReadFile(configPath)

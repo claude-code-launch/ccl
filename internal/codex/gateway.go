@@ -49,6 +49,7 @@ type Route struct {
 	Model           string
 	NativeResponses bool
 	ThinkingBudget  bool
+	MaxOutputTokens int
 }
 
 type Gateway struct {
@@ -118,7 +119,11 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	details = withGPTReasoningDefaults(models, details)
 	for _, model := range models {
 		alias := "ccl/" + url.PathEscape(p.Name) + "/" + model
-		g.routes[alias] = Route{Alias: alias, Model: model, NativeResponses: native, ThinkingBudget: p.OAuthProvider == "" && provider.IsAnthropicType(p.Type)}
+		info, ok := details[model]
+		if !ok {
+			info = details[strings.ToLower(model)]
+		}
+		g.routes[alias] = Route{Alias: alias, Model: model, NativeResponses: native, ThinkingBudget: p.OAuthProvider == "" && provider.IsAnthropicType(p.Type), MaxOutputTokens: info.MaxOutputTokens}
 		entry := newModel(alias, model, details, names)
 		if native {
 			entry["supports_search_tool"] = false

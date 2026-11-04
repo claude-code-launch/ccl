@@ -22,7 +22,7 @@ func newProviderListCommand(use string) *cobra.Command {
 		Use:   use,
 		Short: "List registered providers",
 		Long: `List providers from ~/.ccl/config.yaml. The USED BY column shows which
-entry is selected by normal mode, ACP mode and a running ccl proxy. The first
+entry is selected by normal mode, ACP mode and Codex model integration. The first
 row, default, shows the default Claude account (ccl use default). Before a
 Claude account is configured it uses Claude Code's original configuration.
 
@@ -136,7 +136,7 @@ func providerUsageSummary(cfg *provider.Config, name, proxyName string) string {
 		usedBy = append(usedBy, "ACP")
 	}
 	if name == proxyName {
-		usedBy = append(usedBy, "proxy")
+		usedBy = append(usedBy, "Codex")
 	}
 	if len(usedBy) == 0 {
 		return "-"

@@ -20,14 +20,18 @@ import (
 // The real client must accept the reasoning catalog, honor the selected effort,
 // and carry it across both protocol conversions into the local Chat provider.
 func TestRealCodexReasoningOptionsReachChatProvider(t *testing.T) {
-	for _, effort := range []string{"high", "xhigh", "max"} {
-		t.Run(effort, func(t *testing.T) {
-			testRealCodexReasoningEffort(t, effort)
+	for _, mode := range []string{"shared", "independent"} {
+		t.Run(mode, func(t *testing.T) {
+			for _, effort := range []string{"high", "xhigh", "max"} {
+				t.Run(effort, func(t *testing.T) {
+					testRealCodexReasoningEffort(t, effort, mode == "independent")
+				})
+			}
 		})
 	}
 }
 
-func testRealCodexReasoningEffort(t *testing.T, effort string) {
+func testRealCodexReasoningEffort(t *testing.T, effort string, independent bool) {
 	t.Helper()
 	executable := os.Getenv("CCL_TEST_CODEX")
 	if executable == "" {
@@ -40,6 +44,9 @@ func testRealCodexReasoningEffort(t *testing.T, effort string) {
 	home := t.TempDir()
 	for key, value := range map[string]string{"HOME": home, "USERPROFILE": home, "CODEX_HOME": home, "OPENAI_API_KEY": "fake-native-key", "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", "ALL_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"} {
 		t.Setenv(key, value)
+	}
+	if independent {
+		t.Setenv("OPENAI_API_KEY", "")
 	}
 	native, _ := json.Marshal(Catalog{Models: []Model{newModel("native-fixture", "native-fixture", nil, nil)}})
 	if err := os.WriteFile(filepath.Join(home, "models_cache.json"), native, 0o600); err != nil {
@@ -62,7 +69,7 @@ func testRealCodexReasoningEffort(t *testing.T, effort string) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"id\":\"chat_fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"reasoning-fixture-done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chat_fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-	}, "openai", Options{Desktop: true})
+	}, "openai", Options{Desktop: !independent, Independent: independent})
 	// Space-Bunny advertises five tiers and defaults to max. The max case
 	// leaves the CLI override unset to verify that the catalog default works.
 	info := protocol.ModelInfo{ID: "model-a", DisplayName: "Reasoner", ReasoningLevels: protocol.GPTReasoningLevels()[:5], DefaultReasoningLevel: "max"}

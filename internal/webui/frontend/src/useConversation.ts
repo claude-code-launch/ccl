@@ -60,14 +60,18 @@ export function useConversation(
       source = stream;
       for (const type of STREAM_TYPES) {
         stream.addEventListener(type, (message) => {
-          const data = (message as MessageEvent<string>).data;
+          // EventSource also dispatches a plain "error" Event when its
+          // connection drops. Only server MessageEvents belong to the chat;
+          // counting a disconnect would invent an error and advance lastSeq.
+          if (!(message instanceof MessageEvent)) return;
+          const data = message.data;
           let payload: unknown = {};
           try {
             payload = JSON.parse(data);
           } catch {
             payload = {};
           }
-          const seq = Number((message as MessageEvent).lastEventId) || lastSeq + 1;
+          const seq = Number(message.lastEventId) || lastSeq + 1;
           if (seq <= lastSeq) return;
           lastSeq = seq;
           buffer.push({ seq, type, payload, ts: Date.now() });
@@ -79,7 +83,10 @@ export function useConversation(
           if (type === "user" || type === "status" || type === "result") callbacks.current.onBoundary();
         });
       }
-      stream.onerror = () => {
+      stream.onerror = (event) => {
+        // A stored server error shares this event name, but does not mean
+        // the stream disconnected.
+        if (event instanceof MessageEvent) return;
         if (source !== stream) return;
         stream.close();
         source = null;

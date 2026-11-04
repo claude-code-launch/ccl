@@ -30,7 +30,7 @@ Common commands:
                               uses the default Claude account (latest login)
   ccl use --acp [name]        Select a shared provider configuration for ACP
   ccl set [name]              Add/update an API-key or OAuth provider (TUI)
-  ccl proxy -p <name>         Connect direct claude invocations to a background proxy
+  ccl codex -p <name>         Connect provider models to Codex
   ccl oauth <claude|gpt|grok|workbuddy|...>
                               Log in with a subscription account
   ccl doctor                  Environment + provider + subscription health
@@ -60,6 +60,11 @@ ccl claude update.
 }
 
 func Execute() {
+	// Retired commands must not fall through to a paid Claude Code session.
+	if len(os.Args) > 1 && os.Args[1] == "proxy" {
+		fmt.Fprintln(os.Stderr, locale.T("ccl proxy 已移除，请使用 ccl codex start/status/stop", "ccl proxy has been removed; use ccl codex start/status/stop"))
+		os.Exit(1)
+	}
 	// The status line runs on every Claude Code refresh, so it is answered before
 	// anything else: no config load (which can rewrite the file), no logging
 	// setup, and no chance of falling through to a billed Claude session.
@@ -78,9 +83,9 @@ func Execute() {
 	localClaudeDir = useLocalClaudeInstall()
 
 	configureLogging()
-	// ccl proxy start/stop recover under their own lifecycle lock; serve is
+	// ccl codex start/stop recover under their own lifecycle lock; serve is
 	// the proxy itself.
-	if len(os.Args) < 2 || os.Args[1] != "proxy" {
+	if len(os.Args) < 2 || os.Args[1] != "codex" {
 		recoverStaleProxy()
 	}
 
@@ -144,7 +149,7 @@ func configureLogging() {
 		return
 	}
 	oauthproxy.ConfigureLogLevel(configuredLogLevel(cfg.LogLevel))
-	// Every launch path (normal, proxy serve, ACP) reads the same switch.
+	// Every launch path (normal, codex serve, ACP) reads the same switch.
 	claude.ConfigureSignOn(cfg.SignOn)
 }
 

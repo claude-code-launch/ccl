@@ -63,7 +63,7 @@ func (m *Manager) startMenuBar(id string) func() {
 	if err != nil {
 		return func() {}
 	}
-	command := exec.Command(executable, "proxy", "menubar", "--instance", id)
+	command := exec.Command(executable, "codex", "menubar", "--instance", id)
 	command.Stdout, command.Stderr = os.Stderr, os.Stderr
 	if err := command.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "ccl: menu bar unavailable:", err)
@@ -86,7 +86,7 @@ func ShowMenuError(message string) {
 	if os.Getenv("CCL_PROXY_NO_MENUBAR") == "1" {
 		return
 	}
-	script := `function run(argv) { const app = Application.currentApplication(); app.includeStandardAdditions = true; app.displayAlert('CCL Proxy', {message: argv[0], as: 'critical'}); }`
+	script := `function run(argv) { const app = Application.currentApplication(); app.includeStandardAdditions = true; app.displayAlert('CCL Codex', {message: argv[0], as: 'critical'}); }`
 	command := exec.Command("/usr/bin/osascript", "-l", "JavaScript", "-", message)
 	command.Stdin = strings.NewReader(script)
 	_ = command.Run()
