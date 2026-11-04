@@ -84,7 +84,7 @@ func TestIndependentOverlayUsesSeparateAuthAndRestoresProfile(t *testing.T) {
 					t.Fatal(err)
 				}
 				response.Body.Close()
-				if response.StatusCode != 400 {
+				if response.StatusCode != http.StatusNotFound {
 					t.Fatal("historical compaction widened the ordinary model routing allow-list")
 				}
 			}

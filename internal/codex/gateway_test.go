@@ -324,7 +324,7 @@ func TestCodexNativeRoutesAndUnknownCCLAlias(t *testing.T) {
 	}, "anthropic", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
 	responseObject(t, postResponses(t, g, map[string]any{"model": "native-model", "input": "fixture"}))
 	response := postResponses(t, g, map[string]any{"model": "ccl/missing/model", "input": "fixture"})
-	if response.StatusCode != 400 || nativeRequests.Load() != 1 || customRequests.Load() != 0 {
+	if response.StatusCode != http.StatusNotFound || nativeRequests.Load() != 1 || customRequests.Load() != 0 {
 		t.Fatal("routing allow-list was not enforced")
 	}
 	request, _ := http.NewRequest(http.MethodGet, g.BaseURL()+"/responses", nil)

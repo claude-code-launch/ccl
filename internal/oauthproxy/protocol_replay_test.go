@@ -1,6 +1,7 @@
 package oauthproxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -76,6 +77,100 @@ func TestGeminiSignedPartsRoundTrip(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestGemini3UnsignedFunctionCallGetsBypassSignature(t *testing.T) {
+	tool := func(id, cmd string) map[string]any {
+		return map[string]any{"type": "tool_use", "id": id, "name": "exec", "input": map[string]any{"cmd": cmd}}
+	}
+	result := func(id, text string) map[string]any {
+		return map[string]any{"type": "tool_result", "tool_use_id": id, "content": text}
+	}
+	messages := []any{
+		map[string]any{"role": "user", "content": "run it"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "checking"},
+			tool("call_1", "ls"),
+			tool("call_2", "pwd"),
+		}},
+		map[string]any{"role": "user", "content": []any{result("call_1", "a"), result("call_2", "b")}},
+		map[string]any{"role": "assistant", "content": []any{tool("call_3", "echo")}},
+		map[string]any{"role": "user", "content": []any{result("call_3", "ok")}},
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"model": "gemini-3-flash", "messages": messages,
+		"tools": []any{map[string]any{"name": "exec", "description": "run", "input_schema": map[string]any{"type": "object"}}},
+	})
+	converted, err := convertAnthropicToGemini(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var steps []gjson.Result
+	for _, content := range gjson.GetBytes(converted.geminiBody, "contents").Array() {
+		if content.Get("role").String() == "model" {
+			steps = append(steps, content)
+		}
+	}
+	if len(steps) != 2 {
+		t.Fatalf("model steps = %d", len(steps))
+	}
+	first, second := steps[0].Get("parts"), steps[1].Get("parts")
+	if first.Get("0.thoughtSignature").Exists() {
+		t.Fatalf("text part gained a signature: %s", first.Get("0").Raw)
+	}
+	if first.Get("1.functionCall.name").String() != "exec" || first.Get("1.thoughtSignature").String() != geminiBypassThoughtSignature {
+		t.Fatalf("first call = %s", first.Raw)
+	}
+	if first.Get("2.functionCall.name").String() != "exec" || first.Get("2.thoughtSignature").String() != geminiBypassThoughtSignature {
+		t.Fatalf("parallel call at position 2 = %s", first.Get("2").Raw)
+	}
+	if second.Get("0.thoughtSignature").String() != geminiBypassThoughtSignature {
+		t.Fatalf("next step = %s", second.Raw)
+	}
+
+	claudeRaw, _ := json.Marshal(map[string]any{"model": "claude-sonnet-4-6", "messages": messages, "tools": []any{map[string]any{"name": "exec", "input_schema": map[string]any{"type": "object"}}}})
+	claude, err := convertAnthropicToAntigravity(claudeRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gjson.GetBytes(claude.geminiBody, "contents.1.parts.1.thoughtSignature").Exists() {
+		t.Fatal("Claude function calls must not gain a Gemini thought signature")
+	}
+	if gjson.GetBytes(claude.geminiBody, "contents.1.parts.2.thoughtSignature").Exists() {
+		t.Fatal("Claude parallel function calls must not gain a Gemini thought signature")
+	}
+}
+
+func TestGemini3RealSignatureStaysWhileLaterCallIsSigned(t *testing.T) {
+	rawPart := `{"functionCall":{"name":"exec","args":{"cmd":"ls"}},"thoughtSignature":"opaque+/="}`
+	signature := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(rawPart))
+	messages := []any{
+		map[string]any{"role": "user", "content": "run it"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "thinking", "thinking": "check", "signature": signature},
+			map[string]any{"type": "tool_use", "id": "call_1", "name": "exec", "input": map[string]any{"cmd": "ls"}},
+			map[string]any{"type": "tool_use", "id": "call_2", "name": "exec", "input": map[string]any{"cmd": "pwd"}},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "a"},
+			map[string]any{"type": "tool_result", "tool_use_id": "call_2", "content": "b"},
+		}},
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"model": "gemini-3-flash", "messages": messages,
+		"tools": []any{map[string]any{"name": "exec", "description": "run", "input_schema": map[string]any{"type": "object"}}},
+	})
+	converted, err := convertAnthropicToGemini(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := gjson.GetBytes(converted.geminiBody, "contents.1.parts")
+	if parts.Get("0").Raw != rawPart {
+		t.Fatalf("real signature changed: %s", parts.Get("0").Raw)
+	}
+	if parts.Get("1.functionCall.args.cmd").String() != "pwd" || parts.Get("1.thoughtSignature").String() != geminiBypassThoughtSignature {
+		t.Fatalf("later call = %s", parts.Get("1").Raw)
 	}
 }
 

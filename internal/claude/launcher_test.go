@@ -929,7 +929,7 @@ func TestPreviewSettingsGeminiPreferredDefaultsValidatedAgainstCatalog(t *testin
 	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-sonnet-4-6" {
 		t.Fatalf("missing preferred sonnet should not stay pinned")
 	}
-	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "gemini-3.1-pro-low" {
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "gemini-3-flash" {
 		t.Fatalf("missing preferred haiku should not stay pinned")
 	}
 	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "" {
@@ -947,7 +947,7 @@ func TestPreviewSettingsGeminiUsesPreferredWhenPresent(t *testing.T) {
 		Endpoint:      "https://generativelanguage.googleapis.com/v1",
 		APIKey:        "sk-test",
 		OAuthProvider: "gemini",
-		Model:         "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3.1-pro-low,gemini-2.0-flash",
+		Model:         "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3-flash,gemini-2.0-flash",
 	}
 	settings := previewSettingsJSON(t, p)
 	if settings.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-6-thinking" {
@@ -956,7 +956,7 @@ func TestPreviewSettingsGeminiUsesPreferredWhenPresent(t *testing.T) {
 	if settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "claude-sonnet-4-6" {
 		t.Fatalf("sonnet = %q", settings.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 	}
-	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "gemini-3.1-pro-low" {
+	if settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "gemini-3-flash" {
 		t.Fatalf("haiku = %q", settings.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 	}
 	if settings.Model != "claude-opus-4-6-thinking" {

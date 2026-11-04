@@ -58,8 +58,8 @@ type Manager struct {
 }
 
 // Bump when an existing daemon must be replaced to pick up a protocol fix.
-// Version 12 completes independent provider auth and native context migration.
-const proxyVersion = 12
+// Version 13 reloads the Gemini tool-call validation and history ID fixes.
+const proxyVersion = 13
 
 func Default() (*Manager, error) {
 	home, err := os.UserHomeDir()

@@ -174,9 +174,12 @@ func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, t
 					args = "{}"
 				}
 				(*toolCounter)++
-				// The counter is response-local; a random component prevents IDs
-				// from colliding across turns or after name sanitization.
-				id := sanitizeClaudeToolID(name + "-" + strings.ReplaceAll(uuidString(), "-", "") + "_" + strconv.Itoa(*toolCounter))
+				id := functionCall.Get("id").String()
+				if id == "" {
+					// Gemini may omit IDs. Generate one only in that case; native
+					// IDs must survive so subsequent tool results stay correlated.
+					id = sanitizeClaudeToolID(name + "-" + strings.ReplaceAll(uuidString(), "-", "") + "_" + strconv.Itoa(*toolCounter))
+				}
 				if err := assembler.addToolUse(id, name, args); err != nil {
 					return err
 				}

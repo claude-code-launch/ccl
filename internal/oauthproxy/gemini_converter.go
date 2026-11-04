@@ -245,6 +245,9 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 					args := block.Get("input").String()
 					if gjson.Valid(args) && gjson.Parse(args).IsObject() {
 						part := []byte(`{"functionCall":{"name":"","args":{}}}`)
+						if id := block.Get("id").String(); id != "" {
+							part, _ = sjson.SetBytes(part, "functionCall.id", id)
+						}
 						part, _ = sjson.SetBytes(part, "functionCall.name", name)
 						part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(args))
 						partItems = append(partItems, string(part))
@@ -259,6 +262,9 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 				}
 				return true
 			})
+			if role == "assistant" {
+				partItems = signUnsignedGeminiFunctionCall(upstreamModel, partItems)
+			}
 			if len(partItems) > 0 {
 				contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
 			}
@@ -293,6 +299,7 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 	out, _ = sjson.SetRawBytes(out, "contents", []byte(joinRawJSONStrings(contentItems)))
 
 	// tools -> functionDeclarations with a Gemini-safe parameters schema.
+	autoToolMode := "AUTO"
 	if toolsResult := gjson.GetBytes(raw, "tools"); toolsResult.IsArray() {
 		var toolItems []string
 		toolsResult.ForEach(func(_, tool gjson.Result) bool {
@@ -320,6 +327,15 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 			tools := []byte(`[{"functionDeclarations":[]}]`)
 			tools, _ = sjson.SetRawBytes(tools, "0.functionDeclarations", []byte(joinRawJSONStrings(toolItems)))
 			out, _ = sjson.SetRawBytes(out, "tools", tools)
+			// Gemini 3/4 can otherwise emit malformed calls, or names taken from
+			// executor documentation rather than the actual declarations. Unlike
+			// ANY, VALIDATED still allows ordinary text answers. Keep Claude's
+			// Antigravity route and explicit client choices on their own modes.
+			model := strings.ToLower(upstreamModel)
+			if strings.HasPrefix(model, "gemini-3") || strings.HasPrefix(model, "gemini-4") {
+				autoToolMode = "VALIDATED"
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", autoToolMode)
+			}
 		}
 	}
 
@@ -336,7 +352,7 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 		}
 		switch choiceType {
 		case "auto":
-			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", autoToolMode)
 		case "none":
 			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "NONE")
 		case "any":
@@ -393,6 +409,43 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 	}, nil
 }
 
+// geminiBypassThoughtSignature is the dummy Gemini documents for a function
+// call that has no real thought signature. Codex and other clients replay tool
+// history without the opaque part, and Gemini 3/4 reject that turn.
+const geminiBypassThoughtSignature = "skip_thought_signature_validator"
+
+// geminiRequiresThoughtSignature reports whether this model rejects a function
+// call that does not carry a thought signature.
+func geminiRequiresThoughtSignature(model string) bool {
+	model = strings.ToLower(stripContextModelSuffix(model))
+	return strings.Contains(model, "gemini-3") || strings.Contains(model, "gemini-4")
+}
+
+// signUnsignedGeminiFunctionCall sets the documented bypass on every function
+// call in one model step that has no signature. Antigravity rejects a later
+// unsigned call even when an earlier call in that step is already signed; the
+// upstream error names that part's position. A real signature is kept.
+func signUnsignedGeminiFunctionCall(model string, parts []string) []string {
+	if !geminiRequiresThoughtSignature(model) {
+		return parts
+	}
+	for i, raw := range parts {
+		part := gjson.Parse(raw)
+		if !part.Get("functionCall").Exists() {
+			continue
+		}
+		if part.Get("thoughtSignature").String() != "" {
+			continue
+		}
+		signed, err := sjson.Set(raw, "thoughtSignature", geminiBypassThoughtSignature)
+		if err != nil {
+			continue
+		}
+		parts[i] = signed
+	}
+	return parts
+}
+
 // geminiThinkingLevel maps a client effort onto Gemini's thinkingLevel.
 // minimal, low, medium and high pass through. GPT rungs above high
 // (xhigh, max, ultra) share high so the request is not rejected.
@@ -444,6 +497,9 @@ func geminiToolResultParts(block gjson.Result, names *geminiToolNames) []string 
 	result, resultIsRaw, images := geminiToolResultContent(block.Get("content"))
 	parts := make([]string, 0, 1+len(images))
 	fr := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
+	if id := names.resultID(toolUseID); id != "" {
+		fr, _ = sjson.SetBytes(fr, "functionResponse.id", id)
+	}
 	fr, _ = sjson.SetBytes(fr, "functionResponse.name", funcName)
 	if resultIsRaw {
 		fr, _ = sjson.SetRawBytes(fr, "functionResponse.response.result", []byte(result))

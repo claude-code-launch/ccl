@@ -347,6 +347,7 @@ func isProxyTransportEnv(key string) bool {
 //     Claude Code excludes from --resume (ACP relies on it).
 func inheritedEnvToDrop(settings settingsJSON, useProxy bool) []string {
 	drop := []string{
+		modelCapabilitiesEnv,
 		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
 		"CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_GATEWAY",
 		"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION",
@@ -610,6 +611,7 @@ func (c *providerContext) settings() settingsJSON {
 
 func (c *providerContext) settingsForCWD(cwd string) settingsJSON {
 	env := buildEnvWithModelNames(c.provider, c.baseURL, c.useProxy, c.modelNames)
+	c.applyModelEffortCapabilities(env)
 	// Applied after the provider Env overrides: a preset an older ccl stored must
 	// not survive into a session Claude Code should size itself.
 	c.droppedContextOverride = applyContextPolicy(env)

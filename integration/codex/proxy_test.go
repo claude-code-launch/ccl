@@ -2,11 +2,13 @@ package codex_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/process"
 	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/proxymanager"
 )
 
 // The real Codex reads the exact config written by ccl codex start. The native
@@ -179,5 +182,140 @@ func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
 				t.Fatal("native credentials were modified")
 			}
 		})
+	}
+}
+
+// Provider switches keep the old loopback URL, but a chat retains its model.
+// Exercise that exact boundary with the official client and fake credentials:
+// the old model must not silently cross into the newly selected account.
+func TestRealCodexRejectsGeminiRouteAfterWorkBuddySwitch(t *testing.T) {
+	binary, executable := os.Getenv("CCL_TEST_BINARY"), os.Getenv("CCL_TEST_CODEX")
+	if binary == "" || executable == "" {
+		t.Skip("set CCL_TEST_BINARY and CCL_TEST_CODEX")
+	}
+	binary, _ = filepath.Abs(binary)
+	executable, _ = filepath.Abs(executable)
+	home := t.TempDir()
+	codexHome := filepath.Join(home, "codex-home")
+	for key, value := range map[string]string{"HOME": home, "USERPROFILE": home, "CODEX_HOME": codexHome, "CLAUDE_CONFIG_DIR": filepath.Join(home, "claude-home"), "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", "ALL_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost", "OPENAI_API_KEY": "fake-native-key", "CCL_LANG": "en", "CCL_PROXY_NO_MENUBAR": "1"} {
+		t.Setenv(key, value)
+	}
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"OPENAI_API_KEY":"fake-native-key"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(`{"models":[{"slug":"native-fixture","input_modalities":["text"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var geminiCalls, workBuddyCalls atomic.Int32
+	gemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		geminiCalls.Add(1)
+		var body map[string]any
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body["model"] != "model-a" || r.Header.Get("X-Api-Key") != "fake-gemini-key" {
+			http.Error(w, "wrong Gemini fixture request", 400)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg_gemini", "type": "message", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "gemini-sandbox-done"}}, "stop_reason": "end_turn", "usage": map[string]any{"input_tokens": 1, "output_tokens": 1}})
+	}))
+	t.Cleanup(gemini.Close)
+	geminiProvider := provider.Provider{Name: "gemini-fixture", Type: "anthropic", Endpoint: gemini.URL + "/v1", APIKey: "fake-gemini-key", Model: "model-a", CustomModelID: "model-a"}
+	if err := config.Save(&provider.Config{ActiveProvider: geminiProvider.Name, Providers: map[string]provider.Provider{geminiProvider.Name: geminiProvider}}); err != nil {
+		t.Fatal(err)
+	}
+	run := func(executable string, args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, executable, args...)
+		command.Dir = home
+		process.ConfigureGroup(command)
+		var output bytes.Buffer
+		command.Stdout, command.Stderr = &output, &output
+		err := command.Run()
+		return output.String(), err
+	}
+	if output, err := run(binary, "codex", "start", "--independent", geminiProvider.Name); err != nil {
+		t.Fatalf("start Gemini fixture: %v\n%s", err, output)
+	}
+	t.Cleanup(func() {
+		if output, err := run(binary, "codex", "stop"); err != nil {
+			t.Errorf("stop fixture: %v\n%s", err, output)
+		}
+	})
+	output, err := run(executable, "-m", "ccl/gemini-fixture/model-a", "-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Reply to the local fixture.")
+	if err != nil || !strings.Contains(output, "gemini-sandbox-done") || geminiCalls.Load() != 1 {
+		t.Fatalf("Gemini fixture failed: %v calls=%d\n%s", err, geminiCalls.Load(), output)
+	}
+	var session string
+	for _, line := range strings.Split(output, "\n") {
+		var event struct {
+			Type string `json:"type"`
+			ID   string `json:"thread_id"`
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Type == "thread.started" {
+			session = event.ID
+		}
+	}
+	if session == "" {
+		t.Fatalf("Gemini fixture did not create a chat: %s", output)
+	}
+	manager := &proxymanager.Manager{Dir: filepath.Join(home, ".ccl", "proxy")}
+	before, err := manager.Read()
+	if err != nil || before == nil || before.Codex == nil {
+		t.Fatalf("missing Gemini state: %v", err)
+	}
+
+	// Replace the daemon without another model request. Its WorkBuddy runtime
+	// is a local protocol fixture, not the user's subscription or account.
+	workBuddy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workBuddyCalls.Add(1)
+		var body map[string]any
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body["model"] != "model-b" || r.Header.Get("Authorization") != "Bearer fake-workbuddy-key" {
+			http.Error(w, "wrong WorkBuddy fixture request", 400)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		raw, _ := json.Marshal(map[string]any{"id": "chat_workbuddy", "object": "chat.completion.chunk", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": "workbuddy-sandbox-done"}, "finish_reason": nil}}})
+		fmt.Fprintf(w, "data: %s\n\n", raw)
+		raw, _ = json.Marshal(map[string]any{"id": "chat_workbuddy", "object": "chat.completion.chunk", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw)
+	}))
+	t.Cleanup(workBuddy.Close)
+	workBuddyProvider := provider.Provider{Name: "workbuddy-fixture", Type: "openai", Endpoint: workBuddy.URL + "/v1", APIKey: "fake-workbuddy-key", Model: "model-b", CustomModelID: "model-b"}
+	if err := config.Update(func(cfg *provider.Config) error {
+		cfg.ActiveProvider = workBuddyProvider.Name
+		cfg.Providers[workBuddyProvider.Name] = workBuddyProvider
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := run(binary, "codex", "start", "--independent", workBuddyProvider.Name); err != nil {
+		t.Fatalf("start WorkBuddy fixture: %v\n%s", err, output)
+	}
+	after, err := manager.Read()
+	if err != nil || after == nil || after.Codex == nil {
+		t.Fatalf("missing WorkBuddy state: %v", err)
+	}
+	if before.Codex.BaseURL != after.Codex.BaseURL {
+		t.Fatalf("provider switch moved the cached endpoint: %s -> %s", before.Codex.BaseURL, after.Codex.BaseURL)
+	}
+	// The desktop resumes with its persisted model. Passing it explicitly also
+	// prevents the CLI from replacing it with the new daemon's default model.
+	output, err = run(executable, "-m", "ccl/gemini-fixture/model-a", "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue on the old model.")
+	if err == nil || !strings.Contains(output, "select a model from the active CCL provider") || workBuddyCalls.Load() != 0 || geminiCalls.Load() != 1 {
+		t.Fatalf("stale Gemini chat after provider switch: %v workbuddy=%d gemini=%d\n%s", err, workBuddyCalls.Load(), geminiCalls.Load(), output)
+	}
+	output, err = run(executable, "-m", "ccl/workbuddy-fixture/model-b", "-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Reply to the WorkBuddy fixture.")
+	if err != nil || !strings.Contains(output, "workbuddy-sandbox-done") || workBuddyCalls.Load() != 1 {
+		t.Fatalf("WorkBuddy fixture failed: %v calls=%d\n%s", err, workBuddyCalls.Load(), output)
+	}
+	if output, err := run(binary, "codex", "start", "--independent", geminiProvider.Name); err != nil {
+		t.Fatalf("restore Gemini fixture: %v\n%s", err, output)
+	}
+	output, err = run(executable, "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue after restoring Gemini.")
+	if err != nil || !strings.Contains(output, "gemini-sandbox-done") || geminiCalls.Load() != 2 {
+		t.Fatalf("restored Gemini chat failed: %v calls=%d\n%s", err, geminiCalls.Load(), output)
 	}
 }

@@ -1,6 +1,10 @@
 package provider
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/claude-code-launch/ccl/internal/modelrouting"
+)
 
 // Context preset spellings persisted in Provider.ContextPreset.
 const (
@@ -87,7 +91,60 @@ func NormalizeProvider(p *Provider) bool {
 	if len(p.Env) == 0 && p.Env != nil {
 		p.Env = nil
 	}
+	if migrateRetiredGeminiModels(p) {
+		changed = true
+	}
 	return changed
+}
+
+// migrateRetiredGeminiModels rewrites the retired generated Gemini haiku ID.
+// The live catalog does not contain it, so leaving the old default in place
+// makes that one model 404. Any other value is a user choice and stays.
+func migrateRetiredGeminiModels(p *Provider) bool {
+	if p == nil || !strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "gemini") {
+		return false
+	}
+	_, _, _, haiku, _, ok := PreferredOAuthSlotDefaults("gemini")
+	if !ok || strings.EqualFold(haiku, retiredGeminiHaikuModel) {
+		return false
+	}
+	changed := false
+	for _, slot := range []*string{&p.CustomModelID, &p.OpusModel, &p.SonnetModel, &p.HaikuModel, &p.FableModel, &p.SubagentModel} {
+		if slot != nil && strings.EqualFold(stripContextSuffix(*slot), retiredGeminiHaikuModel) {
+			*slot = replaceModelKeepingContext(*slot, haiku)
+			changed = true
+		}
+	}
+	if updated, ok := replaceCSVModel(p.Model, retiredGeminiHaikuModel, haiku); ok {
+		p.Model = updated
+		changed = true
+	}
+	return changed
+}
+
+func replaceCSVModel(pool, from, to string) (string, bool) {
+	models := modelrouting.SplitCSV(pool)
+	if len(models) == 0 {
+		return pool, false
+	}
+	changed := false
+	for i, model := range models {
+		if strings.EqualFold(stripContextSuffix(model), from) {
+			models[i] = replaceModelKeepingContext(model, to)
+			changed = true
+		}
+	}
+	if !changed {
+		return pool, false
+	}
+	return strings.Join(models, ","), true
+}
+
+func replaceModelKeepingContext(model, replacement string) string {
+	if strings.HasSuffix(strings.TrimSpace(model), "[1m]") {
+		return replacement + "[1m]"
+	}
+	return replacement
 }
 
 // Clone returns a deep copy of p: its maps are not shared with the original.

@@ -132,7 +132,7 @@ func TestRunAuthGeminiUsesChatAndAntigravityBackend(t *testing.T) {
 		t.Fatalf("Gemini provider = %+v", p)
 	}
 	if p.CustomModelID != "claude-opus-4-6-thinking" || p.OpusModel != "claude-opus-4-6-thinking" ||
-		p.SonnetModel != "claude-sonnet-4-6" || p.HaikuModel != "gemini-3.1-pro-low" {
+		p.SonnetModel != "claude-sonnet-4-6" || p.HaikuModel != "gemini-3-flash" {
 		t.Fatalf("Gemini preferred defaults not applied: %+v", p)
 	}
 }
@@ -168,7 +168,7 @@ func TestRunAuthGeminiPreservesExistingSlotPins(t *testing.T) {
 	if p.SonnetModel != "my-sonnet" {
 		t.Fatalf("existing sonnet overwritten: %+v", p)
 	}
-	if p.CustomModelID != "claude-opus-4-6-thinking" || p.OpusModel != "claude-opus-4-6-thinking" || p.HaikuModel != "gemini-3.1-pro-low" {
+	if p.CustomModelID != "claude-opus-4-6-thinking" || p.OpusModel != "claude-opus-4-6-thinking" || p.HaikuModel != "gemini-3-flash" {
 		t.Fatalf("empty gemini slots not filled: %+v", p)
 	}
 }

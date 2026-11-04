@@ -6,6 +6,10 @@ import (
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
 )
 
+// retiredGeminiHaikuModel is the Gemini haiku default CCL used to write.
+// Neither Antigravity catalog still lists it, and requesting it returns 404.
+const retiredGeminiHaikuModel = "gemini-3.1-pro-low"
+
 // PreferredOAuthSlotDefaults returns the first-choice Claude slot mapping for a
 // subscription OAuth backend. ok is false when the backend has no built-in
 // preferences and should rely entirely on runtime model discovery.
@@ -30,7 +34,9 @@ func preferredOAuthSlots(oauthProvider string) (custom, opus, sonnet, haiku stri
 		return "grok-4.6", "grok-4.6", "grok-4.5", "grok-4.5", true
 	case "gemini":
 		// Gemini / Antigravity subscription defaults. Same missing-catalog fallback.
-		return "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.1-pro-low", true
+		// The haiku slot is the Gemini model. gemini-3.1-pro-low is gone from
+		// both the daily and prod catalogs; Gemini 3 Flash is still offered.
+		return "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3-flash", true
 	case "kimi":
 		// Kimi Code has no public model-list endpoint, so there is nothing for
 		// runtime discovery to fall back on: without these the runtime refuses to

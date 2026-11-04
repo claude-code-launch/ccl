@@ -228,7 +228,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 			if len(name) > 128 {
 				name = name[:128] + "..."
 			}
-			writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model is not in the CCL routing catalog: %q", name), "model_not_found")
+			writeError(w, http.StatusNotFound, "invalid_request_error", fmt.Sprintf("model is not in the CCL routing catalog: %q; select a model from the active CCL provider or switch Codex back to the chat's provider", name), "model_not_found")
 			return
 		}
 		g.serveNative(w, r, nativeHistory(body), path)

@@ -17,6 +17,16 @@ type geminiToolNames struct {
 	byOriginal map[string]string
 	byWire     map[string]string
 	byID       map[string]string
+	replayIDs  map[string]string
+}
+
+// Signed history keeps its native call ID (including an omitted ID), even
+// when an older CCL response exposed a separately generated client tool ID.
+func (n *geminiToolNames) resultID(clientID string) string {
+	if nativeID, ok := n.replayIDs[clientID]; ok {
+		return nativeID
+	}
+	return clientID
 }
 
 func (n *geminiToolNames) resultName(id string) string {
@@ -30,7 +40,7 @@ func (n *geminiToolNames) resultName(id string) string {
 }
 
 func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
-	n := &geminiToolNames{byOriginal: map[string]string{}, byWire: map[string]string{}, byID: map[string]string{}}
+	n := &geminiToolNames{byOriginal: map[string]string{}, byWire: map[string]string{}, byID: map[string]string{}, replayIDs: map[string]string{}}
 	names := map[string]bool{}
 	add := func(name string) {
 		if name != "" {
@@ -61,6 +71,7 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 	// Match each signed functionCall to its synthetic tool_use companion, even
 	// when a client persists adjacent blocks as separate assistant messages.
 	pendingWire := ""
+	pendingID := ""
 	for _, message := range messages {
 		if message.Get("role").String() != "assistant" {
 			pendingWire = ""
@@ -84,6 +95,7 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 							return nil, fmt.Errorf("conflicting signed Gemini aliases for tool %q", original)
 						}
 						n.byOriginal[original], n.byWire[pendingWire] = pendingWire, original
+						n.replayIDs[block.Get("id").String()] = pendingID
 					}
 				}
 				pendingWire = ""
@@ -95,6 +107,7 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 						return nil, fmt.Errorf("invalid CCL Gemini part signature")
 					}
 					pendingWire = gjson.GetBytes(part, "functionCall.name").String()
+					pendingID = gjson.GetBytes(part, "functionCall.id").String()
 				}
 			}
 		}

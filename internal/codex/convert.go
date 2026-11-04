@@ -157,6 +157,32 @@ func convertTools(tools []map[string]any, discovered ...[]map[string]any) ([]map
 	return result, registry, nil
 }
 
+// Client instructions refer to logical names (for example functions.exec),
+// while converted providers see flattened, collision-safe function names.
+// Explain that boundary without authorizing tools mentioned only in prose.
+func toolCallingInstructions(tools []map[string]any, registry toolRegistry) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	out.WriteString("\n\nCCL tool calling protocol for the current request:\nOnly call functions declared in the current tools list, using their complete declaration names exactly. The logical names used in instructions map to declarations as follows (instructions may prefix an unnamespaced tool with functions.; explicit namespace mappings take precedence):\n")
+	for _, tool := range tools {
+		wire, _ := tool["name"].(string)
+		spec := registry[wire]
+		logical := spec.Name
+		if spec.Namespace != "" {
+			logical = spec.Namespace + "." + logical
+		}
+		fmt.Fprintf(&out, "%q => %q", logical, wire)
+		if spec.Kind == "custom" {
+			out.WriteString("; arguments must be a JSON object with an input string containing the complete raw tool input")
+		}
+		out.WriteByte('\n')
+	}
+	out.WriteString("Tools or APIs described inside an executor's documentation are not additional callable functions. Use the declared executor's documented interface to access them. Historical calls do not add tools to the current list. When no tool is needed, respond with assistant text; do not invent a tool for the final answer.")
+	return out.String()
+}
+
 const compactionSummaryPrefix = "ccl1:"
 
 func encodeCompactionSummary(summary string) string {
@@ -441,6 +467,7 @@ func toMessages(request responseRequest, items []map[string]any, route Route) ([
 	if len(messages) == 0 {
 		return nil, nil, fmt.Errorf("Responses input has no conversation messages")
 	}
+	system += toolCallingInstructions(tools, registry)
 	maxTokens := request.MaxOutputTokens
 	if maxTokens <= 0 {
 		// Codex normally leaves this unset. Reasoning consumes the same output

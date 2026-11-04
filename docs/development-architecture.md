@@ -4,6 +4,8 @@ Read the relevant section before changing a subsystem. This reference preserves 
 
 ## High-Level Architecture
 
+Detached Codex services are reused only when their protocol version matches the starting binary. Version 13 forces replacement of pre-fix services for Gemini tool validation and tool-call ID replay; rebuilding the executable alone does not reload an already-running process. Starting the new binary replaces an older protocol version on the existing loopback port and preserves the selected shared/independent mode.
+
 `ccl` launches Anthropic's Claude Code CLI against other model sources. Claude Code always speaks Anthropic Messages; ccl either points it at a real Anthropic-compatible gateway or starts a **127.0.0.1** loopback runtime that translates.
 
 Data flow:
@@ -48,6 +50,10 @@ Image capability travels in `protocol.ModelInfo.InputModalities`, including Qode
 
 Canonical notes: `internal/oauthproxy/doc.go`. Do not reintroduce an external provider process (no qodercli, no Codex CLI).
 
+Converted Codex requests explain the mapping from logical names in client instructions to the current flattened function declarations, including the JSON `input` wrapper for custom tools. Executor documentation and historical calls never authorize additional functions; the response bridge still rejects every undeclared name. Gemini 3/4 requests with function declarations use `VALIDATED` for implicit/explicit auto tool choice, allowing text answers while constraining generated calls to declared functions and schemas. Explicit none/required/specific-tool choices retain `NONE`/`ANY` and the sanitized allowed name. Tool-free requests and Antigravity's Claude route keep their existing modes. A terminal `MALFORMED_FUNCTION_CALL` remains a generation error, never successful completion, and partial streams are not retried or replayed.
+
+Gemini conversion carries each unsigned Messages `tool_use.id` through `functionCall.id` and pairs the result's `functionResponse.id`, including histories replayed from Gemini to Antigravity's Claude models. Native response call IDs are retained; CCL generates a client ID only when the upstream omits one. Signed native parts remain byte-identical: a request-scoped map pairs their original native ID (or its absence) with the persisted client tool ID, so even older synthetic IDs yield correctly correlated results.
+
 | Ingress | Runtime | Notes |
 |---|---|---|
 | Anthropic API key | none (direct) | Claude Code hits `/v1/messages`; `ccl set` still needs `/v1/models` to auto-detect |
@@ -73,6 +79,8 @@ Qoder can return HTTP 200 with a stream-envelope `403 / 10605 / RESOURCE_LIMIT`,
 `ccl set` Auto Configure only GETs `/models` metadata for generic gateways. OAuth subscriptions have no Auto Configure row at all: `configureOAuthRuntime` copies the catalog straight from the loopback runtime (`runtime.Models()`), so a subscription is never probed as a generic endpoint. Per-slot `[1m]` markers live in `live().oneMSlots`; a slot that kept its model keeps its marker, so re-detection cannot re-open a window the user closed.
 
 ### Config, launch, TUI
+
+Claude Code's `/model` and `/effort` capability hints come from the same optional local models.dev reasoning index used by Codex, falling back to explicit runtime reasoning metadata. `internal/claude/effort_capabilities.go` supplies exact per-model `CLAUDE_CODE_MODEL_CAPABILITIES` entries for `effort`, `xhigh_effort` and `max_effort`, covering pool IDs, readable request aliases, `[1m]` variants and explicit canonical model overrides. It does not alter unrelated thinking/tool capabilities or pin `/effort`. An explicit provider Env value wins, and missing/ambiguous metadata leaves native detection intact. Clear old hint entries across process/provider generations, including the long-lived ACP adapter. Native subscription profiles remain on Claude's own model handling. This is a client compatibility hint verified through the official SDK's `supportedModels()` against Claude Code 2.1.296; older clients may ignore it. Claude owns the menu vocabulary: it can enable the base low/medium/high ladder and the xhigh/max extensions, but cannot add minimal/ultra or remove individual base rungs. Do not pretend these hints express arbitrary provider effort lists. The optional real-client test uses `CCL_TEST_CLAUDE` plus `CCL_TEST_CLAUDE_SDK` (the SDK's `sdk.mjs`), an isolated home and a fake local endpoint; it submits no user prompt and rejects inference.
 
 - `internal/config`: `~/.ccl/config.yaml`. `Load` is read-only and normalizes in memory; every write goes through `config.Update(fn)` (file lock, re-read, apply, atomic 0600 write) — cmd code uses `updateProvider` / `replaceProvider`. There are no config migrations: old formats are not read. An OAuth provider's `type` is derived (`provider.EffectiveType`), not persisted; context sizing is the typed `contextPreset` field.
 - Global fields: `active_provider`, `acp_provider` (both are name selectors into one `providers` map; empty `acp_provider` follows `active_provider`), `default_claude_provider` (the Claude provider selected by reserved `default`, with the original native configuration as the unset fallback); a fresh install selects `default`, `lang`, `bypass_mode` (not `auto_mode`), `sign_on` (`off` default; ccl writes Claude Code's empty `attribution`, so commits have no Co-Authored-By trailer; `ccl sign --default` also edits `~/.claude/settings.json`), `log_level` (`off` default; `ccl log`). With no provider selected ccl errors; it never builds one from shell `OPENAI_API_KEY` / `ANTHROPIC_*`.
