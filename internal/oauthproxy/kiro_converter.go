@@ -78,6 +78,9 @@ type anthropicAdapterRequest struct {
 	maxTokens         int
 	inputTokens       int
 	toolNameMap       map[string]string
+	// Chat adapters bind returned names to the current declarations. nil is
+	// used by other protocols that enforce their own name mapping.
+	declaredToolNames map[string]struct{}
 }
 
 type kiroConvertedRequest struct {

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
@@ -60,6 +61,8 @@ type Gateway struct {
 	token            string
 	routes           map[string]Route
 	models           []Model
+	modelSnapshot    atomic.Pointer[catalogSnapshot]
+	catalogMu        sync.Mutex
 	options          Options
 	history          responseHistory
 	migrations       responseHistory
@@ -147,7 +150,6 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 
 func (g *Gateway) BaseURL() string { return "http://" + g.listener.Addr().String() + "/v1" }
 func (g *Gateway) Token() string   { return g.token }
-func (g *Gateway) Models() []Model { return append([]Model(nil), g.models...) }
 func (g *Gateway) Close() {
 	if g == nil {
 		return
@@ -177,7 +179,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1")
 	if r.Method == http.MethodGet && (path == "/models" || path == "/codex/models") {
-		writeJSON(w, http.StatusOK, Catalog{Models: g.models})
+		writeJSON(w, http.StatusOK, Catalog{Models: g.Models()})
 		return
 	}
 	if r.Method != http.MethodPost || (path != "/responses" && path != "/responses/compact") {
@@ -202,7 +204,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 				route, ok = replacement, true
 				request.Model = route.Alias
 				request.Reasoning = nil
-				for _, model := range g.models {
+				for _, model := range g.Models() {
 					if model["slug"] == route.Alias {
 						if effort, _ := model["default_reasoning_level"].(string); effort != "" {
 							request.Reasoning = map[string]any{"effort": effort}

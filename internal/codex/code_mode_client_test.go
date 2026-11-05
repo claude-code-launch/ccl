@@ -64,7 +64,7 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 				names = append(names, raw.(map[string]any)["name"].(string))
 			}
 			t.Logf("code-mode tools: %v", names)
-			writeMessage(w, []map[string]any{{"type": "tool_use", "id": "code_mode_call", "name": findTool(t, body, "exec_"), "input": map[string]any{"input": `const tool = ALL_TOOLS.find(x => x.name.includes("get_app_state")); text(await tools[tool.name]({}));`}}})
+			writeMessage(w, []map[string]any{{"type": "tool_use", "id": "code_mode_call", "name": findTool(t, body, toolWireName("", "exec")), "input": map[string]any{"input": `const tool = ALL_TOOLS.find(x => x.name.includes("get_app_state")); text(await tools[tool.name]({}));`}}})
 			return
 		}
 		sawResult.Store(strings.Contains(textValue(body["messages"]), "computer-mcp-state-fixture"))

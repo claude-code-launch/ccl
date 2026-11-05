@@ -169,7 +169,17 @@ func (s *chatCompletionsStreamState) accumulateToolCall(raw map[string]any) erro
 	}
 	if function := mapValue(raw["function"]); function != nil {
 		if name := stringValue(function["name"]); name != "" {
-			call.name = name
+			merged, err := chatToolNameDelta(call.name, name, s.assembler.request.declaredToolNames)
+			if err != nil {
+				return err
+			}
+			if added := len(merged) - len(call.name); added > 0 {
+				if s.retained+added > anthropicAssemblerMaxRetainedBytes {
+					return fmt.Errorf("OpenAI Chat tool call names exceed %d bytes", anthropicAssemblerMaxRetainedBytes)
+				}
+				s.retained += added
+			}
+			call.name = merged
 		}
 		if arguments := stringValue(function["arguments"]); arguments != "" {
 			if s.retained+len(arguments) > anthropicAssemblerMaxRetainedBytes {
@@ -182,15 +192,72 @@ func (s *chatCompletionsStreamState) accumulateToolCall(raw map[string]any) erro
 	return nil
 }
 
-// emitTools flushes every accumulated tool call in index order, synthesizing
-// missing ids and names so Claude Code always receives a well-formed tool_use
-// block.
+// Some gateways stream name fragments, others repeat the complete name. Only
+// assemble exact prefixes of declared names; never strip reasoning markers or
+// guess a nearby function. Ambiguous interpretations fail before tool emission.
+func chatToolNameDelta(current, delta string, declared map[string]struct{}) (string, error) {
+	maxBytes := 128
+	if declared != nil {
+		maxBytes = 0
+		for name := range declared {
+			maxBytes = max(maxBytes, len(name))
+		}
+	}
+	validPrefix := func(name string) bool {
+		if len(name) == 0 || len(name) > maxBytes {
+			return false
+		}
+		if declared == nil {
+			return true
+		}
+		for candidate := range declared {
+			if strings.HasPrefix(candidate, name) {
+				return true
+			}
+		}
+		return false
+	}
+	var candidates []string
+	if len(current)+len(delta) <= maxBytes && validPrefix(current+delta) {
+		candidates = append(candidates, current+delta)
+	}
+	if current != "" && strings.HasPrefix(delta, current) && validPrefix(delta) {
+		if len(candidates) == 0 || candidates[0] != delta {
+			candidates = append(candidates, delta)
+		}
+	}
+	if declared == nil && current == delta {
+		return current, nil
+	}
+	if len(candidates) != 1 {
+		return "", fmt.Errorf("OpenAI Chat provider returned a malformed, ambiguous or undeclared tool name (payload omitted)")
+	}
+	return candidates[0], nil
+}
+
+func chatValidateToolName(name string, declared map[string]struct{}) error {
+	if declared != nil {
+		if _, ok := declared[name]; !ok {
+			return fmt.Errorf("OpenAI Chat provider returned a malformed or undeclared tool name (payload omitted)")
+		}
+	}
+	return nil
+}
+
+// emitTools flushes accumulated calls in index order. With a request-bound
+// catalog, every name must be a complete declaration before any call is emitted.
 func (s *chatCompletionsStreamState) emitTools() error {
 	indices := make([]int, 0, len(s.tools))
 	for _, call := range s.tools {
 		indices = append(indices, call.index)
 	}
 	sort.Ints(indices)
+	// Validate the whole batch before exposing even its first function call.
+	for _, index := range indices {
+		if err := chatValidateToolName(s.tools[fmt.Sprintf("%d", index)].name, s.assembler.request.declaredToolNames); err != nil {
+			return err
+		}
+	}
 	for _, index := range indices {
 		call := s.tools[fmt.Sprintf("%d", index)]
 		if call == nil || call.emitted {
@@ -251,6 +318,9 @@ func processChatCompletionsNonStream(body []byte, assembler *anthropicResponseAs
 		call := mapValue(rawCall)
 		function := mapValue(call["function"])
 		name := stringValue(function["name"])
+		if err := chatValidateToolName(name, assembler.request.declaredToolNames); err != nil {
+			return err
+		}
 		if strings.TrimSpace(name) == "" {
 			name = fmt.Sprintf("tool_%d", index)
 		}

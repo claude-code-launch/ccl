@@ -42,7 +42,7 @@ func TestCodexToolInstructionsMapOnlyDeclaredExecutorNames(t *testing.T) {
 }
 
 func TestCodexExecutorDocumentationDoesNotAuthorizeNestedTools(t *testing.T) {
-	for _, name := range []string{"view_image", "exec"} {
+	for _, name := range []string{"view_image", "exec_f4c54ead4764"} {
 		t.Run(name, func(t *testing.T) {
 			g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 				writeMessage(w, []map[string]any{{"type": "tool_use", "id": "invalid-call", "name": name, "input": map[string]any{"input": "private-tool-argument"}}})

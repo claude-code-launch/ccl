@@ -162,8 +162,10 @@ func (s *responseStream) addBlock(source int, block map[string]any) error {
 			if len(declared) > 16 {
 				declared = append(declared[:16], "...")
 			}
-			if len(name) > 128 {
-				name = name[:128] + "..."
+			if !simpleToolName(name) {
+				// A damaged name can contain model reasoning or other payload.
+				// Do not expose it as diagnostics or split a UTF-8 sequence.
+				name = "<malformed tool name omitted>"
 			}
 			return fmt.Errorf("provider called a tool outside the declared tool list: %q (declared: %s)", name, strings.Join(declared, ", "))
 		}

@@ -115,6 +115,10 @@ func convertAnthropicToChatCompletions(raw []byte) (*chatCompletionsConvertedReq
 	}
 
 	thinkingEnabled := request.Thinking != nil && !strings.EqualFold(strings.TrimSpace(request.Thinking.Type), "disabled")
+	declaredToolNames := make(map[string]struct{}, len(request.Tools))
+	for _, tool := range request.Tools {
+		declaredToolNames[tool.Name] = struct{}{}
+	}
 	return &chatCompletionsConvertedRequest{
 		anthropicAdapterRequest: anthropicAdapterRequest{
 			upstreamModel:     upstreamModel,
@@ -124,6 +128,7 @@ func convertAnthropicToChatCompletions(raw []byte) (*chatCompletionsConvertedReq
 			thinkingSignature: "ccl-openai-chat-signature-unavailable",
 			maxTokens:         request.MaxTokens,
 			inputTokens:       estimateApproxTokensBytes(raw),
+			declaredToolNames: declaredToolNames,
 		},
 		body:  encoded,
 		model: upstreamModel,

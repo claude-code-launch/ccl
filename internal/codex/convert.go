@@ -43,6 +43,12 @@ func hostedResponsesTool(kind string) bool {
 }
 
 func toolWireName(namespace, name string) string {
+	// Root tools already have names used throughout client instructions. Keep
+	// those names instead of asking models to reproduce an arbitrary hash.
+	// Reserve the hashed spelling space for namespaced/rewritten names.
+	if namespace == "" && simpleToolName(name) && !hasToolHashSuffix(name) {
+		return name
+	}
 	sum := sha256.Sum256([]byte(namespace + "\x00" + name))
 	var out strings.Builder
 	for _, c := range name {
@@ -56,6 +62,31 @@ func toolWireName(namespace, name string) string {
 		}
 	}
 	return out.String() + "_" + hex.EncodeToString(sum[:6])
+}
+
+func simpleToolName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for i, c := range []byte(name) {
+		if c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func hasToolHashSuffix(name string) bool {
+	if len(name) < 13 || name[len(name)-13] != '_' {
+		return false
+	}
+	for _, c := range name[len(name)-12:] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func convertTools(tools []map[string]any, discovered ...[]map[string]any) ([]map[string]any, toolRegistry, error) {

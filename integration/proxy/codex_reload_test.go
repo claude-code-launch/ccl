@@ -115,8 +115,33 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 		}
 	}
 	check(p.Name)
-	// ccl set can refresh metadata without changing provider YAML. An explicit
-	// proxy start must pick up that snapshot while retaining the cached port.
+	waitCatalog := func(providerName string, window, levelCount int) *proxymanager.State {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			current := state()
+			raw, err := os.ReadFile(current.Codex.CatalogPath)
+			var catalog struct {
+				Models []struct {
+					Slug    string `json:"slug"`
+					Window  int    `json:"context_window"`
+					Compact int    `json:"auto_compact_token_limit"`
+					Levels  []any  `json:"supported_reasoning_levels"`
+				} `json:"models"`
+			}
+			if err == nil && json.Unmarshal(raw, &catalog) == nil {
+				for _, model := range catalog.Models {
+					if model.Slug == "ccl/"+providerName+"/model-a" && model.Window == window && model.Compact == window*85/100 && (levelCount < 0 || len(model.Levels) == levelCount) {
+						return current
+					}
+				}
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		t.Fatal("model catalog did not refresh automatically")
+		return nil
+	}
+	// A metadata refresh requires neither another start nor a daemon restart.
 	metadataPath, err := modelsdev.CachePath()
 	if err != nil {
 		t.Fatal(err)
@@ -127,10 +152,9 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if err := fsutil.WriteFileAtomic(metadataPath, []byte(`{"fixture":{"api":"https://example.invalid","models":{"model-a":{"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","max"]}]}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run("codex", "start", p.Name)
-	refreshed := state()
-	if refreshed.ID == first.ID || refreshed.MetadataStamp == "" {
-		t.Fatal("metadata refresh did not replace the daemon")
+	refreshed := waitCatalog(p.Name, 200_000, 2)
+	if refreshed.ID != first.ID || refreshed.PID != first.PID || refreshed.MetadataStamp == "" {
+		t.Fatal("metadata refresh replaced the daemon or missed the cache stamp")
 	}
 	catalogBytes, err := os.ReadFile(refreshed.Codex.CatalogPath)
 	if err != nil {
@@ -204,6 +228,20 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if state().ID != independent.ID {
 		t.Fatal("implicit start did not retain independent mode")
 	}
+	beforeContext, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err := config.Update(func(cfg *provider.Config) error {
+		p := cfg.Providers[other.Name]
+		p.ContextPreset = provider.ContextPresetNameBalanced800K
+		cfg.Providers[other.Name] = p
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	autoIndependent := waitCatalog(other.Name, 800_000, -1)
+	afterContext, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if autoIndependent.ID != independent.ID || autoIndependent.CodexMode != "independent" || string(beforeContext) != string(afterContext) {
+		t.Fatal("independent context refresh changed the daemon, mode or client credentials")
+	}
 	run("codex", "start", "--shared", other.Name)
 	if state().CodexMode != "shared" {
 		t.Fatal("explicit shared switch was ignored")
@@ -213,4 +251,17 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if strings.Contains(string(configBytes), "[model_providers.ccl_proxy]") {
 		t.Fatal("temporary provider credentials survived switching back")
 	}
+	shared := state()
+	if err := config.Update(func(cfg *provider.Config) error {
+		p := cfg.Providers[other.Name]
+		p.ContextPreset = provider.ContextPresetNameBalanced500K
+		cfg.Providers[other.Name] = p
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed := waitCatalog(other.Name, 500_000, -1); refreshed.ID != shared.ID || refreshed.CodexMode != "shared" {
+		t.Fatal("shared context refresh restarted or changed the service mode")
+	}
+	check(other.Name)
 }

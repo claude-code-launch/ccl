@@ -66,6 +66,8 @@ func newModel(alias, id string, details map[string]protocol.ModelInfo, names map
 // current clients; enabling the Node REPL alone does not select that harness.
 // Older catalogs and native Responses routes keep their existing tool mode.
 func (g *Gateway) inheritClientToolMode(native Catalog) {
+	g.catalogMu.Lock()
+	defer g.catalogMu.Unlock()
 	var template Model
 	for _, model := range native.Models {
 		id, _ := model["slug"].(string)

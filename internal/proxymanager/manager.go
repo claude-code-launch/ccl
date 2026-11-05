@@ -25,6 +25,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/codex"
 	"github.com/claude-code-launch/ccl/internal/fsutil"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/providersession"
 )
@@ -58,8 +59,8 @@ type Manager struct {
 }
 
 // Bump when an existing daemon must be replaced to pick up a protocol fix.
-// Version 13 reloads the Gemini tool-call validation and history ID fixes.
-const proxyVersion = 13
+// Version 15 adds live catalog refresh alongside the tool-name protocol fixes.
+const proxyVersion = 15
 
 func Default() (*Manager, error) {
 	home, err := os.UserHomeDir()
@@ -419,18 +420,27 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 	defer server.Close()
 	stopMenuBar := m.startMenuBar(id)
 	defer stopMenuBar()
-	select {
-	case <-ctx.Done():
-		return nil
-	case <-stop:
-		return nil
-	case <-proxy.Runtime.Done():
-		return fmt.Errorf("provider runtime stopped unexpectedly")
-	case err := <-done:
-		if errors.Is(err, http.ErrServerClosed) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var refresh catalogRefresh
+	for {
+		select {
+		case <-ticker.C:
+			if err := refresh.update(m, codexGateway, s, p); err != nil {
+				oauthproxy.LogWarnEvent("catalog_refresh_failed", "component", "codex", "error", err)
+			}
+		case <-ctx.Done():
 			return nil
+		case <-stop:
+			return nil
+		case <-proxy.Runtime.Done():
+			return fmt.Errorf("provider runtime stopped unexpectedly")
+		case err := <-done:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
 		}
-		return err
 	}
 }
 
