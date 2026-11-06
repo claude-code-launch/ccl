@@ -251,6 +251,18 @@ func geminiModelFamily(id string) (string, string) {
 	return id, ""
 }
 
+func stripGeminiDisplayLevel(displayName, level string) string {
+	trimmed := strings.TrimSpace(displayName)
+	if trimmed == "" || level == "" {
+		return trimmed
+	}
+	suffix := "(" + level + ")"
+	if len(trimmed) >= len(suffix) && strings.EqualFold(trimmed[len(trimmed)-len(suffix):], suffix) {
+		return strings.TrimSpace(trimmed[:len(trimmed)-len(suffix)])
+	}
+	return trimmed
+}
+
 func (c *geminiCatalog) publicModels() ([]string, map[string]string, map[string]protocol.ModelInfo) {
 	var ids []string
 	names, details := make(map[string]string), make(map[string]protocol.ModelInfo)
@@ -260,6 +272,7 @@ func (c *geminiCatalog) publicModels() ([]string, map[string]string, map[string]
 		if !exists {
 			info = model
 			info.ID = base
+			info.DisplayName = stripGeminiDisplayLevel(model.DisplayName, level)
 			info.ReasoningKnown = strings.HasPrefix(base, "gemini-")
 			ids = append(ids, base)
 		}
@@ -279,8 +292,8 @@ func (c *geminiCatalog) publicModels() ([]string, map[string]string, map[string]
 		if len(info.InputModalities) == 0 {
 			info.InputModalities = append([]string(nil), model.InputModalities...)
 		}
-		if info.DisplayName != "" && level != "" {
-			info.DisplayName = strings.TrimSpace(strings.TrimSuffix(info.DisplayName, "("+strings.ToUpper(level[:1])+level[1:]+")"))
+		if info.DisplayName == "" {
+			info.DisplayName = stripGeminiDisplayLevel(model.DisplayName, level)
 		}
 		details[base] = info
 		names[base] = info.DisplayName
@@ -298,6 +311,35 @@ func (c *geminiCatalog) publicModels() ([]string, map[string]string, map[string]
 	return ids, names, details
 }
 
+func (c *geminiCatalog) canonicalModel(model string) string {
+	trimmed := stripContextModelSuffix(strings.TrimSpace(model))
+	if trimmed == "" || c == nil {
+		return trimmed
+	}
+	for _, info := range c.Models {
+		if strings.EqualFold(info.ID, trimmed) {
+			return info.ID
+		}
+	}
+	ids, names, _ := c.publicModels()
+	for _, id := range ids {
+		if strings.EqualFold(id, trimmed) {
+			return id
+		}
+	}
+	for _, id := range ids {
+		if strings.EqualFold(strings.TrimSpace(names[id]), trimmed) {
+			return id
+		}
+	}
+	for _, info := range c.Models {
+		if strings.EqualFold(strings.TrimSpace(info.DisplayName), trimmed) {
+			return info.ID
+		}
+	}
+	return trimmed
+}
+
 func geminiEffortRank(effort string) int {
 	switch effort {
 	case "minimal":
@@ -312,15 +354,16 @@ func geminiEffortRank(effort string) int {
 }
 
 func (c *geminiCatalog) resolve(model, effort string, body []byte) (string, []byte, error) {
+	resolved := c.canonicalModel(model)
 	// An explicit wire ID wins over a generic client effort setting.
 	for _, info := range c.Models {
-		if info.ID == model {
-			_, level := geminiModelFamily(model)
+		if info.ID == resolved {
+			_, level := geminiModelFamily(resolved)
 			if level == "" && effort != "" {
 				hasVariants := false
 				for _, candidate := range c.Models {
 					base, variant := geminiModelFamily(candidate.ID)
-					if base == model && variant != "" {
+					if base == resolved && variant != "" {
 						hasVariants = true
 						break
 					}
@@ -333,11 +376,11 @@ func (c *geminiCatalog) resolve(model, effort string, body []byte) (string, []by
 				body, _ = sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
 				body, _ = sjson.SetBytes(body, "generationConfig.thinkingConfig.thinkingLevel", level)
 			}
-			return model, body, nil
+			return resolved, body, nil
 		}
 	}
 	_, _, details := c.publicModels()
-	info, ok := details[model]
+	info, ok := details[resolved]
 	if !ok {
 		return "", nil, fmt.Errorf("model %q is not in the bound Gemini account catalog", model)
 	}
@@ -348,11 +391,11 @@ func (c *geminiCatalog) resolve(model, effort string, body []byte) (string, []by
 	}
 	for _, candidate := range c.Models {
 		base, level := geminiModelFamily(candidate.ID)
-		if base == model && level == effort {
+		if base == resolved && level == effort {
 			body, _ = sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
 			body, _ = sjson.SetBytes(body, "generationConfig.thinkingConfig.thinkingLevel", level)
 			return candidate.ID, body, nil
 		}
 	}
-	return "", nil, fmt.Errorf("thinking level %q is not available for Gemini model %q", effort, model)
+	return "", nil, fmt.Errorf("thinking level %q is not available for Gemini model %q", effort, resolved)
 }

@@ -86,24 +86,36 @@ func isClaudeCodeAttributionSystemText(text string) bool {
 // and records the client-facing state the response assembler needs. The Antigravity
 // envelope (project/model/requestId/sessionId) is applied separately at call time.
 func convertAnthropicToGemini(raw []byte) (*geminiConvertedRequest, error) {
-	return convertAnthropicToGeminiWithSchema(raw, sanitizeGeminiSchema)
+	return convertAnthropicToGeminiWithSchema(raw, "", sanitizeGeminiSchema)
 }
 
 func convertAnthropicToAntigravity(raw []byte) (*geminiConvertedRequest, error) {
-	sanitize := sanitizeGeminiSchema
-	if strings.Contains(strings.ToLower(gjson.GetBytes(raw, "model").String()), "claude") {
-		sanitize = sanitizeAntigravityClaudeSchema
-	}
-	return convertAnthropicToGeminiWithSchema(raw, sanitize)
+	return convertAnthropicToAntigravityWithCatalog(raw, nil)
 }
 
-func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) []byte) (*geminiConvertedRequest, error) {
+func convertAnthropicToAntigravityWithCatalog(raw []byte, catalog *geminiCatalog) (*geminiConvertedRequest, error) {
+	requested := gjson.GetBytes(raw, "model").String()
+	canonical := requested
+	if catalog != nil {
+		canonical = catalog.canonicalModel(requested)
+	}
+	sanitize := sanitizeGeminiSchema
+	if strings.Contains(strings.ToLower(requested), "claude") || strings.Contains(strings.ToLower(canonical), "claude") {
+		sanitize = sanitizeAntigravityClaudeSchema
+	}
+	return convertAnthropicToGeminiWithSchema(raw, canonical, sanitize)
+}
+
+func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanitizeSchema func([]byte) []byte) (*geminiConvertedRequest, error) {
 	modelResult := gjson.GetBytes(raw, "model")
 	if modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
 		return nil, fmt.Errorf("model is required")
 	}
 	clientModel := strings.TrimSpace(modelResult.String())
 	upstreamModel := stripContextModelSuffix(clientModel)
+	if strings.TrimSpace(canonicalModel) != "" {
+		upstreamModel = stripContextModelSuffix(strings.TrimSpace(canonicalModel))
+	}
 
 	if messagesResult := gjson.GetBytes(raw, "messages"); !messagesResult.IsArray() || len(messagesResult.Array()) == 0 {
 		return nil, fmt.Errorf("messages must not be empty")
@@ -156,13 +168,13 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 	}
 
 	// messages -> contents.
+	requireCallID := strings.Contains(strings.ToLower(clientModel), "claude") || strings.Contains(strings.ToLower(upstreamModel), "claude")
 	var contentItems []string
-	var replayCompanion string
 	var replayErr error
-	gjson.GetBytes(raw, "messages").ForEach(func(_, message gjson.Result) bool {
+	for msgIdx, message := range gjson.GetBytes(raw, "messages").Array() {
 		role := message.Get("role").String()
 		if role == "" {
-			return true
+			continue
 		}
 		geminiRole := role
 		if role == "assistant" {
@@ -195,17 +207,14 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 			if len(partItems) > 0 {
 				contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
 			}
-			return true
+			continue
 		}
 		if content.IsArray() {
-			content.ForEach(func(_, block gjson.Result) bool {
+			for blockIdx, block := range content.Array() {
+				pos := geminiBlockPos{msgIdx: msgIdx, blockIdx: blockIdx}
 				kind := block.Get("type").String()
-				if role == "assistant" && replayCompanion != "" {
-					companion := replayCompanion
-					replayCompanion = ""
-					if kind == companion {
-						return true
-					}
+				if role == "assistant" && toolNames.skipCompanions[pos] {
+					continue
 				}
 				if role == "assistant" && kind == "thinking" {
 					if encoded, ok := strings.CutPrefix(block.Get("signature").String(), geminiPartSignaturePrefix); ok {
@@ -213,22 +222,24 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 						part := gjson.ParseBytes(rawPart)
 						if err != nil || !gjson.ValidBytes(rawPart) || !part.IsObject() || !part.Get("thoughtSignature").Exists() {
 							replayErr = fmt.Errorf("invalid CCL Gemini part signature")
-							return false
+							break
+						}
+						if requireCallID && part.Get("functionCall").Exists() && part.Get("functionCall.id").String() == "" {
+							callID := toolNames.signedCallIDs[pos]
+							if callID == "" {
+								callID = fmt.Sprintf("toolu_gemini_%d_%d", msgIdx, blockIdx)
+							}
+							rawPart, _ = sjson.SetBytes(rawPart, "functionCall.id", callID)
 						}
 						partItems = append(partItems, string(rawPart))
-						if part.Get("functionCall").Exists() {
-							replayCompanion = "tool_use"
-						} else if !part.Get("thought").Bool() && part.Get("text").String() != "" {
-							replayCompanion = "text"
-						}
-						return true
+						continue
 					}
 				}
-				switch block.Get("type").String() {
+				switch kind {
 				case "text":
 					text := block.Get("text").String()
 					if text == "" {
-						return true
+						continue
 					}
 					part := []byte(`{"text":""}`)
 					part, _ = sjson.SetBytes(part, "text", text)
@@ -240,7 +251,7 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 					}
 					name = toolNames.byOriginal[name]
 					if name == "" {
-						return true
+						continue
 					}
 					args := block.Get("input").String()
 					if gjson.Valid(args) && gjson.Parse(args).IsObject() {
@@ -253,15 +264,17 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 						partItems = append(partItems, string(part))
 					}
 				case "tool_result":
-					parts := geminiToolResultParts(block, toolNames)
+					parts := geminiToolResultParts(block, toolNames, requireCallID)
 					partItems = append(partItems, parts...)
 				case "image":
 					if part, ok := geminiImagePart(block); ok {
 						partItems = append(partItems, part)
 					}
 				}
-				return true
-			})
+			}
+			if replayErr != nil {
+				break
+			}
 			if role == "assistant" {
 				partItems = signUnsignedGeminiFunctionCall(upstreamModel, partItems)
 			}
@@ -272,8 +285,7 @@ func convertAnthropicToGeminiWithSchema(raw []byte, sanitizeSchema func([]byte) 
 			partItems = append(partItems, `{"text":`+jsonStringValue(content.String())+`}`)
 			contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
 		}
-		return true
-	})
+	}
 	if replayErr != nil {
 		return nil, replayErr
 	}
@@ -487,7 +499,7 @@ func geminiImagePart(block gjson.Result) (string, bool) {
 
 // geminiToolResultParts converts a Claude tool_result content block into Gemini
 // functionResponse/inline_data parts using the same name map as declarations.
-func geminiToolResultParts(block gjson.Result, names *geminiToolNames) []string {
+func geminiToolResultParts(block gjson.Result, names *geminiToolNames, requireCallID bool) []string {
 	toolUseID := block.Get("tool_use_id").String()
 	if toolUseID == "" {
 		return nil
@@ -497,7 +509,7 @@ func geminiToolResultParts(block gjson.Result, names *geminiToolNames) []string 
 	result, resultIsRaw, images := geminiToolResultContent(block.Get("content"))
 	parts := make([]string, 0, 1+len(images))
 	fr := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
-	if id := names.resultID(toolUseID); id != "" {
+	if id := names.resultIDForModel(toolUseID, requireCallID); id != "" {
 		fr, _ = sjson.SetBytes(fr, "functionResponse.id", id)
 	}
 	fr, _ = sjson.SetBytes(fr, "functionResponse.name", funcName)

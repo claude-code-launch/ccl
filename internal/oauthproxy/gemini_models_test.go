@@ -34,16 +34,43 @@ func TestGeminiCatalogUsesActualWireVariants(t *testing.T) {
 	for _, test := range []struct{ model, effort, want string }{
 		{"gemini-4-argon", "", "gemini-4-argon-high"}, {"gemini-4-argon", "low", "gemini-4-argon-low"}, {"gemini-4-argon", "xhigh", "gemini-4-argon-high"},
 		{"gemini-4-argon-low", "high", "gemini-4-argon-low"}, {"gemini-3.8-flash", "", "gemini-3.8-flash-medium"},
+		{"Gemini 4 Argon", "", "gemini-4-argon-high"}, {"Gemini 4 Argon", "low", "gemini-4-argon-low"}, {"Gemini 4 Argon[1m]", "low", "gemini-4-argon-low"},
+		{"Gemini 4 Argon (Low)", "high", "gemini-4-argon-low"}, {"Gemini 3.8 Flash", "", "gemini-3.8-flash-medium"},
 	} {
 		got, body, err := c.resolve(test.model, test.effort, []byte(`{"generationConfig":{"thinkingConfig":{"thinkingBudget":2000}}}`))
 		if err != nil || got != test.want || gjson.GetBytes(body, "generationConfig.thinkingConfig.thinkingBudget").Exists() {
 			t.Fatalf("%+v: %s %s %v", test, got, body, err)
 		}
 	}
+	for _, test := range []struct{ model, effort, want string }{
+		{"claude-sonnet-5-5", "high", "claude-sonnet-5-5"},
+		{"Claude Sonnet 5.5", "high", "claude-sonnet-5-5"},
+		{"Claude Sonnet 5.5[1m]", "high", "claude-sonnet-5-5"},
+	} {
+		got, _, err := c.resolve(test.model, test.effort, []byte(`{}`))
+		if err != nil || got != test.want {
+			t.Fatalf("%+v: %s %v", test, got, err)
+		}
+	}
 	for _, test := range []struct{ model, effort string }{{"gemini-4-argon", "medium"}, {"gemini-4-pro", "high"}, {"gemini-4-argon", "minimal"}} {
 		if _, _, err := c.resolve(test.model, test.effort, []byte(`{}`)); err == nil {
 			t.Fatalf("invented route for %+v", test)
 		}
+	}
+	converted, err := convertAnthropicToAntigravityWithCatalog([]byte(`{"model":"Gemini 4 Argon","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"echo","input_schema":{"type":"object"}}]}`), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := gjson.GetBytes(converted.geminiBody, "toolConfig.functionCallingConfig.mode").String(); mode != "VALIDATED" {
+		t.Fatalf("display alias tool mode = %q, want VALIDATED", mode)
+	}
+	opusCatalog, err := parseGeminiCatalog([]byte(`{"models":{"claude-opus-4-6-thinking":{"displayName":"Claude Opus 5.5 (High)"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _, err := opusCatalog.resolve("Claude Opus 5.5 (High)", "high", []byte(`{}`))
+	if err != nil || wire != "claude-opus-4-6-thinking" {
+		t.Fatalf("opus display alias resolved to %q, %v", wire, err)
 	}
 }
 
@@ -223,6 +250,17 @@ func TestGeminiRuntimeDiscoversAndRoutesFamily(t *testing.T) {
 	if response.StatusCode != 200 || !strings.Contains(string(raw), "live catalog") {
 		t.Fatalf("response = %d %s", response.StatusCode, raw)
 	}
+	displayReq, _ := http.NewRequest(http.MethodPost, runtime.ClaudeBaseURL()+"/v1/messages", strings.NewReader(`{"model":"Gemini 4 Argon","max_tokens":100,"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hello"}]}`))
+	displayReq.Header.Set("X-Api-Key", runtime.APIKey())
+	displayResp, err := server.Client().Do(displayReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer displayResp.Body.Close()
+	displayRaw, _ := io.ReadAll(displayResp.Body)
+	if displayResp.StatusCode != 200 || !strings.Contains(string(displayRaw), "live catalog") {
+		t.Fatalf("display response = %d %s", displayResp.StatusCode, displayRaw)
+	}
 }
 
 func TestGeminiDiscoveryRefreshesCredentialAcrossMetadataCalls(t *testing.T) {
@@ -331,15 +369,18 @@ func TestGeminiConfiguredFallbackResolvesKnownFamily(t *testing.T) {
 	antigravityBaseURLDaily, antigravityBaseURLProd = server.URL, server.URL
 	t.Cleanup(func() { antigravityBaseURLDaily, antigravityBaseURLProd = oldDaily, oldProd })
 	path := writeGeminiCredential(t, home, "offline-first-run.json")
-	runtime, err := StartOAuth(t.Context(), ProviderGemini, "gemini-3.8-flash", filepath.Base(path))
+	runtime, err := StartOAuth(t.Context(), ProviderGemini, "Gemini 3.8 Flash,gemini-4-argon-low", filepath.Base(path))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-	if !runtime.ModelCatalogIsFallback() || strings.Join(runtime.Models(), ",") != "gemini-3.8-flash" {
+	if !runtime.ModelCatalogIsFallback() || strings.Join(runtime.Models(), ",") != "Gemini 3.8 Flash,gemini-4-argon-low" {
 		t.Fatalf("configured pool was replaced by guesses: %v", runtime.Models())
 	}
-	req, _ := http.NewRequest(http.MethodPost, runtime.ClaudeBaseURL()+"/v1/messages", strings.NewReader(`{"model":"gemini-3.8-flash","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`))
+	if got := runtime.modelNames["gemini-4-argon-low"]; got != "Gemini 4 Argon (Low)" {
+		t.Fatalf("explicit variant display name = %q", got)
+	}
+	req, _ := http.NewRequest(http.MethodPost, runtime.ClaudeBaseURL()+"/v1/messages", strings.NewReader(`{"model":"Gemini 3.8 Flash","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`))
 	req.Header.Set("X-Api-Key", runtime.APIKey())
 	response, err := server.Client().Do(req)
 	if err != nil {

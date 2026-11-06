@@ -4,7 +4,8 @@
 // data plane: Codex Responses (GPT and openai_responses API-key gateways),
 // OpenAI Chat (manual API-key providers, Kimi, and WorkBuddy), Grok (cli-chat-proxy Responses with Grok Build identity), the
 // native-Anthropic Messages passthrough (models.dev @ai-sdk/anthropic models
-// and Zed native-Messages models), and Gemini (Antigravity conversion).
+// and Zed native-Messages models), Gemini (Antigravity conversion), and Cursor
+// (Connect bidirectional agent stream).
 // Zed's mixed catalog, Kiro, and Qoder run entirely
 // on CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
 // this package altogether. AutoClaw uses a CCL-owned Anthropic-to-OpenAI Chat
@@ -91,7 +92,20 @@
 //     unwraps its NDJSON {event}/{status} stream. Zed's cloud only streams, so
 //     non-streaming Claude Code requests are folded back from the Anthropic SSE.
 //
-//  8. Session credentials
+//  8. Gemini Antigravity runtime (gemini_*.go)
+//     `ccl oauth gemini` discovers the bound account's Antigravity catalog via
+//     loadCodeAssist and fetchAvailableModels, caches validated wire IDs and
+//     modalities per account digest, groups thinking variants into families,
+//     normalizes readable display aliases to canonical catalog IDs, and
+//     translates Anthropic Messages to Antigravity streams.
+//
+//  9. Cursor direct runtime (cursor_*.go)
+//     `ccl oauth cursor` runs PKCE sign-in and polls for tokens. At runtime it
+//     bridges Anthropic Messages over Cursor's Connect bidirectional agent
+//     stream (Run + GetUsableModels), parking the open stream across tool calls
+//     so tool results resume the active turn while Claude Code owns execution.
+//
+//  10. Session credentials
 //     All runtimes bind 127.0.0.1 only and use a random per-session API key
 //     that is never written back to ~/.ccl/config.yaml. OAuth credentials live
 //     under ~/.ccl/auth and are filtered per backend so multi-login providers do

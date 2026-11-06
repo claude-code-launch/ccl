@@ -306,18 +306,19 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	converted, err := convertAnthropicToAntigravity(raw)
+	converted, err := convertAnthropicToAntigravityWithCatalog(raw, s.catalog)
 	if err != nil {
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	if s.catalog != nil {
 		effort := strings.TrimSpace(gjson.GetBytes(raw, "output_config.effort").String())
-		converted.upstreamModel, converted.geminiBody, err = s.catalog.resolve(converted.upstreamModel, effort, converted.geminiBody)
+		converted.upstreamModel, converted.geminiBody, err = s.catalog.resolve(converted.clientModel, effort, converted.geminiBody)
 		if err != nil {
 			writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
+		converted.model = converted.upstreamModel
 	}
 	if LogDebugEnabled() {
 		var tools []string
@@ -574,7 +575,7 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 			wireIDs[info.ID] = true
 		}
 		for _, route := range runtimeModelRoutes(modelSpec) {
-			id := stripContextModelSuffix(route.Alias)
+			id := catalog.canonicalModel(route.Alias)
 			_, familyAlias := known[id]
 			if !familyAlias && !wireIDs[id] {
 				catalog.Models = append(catalog.Models, protocol.ModelInfo{ID: id})
@@ -622,14 +623,36 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 			selectedNames := make(map[string]string, len(models))
 			selectedDetails := make(map[string]protocol.ModelInfo, len(models))
 			for _, id := range models {
-				base, level := geminiModelFamily(stripContextModelSuffix(id))
+				canonical := catalog.canonicalModel(id)
+				base, level := geminiModelFamily(canonical)
 				info := details[base]
-				info.ID = id
 				if level != "" {
+					for _, candidate := range catalog.Models {
+						if strings.EqualFold(candidate.ID, canonical) {
+							if candidate.ContextWindow > 0 {
+								info.ContextWindow = candidate.ContextWindow
+							}
+							if candidate.MaxOutputTokens > 0 {
+								info.MaxOutputTokens = candidate.MaxOutputTokens
+							}
+							if len(candidate.InputModalities) > 0 {
+								info.InputModalities = append([]string(nil), candidate.InputModalities...)
+							}
+							if strings.TrimSpace(candidate.DisplayName) != "" {
+								info.DisplayName = candidate.DisplayName
+							}
+							break
+						}
+					}
 					info.ReasoningLevels = nil
 					info.DefaultReasoningLevel = ""
 				}
-				selectedNames[id], selectedDetails[strings.ToLower(id)] = names[base], info
+				info.ID = id
+				displayName := info.DisplayName
+				if displayName == "" {
+					displayName = names[base]
+				}
+				selectedNames[id], selectedDetails[strings.ToLower(id)] = displayName, info
 			}
 			names, details = selectedNames, selectedDetails
 		}

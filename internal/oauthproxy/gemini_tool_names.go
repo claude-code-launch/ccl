@@ -10,21 +10,40 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+type geminiBlockPos struct {
+	msgIdx   int
+	blockIdx int
+}
+
+type geminiPendingCompanion struct {
+	pos      geminiBlockPos
+	kind     string
+	wireName string
+	wireID   string
+	text     string
+}
+
 // A single request-scoped bijection covers declarations, choice, history and
 // responses. Signed history reserves its original wire names: changing those
 // names would change the content authenticated by a native thought signature.
 type geminiToolNames struct {
-	byOriginal map[string]string
-	byWire     map[string]string
-	byID       map[string]string
-	replayIDs  map[string]string
+	byOriginal     map[string]string
+	byWire         map[string]string
+	byID           map[string]string
+	replayIDs      map[string]string
+	skipCompanions map[geminiBlockPos]bool
+	signedCallIDs  map[geminiBlockPos]string
 }
 
 // Signed history keeps its native call ID (including an omitted ID), even
 // when an older CCL response exposed a separately generated client tool ID.
-func (n *geminiToolNames) resultID(clientID string) string {
+// When the target model requires non-empty call IDs (such as Antigravity's
+// Claude bridge), fall back to the client tool_use ID if the native call had none.
+func (n *geminiToolNames) resultIDForModel(clientID string, requireCallID bool) string {
 	if nativeID, ok := n.replayIDs[clientID]; ok {
-		return nativeID
+		if nativeID != "" || !requireCallID {
+			return nativeID
+		}
 	}
 	return clientID
 }
@@ -40,7 +59,14 @@ func (n *geminiToolNames) resultName(id string) string {
 }
 
 func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
-	n := &geminiToolNames{byOriginal: map[string]string{}, byWire: map[string]string{}, byID: map[string]string{}, replayIDs: map[string]string{}}
+	n := &geminiToolNames{
+		byOriginal:     map[string]string{},
+		byWire:         map[string]string{},
+		byID:           map[string]string{},
+		replayIDs:      map[string]string{},
+		skipCompanions: map[geminiBlockPos]bool{},
+		signedCallIDs:  map[geminiBlockPos]string{},
+	}
 	names := map[string]bool{}
 	add := func(name string) {
 		if name != "" {
@@ -68,15 +94,16 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 			add(name)
 		}
 	}
-	// Match each signed functionCall to its synthetic tool_use companion, even
-	// when a client persists adjacent blocks as separate assistant messages.
-	pendingWire := ""
-	pendingID := ""
-	for _, message := range messages {
+	// Match each signed part to its synthetic companion block within the same
+	// assistant turn (including adjacent assistant messages or grouped thinking
+	// blocks), and clear pending companions across non-assistant boundaries.
+	var pending []geminiPendingCompanion
+	for msgIdx, message := range messages {
 		if message.Get("role").String() != "assistant" {
-			pendingWire = ""
+			pending = nil
 		}
-		for _, block := range message.Get("content").Array() {
+		for blockIdx, block := range message.Get("content").Array() {
+			pos := geminiBlockPos{msgIdx: msgIdx, blockIdx: blockIdx}
 			kind := block.Get("type").String()
 			if kind == "tool_result" {
 				add(n.resultName(block.Get("tool_use_id").String()))
@@ -84,32 +111,59 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 			if message.Get("role").String() != "assistant" {
 				continue
 			}
-			if pendingWire != "" {
-				if kind == "tool_use" {
-					original := n.byID[block.Get("id").String()]
-					if original != "" {
-						if prior := n.byWire[pendingWire]; prior != "" && prior != original {
-							return nil, fmt.Errorf("conflicting signed Gemini tool name %q", pendingWire)
-						}
-						if prior := n.byOriginal[original]; prior != "" && prior != pendingWire {
-							return nil, fmt.Errorf("conflicting signed Gemini aliases for tool %q", original)
-						}
-						n.byOriginal[original], n.byWire[pendingWire] = pendingWire, original
-						n.replayIDs[block.Get("id").String()] = pendingID
-					}
-				}
-				pendingWire = ""
-			}
 			if kind == "thinking" {
 				if encoded, ok := strings.CutPrefix(block.Get("signature").String(), geminiPartSignaturePrefix); ok {
-					part, err := base64.StdEncoding.DecodeString(encoded)
-					if err != nil || !gjson.ValidBytes(part) {
+					rawPart, err := base64.StdEncoding.DecodeString(encoded)
+					part := gjson.ParseBytes(rawPart)
+					if err != nil || !gjson.ValidBytes(rawPart) || !part.IsObject() || !part.Get("thoughtSignature").Exists() {
 						return nil, fmt.Errorf("invalid CCL Gemini part signature")
 					}
-					pendingWire = gjson.GetBytes(part, "functionCall.name").String()
-					pendingID = gjson.GetBytes(part, "functionCall.id").String()
+					if part.Get("functionCall").Exists() {
+						pending = append(pending, geminiPendingCompanion{
+							pos:      pos,
+							kind:     "tool_use",
+							wireName: part.Get("functionCall.name").String(),
+							wireID:   part.Get("functionCall.id").String(),
+						})
+					} else if !part.Get("thought").Bool() && part.Get("text").String() != "" {
+						pending = append(pending, geminiPendingCompanion{
+							pos:  pos,
+							kind: "text",
+							text: part.Get("text").String(),
+						})
+					}
+				}
+				continue
+			}
+			if len(pending) > 0 && kind == pending[0].kind {
+				item := pending[0]
+				switch kind {
+				case "tool_use":
+					clientID := block.Get("id").String()
+					original := n.byID[clientID]
+					if item.wireName != "" && original != "" {
+						pending = pending[1:]
+						if prior := n.byWire[item.wireName]; prior != "" && prior != original {
+							return nil, fmt.Errorf("conflicting signed Gemini tool name %q", item.wireName)
+						}
+						if prior := n.byOriginal[original]; prior != "" && prior != item.wireName {
+							return nil, fmt.Errorf("conflicting signed Gemini aliases for tool %q", original)
+						}
+						n.byOriginal[original], n.byWire[item.wireName] = item.wireName, original
+						n.replayIDs[clientID] = item.wireID
+						n.skipCompanions[pos] = true
+						n.signedCallIDs[item.pos] = clientID
+						continue
+					}
+				case "text":
+					if block.Get("text").String() == item.text {
+						pending = pending[1:]
+						n.skipCompanions[pos] = true
+						continue
+					}
 				}
 			}
+			pending = nil
 		}
 	}
 	ordered := make([]string, 0, len(names))

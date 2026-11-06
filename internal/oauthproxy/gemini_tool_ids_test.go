@@ -149,8 +149,9 @@ func TestGeminiRuntimeContinuesOnClaudeWithGeminiToolHistory(t *testing.T) {
 	}
 	messages := []any{map[string]any{"role": "user", "content": "run two calls"}}
 	first := post("gemini-3-flash", messages)
-	var toolUses, results []any
+	var toolUses, fullBlocks, results []any
 	for _, block := range gjson.GetBytes(first, "content").Array() {
+		fullBlocks = append(fullBlocks, json.RawMessage(block.Raw))
 		// Codex replays calls and outputs across model switches without the
 		// previous provider's opaque thinking/signature blocks.
 		if block.Get("type").String() == "tool_use" {
@@ -158,11 +159,72 @@ func TestGeminiRuntimeContinuesOnClaudeWithGeminiToolHistory(t *testing.T) {
 			results = append(results, map[string]any{"type": "tool_result", "tool_use_id": block.Get("id").String(), "content": "ok"})
 		}
 	}
-	if len(toolUses) != 2 {
+	if len(toolUses) != 2 || len(fullBlocks) < 3 {
 		t.Fatalf("missing parallel calls: %s", first)
 	}
-	messages = append(messages, map[string]any{"role": "assistant", "content": toolUses}, map[string]any{"role": "user", "content": results}, map[string]any{"role": "user", "content": "hi"})
-	if raw := post("claude-sonnet-4-6", messages); !strings.Contains(string(raw), "continued on sonnet") || calls.Load() != 2 {
-		t.Fatalf("model switch failed: calls=%d response=%s", calls.Load(), raw)
+	codexHistory := append(append([]any{}, messages...), map[string]any{"role": "assistant", "content": toolUses}, map[string]any{"role": "user", "content": results}, map[string]any{"role": "user", "content": "hi"})
+	if raw := post("claude-sonnet-4-6", codexHistory); !strings.Contains(string(raw), "continued on sonnet") || calls.Load() != 2 {
+		t.Fatalf("model switch without thinking blocks failed: calls=%d response=%s", calls.Load(), raw)
+	}
+	// Claude Code preserves signed thinking blocks alongside tool_use blocks.
+	claudeHistory := append(append([]any{}, messages...), map[string]any{"role": "assistant", "content": fullBlocks}, map[string]any{"role": "user", "content": results}, map[string]any{"role": "user", "content": "hi"})
+	if raw := post("claude-sonnet-4-6", claudeHistory); !strings.Contains(string(raw), "continued on sonnet") || calls.Load() != 3 {
+		t.Fatalf("model switch with signed thinking blocks failed: calls=%d response=%s", calls.Load(), raw)
+	}
+}
+
+func TestGeminiSignedReplayGroupedCompanionsAndTurnBoundaries(t *testing.T) {
+	part1 := `{"functionCall":{"name":"exec_one","args":{"n":1}},"thoughtSignature":"sig-1"}`
+	part2 := `{"functionCall":{"id":"native-2","name":"exec_two","args":{"n":2}},"thoughtSignature":"sig-2"}`
+	sig1 := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(part1))
+	sig2 := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(part2))
+	textPart := `{"text":"signed answer","thoughtSignature":"sig-text"}`
+	textSig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(textPart))
+
+	body, _ := json.Marshal(map[string]any{
+		"model": "gemini-3-flash",
+		"tools": []any{
+			map[string]any{"name": "exec_one", "input_schema": map[string]any{"type": "object"}},
+			map[string]any{"name": "exec_two", "input_schema": map[string]any{"type": "object"}},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "run both"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "signature": sig1},
+				map[string]any{"type": "thinking", "signature": sig2},
+				map[string]any{"type": "tool_use", "id": "client-1", "name": "exec_one", "input": map[string]any{"n": 1}},
+				map[string]any{"type": "tool_use", "id": "native-2", "name": "exec_two", "input": map[string]any{"n": 2}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "client-1", "content": "ok-1"},
+				map[string]any{"type": "tool_result", "tool_use_id": "native-2", "content": "ok-2"},
+			}},
+			// Truncated signed text block without its companion in the previous turn must
+			// not swallow the first text block of the next assistant turn after a user message.
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "signature": textSig},
+			}},
+			map[string]any{"role": "user", "content": "next question"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "text", "text": "fresh answer"},
+			}},
+			map[string]any{"role": "user", "content": "follow up"},
+		},
+	})
+	converted, err := convertAnthropicToGemini(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := gjson.GetBytes(converted.geminiBody, "contents.1.parts").Array()
+	if len(parts) != 2 || parts[0].Raw != part1 || parts[1].Raw != part2 {
+		t.Fatalf("grouped companions were not deduplicated: %s", gjson.GetBytes(converted.geminiBody, "contents.1.parts").Raw)
+	}
+	res0 := gjson.GetBytes(converted.geminiBody, "contents.2.parts.0.functionResponse")
+	res1 := gjson.GetBytes(converted.geminiBody, "contents.2.parts.1.functionResponse")
+	if res0.Get("id").Exists() || res1.Get("id").String() != "native-2" {
+		t.Fatalf("unexpected functionResponse IDs: %s / %s", res0.Raw, res1.Raw)
+	}
+	if got := gjson.GetBytes(converted.geminiBody, "contents.5.parts.0.text").String(); got != "fresh answer" {
+		t.Fatalf("next assistant turn text was swallowed: %q (contents=%s)", got, gjson.GetBytes(converted.geminiBody, "contents").Raw)
 	}
 }

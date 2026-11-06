@@ -137,8 +137,10 @@ Claude Code 始终说 Anthropic Messages。Anthropic API-key 网关在普通启�
 | 来源 | 协议转换 |
 |---|---|
 | Anthropic 网关 | 直连（`ccl codex` 下本地透传） |
-| OpenAI Chat 网关 / Kimi / WorkBuddy / Gemini | Messages ↔ Chat Completions |
+| OpenAI Chat 网关 / Kimi / WorkBuddy | Messages ↔ Chat Completions |
 | Codex Responses 网关 / GPT / Grok | Messages ↔ Responses（CCL 统一注入 Codex 身份头） |
+| Gemini | Messages ↔ Antigravity |
+| Cursor | Messages ↔ Connect 双向 Agent 流 |
 | Zed | 按模型分派 Anthropic / OpenAI / xAI / Google |
 | Kiro / Qoder | 各自的直接适配器（Amazon Q / COSY） |
 | AutoClaw | Messages → OpenAI Chat（managed proxy） |
@@ -167,7 +169,7 @@ node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs
 ```
 
 - 不要把 `ccl` 当测试工具直接跑：未知参数会启动计费的 Claude 会话；用 `go test` 与 `--help`，并设置临时 `HOME` / `CLAUDE_CONFIG_DIR`。
-- 架构与约定见 [CLAUDE.md](CLAUDE.md)；协议说明见 `internal/oauthproxy/doc.go`；npm 发布见 [docs/npm-release.md](docs/npm-release.md)；云同步设计见 [docs/cloud-sync-v2-design.md](docs/cloud-sync-v2-design.md)。
+- 架构与约定见 [CLAUDE.md](CLAUDE.md) 与 [docs/development-architecture.md](docs/development-architecture.md)；协议说明见 `internal/oauthproxy/doc.go`；npm 发布见 [docs/npm-release.md](docs/npm-release.md)；云同步设计见 [docs/cloud-sync-v2-design.md](docs/cloud-sync-v2-design.md)。
 - 推送 `v*` tag 触发 CI 构建 6 个平台二进制并发布到 GitHub Releases 与 npm。
 
 ### 许可
@@ -309,8 +311,10 @@ Claude Code always speaks Anthropic Messages. Anthropic API-key gateways are cal
 | Source | Translation |
 |---|---|
 | Anthropic gateway | Direct (local passthrough under `ccl codex`) |
-| OpenAI Chat gateway / Kimi / WorkBuddy / Gemini | Messages ↔ Chat Completions |
+| OpenAI Chat gateway / Kimi / WorkBuddy | Messages ↔ Chat Completions |
 | Codex Responses gateway / GPT / Grok | Messages ↔ Responses (ccl injects the Codex identity headers) |
+| Gemini | Messages ↔ Antigravity |
+| Cursor | Messages ↔ Connect bidirectional agent stream |
 | Zed | Per-model dispatch: Anthropic / OpenAI / xAI / Google |
 | Kiro / Qoder | Dedicated adapters (Amazon Q / COSY) |
 | AutoClaw | Messages → OpenAI Chat (managed proxy) |
@@ -339,7 +343,7 @@ node --test scripts/npm-packages.test.js scripts/acp-adapter.test.mjs
 ```
 
 - Do not use `ccl` itself as a test harness: unknown args start a billed Claude session. Use `go test` and `--help` with a throwaway `HOME` / `CLAUDE_CONFIG_DIR`.
-- Architecture and conventions: [CLAUDE.md](CLAUDE.md); protocol notes: `internal/oauthproxy/doc.go`; npm release: [docs/npm-release.md](docs/npm-release.md); cloud sync design: [docs/cloud-sync-v2-design.md](docs/cloud-sync-v2-design.md).
+- Architecture and conventions: [CLAUDE.md](CLAUDE.md) and [docs/development-architecture.md](docs/development-architecture.md); protocol notes: `internal/oauthproxy/doc.go`; npm release: [docs/npm-release.md](docs/npm-release.md); cloud sync design: [docs/cloud-sync-v2-design.md](docs/cloud-sync-v2-design.md).
 - Pushing a `v*` tag makes CI build six platform binaries and publish to GitHub Releases and npm.
 
 ### License
