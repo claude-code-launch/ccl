@@ -178,14 +178,14 @@ func TestRealCodexResumesAcrossNativeAndConvertedModels(t *testing.T) {
 				writeMessage(w, []map[string]any{{"type": "text", "text": "converted-continued"}})
 			}, "anthropic", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
 			applyClientFixture(t, g, home)
-			runConverted := func(args ...string) string {
+			runTurn := func(args ...string) string {
 				if mode == "independent-provider" {
 					base, _ := json.Marshal(g.BaseURL())
-					args = append([]string{"-c", `model_provider="ccl"`, "-c", `model_providers.ccl.name="CCL"`, "-c", "model_providers.ccl.base_url=" + string(base), "-c", `model_providers.ccl.wire_api="responses"`, "-c", "model_providers.ccl.requires_openai_auth=false"}, args...)
+					args = append([]string{"-c", `model_provider="ccl"`, "-c", `model_providers.ccl.name="CCL"`, "-c", "model_providers.ccl.base_url=" + string(base), "-c", `model_providers.ccl.wire_api="responses"`, "-c", "model_providers.ccl.requires_openai_auth=false", "-c", `model_providers.ccl.experimental_bearer_token="fake-native-key"`}, args...)
 				}
 				return run(args...)
 			}
-			output := runConverted("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Remember keep-this-goal.")
+			output := runTurn("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Remember keep-this-goal.")
 			var session string
 			for _, line := range strings.Split(output, "\n") {
 				var event struct {
@@ -199,12 +199,12 @@ func TestRealCodexResumesAcrossNativeAndConvertedModels(t *testing.T) {
 			if session == "" || !strings.Contains(output, "converted-first") {
 				t.Fatalf("first turn failed: %s", output)
 			}
-			output = run("-m", "native-fixture", "-c", `web_search="disabled"`, "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue.")
+			output = runTurn("-m", "native-fixture", "-c", `web_search="disabled"`, "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue.")
 			assertCodexThreadID(t, output, session)
 			if !strings.Contains(output, "native-continued") {
 				t.Fatalf("native turn failed: %s", output)
 			}
-			output = runConverted("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue again.")
+			output = runTurn("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue again.")
 			assertCodexThreadID(t, output, session)
 			if !strings.Contains(output, "converted-continued") || convertedCalls.Load() != 2 || nativeCalls.Load() != 1 {
 				t.Fatalf("model switching failed: converted=%d native=%d\n%s", convertedCalls.Load(), nativeCalls.Load(), output)

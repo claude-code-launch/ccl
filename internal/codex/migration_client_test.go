@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -108,7 +109,11 @@ func TestRealCodexSwitchesToIndependentAfterNativeCompaction(t *testing.T) {
 		writeMessage(w, []map[string]any{{"type": "text", "text": "independent-resumed-after-native-compaction"}})
 	}, "anthropic", Options{Independent: true})
 	applyClientFixture(t, converted, home)
-	output = run("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue using the independent provider.")
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"OPENAI_API_KEY":`+strconv.Quote(converted.Token())+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENAI_API_KEY", converted.Token())
+	output = run("-c", `model_provider="openai"`, "-c", "openai_base_url="+strconv.Quote(converted.BaseURL()), "-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "resume", "--json", "--skip-git-repo-check", session, "Continue using the independent provider.")
 	assertCodexThreadID(t, output, session)
 	if !strings.Contains(output, "independent-resumed-after-native-compaction") {
 		t.Fatalf("resume failed: %s", output)

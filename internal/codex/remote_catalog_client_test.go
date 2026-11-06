@@ -82,7 +82,7 @@ func TestRemoteCatalogRestoresLocalSourceAndRejectsShared(t *testing.T) {
 	}
 	raw, _ = os.ReadFile(path)
 	fields, err := configFields(raw)
-	if err != nil || fields["model_catalog_json"] != catalog {
+	if err != nil || fields["model_catalog_json"] != filepath.ToSlash(catalog) {
 		t.Fatal("previous catalog source was lost")
 	}
 	if _, err := New(t.Context(), g.runtime, provider.Provider{Name: "chosen", Type: "anthropic"}, Options{Desktop: true, CatalogMode: CatalogRemote}); err == nil {

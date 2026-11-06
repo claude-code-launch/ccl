@@ -58,7 +58,7 @@ def main():
         shutil.copy2(claude_source, claude)
         version = subprocess.check_output([str(claude), "--version"], text=True).strip()
         print(f"Checking {version}", flush=True)
-        for mode in ("launch", "proxy"):
+        for mode in ("launch", "provider-flag"):
             home = root / f"{mode} user 配置"
             project = home / "project"
             config_dir = home / "Claude settings 中文"
@@ -74,8 +74,9 @@ def main():
                 "haikuModel": "acme/custom", "fableModel": "acme/pro",
                 "customModelId": "acme/custom", "statuslineDisabled": True,
             }
+            active_provider = "fixture" if mode == "launch" else "default"
             (home / ".ccl/config.yaml").write_text(json.dumps({
-                "lang": "en", "active_provider": "fixture", "providers": {"fixture": provider},
+                "lang": "en", "active_provider": active_provider, "providers": {"fixture": provider},
             }), encoding="utf-8")
             (config_dir / ".claude.json").write_text(json.dumps({
                 "hasCompletedOnboarding": True, "theme": "dark",
@@ -90,8 +91,10 @@ def main():
                        CLAUDE_CONFIG_DIR=str(config_dir), CCL_LANG="en", TERM="xterm-256color",
                        PATH=str(binary_dir) + os.pathsep + os.environ["PATH"],
                        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1")
-            args = [str(ccl if mode == "launch" else claude), "--strict-mcp-config",
-                    "--mcp-config", '{"mcpServers":{}}']
+            args = [str(ccl)]
+            if mode == "provider-flag":
+                args.extend(["--provider", "fixture"])
+            args.extend(["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'])
             child = None
             output = queue.Queue()
             screen = pyte.Screen(160, 50)
@@ -135,9 +138,6 @@ def main():
                 raise AssertionError("Timed out waiting for Claude terminal; see evidence")
 
             try:
-                if mode == "proxy":
-                    subprocess.run([str(ccl), "codex", "-p", "fixture"], env=env, cwd=project,
-                                   check=True, timeout=30, capture_output=True)
                 if os.name == "nt":
                     from winpty import PtyProcess
                     child = PtyProcess.spawn(args, cwd=str(project), env=env, dimensions=(50, 160))
@@ -171,9 +171,6 @@ def main():
                             os.killpg(os.getpgid(child.pid), signal.SIGKILL)
                         except ProcessLookupError:
                             pass
-                if mode == "proxy":
-                    subprocess.run([str(ccl), "codex", "stop"], env=env, cwd=project,
-                                   check=True, timeout=30, capture_output=True)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func TestModelCacheRefreshUsesETagAndReloadsChangedIndex(t *testing.T) {
 	if updated == first || !slices.Equal(efforts, []string{"low", "high", "max"}) {
 		t.Fatalf("changed snapshot did not replace the index: %v", efforts)
 	}
-	if after.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && after.Mode().Perm() != 0o600 {
 		t.Fatal("cache permissions are not private")
 	}
 }
