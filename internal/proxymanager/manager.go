@@ -27,17 +27,18 @@ import (
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/provider"
-	"github.com/claude-code-launch/ccl/internal/providersession"
 )
 
 type State struct {
-	ProxyVersion int    `json:"proxy_version,omitempty"`
-	ID           string `json:"id"`
-	Provider     string `json:"provider"`
-	PID          int    `json:"pid"`
-	BaseURL      string `json:"base_url"`
-	ControlURL   string `json:"control_url"`
-	ControlToken string `json:"control_token"`
+	AdditionalProviders []string          `json:"additional_providers,omitempty"`
+	CatalogMode         codex.CatalogMode `json:"catalog_mode,omitempty"`
+	ProxyVersion        int               `json:"proxy_version,omitempty"`
+	ID                  string            `json:"id"`
+	Provider            string            `json:"provider"`
+	PID                 int               `json:"pid"`
+	BaseURL             string            `json:"base_url"`
+	ControlURL          string            `json:"control_url"`
+	ControlToken        string            `json:"control_token"`
 	// Legacy Claude overlay fields are read only to restore pre-Codex-only daemons.
 	SettingsPath  string          `json:"settings_path,omitempty"`
 	StartedAt     time.Time       `json:"started_at"`
@@ -51,7 +52,10 @@ type State struct {
 }
 
 type Manager struct {
-	Dir string
+	AdditionalProviders []string
+	CatalogMode         codex.CatalogMode
+	Refresh             bool
+	Dir                 string
 	// CodexListenAddress pins replacements, including a failed menu switch rollback.
 	CodexListenAddress string
 	// Empty inherits the running daemon's mode, or uses shared on first start.
@@ -59,8 +63,8 @@ type Manager struct {
 }
 
 // Bump when an existing daemon must be replaced to pick up a protocol fix.
-// Version 15 adds live catalog refresh alongside the tool-name protocol fixes.
-const proxyVersion = 15
+// Version 16 adds live runtime generations and account-bound Gemini catalogs.
+const proxyVersion = 16
 
 func Default() (*Manager, error) {
 	home, err := os.UserHomeDir()
@@ -236,12 +240,39 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 	if info, err := os.Stat(codexHome); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("Codex profile not found; open Codex once before starting its proxy")
 	}
-	if m.Running(ctx, existing) && existing.ConfigHash == providerHash(p) &&
-		(existing.CodexMode == mode || existing.CodexMode == "" && mode == "shared") &&
-		existing.MetadataStamp == modelsdev.CacheStamp() &&
-		existing.ProxyVersion == proxyVersion &&
-		existing.CodexHome == codexHome && existing.Codex != nil {
-		return existing, nil
+	catalogMode := m.CatalogMode
+	if catalogMode == "" && existing != nil {
+		catalogMode = existing.CatalogMode
+	}
+	if catalogMode == "" {
+		catalogMode = codex.CatalogLocal
+	}
+	if mode == "shared" && m.CatalogMode == "" {
+		catalogMode = codex.CatalogLocal
+	}
+	if catalogMode != codex.CatalogLocal && catalogMode != codex.CatalogRemote {
+		return nil, fmt.Errorf("invalid Codex catalog mode")
+	}
+	if catalogMode == codex.CatalogRemote && mode != "independent" {
+		return nil, fmt.Errorf("remote CCL catalogs require --independent; shared mode uses local JSON")
+	}
+	additional := m.AdditionalProviders
+	if additional == nil && existing != nil {
+		additional = existing.AdditionalProviders
+	}
+	providers, err := boundProviders(p, additional)
+	if err != nil {
+		return nil, err
+	}
+	if m.Running(ctx, existing) && existing.ProxyVersion == proxyVersion && existing.CodexHome == codexHome && existing.Codex != nil &&
+		(existing.CodexMode == mode || existing.CodexMode == "" && mode == "shared") && (existing.CatalogMode == catalogMode || existing.CatalogMode == "" && catalogMode == codex.CatalogLocal) {
+		if !m.Refresh && existing.ConfigHash == providersHash(providers) && existing.MetadataStamp == modelsdev.CacheStamp() {
+			return existing, nil
+		}
+		if err := reloadControl(ctx, existing, p.Name, additional); err != nil {
+			return nil, err
+		}
+		return m.Read()
 	}
 	// Codex retains its endpoint in memory. Replacing a daemon must bind the
 	// same port so retries from already-open native and CCL chats can recover.
@@ -266,7 +297,10 @@ func (m *Manager) Start(ctx context.Context, executable string, p provider.Provi
 		return nil, err
 	}
 	defer log.Close()
-	args := []string{"codex", "serve", "--provider", p.Name, "--instance", id, "--codex-mode", mode}
+	args := []string{"codex", "serve", "--provider", p.Name, "--instance", id, "--codex-mode", mode, "--catalog-mode", string(catalogMode)}
+	for _, name := range additional {
+		args = append(args, "--with-provider", name)
+	}
 	if codexAddress != "" {
 		args = append(args, "--codex-listen-address", codexAddress)
 	}
@@ -330,15 +364,27 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 		}
 		return fmt.Errorf("a previous proxy needs recovery; run ccl codex stop")
 	}
-	proxy, err := providersession.PrepareProxy(ctx, p)
+	providers, err := boundProviders(p, m.AdditionalProviders)
 	if err != nil {
 		return err
 	}
-	defer proxy.Close()
-	metadataStamp := modelsdev.CacheStamp()
-	codexGateway, err := codex.New(ctx, proxy.Runtime, p, codex.Options{Desktop: mode == "shared", Independent: mode == "independent", ListenAddress: m.CodexListenAddress})
+	bindings, runtimeDone, cleanup, err := prepareBindings(ctx, providers)
 	if err != nil {
 		return err
+	}
+	defer cleanup()
+	metadataStamp := modelsdev.CacheStamp()
+	codexGateway, err := codex.New(ctx, bindings[0].Runtime, p, codex.Options{Desktop: mode == "shared", Independent: mode == "independent", ListenAddress: m.CodexListenAddress, CatalogMode: m.CatalogMode, DeferredStart: true})
+	if err != nil {
+		return err
+	}
+	if len(bindings) > 1 {
+		if err := codexGateway.ReplaceProviders(bindings, func([]codex.Model) error { return nil }); err != nil {
+			codexGateway.Close()
+			return err
+		}
+	} else {
+		codexGateway.OwnRuntime(cleanup)
 	}
 	defer codexGateway.Close()
 	codexOverlay, err := codex.Plan(ctx, codexGateway, m.Dir)
@@ -370,9 +416,14 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 	s.ProxyVersion = proxyVersion
 	s.CodexHome, _ = codex.Home()
 	s.Codex = codexOverlay
-	s.ConfigHash = providerHash(p)
+	s.ConfigHash = providersHash(providers)
 	s.MetadataStamp = metadataStamp
 	s.CodexMode = mode
+	s.CatalogMode = m.CatalogMode
+	if s.CatalogMode == "" {
+		s.CatalogMode = codex.CatalogLocal
+	}
+	s.AdditionalProviders = append([]string(nil), m.AdditionalProviders...)
 	// Journal before applying Codex's overlay; fresh daemons never read or
 	// write Claude's settings, even if that file is malformed or inaccessible.
 	if err := writeJSON(m.statePath(), s); err != nil {
@@ -380,7 +431,6 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 	}
 	defer func() {
 		codexGateway.Close()
-		proxy.Close()
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := restoreState(cleanupCtx, s); err != nil {
@@ -393,8 +443,10 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 	if err := codexOverlay.Apply(ctx); err != nil {
 		return fmt.Errorf("apply Codex proxy configuration: %w", err)
 	}
+	codexGateway.Start()
 	stop := make(chan struct{})
 	var stopOnce sync.Once
+	reloads := make(chan reloadRequest)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
@@ -403,6 +455,32 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/health" {
 			_, _ = io.WriteString(w, id)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/reload" {
+			var request reloadRequest
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&request) != nil || request.Provider == "" || len(request.Additional) > 64 {
+				http.Error(w, "invalid reload request", 400)
+				return
+			}
+			request.result = make(chan error, 1)
+			select {
+			case reloads <- request:
+			case <-r.Context().Done():
+				return
+			case <-stop:
+				return
+			}
+			select {
+			case err := <-request.result:
+				if err != nil {
+					http.Error(w, "Codex reload failed; previous registry retained", http.StatusConflict)
+					return
+				}
+				_, _ = io.WriteString(w, id)
+			case <-r.Context().Done():
+			case <-stop:
+			}
 			return
 		}
 		if r.Method == http.MethodPost && r.URL.Path == "/stop" {
@@ -422,18 +500,20 @@ func (m *Manager) Run(ctx context.Context, p provider.Provider, id string) (runE
 	defer stopMenuBar()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	var refresh catalogRefresh
+	refresh := catalogRefresh{providers: providers, runtimeHash: runtimeProvidersHash(providers), lastDiscovery: time.Now(), done: runtimeDone}
 	for {
 		select {
 		case <-ticker.C:
-			if err := refresh.update(m, codexGateway, s, p); err != nil {
+			if err := refresh.update(ctx, m, codexGateway, s, false, "", nil); err != nil {
 				oauthproxy.LogWarnEvent("catalog_refresh_failed", "component", "codex", "error", err)
 			}
+		case request := <-reloads:
+			request.result <- refresh.update(ctx, m, codexGateway, s, true, request.Provider, request.Additional)
 		case <-ctx.Done():
 			return nil
 		case <-stop:
 			return nil
-		case <-proxy.Runtime.Done():
+		case <-refresh.done:
 			return fmt.Errorf("provider runtime stopped unexpectedly")
 		case err := <-done:
 			if errors.Is(err, http.ErrServerClosed) {
@@ -457,3 +537,18 @@ func providerHash(p provider.Provider) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
+
+// CatalogCapabilities describes the client guarantees of the selected source.
+// Shared mode remains local even when inspecting a malformed/stale journal.
+func (s *State) CatalogCapabilities() codex.CatalogCapabilities {
+	if s == nil {
+		return codex.CatalogCapabilities{}
+	}
+	mode := s.CatalogMode
+	if s.CodexMode != "independent" {
+		mode = codex.CatalogLocal
+	}
+	return mode.Capabilities()
+}
+
+func (s *State) SupportsGatewayHotReload() bool { return s != nil && s.ProxyVersion == proxyVersion }

@@ -74,6 +74,10 @@ func TestGeminiResponsePreservesNativeToolID(t *testing.T) {
 func TestGeminiRuntimeContinuesOnClaudeWithGeminiToolHistory(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1internal:fetchAvailableModels" || r.URL.Path == "/v1internal:loadCodeAssist" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		if calls.Add(1) == 1 {

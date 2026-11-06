@@ -20,7 +20,7 @@ func TestCatalogRefreshKeepsRoutesHistoryAndNativeRows(t *testing.T) {
 	g := fixtureProviderGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		writeMessage(w, []map[string]any{{"type": "text", "text": "still connected"}})
 	}, p, Options{})
-	g.models[0]["tool_mode"] = "code_mode_only"
+	editFixtureModels(g, func(models []Model) []Model { models[0]["tool_mode"] = "code_mode_only"; return models })
 	before := g.Models()[0]
 	if before["context_window"] != 1_000_000 {
 		t.Fatal("fixture did not start with a marked 1M model")

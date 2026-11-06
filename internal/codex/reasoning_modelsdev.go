@@ -40,6 +40,11 @@ func withModelsDevReasoning(models []string, details map[string]protocol.ModelIn
 			}
 		}
 		info := details[key]
+		// Gemini's account inventory defines the callable thinking variants.
+		// Public metadata must not add tiers this bound account cannot route.
+		if configured.OAuthProvider == "gemini" && info.ReasoningKnown {
+			continue
+		}
 		name := names[id]
 		if name == "" {
 			name = info.DisplayName

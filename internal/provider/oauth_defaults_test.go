@@ -48,7 +48,7 @@ func TestPreferredOAuthSlotDefaultsGemini(t *testing.T) {
 		t.Fatal("expected gemini defaults")
 	}
 	if custom != "claude-opus-4-6-thinking" || opus != "claude-opus-4-6-thinking" ||
-		sonnet != "claude-sonnet-4-6" || haiku != "gemini-3-flash" {
+		sonnet != "claude-sonnet-4-6" || haiku != "gemini-3.8-flash" {
 		t.Fatalf("gemini defaults = %q %q %q %q", custom, opus, sonnet, haiku)
 	}
 	if fable != opus {
@@ -108,7 +108,7 @@ func TestApplyOAuthSlotDefaultsFillsEmptyOnly(t *testing.T) {
 func TestApplyOAuthSlotDefaultsGeminiFillsEmptyOnly(t *testing.T) {
 	p := provider.Provider{OAuthProvider: "gemini", OpusModel: "my-opus"}
 	provider.ApplyOAuthSlotDefaults(&p)
-	if p.CustomModelID != "claude-opus-4-6-thinking" || p.SonnetModel != "claude-sonnet-4-6" || p.HaikuModel != "gemini-3-flash" {
+	if p.CustomModelID != "claude-opus-4-6-thinking" || p.SonnetModel != "claude-sonnet-4-6" || p.HaikuModel != "gemini-3.8-flash" {
 		t.Fatalf("empty gemini slots not filled: %+v", p)
 	}
 	if p.OpusModel != "my-opus" {
@@ -165,6 +165,23 @@ func TestNormalizeProviderRewritesRetiredGeminiHaiku(t *testing.T) {
 	if !provider.NormalizeProvider(&p) {
 		t.Fatal("expected the retired Gemini haiku id to change")
 	}
+	if p.HaikuModel != "gemini-3.8-flash" || p.Model != "gemini-3.8-flash,claude-sonnet-4-6" || p.SonnetModel != "my-sonnet" {
+		t.Fatalf("migrated = %+v", p)
+	}
+	if provider.NormalizeProvider(&p) {
+		t.Fatal("second pass should leave the provider unchanged")
+	}
+}
+
+func TestNormalizeProviderPreservesExplicitGemini3Flash(t *testing.T) {
+	p := provider.Provider{
+		OAuthProvider: "gemini",
+		Type:          "openai",
+		HaikuModel:    "gemini-3-flash",
+		SonnetModel:   "my-sonnet",
+		Model:         "gemini-3-flash,claude-sonnet-4-6",
+	}
+	provider.NormalizeProvider(&p)
 	if p.HaikuModel != "gemini-3-flash" || p.Model != "gemini-3-flash,claude-sonnet-4-6" || p.SonnetModel != "my-sonnet" {
 		t.Fatalf("migrated = %+v", p)
 	}
@@ -186,11 +203,11 @@ func TestNormalizeRetiredGeminiPreservesContextMarkers(t *testing.T) {
 	}
 	provider.NormalizeProvider(&p)
 	for _, model := range []string{p.CustomModelID, p.OpusModel, p.SonnetModel, p.HaikuModel, p.FableModel, p.SubagentModel} {
-		if model != "gemini-3-flash[1m]" {
+		if model != "gemini-3.8-flash[1m]" {
 			t.Fatalf("slot lost its context setting: %q", model)
 		}
 	}
-	if p.Model != "gemini-3-flash[1m],claude-sonnet-4-6[1m],gemini-3-flash" {
+	if p.Model != "gemini-3.8-flash[1m],claude-sonnet-4-6[1m],gemini-3.8-flash" {
 		t.Fatalf("pool context markers changed: %q", p.Model)
 	}
 }

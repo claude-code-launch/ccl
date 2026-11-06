@@ -48,6 +48,7 @@ Login:
 Notes:
   - Claude Code manages its own credentials in separate local profiles;
     other subscription logins create providers and use ~/.ccl/auth
+  - gemini signs in to Google Antigravity; it does not use Gemini CLI credentials
   - WorkBuddy has two deployments with separate accounts and credentials:
     workbuddy is www.workbuddy.ai, workbuddycn is www.workbuddy.cn
   - Fast mode (gpt): Claude /fast or ccl set Review & Apply

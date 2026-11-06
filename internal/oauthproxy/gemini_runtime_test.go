@@ -80,6 +80,10 @@ func TestGeminiRuntimeStreamsThrough(t *testing.T) {
 	var gotAuthorization atomic.Value
 	var gotEnvelope atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1internal:fetchAvailableModels" || request.URL.Path == "/v1internal:loadCodeAssist" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
 		upstreamCalls.Add(1)
 		if !strings.Contains(request.URL.Path, "streamGenerateContent") {
 			t.Errorf("path = %q", request.URL.Path)

@@ -32,6 +32,12 @@ import (
 const maxBodyBytes = 32 << 20
 
 type Options struct {
+	// DeferredStart lets the daemon finish its catalog/configuration plan before
+	// serving clients reconnecting to a reused port.
+	DeferredStart bool
+	// CatalogRemote is opt-in for custom providers; native OpenAI only accepts
+	// catalog URLs on allowed ChatGPT hosts. Local JSON remains the default.
+	CatalogMode CatalogMode
 	// Independent selects a custom provider with its own loopback credential,
 	// rather than sharing OpenAI's provider/account state in the desktop app.
 	Independent bool
@@ -46,6 +52,7 @@ type Options struct {
 }
 
 type Route struct {
+	Provider        string
 	Alias           string
 	Model           string
 	NativeResponses bool
@@ -71,6 +78,9 @@ type Gateway struct {
 	// independent provider's selected default. Normal unknown routes still fail.
 	legacyCompaction map[string]Route
 	closeOnce        sync.Once
+	startOnce        sync.Once
+	generation       *runtimeGeneration
+	nativeCatalog    Catalog
 }
 
 func randomID(prefix string) string {
@@ -81,9 +91,16 @@ func randomID(prefix string) string {
 	return prefix + hex.EncodeToString(b[:])
 }
 
-// New wraps the standalone proxy's existing runtime. Close never stops that
-// runtime: proxymanager owns its credential refresh and lifetime.
+// New initially borrows the runtime. OwnRuntime/ReplaceProviders transfer
+// lifecycle cleanup to request-leased generations while the listener stays put.
 func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.Provider, options Options) (*Gateway, error) {
+	if _, err := ParseCatalogMode(string(options.CatalogMode)); err != nil {
+		return nil, err
+	}
+	options.CatalogMode = options.CatalogMode.Effective()
+	if options.CatalogMode == CatalogRemote && !options.Independent {
+		return nil, fmt.Errorf("remote CCL catalogs require independent mode; shared mode uses local JSON")
+	}
 	if provider.IsClaudeAccount(configured) || provider.IsDefaultProvider(configured.Name) {
 		return nil, fmt.Errorf("native Claude accounts cannot be used by Codex; select a CCL API or OAuth provider")
 	}
@@ -106,6 +123,26 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	g := &Gateway{runtime: runtime, listener: listener, options: options, token: randomID("ccl_"),
 		routes: make(map[string]Route), client: &http.Client{Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	if err := g.buildModels(runtime, configured); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	g.server = &http.Server{Handler: http.HandlerFunc(g.serve), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
+	g.modelSnapshot.Store(g.currentLocked())
+	if !options.DeferredStart {
+		g.Start()
+	}
+	return g, nil
+}
+
+func (g *Gateway) Start() {
+	g.startOnce.Do(func() { go func() { _ = g.server.Serve(g.listener) }() })
+}
+
+// buildModels only prepares an unpublished route/catalog pair.
+func (g *Gateway) buildModels(runtime *oauthproxy.Runtime, configured provider.Provider) error {
+	var err error
 	p := configured
 	p.Type = provider.EffectiveType(p)
 	native := len(p.ModelProtocols) == 0 && ((p.OAuthProvider == "" && provider.IsOpenAIResponsesType(p.Type)) ||
@@ -115,8 +152,7 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	if !native {
 		details, err = withModelsDevReasoning(models, details, names, p)
 		if err != nil {
-			_ = listener.Close()
-			return nil, err
+			return err
 		}
 	}
 	details = withGPTReasoningDefaults(models, details)
@@ -126,7 +162,7 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 		if !ok {
 			info = details[strings.ToLower(model)]
 		}
-		g.routes[alias] = Route{Alias: alias, Model: model, NativeResponses: native, ThinkingBudget: p.OAuthProvider == "" && provider.IsAnthropicType(p.Type), MaxOutputTokens: info.MaxOutputTokens}
+		g.routes[alias] = Route{Provider: p.Name, Alias: alias, Model: model, NativeResponses: native, ThinkingBudget: p.OAuthProvider == "" && provider.IsAnthropicType(p.Type), MaxOutputTokens: info.MaxOutputTokens}
 		entry := newModel(alias, model, details, names)
 		if native {
 			entry["supports_search_tool"] = false
@@ -139,13 +175,9 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	}
 	disambiguateModelNames(g.models, g.routes)
 	if len(g.models) == 0 {
-		_ = listener.Close()
-		return nil, fmt.Errorf("provider %q has no models for Codex", p.Name)
+		return fmt.Errorf("provider %q has no models for Codex", p.Name)
 	}
-	g.server = &http.Server{Handler: http.HandlerFunc(g.serve), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute,
-		BaseContext: func(net.Listener) context.Context { return ctx }}
-	go func() { _ = g.server.Serve(listener) }()
-	return g, nil
+	return nil
 }
 
 func (g *Gateway) BaseURL() string { return "http://" + g.listener.Addr().String() + "/v1" }
@@ -160,6 +192,13 @@ func (g *Gateway) Close() {
 		// Release it synchronously so the replacement can reuse this port.
 		_ = g.listener.Close()
 		g.client.CloseIdleConnections()
+		g.catalogMu.Lock()
+		gen := g.currentLocked().generation
+		closeRuntime := retireGeneration(gen)
+		g.catalogMu.Unlock()
+		if closeRuntime != nil {
+			closeRuntime()
+		}
 	})
 }
 
@@ -177,9 +216,11 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUpgradeRequired, "invalid_request_error", "CCL uses HTTP Responses; retry over HTTP", "")
 		return
 	}
+	snapshot, release := g.acquireSnapshot()
+	defer release()
 	path := strings.TrimPrefix(r.URL.Path, "/v1")
 	if r.Method == http.MethodGet && (path == "/models" || path == "/codex/models") {
-		writeJSON(w, http.StatusOK, Catalog{Models: g.Models()})
+		g.serveCatalog(w, r, snapshot)
 		return
 	}
 	if r.Method != http.MethodPost || (path != "/responses" && path != "/responses/compact") {
@@ -196,15 +237,15 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "a Responses model is required", "")
 		return
 	}
-	route, ok := g.routes[request.Model]
+	route, ok := snapshot.routes[request.Model]
 	if !ok && g.options.Independent {
 		items, _ := inputItems(request.Input)
 		if isClientCompaction(r, request, items, path) {
-			if replacement, allowed := g.legacyCompaction[request.Model]; allowed {
+			if replacement, allowed := snapshot.legacyCompaction[request.Model]; allowed {
 				route, ok = replacement, true
 				request.Model = route.Alias
 				request.Reasoning = nil
-				for _, model := range g.Models() {
+				for _, model := range snapshot.models {
 					if model["slug"] == route.Alias {
 						if effort, _ := model["default_reasoning_level"].(string); effort != "" {
 							request.Reasoning = map[string]any{"effort": effort}
@@ -236,6 +277,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		g.serveNative(w, r, nativeHistory(body), path)
 		return
 	}
+	r = r.WithContext(context.WithValue(r.Context(), runtimeRequestKey{}, snapshot.runtimes[route.Alias]))
 	if route.NativeResponses {
 		g.forwardResponses(w, r, nativeHistory(body), route, path)
 		return
@@ -270,8 +312,8 @@ func (g *Gateway) forwardResponses(w http.ResponseWriter, r *http.Request, body 
 	_ = json.Unmarshal(body, &fields)
 	fields["model"], _ = json.Marshal(route.Model)
 	body, _ = json.Marshal(fields)
-	request, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(g.runtime.Endpoint(), "/")+path, bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer "+g.runtime.APIKey())
+	request, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(g.requestRuntime(r).Endpoint(), "/")+path, bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+g.requestRuntime(r).APIKey())
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
 	for _, key := range []string{"Session_id", "X-Codex-Turn-Metadata", "X-Codex-Session-Id"} {

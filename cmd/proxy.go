@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/codex"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -98,6 +99,15 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	independent, _ := cmd.Flags().GetBool("independent")
+	catalogMode, _ := cmd.Flags().GetString("catalog")
+	m.CatalogMode, err = codex.ParseCatalogMode(catalogMode)
+	if err != nil {
+		return err
+	}
+	m.Refresh, _ = cmd.Flags().GetBool("refresh")
+	if cmd.Flags().Changed("with-provider") {
+		m.AdditionalProviders, _ = cmd.Flags().GetStringSlice("with-provider")
+	}
 	shared, _ := cmd.Flags().GetBool("shared")
 	if independent && shared {
 		return fmt.Errorf("choose --independent or --shared")
@@ -121,7 +131,7 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), locale.T("Codex 模型接入已开启 · %s · %s\n停止：ccl codex stop\n", "Codex model integration running · %s · %s\nStop with: ccl codex stop\n"), s.Provider, s.BaseURL)
 	if s.Codex != nil {
-		fmt.Fprintln(cmd.OutOrStdout(), locale.T("Codex 模型目录已接入；重启 Codex 后可选择 CCL 模型。", "Codex model catalog connected; restart Codex to select CCL models."))
+		fmt.Fprintln(cmd.OutOrStdout(), codexCatalogConnectionMessage(s.CatalogCapabilities()))
 		if s.CodexMode == "independent" {
 			fmt.Fprintln(cmd.OutOrStdout(), locale.T("独立提供商模式：不依赖 OpenAI 登录。恢复共享目录：ccl codex start --shared", "Independent provider mode: OpenAI login is not required. Restore the shared catalog: ccl codex start --shared"))
 		}
@@ -166,15 +176,21 @@ func newCodexCommand() *cobra.Command {
   ccl codex start provider1     Equivalent explicit command
   ccl codex start --independent Use CCL without OpenAI account authentication
   ccl codex start --shared      Restore native OpenAI + CCL shared picker
+  ccl codex start --refresh     Rediscover account models without interrupting output
+  ccl codex start -p one --with-provider two   Attach multiple providers
+  ccl codex start --independent --catalog remote  Opt into URL discovery
+  ccl codex start --catalog local             Restore local JSON discovery
   ccl codex                    Start with the active provider
   ccl codex start default      Disconnect CCL and restore Codex's original route
   ccl codex status             Show the running provider and local endpoint
   ccl codex stop               Stop and restore previous Codex settings
 
 Open Codex once to create its profile (CODEX_HOME is supported). The proxy adds
-the selected provider's models to Codex's picker. Native OpenAI models keep their
+the explicitly bound providers' models to Codex's picker. Native OpenAI models keep their
 own route and credentials. Restart Codex after starting, switching or stopping
-the proxy to reload the catalog. macOS shows a menu bar icon.
+the proxy to reload a local catalog. Runtime/configuration changes preserve active
+requests on the same gateway. URL discovery is optional for independent mode;
+Desktop decides when to refresh its picker. macOS shows a menu bar icon.
 Independent mode exposes only CCL models through a custom provider. Chats resume
 with their saved model provider: restore --independent for ccl_proxy chats, or
 fork a chat to continue its history on a different provider. Use --shared to
@@ -186,6 +202,9 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 	command.PersistentFlags().StringP("provider", "p", "", "Provider name (defaults to the active provider)")
 	command.PersistentFlags().Bool("independent", false, "Use a separate Codex provider without OpenAI account authentication")
 	command.PersistentFlags().Bool("shared", false, "Use the native OpenAI provider and merged model catalog")
+	command.PersistentFlags().String("catalog", "", "Catalog source: local (default) or remote (requires --independent)")
+	command.PersistentFlags().StringSlice("with-provider", nil, "Additional providers to attach to the same Codex gateway (repeatable)")
+	command.PersistentFlags().Bool("refresh", false, "Refresh account models and replace runtimes without interrupting in-flight requests")
 	command.MarkFlagsMutuallyExclusive("independent", "shared")
 	start := &cobra.Command{Use: "start [provider]", Args: cobra.MaximumNArgs(1), Short: "Start or switch Codex model integration", RunE: runProxyStart}
 	stop := &cobra.Command{Use: "stop", Args: cobra.NoArgs, Short: "Disconnect CCL models and restore Codex settings", RunE: func(cmd *cobra.Command, _ []string) error {
@@ -223,6 +242,11 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 			endpoint = s.Codex.BaseURL
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Provider: %s\nCodex mode: %s\nCodex endpoint: %s\nPID: %d\n", s.Provider, s.CodexMode, endpoint, s.PID)
+		fmt.Fprintf(cmd.OutOrStdout(), "Catalog source: %s\n", s.CatalogMode.Effective())
+		fmt.Fprintln(cmd.OutOrStdout(), codexCatalogConnectionMessage(s.CatalogCapabilities()))
+		if len(s.AdditionalProviders) > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Additional providers: %s\n", strings.Join(s.AdditionalProviders, ", "))
+		}
 		if s.Codex != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "Codex config: %s\n", s.Codex.Path)
 		}
@@ -244,12 +268,19 @@ Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 		}
 		m.CodexListenAddress, _ = cmd.Flags().GetString("codex-listen-address")
 		m.CodexMode, _ = cmd.Flags().GetString("codex-mode")
+		catalogMode, _ := cmd.Flags().GetString("catalog-mode")
+		m.CatalogMode, err = codex.ParseCatalogMode(catalogMode)
+		if err != nil {
+			return err
+		}
+		m.AdditionalProviders, _ = cmd.Flags().GetStringSlice("with-provider")
 		ctx, cancel := signal.NotifyContext(cmd.Context(), proxySignals...)
 		defer cancel()
 		return m.Run(ctx, p, id)
 	}}
 	serve.Flags().String("instance", "", "Internal startup identity")
 	serve.Flags().String("codex-mode", "shared", "Internal Codex provider mode")
+	serve.Flags().String("catalog-mode", "local", "Internal Codex catalog mode")
 	serve.Flags().String("codex-listen-address", "", "Internal replacement Codex listener address")
 	// Proxy failures are runtime errors, not usage mistakes: print the error
 	// once (from Execute) without cobra's usage block.

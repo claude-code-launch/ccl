@@ -51,6 +51,18 @@ func fixtureProviderGateway(t *testing.T, handler http.HandlerFunc, configured p
 	t.Cleanup(g.Close)
 	return g
 }
+
+// Fixture metadata changes use the same immutable-publication discipline as
+// production refreshes; mutating a map returned to HTTP readers would race.
+func editFixtureModels(g *Gateway, edit func([]Model) []Model) {
+	g.catalogMu.Lock()
+	defer g.catalogMu.Unlock()
+	next := *g.currentLocked()
+	next.models = edit(cloneCatalogModels(next.models))
+	g.models = next.models
+	g.modelSnapshot.Store(&next)
+}
+
 func postResponses(t *testing.T, g *Gateway, payload map[string]any) *http.Response {
 	t.Helper()
 	raw, _ := json.Marshal(payload)

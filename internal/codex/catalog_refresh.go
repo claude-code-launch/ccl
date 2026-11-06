@@ -2,17 +2,16 @@ package codex
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/fsutil"
-	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
-
-type catalogSnapshot struct{ models []Model }
 
 var refreshedCatalogFields = []string{
 	"context_window", "max_context_window", "auto_compact_token_limit",
@@ -50,40 +49,7 @@ func cloneCatalogModels(models []Model) []Model {
 // the runtime and conversation history remain owned by the existing session.
 // Persist the new catalog before publishing it to concurrent HTTP readers.
 func (g *Gateway) RefreshMetadata(configured provider.Provider, persist func([]Model) error) error {
-	g.catalogMu.Lock()
-	defer g.catalogMu.Unlock()
-	models := g.modelsLocked()
-	details := g.runtime.ModelDetails()
-	if _, err := modelsdev.CachedIndex(); err == nil {
-		details, _ = withModelsDevReasoning(g.runtime.Models(), details, g.runtime.ModelDisplayNames(), configured)
-	} else {
-		// A missing/damaged optional cache must not withdraw the last good
-		// effort metadata while a context-setting edit is being applied.
-		details = nil
-	}
-	for _, model := range models {
-		alias, _ := model["slug"].(string)
-		route, ok := g.routes[alias]
-		if !ok {
-			continue
-		}
-		base := provider.StripContextSuffix(route.Model)
-		// The old route may contain a marker the user has since removed. Only
-		// the current pool/slots decide whether that model still has 1M.
-		applyProviderContext(model, base, configured)
-		info, ok := details[route.Model]
-		if !ok {
-			info = details[strings.ToLower(route.Model)]
-		}
-		if !route.NativeResponses && info.ReasoningKnown {
-			model["supported_reasoning_levels"], model["default_reasoning_level"] = reasoningLevels(info)
-		}
-	}
-	if err := persist(models); err != nil {
-		return err
-	}
-	g.modelSnapshot.Store(&catalogSnapshot{models: models})
-	return nil
+	return g.RefreshProvidersMetadata([]provider.Provider{configured}, persist)
 }
 
 // RefreshCatalog updates only CCL-owned metadata in the existing file. It never
@@ -124,4 +90,99 @@ func (o *Overlay) RefreshCatalog(models []Model) error {
 		return nil
 	}
 	return fsutil.WriteFileAtomic(o.CatalogPath, updated, 0o600)
+}
+
+// ReplaceCatalog changes the complete CCL model set while preserving all
+// native rows and unknown native fields from the current catalog file.
+func (o *Overlay) ReplaceCatalog(models []Model) error {
+	raw, err := os.ReadFile(o.CatalogPath)
+	if err != nil {
+		return err
+	}
+	catalog, err := ParseCatalog(raw)
+	if err != nil {
+		return err
+	}
+	native := Catalog{}
+	for _, model := range catalog.Models {
+		id, _ := model["slug"].(string)
+		if !strings.HasPrefix(strings.ToLower(id), "ccl/") {
+			native.Models = append(native.Models, model)
+		}
+	}
+	combined, err := MergeCatalog(native, models)
+	if err != nil {
+		return err
+	}
+	updated, err := json.MarshalIndent(combined, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(o.CatalogPath, append(updated, '\n'), 0o600)
+}
+
+// PlanModelSelection replaces an owned independent-mode default only when its
+// route was removed. A user-edited selection is preserved. The new journal can
+// recover a crash before or after ApplyModelSelection changes config.toml.
+func (o *Overlay) PlanModelSelection(models []Model) (*Overlay, error) {
+	next := *o
+	next.Changes = append([]ConfigChange(nil), o.Changes...)
+	if o.ProviderBlock == "" || len(models) == 0 {
+		return &next, nil
+	}
+	raw, err := readConfig(o.Path)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := configFields(raw)
+	if err != nil {
+		return nil, err
+	}
+	available := make(map[string]bool, len(models))
+	for _, model := range models {
+		id, _ := model["slug"].(string)
+		available[id] = true
+	}
+	replacement, _ := models[0]["slug"].(string)
+	for i, change := range next.Changes {
+		if change.Key != "model" || change.Applied == nil || available[*change.Applied] {
+			continue
+		}
+		if current := scopeFields(fields, change.Scope)[change.Key]; current != *change.Applied {
+			continue
+		}
+		next.Changes[i].PreviousApplied = change.Applied
+		value := replacement
+		next.Changes[i].Applied = &value
+	}
+	return &next, nil
+}
+
+func (o *Overlay) ApplyModelSelection(ctx context.Context, previous *Overlay) error {
+	changed := false
+	for i, change := range o.Changes {
+		if change.Key == "model" && change.Applied != nil && previous.Changes[i].Applied != nil && *change.Applied != *previous.Changes[i].Applied {
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return withConfig(ctx, o.Path, func(raw []byte, fields map[string]any) ([]byte, error) {
+		for i, change := range o.Changes {
+			old := previous.Changes[i]
+			if change.Key != "model" || change.Applied == nil || old.Applied == nil || *change.Applied == *old.Applied {
+				continue
+			}
+			if current := scopeFields(fields, change.Scope)[change.Key]; current != *old.Applied {
+				return nil, fmt.Errorf("Codex model selection changed during catalog refresh")
+			}
+			var err error
+			raw, err = editScope(raw, change.Scope, map[string]*string{change.Key: change.Applied})
+			if err != nil {
+				return nil, err
+			}
+		}
+		return raw, nil
+	})
 }

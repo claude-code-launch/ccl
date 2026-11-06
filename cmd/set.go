@@ -259,6 +259,7 @@ func RunProviderSet(args []string) error {
 	} else {
 		fmt.Printf("✅ %s %q\n", locale.T("已添加 Provider", "Successfully added provider"), p.Name)
 	}
+	printCodexModelUpdateNotice(os.Stdout, p.Name)
 	return nil
 }
 

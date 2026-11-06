@@ -72,7 +72,7 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 	}, "anthropic", Options{Desktop: true})
 	// Begin with the classic harness, then resume that same conversation after
 	// loading code mode. A fresh-session-only test cannot catch stale tool calls.
-	g.models[0]["supports_search_tool"] = false
+	editFixtureModels(g, func(models []Model) []Model { models[0]["supports_search_tool"] = false; return models })
 	classic, err := Plan(t.Context(), g, filepath.Join(home, "proxy"))
 	if err != nil {
 		t.Fatal(err)
@@ -102,13 +102,13 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 	native := newModel("native-fixture", "native-fixture", nil, nil)
 	native["tool_mode"] = "code_mode_only"
 	native["node_repl_auto_review_required"] = true
-	g.models[0]["supports_search_tool"] = true
+	editFixtureModels(g, func(models []Model) []Model { models[0]["supports_search_tool"] = true; return models })
 	raw, _ := json.Marshal(Catalog{Models: []Model{native}})
 	if err := os.WriteFile(filepath.Join(home, "models_cache.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	applyClientFixture(t, g, home)
-	if g.models[0]["tool_mode"] != "code_mode_only" || g.models[0]["node_repl_auto_review_required"] != true {
+	if g.Models()[0]["tool_mode"] != "code_mode_only" || g.Models()[0]["node_repl_auto_review_required"] != true {
 		t.Fatal("native client tool mode or review requirement was lost")
 	}
 	output = run("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "--dangerously-bypass-approvals-and-sandbox", "exec", "resume", "--json", "--skip-git-repo-check", session, "Read app state again using the current code-mode tools.")

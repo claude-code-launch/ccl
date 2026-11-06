@@ -73,7 +73,9 @@ func testRealCodexReasoningEffort(t *testing.T, effort string, independent bool)
 	// Space-Bunny advertises five tiers and defaults to max. The max case
 	// leaves the CLI override unset to verify that the catalog default works.
 	info := protocol.ModelInfo{ID: "model-a", DisplayName: "Reasoner", ReasoningLevels: protocol.GPTReasoningLevels()[:5], DefaultReasoningLevel: "max"}
-	g.models = []Model{newModel("ccl/chosen/model-a", "model-a", map[string]protocol.ModelInfo{"model-a": info}, nil)}
+	editFixtureModels(g, func([]Model) []Model {
+		return []Model{newModel("ccl/chosen/model-a", "model-a", map[string]protocol.ModelInfo{"model-a": info}, nil)}
+	})
 	overlay, err := Plan(context.Background(), g, filepath.Join(home, "proxy"))
 	if err != nil {
 		t.Fatal(err)

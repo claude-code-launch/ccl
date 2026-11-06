@@ -43,8 +43,11 @@ type Runtime struct {
 	// so callers can keep the catalog they already had instead of overwriting it
 	// with a guess.
 	catalogFallback bool
-	ownsLog         bool
-	stopOnce        sync.Once
+	// catalogStale is a known account inventory read from cache after discovery
+	// failed. It may seed a new session, but must not replace a running snapshot.
+	catalogStale bool
+	ownsLog      bool
+	stopOnce     sync.Once
 	// usage accumulates per-model token totals for this runtime. It is never nil:
 	// StartProvider always installs one, even when the backend cannot report
 	// usage, so callers do not need a nil check.
@@ -107,6 +110,8 @@ func (r *Runtime) ModelCatalogIsFallback() bool {
 	}
 	return r.catalogFallback
 }
+
+func (r *Runtime) ModelCatalogIsStale() bool { return r != nil && r.catalogStale }
 
 type UpstreamProtocol string
 

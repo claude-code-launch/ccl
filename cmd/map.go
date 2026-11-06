@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/claude"
@@ -150,6 +151,7 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 		fmt.Printf("  Subagent ID -> %s\n", subagentMappingDisplay(p))
 	}
 
+	printCodexModelUpdateNotice(cmd.OutOrStdout(), providerName)
 	return nil
 }
 
@@ -227,6 +229,7 @@ func runMapAuto(ctx context.Context, args []string, probe bool) error {
 	if !probe {
 		fmt.Println("\nNot probed; `ccl map auto --probe` first tests each model (billed).")
 	}
+	printCodexModelUpdateNotice(os.Stdout, providerName)
 	return nil
 }
 
@@ -311,6 +314,7 @@ func runMapTUI(args []string) error {
 		printSlot("Subagent", subagentMappingDisplay(p))
 	}
 
+	printCodexModelUpdateNotice(os.Stdout, providerName)
 	return nil
 }
 

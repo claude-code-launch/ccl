@@ -676,12 +676,12 @@ func (g *Gateway) readBridgeResponse(w http.ResponseWriter, r *http.Request, bod
 			writeError(w, status, "api_error", message, "")
 		}
 	}
-	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, g.runtime.ClaudeBaseURL()+"/v1/messages", bytes.NewReader(body))
+	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, g.requestRuntime(r).ClaudeBaseURL()+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		fail(502, "invalid CCL runtime")
 		return nil
 	}
-	upstream.Header.Set("X-Api-Key", g.runtime.APIKey())
+	upstream.Header.Set("X-Api-Key", g.requestRuntime(r).APIKey())
 	upstream.Header.Set("Content-Type", "application/json")
 	upstream.Header.Set("Accept", "text/event-stream")
 	response, err := g.client.Do(upstream)

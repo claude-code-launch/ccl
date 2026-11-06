@@ -34,9 +34,9 @@ func preferredOAuthSlots(oauthProvider string) (custom, opus, sonnet, haiku stri
 		return "grok-4.6", "grok-4.6", "grok-4.5", "grok-4.5", true
 	case "gemini":
 		// Gemini / Antigravity subscription defaults. Same missing-catalog fallback.
-		// The haiku slot is the Gemini model. gemini-3.1-pro-low is gone from
-		// both the daily and prod catalogs; Gemini 3 Flash is still offered.
-		return "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3-flash", true
+		// New empty haiku slots prefer Gemini 3.8 Flash. The runtime catalog
+		// validates availability; explicit user pins are otherwise preserved.
+		return "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.8-flash", true
 	case "kimi":
 		// Kimi Code has no public model-list endpoint, so there is nothing for
 		// runtime discovery to fall back on: without these the runtime refuses to

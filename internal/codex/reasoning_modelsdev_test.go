@@ -129,3 +129,18 @@ func seedModelsDevCache(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGeminiAccountEffortsOverridePublicMetadata(t *testing.T) {
+	seedModelsDevCache(t)
+	// Use an ID present in the public fixture to prove the override boundary,
+	// independently of which Gemini generations models.dev happens to publish.
+	const id = "deepseek-v4.1-flash"
+	details := map[string]protocol.ModelInfo{id: {ID: id, ReasoningKnown: true, ReasoningLevels: []protocol.ReasoningLevel{{Effort: "low"}, {Effort: "high"}}, DefaultReasoningLevel: "high"}}
+	actual, err := withModelsDevReasoning([]string{id}, details, nil, provider.Provider{OAuthProvider: "gemini"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info := actual[id]; len(info.ReasoningLevels) != 2 || info.ReasoningLevels[1].Effort != "high" || info.DefaultReasoningLevel != "high" {
+		t.Fatalf("public metadata replaced account variants: %+v", info)
+	}
+}

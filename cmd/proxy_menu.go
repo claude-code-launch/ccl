@@ -126,8 +126,8 @@ func proxyMenuSwitch(cmd *cobra.Command, _ []string) (switchErr error) {
 		if _, exists := current.Providers[name]; !exists {
 			return fmt.Errorf("selected provider was removed while switching")
 		}
-		// Codex reads its model catalog only at startup. Leave a running app
-		// alone; the user restarts it when they want the new list.
+		// The app controls when its picker reloads. Leave it running; the user
+		// can restart it if the list remains stale.
 		current.ActiveProvider = name
 		return nil
 	}); err != nil {

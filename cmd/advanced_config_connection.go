@@ -8,6 +8,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
@@ -75,6 +76,13 @@ func (m *AdvancedConfigModel) beginOAuthRuntime(p provider.Provider) {
 			// Qoder publishes account-specific credit multipliers on the local
 			// catalog. Preserve them alongside display names for the picker.
 			modelInfos = fetchModelInfosForProvider(runtimeProvider)
+		} else if strings.EqualFold(strings.TrimSpace(p.OAuthProvider), oauthproxy.ProviderGemini) {
+			details := runtime.ModelDetails()
+			for _, id := range runtime.Models() {
+				if info, ok := details[strings.ToLower(id)]; ok {
+					modelInfos = append(modelInfos, info)
+				}
+			}
 		}
 		m.oauthDone <- oauthRuntimeDoneMsg{
 			endpoint:        runtimeProvider.Endpoint,

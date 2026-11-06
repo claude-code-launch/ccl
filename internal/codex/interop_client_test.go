@@ -123,7 +123,9 @@ func TestRealCodexReadsScreenshotThroughConvertedProvider(t *testing.T) {
 		sawImage.Store(strings.Contains(raw, `"type":"image"`) && strings.Contains(raw, `"media_type":"image/png"`))
 		writeMessage(w, []map[string]any{{"type": "text", "text": "image-roundtrip-done"}})
 	}, "anthropic", Options{Desktop: true})
-	g.models = []Model{newModel("ccl/chosen/model-a", "model-a", map[string]protocol.ModelInfo{"model-a": {InputModalities: []string{"text", "image"}}}, nil)}
+	editFixtureModels(g, func([]Model) []Model {
+		return []Model{newModel("ccl/chosen/model-a", "model-a", map[string]protocol.ModelInfo{"model-a": {InputModalities: []string{"text", "image"}}}, nil)}
+	})
 	applyClientFixture(t, g, home)
 	output := run("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Read the fixture screenshot with view_image.")
 	if calls.Load() != 2 || !sawImage.Load() || !strings.Contains(output, "image-roundtrip-done") {

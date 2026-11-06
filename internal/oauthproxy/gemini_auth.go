@@ -1,6 +1,7 @@
 package oauthproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -243,9 +244,9 @@ func fetchGeminiUserInfo(ctx context.Context, client *http.Client, accessToken s
 }
 
 func fetchGeminiProjectID(ctx context.Context, client *http.Client, accessToken string) (string, error) {
-	projectID, loadErr := geminiLoadCodeAssist(ctx, client, accessToken)
-	if loadErr == nil && projectID != "" {
-		return projectID, nil
+	account, _, loadErr := geminiLoadCodeAssist(ctx, client, accessToken)
+	if loadErr == nil && account.project != "" {
+		return account.project, nil
 	}
 	projectID, err := geminiOnboardUser(ctx, client, accessToken)
 	if err != nil {
@@ -260,15 +261,32 @@ func fetchGeminiProjectID(ctx context.Context, client *http.Client, accessToken 
 	return projectID, nil
 }
 
-func geminiLoadCodeAssist(ctx context.Context, client *http.Client, accessToken string) (string, error) {
-	rawBody, err := json.Marshal(map[string]any{"metadata": map[string]string{"ideType": "ANTIGRAVITY"}})
+type geminiCodeAssistAccount struct {
+	project, paidTier, currentTier string
+}
+
+func geminiLoadCodeAssist(ctx context.Context, client *http.Client, accessToken string) (geminiCodeAssistAccount, int, error) {
+	body, status, err := geminiCodeAssistPost(ctx, client, antigravityBaseURLProd, "loadCodeAssist", accessToken,
+		[]byte(`{"metadata":{"ideType":"ANTIGRAVITY"}}`), antigravityMaxErrorBytes)
 	if err != nil {
-		return "", fmt.Errorf("marshal loadCodeAssist body: %w", err)
+		return geminiCodeAssistAccount{}, status, err
 	}
-	endpoint := strings.TrimRight(antigravityBaseURLProd, "/") + "/v1internal:loadCodeAssist"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(rawBody)))
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return geminiCodeAssistAccount{}, status, fmt.Errorf("loadCodeAssist: decode response: %w", err)
+	}
+	paid, _ := data["paidTier"].(map[string]any)
+	current, _ := data["currentTier"].(map[string]any)
+	return geminiCodeAssistAccount{project: geminiExtractProjectID(data), paidTier: firstMetadataString(paid, "id"), currentTier: firstMetadataString(current, "id")}, status, nil
+}
+
+// geminiCodeAssistPost reads bounded metadata without including upstream bodies
+// in errors (they can contain account information).
+func geminiCodeAssistPost(ctx context.Context, client *http.Client, base, method, accessToken string, payload []byte, limit int64) ([]byte, int, error) {
+	endpoint := strings.TrimRight(base, "/") + "/v1internal:" + method
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("loadCodeAssist: create request: %w", err)
+		return nil, 0, fmt.Errorf("%s: create request: %w", method, err)
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
 	request.Header.Set("Accept", "*/*")
@@ -276,21 +294,21 @@ func geminiLoadCodeAssist(ctx context.Context, client *http.Client, accessToken 
 	request.Header.Set("User-Agent", antigravityRequestUserAgent)
 	response, err := client.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("loadCodeAssist: %w", err)
+		return nil, 0, fmt.Errorf("%s: %w", method, err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, antigravityMaxErrorBytes))
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return nil, response.StatusCode, fmt.Errorf("%s: HTTP %d", method, response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
-		return "", fmt.Errorf("loadCodeAssist: read response: %w", err)
+		return nil, response.StatusCode, fmt.Errorf("%s: read response: %w", method, err)
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("loadCodeAssist: HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	if int64(len(body)) > limit {
+		return nil, response.StatusCode, fmt.Errorf("%s: response exceeds size limit", method)
 	}
-	var data map[string]any
-	if err := json.Unmarshal(body, &data); err != nil {
-		return "", fmt.Errorf("loadCodeAssist: decode response: %w", err)
-	}
-	return geminiExtractProjectID(data), nil
+	return body, response.StatusCode, nil
 }
 
 func geminiOnboardUser(ctx context.Context, client *http.Client, accessToken string) (string, error) {

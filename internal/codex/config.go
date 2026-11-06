@@ -27,8 +27,12 @@ type ConfigChange struct {
 	Key     string   `json:"key"`
 	Before  *string  `json:"before"`
 	Applied *string  `json:"applied"`
+	// PreviousApplied covers the journal-before-config window of a live model
+	// selection update, so crash recovery can restore either owned value.
+	PreviousApplied *string `json:"previous_applied,omitempty"`
 }
 type Overlay struct {
+	RemoteCatalog bool           `json:"remote_catalog,omitempty"`
 	Path          string         `json:"path"`
 	CatalogPath   string         `json:"catalog_path"`
 	BaseURL       string         `json:"base_url"`
@@ -69,6 +73,12 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 	fields, err := configFields(data)
 	if err != nil {
 		return nil, err
+	}
+	if g.options.CatalogMode == CatalogRemote {
+		features, _ := fields["features"].(map[string]any)
+		if enabled, ok := features["api_key_model_discovery"].(bool); ok && !enabled {
+			return nil, fmt.Errorf("remote catalogs require features.api_key_model_discovery; enable it or use --catalog local")
+		}
 	}
 	selected, _ := fields["model_provider"].(string)
 	var profileScope []string
@@ -130,6 +140,7 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 	}
 	base := g.BaseURL()
 	overlay := &Overlay{Path: path, CatalogPath: catalogPath, BaseURL: base}
+	overlay.RemoteCatalog = g.options.CatalogMode == CatalogRemote
 	values := map[string]string{"openai_base_url": base, "model_catalog_json": catalogPath}
 	if g.options.Independent {
 		delete(values, "openai_base_url")
@@ -151,6 +162,9 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 		values["model_provider"], values["model"] = IndependentProviderID, model
 		quote := func(value string) string { encoded, _ := json.Marshal(value); return string(encoded) }
 		overlay.ProviderBlock = fmt.Sprintf("\n# CCL temporary provider\n[model_providers.%s]\nname = \"CCL\"\nbase_url = %s\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\nexperimental_bearer_token = %s\n# End CCL temporary provider\n", IndependentProviderID, quote(base), quote(g.Token()))
+		if g.options.CatalogMode == CatalogRemote {
+			overlay.ProviderBlock = strings.Replace(overlay.ProviderBlock, "# End CCL temporary provider", "model_catalog_url = "+quote(base+"/models")+"\n# End CCL temporary provider", 1)
+		}
 	}
 	addChanges := func(scope []string, source map[string]any, values map[string]string) error {
 		for key, value := range values {
@@ -177,6 +191,14 @@ func Plan(ctx context.Context, g *Gateway, directory string) (*Overlay, error) {
 			return nil, err
 		}
 	}
+	if g.options.CatalogMode == CatalogRemote {
+		for i := range overlay.Changes {
+			if overlay.Changes[i].Key == "model_catalog_json" {
+				overlay.Changes[i].Applied = nil
+			}
+		}
+	}
+	g.finishCatalogPlan()
 	sort.Slice(overlay.Changes, func(i, j int) bool {
 		return strings.Join(overlay.Changes[i].Scope, ".")+overlay.Changes[i].Key < strings.Join(overlay.Changes[j].Scope, ".")+overlay.Changes[j].Key
 	})
@@ -481,7 +503,7 @@ func (o *Overlay) Restore(ctx context.Context) error {
 		}
 		for _, change := range o.Changes {
 			current, exists := scopeFields(fields, change.Scope)[change.Key]
-			if change.Applied == nil && !exists || change.Applied != nil && current == *change.Applied {
+			if change.Applied == nil && !exists || change.Applied != nil && current == *change.Applied || change.PreviousApplied != nil && current == *change.PreviousApplied {
 				if len(change.Scope) > 0 && scopeFields(fields, change.Scope) == nil {
 					continue
 				}

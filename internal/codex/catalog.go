@@ -68,6 +68,19 @@ func newModel(alias, id string, details map[string]protocol.ModelInfo, names map
 func (g *Gateway) inheritClientToolMode(native Catalog) {
 	g.catalogMu.Lock()
 	defer g.catalogMu.Unlock()
+	g.nativeCatalog = native
+	if current := g.modelSnapshot.Load(); current != nil {
+		next := *current
+		next.models = cloneCatalogModels(current.models)
+		next.native = native
+		applyClientToolMode(native, next.models, next.routes)
+		g.modelSnapshot.Store(&next)
+	} else {
+		applyClientToolMode(native, g.models, g.routes)
+	}
+}
+
+func applyClientToolMode(native Catalog, models []Model, routes map[string]Route) {
 	var template Model
 	for _, model := range native.Models {
 		id, _ := model["slug"].(string)
@@ -84,9 +97,9 @@ func (g *Gateway) inheritClientToolMode(native Catalog) {
 	if template == nil {
 		return
 	}
-	for _, model := range g.models {
+	for _, model := range models {
 		id, _ := model["slug"].(string)
-		if route, ok := g.routes[id]; !ok || route.NativeResponses {
+		if route, ok := routes[id]; !ok || route.NativeResponses {
 			continue
 		}
 		model["tool_mode"] = "code_mode_only"

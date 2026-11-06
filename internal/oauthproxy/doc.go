@@ -17,9 +17,9 @@
 // can honor the upstream wait without CCL sending more requests first.
 // Per-provider recovery happens INSIDE one attempt: Codex Responses, Grok, and
 // Kimi refresh once after a 401; WorkBuddy refreshes once after a 401/403;
-// Gemini also falls back from the daily to the prod Antigravity base on
-// network errors, 429s and 5xx responses (so one attempt is up to 2 upstream
-// calls); Qoder uses its single bound credential and re-signs COSY per attempt; the Zed
+// Gemini keeps inference on its discovered catalog source. Without a known
+// catalog source it falls back from daily to prod on network errors, 429s
+// and 5xx responses (one attempt is then up to 2 upstream calls); Qoder uses its single bound credential and re-signs COSY per attempt; the Zed
 // gateway mints one fresh LLM token and resends once when the service reports
 // the cached one expired. Three layers are deliberately outside the loop: Kiro
 // keeps its own longer 1/2/4s budget with per-round credential rotation

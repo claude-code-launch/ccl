@@ -265,8 +265,8 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	cli("codex", "start", "-p", chat.Name)
-	if state().ID == first.ID {
-		t.Fatal("updated provider did not reload")
+	if state().ID != first.ID {
+		t.Fatal("updated provider replaced the stable gateway")
 	}
 	fields = readObject(t, settingsPath)
 	_ = json.Unmarshal(fields["env"], &env)

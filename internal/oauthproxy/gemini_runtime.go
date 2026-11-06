@@ -15,11 +15,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/tidwall/gjson"
 )
 
@@ -44,10 +46,10 @@ const (
 
 	// antigravityRequestUserAgent is the Antigravity Hub family UA sent when no
 	// configured override is present (the version updater is not run by CCL).
-	antigravityRequestUserAgent = "antigravity/hub/2.2.1 darwin/arm64"
 )
 
 var (
+	antigravityRequestUserAgent = fmt.Sprintf("antigravity/cli/1.5.0 (aidev_client; os_type=%s; arch=%s; auth_method=consumer)", runtime.GOOS, runtime.GOARCH)
 	// antigravityBaseURLDaily/Prod are the Antigravity control-plane bases in
 	// fallback order. Vars (not consts) so tests can point them at a stub.
 	antigravityBaseURLDaily = "https://daily-cloudcode-pa.googleapis.com"
@@ -109,6 +111,10 @@ type antigravityOAuthCredential struct {
 }
 
 func (a *antigravityOAuthAuthorizer) authorize(ctx context.Context, force bool) (string, error) {
+	return a.authorizeBound(ctx, force, nil)
+}
+
+func (a *antigravityOAuthAuthorizer) authorizeBound(ctx context.Context, force bool, expected *antigravityOAuthCredential) (string, error) {
 	release, err := lockOAuthCredential(ctx, a.path)
 	if err != nil {
 		return "", err
@@ -120,6 +126,9 @@ func (a *antigravityOAuthAuthorizer) authorize(ctx context.Context, force bool) 
 	}
 	if credential.disabled {
 		return "", fmt.Errorf("Gemini credential %s is disabled", filepath.Base(a.path))
+	}
+	if expected != nil && geminiCatalogIdentity(a.path, expected) != geminiCatalogIdentity(a.path, credential) {
+		return "", fmt.Errorf("Gemini account changed during model discovery")
 	}
 	force = force && oauthTokenStillRejected(ctx, credential.accessToken)
 	if force || credential.accessToken == "" || (!credential.expiresAt.IsZero() && time.Now().Add(time.Minute).After(credential.expiresAt)) {
@@ -242,6 +251,8 @@ type geminiService struct {
 	client     *http.Client
 	usage      *UsageTracker
 	projectID  string
+	catalog    *geminiCatalog
+	baseURL    string
 }
 
 func (s *geminiService) handler() http.Handler {
@@ -299,6 +310,14 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 	if err != nil {
 		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
+	}
+	if s.catalog != nil {
+		effort := strings.TrimSpace(gjson.GetBytes(raw, "output_config.effort").String())
+		converted.upstreamModel, converted.geminiBody, err = s.catalog.resolve(converted.upstreamModel, effort, converted.geminiBody)
+		if err != nil {
+			writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
 	}
 	if LogDebugEnabled() {
 		var tools []string
@@ -407,7 +426,11 @@ func (s *geminiService) forwardOnce(ctx context.Context, stream bool, envelope [
 	}
 	var lastErr error
 	var lastResponse *http.Response
-	for _, base := range []string{antigravityBaseURLDaily, antigravityBaseURLProd} {
+	bases := []string{antigravityBaseURLDaily, antigravityBaseURLProd}
+	if s.baseURL != "" {
+		bases = []string{s.baseURL}
+	}
+	for _, base := range bases {
 		response, doErr := s.doRequest(ctx, stream, envelope, token, base)
 		if doErr != nil {
 			lastErr = doErr
@@ -508,6 +531,9 @@ func geminiStableSessionID(geminiBody []byte) string {
 // the upstream wire protocol with the Antigravity Gemini converter/stream
 // pipeline.
 func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	authDir, err := ensureAuthDir()
 	if err != nil {
 		return nil, err
@@ -530,7 +556,37 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 	if credential.projectID == "" {
 		return nil, fmt.Errorf("Gemini credential %s has no project id", filepath.Base(path))
 	}
-	routes := runtimeModelRoutes(modelSpec)
+	catalog, stale := authorizer.discoverModels(parent, credential)
+	fallback := catalog == nil
+	if parent.Err() != nil {
+		return nil, parent.Err()
+	}
+	effectiveModelSpec := modelSpec
+	preserveConfigured := fallback && strings.TrimSpace(effectiveModelSpec) != ""
+	if catalog == nil {
+		catalog = &geminiCatalog{Models: GeminiModelCatalog()}
+		// Keep configured routes on failure, but still resolve known family
+		// aliases to real compatibility wire IDs. Unrecognized explicit pins
+		// remain caller choices rather than being silently mapped elsewhere.
+		_, _, known := catalog.publicModels()
+		wireIDs := make(map[string]bool, len(catalog.Models))
+		for _, info := range catalog.Models {
+			wireIDs[info.ID] = true
+		}
+		for _, route := range runtimeModelRoutes(modelSpec) {
+			id := stripContextModelSuffix(route.Alias)
+			_, familyAlias := known[id]
+			if !familyAlias && !wireIDs[id] {
+				catalog.Models = append(catalog.Models, protocol.ModelInfo{ID: id})
+				wireIDs[id] = true
+			}
+		}
+	}
+	if !preserveConfigured {
+		ids, _, _ := catalog.publicModels()
+		effectiveModelSpec = strings.Join(ids, ",")
+	}
+	routes := runtimeModelRoutes(effectiveModelSpec)
 	if len(routes) == 0 {
 		return nil, fmt.Errorf("Gemini runtime requires at least one model")
 	}
@@ -554,10 +610,38 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 			seenModels[strings.ToLower(alias)] = true
 		}
 	}
+	var names map[string]string
+	var details map[string]protocol.ModelInfo
+	var baseURL string
+	if catalog != nil {
+		var public []string
+		public, names, details = catalog.publicModels()
+		if !preserveConfigured {
+			models = public
+		} else {
+			selectedNames := make(map[string]string, len(models))
+			selectedDetails := make(map[string]protocol.ModelInfo, len(models))
+			for _, id := range models {
+				base, level := geminiModelFamily(stripContextModelSuffix(id))
+				info := details[base]
+				info.ID = id
+				if level != "" {
+					info.ReasoningLevels = nil
+					info.DefaultReasoningLevel = ""
+				}
+				selectedNames[id], selectedDetails[strings.ToLower(id)] = names[base], info
+			}
+			names, details = selectedNames, selectedDetails
+		}
+		if catalog.BaseURL == antigravityBaseURLDaily || catalog.BaseURL == antigravityBaseURLProd {
+			baseURL = catalog.BaseURL
+		}
+	}
 	usage := NewUsageTracker()
 	service := &geminiService{
 		apiKey: apiKey, authorizer: authorizer, models: models, usage: usage,
 		client: &http.Client{Transport: antigravityHTTPTransport()}, projectID: credential.projectID,
+		catalog: catalog, baseURL: baseURL,
 	}
 	runCtx, cancel := context.WithCancel(parent)
 	server := &http.Server{
@@ -570,6 +654,7 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 		endpoint: "http://" + listener.Addr().String() + "/v1", apiKey: apiKey,
 		httpServer: server, cancel: cancel, done: make(chan struct{}), runErr: make(chan error, 1),
 		started: started, models: models, usage: usage, listAuths: authorizer.listAuths,
+		modelNames: names, modelDetails: details, catalogFallback: fallback, catalogStale: stale,
 	}
 	runtime.cleanup = append(runtime.cleanup, closeIdleClients(service.client, authorizer.client))
 	go func() {
