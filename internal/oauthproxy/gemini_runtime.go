@@ -253,7 +253,23 @@ type geminiService struct {
 	usage      *UsageTracker
 	projectID  string
 	catalog    *geminiCatalog
+	baseMu     sync.Mutex
 	baseURL    string
+}
+
+func (s *geminiService) preferredBaseURL() string {
+	s.baseMu.Lock()
+	defer s.baseMu.Unlock()
+	return s.baseURL
+}
+
+func (s *geminiService) setPreferredBaseURL(base string) {
+	if base != antigravityBaseURLDaily && base != antigravityBaseURLProd {
+		return
+	}
+	s.baseMu.Lock()
+	s.baseURL = base
+	s.baseMu.Unlock()
 }
 
 func (s *geminiService) handler() http.Handler {
@@ -605,11 +621,12 @@ func (s *geminiService) forwardOnce(ctx context.Context, stream bool, envelope [
 	}
 	var lastErr error
 	var lastResponse *http.Response
+	preferred := s.preferredBaseURL()
 	bases := []string{antigravityBaseURLDaily, antigravityBaseURLProd}
-	if s.baseURL == antigravityBaseURLProd {
+	if preferred == antigravityBaseURLProd {
 		bases = []string{antigravityBaseURLProd, antigravityBaseURLDaily}
-	} else if s.baseURL != "" && s.baseURL != antigravityBaseURLDaily {
-		bases = []string{s.baseURL}
+	} else if preferred != "" && preferred != antigravityBaseURLDaily {
+		bases = []string{preferred}
 	}
 	for _, base := range bases {
 		response, doErr := s.doRequest(ctx, stream, envelope, token, base)
@@ -618,9 +635,17 @@ func (s *geminiService) forwardOnce(ctx context.Context, stream bool, envelope [
 			continue
 		}
 		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError {
-			_ = response.Body.Close()
+			if lastResponse != nil {
+				_ = lastResponse.Body.Close()
+			}
 			lastResponse = response
 			continue
+		}
+		if lastResponse != nil {
+			_ = lastResponse.Body.Close()
+		}
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			s.setPreferredBaseURL(base)
 		}
 		return response, nil
 	}

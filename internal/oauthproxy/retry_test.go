@@ -445,4 +445,7 @@ func TestGeminiForwardWithConfiguredDailyBaseStillFallsBackToProd(t *testing.T) 
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 after daily->prod fallback", response.StatusCode)
 	}
+	if got := service.preferredBaseURL(); got != prod.URL {
+		t.Fatalf("preferredBaseURL() = %q, want %q", got, prod.URL)
+	}
 }
