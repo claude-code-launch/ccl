@@ -52,3 +52,28 @@ func TestGeminiValidatedToolsPreserveClientChoice(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiLargeToolCatalogAvoidsAutoValidatedMode(t *testing.T) {
+	tools := make([]any, 0, geminiValidatedMaxTools+2)
+	for index := 0; index < geminiValidatedMaxTools+2; index++ {
+		tools = append(tools, map[string]any{
+			"name": "tool_" + string(rune('a'+index)),
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"arg": map[string]any{"type": "string"}},
+			},
+		})
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"model":    "gemini-4-argon-high",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		"tools":    tools,
+	})
+	converted, err := convertAnthropicToAntigravity(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(converted.geminiBody, "toolConfig.functionCallingConfig.mode").String(); got != "" {
+		t.Fatalf("large tool catalog mode = %q, want empty (default AUTO)", got)
+	}
+}

@@ -23,6 +23,7 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -76,7 +77,7 @@ func antigravityHTTPTransport() *http.Transport {
 			TLSClientConfig:       &tls.Config{NextProtos: []string{"http/1.1"}},
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 90 * time.Second,
+			ResponseHeaderTimeout: 45 * time.Second,
 		}
 	})
 	return antigravityTransport
@@ -319,6 +320,9 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 			return
 		}
 		converted.model = converted.upstreamModel
+		if gjson.GetBytes(converted.geminiBody, "generationConfig.thinkingConfig").Exists() {
+			converted.thinkingEnabled = true
+		}
 	}
 	if LogDebugEnabled() {
 		var tools []string
@@ -329,19 +333,25 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 			"client_model", converted.clientModel, "model", converted.upstreamModel,
 			"tools", strings.Join(tools, ","))
 	}
+	toolsCount := len(gjson.GetBytes(converted.geminiBody, "tools.0.functionDeclarations").Array())
+	toolMode := gjson.GetBytes(converted.geminiBody, "toolConfig.functionCallingConfig.mode").String()
+	thinkingSummary := gjson.GetBytes(converted.geminiBody, "generationConfig.thinkingConfig").Raw
 	envelope := antigravityEnvelope(converted.geminiBody, converted.upstreamModel, s.projectID, geminiStableSessionID(converted.geminiBody))
 	response, err := s.forward(requestCtx, converted.stream, envelope)
 	if err != nil {
 		LogErrorEvent("request_failed", "component", "gemini", "request_id", requestID,
 			"model", converted.upstreamModel, "returned_status", http.StatusBadGateway,
-			"duration", logDuration(started), "error", err)
+			"tools_count", toolsCount, "tool_mode", toolMode, "thinking_config", thinkingSummary,
+			"body_bytes", len(envelope), "duration", logDuration(started), "error", err)
 		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		LogUpstreamEvent(response.StatusCode, "request_failed", "component", "gemini", "request_id", requestID,
-			"model", converted.upstreamModel, "status", response.StatusCode, "duration", logDuration(started))
+			"model", converted.upstreamModel, "status", response.StatusCode,
+			"tools_count", toolsCount, "tool_mode", toolMode, "thinking_config", thinkingSummary,
+			"body_bytes", len(envelope), "duration", logDuration(started))
 		s.forwardUpstreamError(writer, response)
 		return
 	}
@@ -355,7 +365,46 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 		if err := assembler.start(); err != nil {
 			return
 		}
-		streamErr := processGeminiStream(response.Body, assembler)
+		toolCounter := 0
+		stepResult, streamErr := processGeminiStreamStep(response.Body, assembler, &toolCounter)
+		currentBody := converted.geminiBody
+		currentModel := converted.upstreamModel
+		for contAttempt := 1; streamErr == nil && contAttempt <= 2 && !assemblerHasVisibleOutput(assembler) && !assemblerHasThinkingText(assembler); contAttempt++ {
+			inTokens, outTokens := assembler.tokenTotals()
+			LogWarnEvent("gemini_empty_response", "component", "gemini", "request_id", requestID,
+				"attempt", contAttempt, "model", currentModel, "finish_reason", stepResult.finishReason,
+				"input_tokens", inTokens, "output_tokens", outTokens,
+				"raw_parts", strings.Join(stepResult.rawParts, " | "),
+				"raw_chunks", strings.Join(stepResult.rawChunks, " || "),
+				"tail_messages", summarizeAnthropicTailMessages(raw, 6),
+				"tail_contents", summarizeGeminiTailContents(currentBody, 6),
+				"gen_config", gjson.GetBytes(currentBody, "generationConfig").Raw)
+			currentModel, currentBody = s.buildGeminiEmptyContinuation(currentModel, currentBody, stepResult.rawParts, contAttempt)
+			contEnvelope := antigravityEnvelope(currentBody, currentModel, s.projectID, geminiStableSessionID(currentBody))
+			contResp, contErr := s.forward(requestCtx, true, contEnvelope)
+			if contErr != nil {
+				LogWarnEvent("gemini_empty_continuation_failed", "component", "gemini", "request_id", requestID,
+					"attempt", contAttempt, "model", currentModel, "error", contErr)
+				break
+			}
+			if contResp.StatusCode < 200 || contResp.StatusCode >= 300 {
+				_ = contResp.Body.Close()
+				LogWarnEvent("gemini_empty_continuation_failed", "component", "gemini", "request_id", requestID,
+					"attempt", contAttempt, "model", currentModel, "status", contResp.StatusCode)
+				break
+			}
+			stepResult, streamErr = processGeminiStreamStep(contResp.Body, assembler, &toolCounter)
+			_ = contResp.Body.Close()
+		}
+		if streamErr == nil && stepResult != nil {
+			streamErr = flushGeminiPendingSignedParts(assembler, &stepResult.pendingSignedParts)
+		}
+		if streamErr == nil {
+			streamErr = ensureGeminiVisibleOutput(assembler)
+		}
+		if streamErr == nil {
+			streamErr = assembler.finish()
+		}
 		s.recordGeminiUsage(converted, assembler)
 		if streamErr != nil {
 			LogErrorEvent("stream_conversion_failed", "component", "gemini", "request_id", requestID,
@@ -364,7 +413,14 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 				"type":  "error",
 				"error": map[string]any{"type": "api_error", "message": streamErr.Error()},
 			})
+			return
 		}
+		inTokens, outTokens := assembler.tokenTotals()
+		LogInfoEvent("request_complete", "component", "gemini", "request_id", requestID,
+			"client_model", converted.clientModel, "model", currentModel,
+			"status", http.StatusOK, "stream", true, "blocks", len(assembler.blocks),
+			"has_tool_use", assembler.hasToolUse, "stop_reason", assembler.resolvedStopReason(),
+			"input_tokens", inTokens, "output_tokens", outTokens, "duration", logDuration(started))
 		return
 	}
 
@@ -388,6 +444,128 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 	_ = json.NewEncoder(writer).Encode(assembler.response())
 	LogDebugEvent("request_complete", "component", "gemini", "request_id", requestID,
 		"model", converted.upstreamModel, "status", http.StatusOK, "stream", false, "duration", logDuration(started))
+}
+
+func (s *geminiService) buildGeminiEmptyContinuation(model string, body []byte, rawParts []string, attempt int) (string, []byte) {
+	out := append([]byte(nil), body...)
+	var validModelParts []string
+	for _, raw := range rawParts {
+		if gjson.Valid(raw) {
+			validModelParts = append(validModelParts, raw)
+		}
+	}
+	nudgeText := "Please continue and provide your response or tool calls now."
+	if len(validModelParts) > 0 {
+		modelTurn := geminiContentWithParts("model", validModelParts)
+		userTurn := geminiContentWithParts("user", []string{`{"text":` + jsonStringValue(nudgeText) + `}`})
+		out, _ = sjson.SetRawBytes(out, "contents.-1", []byte(modelTurn))
+		out, _ = sjson.SetRawBytes(out, "contents.-1", []byte(userTurn))
+	} else {
+		contents := gjson.GetBytes(out, "contents").Array()
+		if len(contents) > 0 && contents[len(contents)-1].Get("role").String() == "user" {
+			path := fmt.Sprintf("contents.%d.parts.-1", len(contents)-1)
+			out, _ = sjson.SetRawBytes(out, path, []byte(`{"text":`+jsonStringValue(nudgeText)+`}`))
+		} else {
+			userTurn := geminiContentWithParts("user", []string{`{"text":` + jsonStringValue(nudgeText) + `}`})
+			out, _ = sjson.SetRawBytes(out, "contents.-1", []byte(userTurn))
+		}
+	}
+	nextModel := model
+	if attempt >= 2 && strings.HasSuffix(model, "-high") {
+		lowCandidate := strings.TrimSuffix(model, "-high") + "-low"
+		if s.catalog != nil {
+			for _, info := range s.catalog.Models {
+				if info.ID == lowCandidate {
+					nextModel = lowCandidate
+					break
+				}
+			}
+		}
+		out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "low")
+	}
+	return nextModel, out
+}
+
+func summarizeAnthropicTailMessages(raw []byte, limit int) string {
+	msgs := gjson.GetBytes(raw, "messages").Array()
+	start := 0
+	if len(msgs) > limit {
+		start = len(msgs) - limit
+	}
+	var items []string
+	for i := start; i < len(msgs); i++ {
+		msg := msgs[i]
+		role := msg.Get("role").String()
+		content := msg.Get("content")
+		if content.IsArray() {
+			var blocks []string
+			for _, b := range content.Array() {
+				kind := b.Get("type").String()
+				switch kind {
+				case "thinking":
+					sig := b.Get("signature").String()
+					if len(sig) > 24 {
+						sig = sig[:24] + "..."
+					}
+					blocks = append(blocks, fmt.Sprintf("thinking(len=%d,sig=%s)", len(b.Get("thinking").String()), sig))
+				case "text":
+					txt := strings.TrimSpace(b.Get("text").String())
+					if len(txt) > 32 {
+						txt = txt[:32] + "..."
+					}
+					blocks = append(blocks, fmt.Sprintf("text(len=%d,%q)", len(b.Get("text").String()), txt))
+				case "tool_use":
+					blocks = append(blocks, fmt.Sprintf("tool_use(%s:%s)", b.Get("name").String(), b.Get("id").String()))
+				case "tool_result":
+					blocks = append(blocks, fmt.Sprintf("tool_result(%s)", b.Get("tool_use_id").String()))
+				default:
+					blocks = append(blocks, kind)
+				}
+			}
+			items = append(items, fmt.Sprintf("%d:%s[%s]", i, role, strings.Join(blocks, ",")))
+		} else {
+			txt := strings.TrimSpace(content.String())
+			if len(txt) > 32 {
+				txt = txt[:32] + "..."
+			}
+			items = append(items, fmt.Sprintf("%d:%s(%q)", i, role, txt))
+		}
+	}
+	return strings.Join(items, "; ")
+}
+
+func summarizeGeminiTailContents(geminiBody []byte, limit int) string {
+	contents := gjson.GetBytes(geminiBody, "contents").Array()
+	start := 0
+	if len(contents) > limit {
+		start = len(contents) - limit
+	}
+	var items []string
+	for i := start; i < len(contents); i++ {
+		c := contents[i]
+		role := c.Get("role").String()
+		var parts []string
+		for _, p := range c.Get("parts").Array() {
+			switch {
+			case p.Get("functionCall").Exists():
+				parts = append(parts, fmt.Sprintf("fc(%s,id=%s,sig=%t)", p.Get("functionCall.name").String(), p.Get("functionCall.id").String(), p.Get("thoughtSignature").Exists()))
+			case p.Get("functionResponse").Exists():
+				parts = append(parts, fmt.Sprintf("fr(%s,id=%s)", p.Get("functionResponse.name").String(), p.Get("functionResponse.id").String()))
+			case p.Get("thought").Bool():
+				parts = append(parts, fmt.Sprintf("thought(len=%d,sig=%t)", len(p.Get("text").String()), p.Get("thoughtSignature").Exists()))
+			case p.Get("text").Exists():
+				txt := strings.TrimSpace(p.Get("text").String())
+				if len(txt) > 32 {
+					txt = txt[:32] + "..."
+				}
+				parts = append(parts, fmt.Sprintf("text(len=%d,sig=%t,%q)", len(p.Get("text").String()), p.Get("thoughtSignature").Exists(), txt))
+			default:
+				parts = append(parts, "other")
+			}
+		}
+		items = append(items, fmt.Sprintf("%d:%s[%s]", i, role, strings.Join(parts, ",")))
+	}
+	return strings.Join(items, "; ")
 }
 
 // forward sends one upstream Antigravity request, resolving the Bearer token,
@@ -428,7 +606,9 @@ func (s *geminiService) forwardOnce(ctx context.Context, stream bool, envelope [
 	var lastErr error
 	var lastResponse *http.Response
 	bases := []string{antigravityBaseURLDaily, antigravityBaseURLProd}
-	if s.baseURL != "" {
+	if s.baseURL == antigravityBaseURLProd {
+		bases = []string{antigravityBaseURLProd, antigravityBaseURLDaily}
+	} else if s.baseURL != "" && s.baseURL != antigravityBaseURLDaily {
 		bases = []string{s.baseURL}
 	}
 	for _, base := range bases {

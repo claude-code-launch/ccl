@@ -128,7 +128,13 @@ func (c geminiSchemaCleaner) clean(node map[string]any, depth int, refStack []st
 		}
 	}
 	if kind, ok := node["type"].(string); ok {
-		node["type"] = strings.ToLower(kind)
+		kind = strings.ToLower(kind)
+		if kind == "null" && !c.claudeBridge {
+			node["nullable"] = true
+			delete(node, "type")
+		} else {
+			node["type"] = kind
+		}
 	}
 	if _, hasType := node["type"]; !hasType {
 		switch {
@@ -264,12 +270,27 @@ func (c geminiSchemaCleaner) clean(node map[string]any, depth int, refStack []st
 		cleaned := make([]any, 0, len(alternatives))
 		for _, item := range alternatives {
 			if child, ok := item.(map[string]any); ok {
-				cleaned = append(cleaned, c.clean(child, depth+1, refStack))
+				cleanedChild := c.clean(child, depth+1, refStack)
+				if !c.claudeBridge && isGeminiNullOnlyBranch(cleanedChild) {
+					node["nullable"] = true
+					continue
+				}
+				cleaned = append(cleaned, cleanedChild)
 			}
 		}
-		if len(cleaned) == 0 {
+		switch {
+		case len(cleaned) == 0:
 			delete(node, "anyOf")
-		} else {
+		case !c.claudeBridge && len(cleaned) == 1 && node["type"] == nil && node["properties"] == nil && node["items"] == nil && node["enum"] == nil:
+			delete(node, "anyOf")
+			if branch, ok := cleaned[0].(map[string]any); ok {
+				for key, value := range branch {
+					if _, exists := node[key]; !exists {
+						node[key] = value
+					}
+				}
+			}
+		default:
 			node["anyOf"] = cleaned
 		}
 	}
@@ -465,4 +486,18 @@ func unionStringAny(a, b []any) []any {
 		out[i] = name
 	}
 	return out
+}
+
+func isGeminiNullOnlyBranch(branch map[string]any) bool {
+	if nullable, _ := branch["nullable"].(bool); !nullable {
+		return false
+	}
+	for key := range branch {
+		switch key {
+		case "nullable", "description", "title":
+		default:
+			return false
+		}
+	}
+	return true
 }

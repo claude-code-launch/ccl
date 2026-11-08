@@ -412,3 +412,37 @@ func TestRetryUpstreamRetriesPostDataEveryAttempt(t *testing.T) {
 		t.Fatalf("bodies = %q", bodies)
 	}
 }
+
+func TestGeminiForwardWithConfiguredDailyBaseStillFallsBackToProd(t *testing.T) {
+	staticFastRetryBackoff(t)
+	daily := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusGatewayTimeout)
+	}))
+	defer daily.Close()
+	prod := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"candidates":[]}`))
+	}))
+	defer prod.Close()
+
+	previousDaily, previousProd := antigravityBaseURLDaily, antigravityBaseURLProd
+	antigravityBaseURLDaily = daily.URL
+	antigravityBaseURLProd = prod.URL
+	t.Cleanup(func() {
+		antigravityBaseURLDaily, antigravityBaseURLProd = previousDaily, previousProd
+	})
+
+	service := &geminiService{
+		authorizer: &chatStaticAuthorizer{token: "test-token"},
+		client:     daily.Client(),
+		baseURL:    antigravityBaseURLDaily,
+	}
+	response, err := service.forward(context.Background(), false, []byte("{}"))
+	if err != nil {
+		t.Fatalf("forward() error: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after daily->prod fallback", response.StatusCode)
+	}
+}

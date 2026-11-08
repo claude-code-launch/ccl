@@ -94,6 +94,11 @@ func TestGeminiRuntimeContinuesOnClaudeWithGeminiToolHistory(t *testing.T) {
 		results := 0
 		for _, content := range gjson.GetBytes(body, "request.contents").Array() {
 			for _, part := range content.Get("parts").Array() {
+				if part.Get("thoughtSignature").Exists() && (!part.Get("thought").Bool() || part.Get("text").String() == "") {
+					w.WriteHeader(http.StatusBadRequest)
+					fmt.Fprint(w, `{"error":{"message":"messages.1.content.0.thinking.thinking: Field required"}}`)
+					return
+				}
 				if call := part.Get("functionCall"); call.Exists() {
 					id := call.Get("id").String()
 					if id == "" || pending[id] {
@@ -226,5 +231,205 @@ func TestGeminiSignedReplayGroupedCompanionsAndTurnBoundaries(t *testing.T) {
 	}
 	if got := gjson.GetBytes(converted.geminiBody, "contents.5.parts.0.text").String(); got != "fresh answer" {
 		t.Fatalf("next assistant turn text was swallowed: %q (contents=%s)", got, gjson.GetBytes(converted.geminiBody, "contents").Raw)
+	}
+}
+
+func TestGeminiClaudeStreamedThinkingSignatureRoundTrip(t *testing.T) {
+	for _, sigPart := range []string{
+		`{"thought":true,"text":"","thoughtSignature":"sig-opus"}`,
+		`{"thoughtSignature":"sig-opus"}`,
+	} {
+		sse := strings.Join([]string{
+			`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"step 1, "}]}}]}}`,
+			`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"step 2"}]}}]}}`,
+			`data: {"response":{"candidates":[{"content":{"parts":[` + sigPart + `]}}]}}`,
+			`data: {"response":{"candidates":[{"content":{"parts":[{"text":"final answer"}]},"finishReason":"STOP"}]}}`,
+			"",
+		}, "\n\n")
+		assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{
+			upstreamModel:     "claude-opus-4-6-thinking",
+			clientModel:       "claude-opus-4-6-thinking",
+			thinkingEnabled:   true,
+			thinkingSignature: "gemini",
+		}, nil)
+		if err := processGeminiStream(strings.NewReader(sse), assembler); err != nil {
+			t.Fatal(err)
+		}
+		blocks := assembler.contentBlocks()
+		if len(blocks) != 2 || blocks[0].Type != "thinking" || blocks[0].Thinking != "step 1, step 2" || !strings.HasPrefix(blocks[0].Signature, geminiPartSignaturePrefix) {
+			t.Fatalf("unexpected blocks: %+v", blocks)
+		}
+		rawBlocks, err := json.Marshal(blocks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayReq, _ := json.Marshal(map[string]any{
+			"model": "claude-opus-4-6-thinking",
+			"messages": []any{
+				map[string]any{"role": "user", "content": "think"},
+				map[string]any{"role": "assistant", "content": json.RawMessage(rawBlocks)},
+				map[string]any{"role": "user", "content": "follow up"},
+			},
+		})
+		converted, err := convertAnthropicToAntigravity(replayReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := gjson.GetBytes(converted.geminiBody, "contents.1.parts").Array()
+		if len(parts) != 2 || !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "step 1, step 2" || parts[0].Get("thoughtSignature").String() != "sig-opus" || parts[1].Get("text").String() != "final answer" {
+			t.Fatalf("unexpected replayed parts: %s", gjson.GetBytes(converted.geminiBody, "contents.1.parts").Raw)
+		}
+	}
+
+	emptyThoughtSig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(`{"thought":true,"text":"","thoughtSignature":"sig-split"}`))
+	emptyStandaloneSig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(`{"thought":true,"text":"","thoughtSignature":"sig-empty"}`))
+	legacyReq, _ := json.Marshal(map[string]any{
+		"model": "claude-opus-4-6-thinking",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "think"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "recovered thought", "signature": "gemini"},
+				map[string]any{"type": "thinking", "thinking": "", "signature": emptyThoughtSig},
+				map[string]any{"type": "thinking", "thinking": "", "signature": emptyStandaloneSig},
+				map[string]any{"type": "text", "text": "done"},
+			}},
+			map[string]any{"role": "user", "content": "next"},
+		},
+	})
+	converted, err := convertAnthropicToAntigravity(legacyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := gjson.GetBytes(converted.geminiBody, "contents.1.parts").Array()
+	if len(parts) != 2 || parts[0].Get("text").String() != "recovered thought" || parts[0].Get("thoughtSignature").String() != "sig-split" || parts[1].Get("text").String() != "done" {
+		t.Fatalf("unexpected legacy recovery parts: %s", gjson.GetBytes(converted.geminiBody, "contents.1.parts").Raw)
+	}
+}
+
+func TestGeminiClaudeConcurrentToolUseAndSplitTurnNormalization(t *testing.T) {
+	thoughtSig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(`{"thought":true,"text":"plan two reads","thoughtSignature":"sig-claude"}`))
+	req, _ := json.Marshal(map[string]any{
+		"model":    "claude-opus-4-6-thinking",
+		"thinking": map[string]any{"type": "adaptive"},
+		"tools": []any{
+			map[string]any{"name": "Read", "input_schema": map[string]any{"type": "object"}},
+			map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "inspect project"},
+			// Assistant blocks split across consecutive messages (thinking + text + 2 concurrent tool_use calls).
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "plan two reads", "signature": thoughtSig},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "text", "text": "Reading both files concurrently."},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "toolu_read_1", "name": "Read", "input": map[string]any{"file_path": "a.go"}},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "toolu_bash_2", "name": "Bash", "input": map[string]any{"command": "ls"}},
+			}},
+			// System reminder + image-bearing tool_result + missing second tool_result split across user turns.
+			map[string]any{"role": "system", "content": "<system-reminder>hook note</system-reminder>"},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": "toolu_read_1",
+					"content": []any{
+						map[string]any{"type": "text", "text": "file a"},
+						map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+					},
+				},
+				map[string]any{"type": "tool_result", "tool_use_id": "toolu_orphan", "content": "stale"},
+			}},
+		},
+	})
+	converted, err := convertAnthropicToAntigravity(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gjson.GetBytes(converted.geminiBody, "generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("missing includeThoughts in thinkingConfig: %s", gjson.GetBytes(converted.geminiBody, "generationConfig").Raw)
+	}
+	contents := gjson.GetBytes(converted.geminiBody, "contents").Array()
+	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
+		t.Fatalf("expected strict user/model/user alternation, got: %s", gjson.GetBytes(converted.geminiBody, "contents").Raw)
+	}
+	modelParts := contents[1].Get("parts").Array()
+	if len(modelParts) != 4 || !modelParts[0].Get("thought").Bool() || modelParts[1].Get("text").String() != "Reading both files concurrently." || modelParts[2].Get("functionCall.id").String() != "toolu_read_1" || modelParts[3].Get("functionCall.id").String() != "toolu_bash_2" {
+		t.Fatalf("unexpected model parts ordering: %s", contents[1].Get("parts").Raw)
+	}
+	userParts := contents[2].Get("parts").Array()
+	// Both functionResponse parts must come first (in call order, with missing toolu_bash_2 synthesized and toolu_orphan dropped), followed by reminder text and image inline_data.
+	if len(userParts) != 4 || userParts[0].Get("functionResponse.id").String() != "toolu_read_1" || userParts[1].Get("functionResponse.id").String() != "toolu_bash_2" || userParts[2].Get("text").String() != "<system-reminder>hook note</system-reminder>" || userParts[3].Get("inline_data.data").String() != "AAAA" {
+		t.Fatalf("unexpected user parts ordering/repair: %s", contents[2].Get("parts").Raw)
+	}
+}
+
+func TestGeminiThinkingOnlyResponseAndHistoryRecovery(t *testing.T) {
+	// 1. A stream that finishes with only thought parts promotes the thought text
+	// into a visible text block so Claude Code does not render an empty turn.
+	sse := strings.Join([]string{
+		`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"继续执行修复步骤"}]}}]}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"","thoughtSignature":"sig-argon"}]},"finishReason":"STOP"}]}}`,
+		"",
+	}, "\n\n")
+	assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{
+		upstreamModel:     "gemini-4-argon-high",
+		clientModel:       "gemini-4-argon",
+		thinkingEnabled:   true,
+		thinkingSignature: "gemini",
+	}, nil)
+	if err := processGeminiStream(strings.NewReader(sse), assembler); err != nil {
+		t.Fatal(err)
+	}
+	blocks := assembler.contentBlocks()
+	if len(blocks) != 2 || blocks[0].Type != "thinking" || blocks[1].Type != "text" || blocks[1].Text != "继续执行修复步骤" {
+		t.Fatalf("expected thinking + promoted text block, got: %+v", blocks)
+	}
+
+	// 2. Historical thinking-only turns and interrupted tool calls followed by "继续"
+	// are repaired on Gemini routes.
+	thoughtOnlySig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(`{"thought":true,"text":"baked only","thoughtSignature":"sig-baked"}`))
+	req, _ := json.Marshal(map[string]any{
+		"model":      "gemini-4-argon",
+		"max_tokens": 4096,
+		"tools": []any{
+			map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "start"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "toolu_interrupted", "name": "Bash", "input": map[string]any{"command": "ls"}},
+			}},
+			map[string]any{"role": "user", "content": "继续"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "baked only", "signature": thoughtOnlySig},
+			}},
+			map[string]any{"role": "user", "content": "继续"},
+		},
+	})
+	catalog, err := parseGeminiCatalog([]byte(geminiCatalogFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := convertAnthropicToAntigravityWithCatalog(req, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := catalog.resolve(converted.clientModel, "", converted.geminiBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(body, "generationConfig.maxOutputTokens").Int(); got != 32768 {
+		t.Fatalf("maxOutputTokens = %d, want 32768", got)
+	}
+	contents := gjson.GetBytes(body, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents len = %d, want 3 (user, model, merged user): %s", len(contents), gjson.GetBytes(body, "contents").Raw)
+	}
+	if got := contents[2].Get("parts.0.functionResponse.id").String(); got != "toolu_interrupted" {
+		t.Fatalf("missing synthesized functionResponse for interrupted tool call: %s", contents[2].Raw)
 	}
 }

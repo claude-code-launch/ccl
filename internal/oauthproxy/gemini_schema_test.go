@@ -63,3 +63,33 @@ func TestSanitizeGeminiSchemaSelfReferenceTerminates(t *testing.T) {
 		t.Fatalf("unexpected: %s", out)
 	}
 }
+
+func TestSanitizeGeminiSchemaCollapsesNullableAnyOfUnion(t *testing.T) {
+	raw := `{
+		"type":"object",
+		"properties":{
+			"path":{"anyOf":[{"type":"string"},{"type":"null"}],"description":"Optional file path"},
+			"multi":{"anyOf":[{"type":"string"},{"type":"integer"},{"type":"null"}]}
+		}
+	}`
+	out := sanitizeGeminiSchema([]byte(raw))
+	text := string(out)
+	if strings.Contains(text, `"null"`) {
+		t.Fatalf("raw null type leaked into Gemini schema: %s", text)
+	}
+	if got := gjson.GetBytes(out, "properties.path.type").String(); got != "string" {
+		t.Fatalf("path.type = %q, want string: %s", got, text)
+	}
+	if !gjson.GetBytes(out, "properties.path.nullable").Bool() {
+		t.Fatalf("path.nullable = false, want true: %s", text)
+	}
+	if gjson.GetBytes(out, "properties.path.anyOf").Exists() {
+		t.Fatalf("single non-null anyOf branch should collapse: %s", text)
+	}
+	if !gjson.GetBytes(out, "properties.multi.nullable").Bool() {
+		t.Fatalf("multi.nullable = false, want true: %s", text)
+	}
+	if got := len(gjson.GetBytes(out, "properties.multi.anyOf").Array()); got != 2 {
+		t.Fatalf("multi.anyOf len = %d, want 2: %s", got, text)
+	}
+}

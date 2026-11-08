@@ -27,6 +27,32 @@ type anthropicResponseBlock struct {
 	Input     *map[string]any `json:"input,omitempty"`
 }
 
+func (b anthropicResponseBlock) MarshalJSON() ([]byte, error) {
+	switch b.Type {
+	case "thinking":
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature,omitempty"`
+		}{
+			Type:      b.Type,
+			Thinking:  b.Thinking,
+			Signature: b.Signature,
+		})
+	case "text":
+		return json.Marshal(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{
+			Type: b.Type,
+			Text: b.Text,
+		})
+	default:
+		type plain anthropicResponseBlock
+		return json.Marshal(plain(b))
+	}
+}
+
 type anthropicToolAccumulator struct {
 	name  string
 	input strings.Builder

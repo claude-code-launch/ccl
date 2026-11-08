@@ -353,17 +353,40 @@ func geminiEffortRank(effort string) int {
 	}
 }
 
+func applyGeminiThinkingConfig(body []byte, level string, maxOutputTokens int) []byte {
+	if level == "" {
+		return body
+	}
+	body, _ = sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
+	body, _ = sjson.SetBytes(body, "generationConfig.thinkingConfig.thinkingLevel", level)
+	body, _ = sjson.SetBytes(body, "generationConfig.thinkingConfig.includeThoughts", true)
+	// Gemini maxOutputTokens caps thoughtsTokenCount + candidatesTokenCount.
+	// Claude Code sends small fallback max_tokens for non-Claude model IDs,
+	// which can be exhausted entirely inside a high-effort thinking block.
+	if gjson.GetBytes(body, "generationConfig.maxOutputTokens").Exists() {
+		minMaxTokens := maxOutputTokens
+		if minMaxTokens <= 0 {
+			minMaxTokens = 65_536
+		}
+		if int(gjson.GetBytes(body, "generationConfig.maxOutputTokens").Int()) < minMaxTokens {
+			body, _ = sjson.SetBytes(body, "generationConfig.maxOutputTokens", minMaxTokens)
+		}
+	}
+	return body
+}
+
 func (c *geminiCatalog) resolve(model, effort string, body []byte) (string, []byte, error) {
 	resolved := c.canonicalModel(model)
+	_, _, details := c.publicModels()
 	// An explicit wire ID wins over a generic client effort setting.
 	for _, info := range c.Models {
 		if info.ID == resolved {
-			_, level := geminiModelFamily(resolved)
+			base, level := geminiModelFamily(resolved)
 			if level == "" && effort != "" {
 				hasVariants := false
 				for _, candidate := range c.Models {
-					base, variant := geminiModelFamily(candidate.ID)
-					if base == resolved && variant != "" {
+					candBase, variant := geminiModelFamily(candidate.ID)
+					if candBase == resolved && variant != "" {
 						hasVariants = true
 						break
 					}
@@ -372,14 +395,14 @@ func (c *geminiCatalog) resolve(model, effort string, body []byte) (string, []by
 					break
 				}
 			}
-			if level != "" {
-				body, _ = sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
-				body, _ = sjson.SetBytes(body, "generationConfig.thinkingConfig.thinkingLevel", level)
+			maxOut := info.MaxOutputTokens
+			if maxOut <= 0 {
+				maxOut = details[base].MaxOutputTokens
 			}
+			body = applyGeminiThinkingConfig(body, level, maxOut)
 			return resolved, body, nil
 		}
 	}
-	_, _, details := c.publicModels()
 	info, ok := details[resolved]
 	if !ok {
 		return "", nil, fmt.Errorf("model %q is not in the bound Gemini account catalog", model)
@@ -392,8 +415,11 @@ func (c *geminiCatalog) resolve(model, effort string, body []byte) (string, []by
 	for _, candidate := range c.Models {
 		base, level := geminiModelFamily(candidate.ID)
 		if base == resolved && level == effort {
-			body, _ = sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
-			body, _ = sjson.SetBytes(body, "generationConfig.thinkingConfig.thinkingLevel", level)
+			maxOut := candidate.MaxOutputTokens
+			if maxOut <= 0 {
+				maxOut = info.MaxOutputTokens
+			}
+			body = applyGeminiThinkingConfig(body, level, maxOut)
 			return candidate.ID, body, nil
 		}
 	}

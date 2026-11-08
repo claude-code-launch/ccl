@@ -22,6 +22,12 @@ var geminiFunctionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
 // synthesized Claude-facing tool_use.id on the response path.
 var geminiToolIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
+// geminiValidatedMaxTools caps automatic VALIDATED function-calling mode to
+// compact tool catalogs (such as Codex's exec/wait/tool_search set). Large
+// Claude Code / MCP tool sets stay on AUTO unless the client explicitly sets
+// tool_choice, avoiding Antigravity grammar-compilation hangs.
+const geminiValidatedMaxTools = 8
+
 // geminiConvertedRequest is the client-facing state plus the Gemini-format
 // request body, ready to be wrapped into the Antigravity envelope at call time
 // (the project id is only known after credential resolution).
@@ -169,12 +175,16 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 
 	// messages -> contents.
 	requireCallID := strings.Contains(strings.ToLower(clientModel), "claude") || strings.Contains(strings.ToLower(upstreamModel), "claude")
-	var contentItems []string
+	var turns []geminiTurn
 	var replayErr error
+	var unsignedThinking strings.Builder
 	for msgIdx, message := range gjson.GetBytes(raw, "messages").Array() {
 		role := message.Get("role").String()
 		if role == "" {
 			continue
+		}
+		if role != "assistant" {
+			unsignedThinking.Reset()
 		}
 		geminiRole := role
 		if role == "assistant" {
@@ -205,7 +215,7 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 				}
 			}
 			if len(partItems) > 0 {
-				contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
+				turns = append(turns, geminiTurn{role: geminiRole, parts: partItems, fromSystem: true})
 			}
 			continue
 		}
@@ -224,17 +234,51 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 							replayErr = fmt.Errorf("invalid CCL Gemini part signature")
 							break
 						}
-						if requireCallID && part.Get("functionCall").Exists() && part.Get("functionCall.id").String() == "" {
-							callID := toolNames.signedCallIDs[pos]
-							if callID == "" {
-								callID = fmt.Sprintf("toolu_gemini_%d_%d", msgIdx, blockIdx)
+						fallbackThinking := block.Get("thinking").String()
+						if fallbackThinking == "" {
+							fallbackThinking = unsignedThinking.String()
+						}
+						unsignedThinking.Reset()
+						if part.Get("functionCall").Exists() {
+							if requireCallID {
+								if part.Get("functionCall.id").String() == "" {
+									callID := toolNames.signedCallIDs[pos]
+									if callID == "" {
+										callID = fmt.Sprintf("toolu_gemini_%d_%d", msgIdx, blockIdx)
+									}
+									rawPart, _ = sjson.SetBytes(rawPart, "functionCall.id", callID)
+								}
+								rawPart, _ = sjson.DeleteBytes(rawPart, "thoughtSignature")
 							}
-							rawPart, _ = sjson.SetBytes(rawPart, "functionCall.id", callID)
+							partItems = append(partItems, string(rawPart))
+							continue
+						}
+						if part.Get("text").String() == "" && fallbackThinking != "" {
+							rawPart, _ = sjson.SetBytes(rawPart, "thought", true)
+							rawPart, _ = sjson.SetBytes(rawPart, "text", fallbackThinking)
+							part = gjson.ParseBytes(rawPart)
+						}
+						if requireCallID {
+							if part.Get("text").String() == "" {
+								continue
+							}
+							if !part.Get("thought").Bool() {
+								rawPart, _ = sjson.DeleteBytes(rawPart, "thoughtSignature")
+							}
+						} else if geminiRequiresThoughtSignature(upstreamModel) {
+							if part.Get("thought").Bool() || strings.TrimSpace(part.Get("text").String()) == "" {
+								continue
+							}
 						}
 						partItems = append(partItems, string(rawPart))
 						continue
 					}
+					if thinking := block.Get("thinking").String(); thinking != "" {
+						unsignedThinking.WriteString(thinking)
+					}
+					continue
 				}
+				unsignedThinking.Reset()
 				switch kind {
 				case "text":
 					text := block.Get("text").String()
@@ -253,16 +297,19 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 					if name == "" {
 						continue
 					}
-					args := block.Get("input").String()
-					if gjson.Valid(args) && gjson.Parse(args).IsObject() {
-						part := []byte(`{"functionCall":{"name":"","args":{}}}`)
-						if id := block.Get("id").String(); id != "" {
-							part, _ = sjson.SetBytes(part, "functionCall.id", id)
-						}
-						part, _ = sjson.SetBytes(part, "functionCall.name", name)
-						part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(args))
-						partItems = append(partItems, string(part))
+					args := "{}"
+					if input := block.Get("input"); input.IsObject() {
+						args = input.Raw
+					} else if s := input.String(); gjson.Valid(s) && gjson.Parse(s).IsObject() {
+						args = s
 					}
+					part := []byte(`{"functionCall":{"name":"","args":{}}}`)
+					if id := block.Get("id").String(); id != "" {
+						part, _ = sjson.SetBytes(part, "functionCall.id", id)
+					}
+					part, _ = sjson.SetBytes(part, "functionCall.name", name)
+					part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(args))
+					partItems = append(partItems, string(part))
 				case "tool_result":
 					parts := geminiToolResultParts(block, toolNames, requireCallID)
 					partItems = append(partItems, parts...)
@@ -275,39 +322,19 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 			if replayErr != nil {
 				break
 			}
-			if role == "assistant" {
-				partItems = signUnsignedGeminiFunctionCall(upstreamModel, partItems)
-			}
 			if len(partItems) > 0 {
-				contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
+				turns = append(turns, geminiTurn{role: geminiRole, parts: partItems})
 			}
 		} else if content.Type == gjson.String {
 			partItems = append(partItems, `{"text":`+jsonStringValue(content.String())+`}`)
-			contentItems = append(contentItems, geminiContentWithParts(geminiRole, partItems))
+			turns = append(turns, geminiTurn{role: geminiRole, parts: partItems})
 		}
 	}
 	if replayErr != nil {
 		return nil, replayErr
 	}
 
-	// Strip a trailing model turn with unanswered function calls: the model is
-	// about to answer them, so the dangling calls must not be replayed upstream.
-	if len(contentItems) > 0 {
-		last := gjson.Parse(contentItems[len(contentItems)-1])
-		if last.Get("role").String() == "model" {
-			hasFunctionCall := false
-			last.Get("parts").ForEach(func(_, part gjson.Result) bool {
-				if part.Get("functionCall").Exists() {
-					hasFunctionCall = true
-					return false
-				}
-				return true
-			})
-			if hasFunctionCall {
-				contentItems = contentItems[:len(contentItems)-1]
-			}
-		}
-	}
+	contentItems := normalizeGeminiContents(turns, upstreamModel, requireCallID)
 	out, _ = sjson.SetRawBytes(out, "contents", []byte(joinRawJSONStrings(contentItems)))
 
 	// tools -> functionDeclarations with a Gemini-safe parameters schema.
@@ -342,9 +369,11 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 			// Gemini 3/4 can otherwise emit malformed calls, or names taken from
 			// executor documentation rather than the actual declarations. Unlike
 			// ANY, VALIDATED still allows ordinary text answers. Keep Claude's
-			// Antigravity route and explicit client choices on their own modes.
+			// Antigravity route and explicit client choices on their own modes,
+			// and avoid auto-enabling VALIDATED on large tool catalogs where
+			// Antigravity's grammar compiler can stall before streaming headers.
 			model := strings.ToLower(upstreamModel)
-			if strings.HasPrefix(model, "gemini-3") || strings.HasPrefix(model, "gemini-4") {
+			if len(toolItems) <= geminiValidatedMaxTools && (strings.HasPrefix(model, "gemini-3") || strings.HasPrefix(model, "gemini-4")) {
 				autoToolMode = "VALIDATED"
 				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", autoToolMode)
 			}
@@ -386,6 +415,7 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 			if budget := thinking.Get("budget_tokens"); budget.Type == gjson.Number {
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", budget.Int())
 			}
+			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", true)
 		case "adaptive", "auto":
 			thinkingEnabled = true
 			if effort := strings.TrimSpace(gjson.GetBytes(raw, "output_config.effort").String()); effort != "" {
@@ -393,6 +423,7 @@ func convertAnthropicToGeminiWithSchema(raw []byte, canonicalModel string, sanit
 			} else {
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "high")
 			}
+			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", true)
 		}
 	}
 	if temperature := gjson.GetBytes(raw, "temperature"); temperature.Type == gjson.Number {
@@ -468,6 +499,223 @@ func geminiThinkingLevel(effort string) string {
 	default:
 		return "high"
 	}
+}
+
+type geminiTurn struct {
+	role       string
+	parts      []string
+	fromSystem bool
+}
+
+func geminiPartsHaveField(parts []string, field string) bool {
+	for _, raw := range parts {
+		if gjson.Get(raw, field).Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+func appendDeduplicatedGeminiParts(existing, next []string) []string {
+	out := append([]string(nil), existing...)
+	for _, part := range next {
+		if gjson.Get(part, "text").Exists() && !gjson.Get(part, "thought").Bool() && !gjson.Get(part, "thoughtSignature").Exists() {
+			duplicate := false
+			for _, prev := range out {
+				if prev == part {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func mergeGeminiTurns(turns []geminiTurn, requireCallID bool) []geminiTurn {
+	var merged []geminiTurn
+	for _, turn := range turns {
+		if len(turn.parts) == 0 {
+			continue
+		}
+		if len(merged) > 0 && merged[len(merged)-1].role == turn.role {
+			prev := &merged[len(merged)-1]
+			if turn.role == "model" || requireCallID || geminiPartsHaveField(turn.parts, "functionResponse") || (!prev.fromSystem && !turn.fromSystem) {
+				prev.parts = appendDeduplicatedGeminiParts(prev.parts, turn.parts)
+				prev.fromSystem = prev.fromSystem && turn.fromSystem
+				continue
+			}
+		}
+		merged = append(merged, geminiTurn{
+			role:       turn.role,
+			parts:      append([]string(nil), turn.parts...),
+			fromSystem: turn.fromSystem,
+		})
+	}
+	return merged
+}
+
+func geminiIsThinkingOnlyTurn(parts []string) bool {
+	if len(parts) == 0 {
+		return true
+	}
+	for _, raw := range parts {
+		part := gjson.Parse(raw)
+		if part.Get("functionCall").Exists() || part.Get("inline_data").Exists() {
+			return false
+		}
+		if !part.Get("thought").Bool() && strings.TrimSpace(part.Get("text").String()) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeGeminiContents(turns []geminiTurn, upstreamModel string, requireCallID bool) []string {
+	merged := mergeGeminiTurns(turns, requireCallID)
+	// Strip model turns that contain only thought or empty text parts (from an
+	// interrupted or empty response) and coalesce the surrounding user turns so
+	// the model does not imitate empty turns on "继续".
+	var cleaned []geminiTurn
+	for _, turn := range merged {
+		if turn.role == "model" && geminiIsThinkingOnlyTurn(turn.parts) {
+			continue
+		}
+		cleaned = append(cleaned, turn)
+	}
+	merged = mergeGeminiTurns(cleaned, requireCallID)
+	for i := range merged {
+		if merged[i].role == "model" {
+			merged[i].parts = signUnsignedGeminiFunctionCall(upstreamModel, merged[i].parts)
+		}
+	}
+	// Strip a trailing model turn with unanswered function calls: the model is
+	// about to answer them, so the dangling calls must not be replayed upstream.
+	if len(merged) > 0 && merged[len(merged)-1].role == "model" && geminiPartsHaveField(merged[len(merged)-1].parts, "functionCall") {
+		merged = merged[:len(merged)-1]
+	}
+	if requireCallID || geminiRequiresThoughtSignature(upstreamModel) {
+		for i := range merged {
+			if merged[i].role != "model" {
+				continue
+			}
+			var thoughts, others, calls []string
+			seenCallIDs := map[string]bool{}
+			for _, raw := range merged[i].parts {
+				part := gjson.Parse(raw)
+				switch {
+				case part.Get("thought").Bool():
+					thoughts = append(thoughts, raw)
+				case part.Get("functionCall").Exists():
+					id := part.Get("functionCall.id").String()
+					if id != "" {
+						if seenCallIDs[id] {
+							continue
+						}
+						seenCallIDs[id] = true
+					}
+					calls = append(calls, raw)
+				default:
+					others = append(others, raw)
+				}
+			}
+			merged[i].parts = append(append(thoughts, others...), calls...)
+		}
+
+		var paired []geminiTurn
+		for i := 0; i < len(merged); i++ {
+			turn := merged[i]
+			if turn.role == "user" {
+				var others []string
+				for _, raw := range turn.parts {
+					if !gjson.Get(raw, "functionResponse").Exists() {
+						others = append(others, raw)
+					}
+				}
+				turn.parts = others
+				if len(turn.parts) > 0 {
+					paired = append(paired, turn)
+				}
+				continue
+			}
+			paired = append(paired, turn)
+			var calls []struct{ id, name string }
+			for _, raw := range turn.parts {
+				call := gjson.Get(raw, "functionCall")
+				if call.Exists() {
+					calls = append(calls, struct{ id, name string }{
+						id:   call.Get("id").String(),
+						name: call.Get("name").String(),
+					})
+				}
+			}
+			if len(calls) == 0 || i == len(merged)-1 {
+				continue
+			}
+			var nextUser geminiTurn
+			if i+1 < len(merged) && merged[i+1].role == "user" {
+				nextUser = merged[i+1]
+				i++
+			} else {
+				nextUser = geminiTurn{role: "user"}
+			}
+			byID := map[string]string{}
+			var unkeyed, others []string
+			for _, raw := range nextUser.parts {
+				fr := gjson.Get(raw, "functionResponse")
+				if !fr.Exists() {
+					others = append(others, raw)
+					continue
+				}
+				id := fr.Get("id").String()
+				if id == "" {
+					unkeyed = append(unkeyed, raw)
+				} else if _, exists := byID[id]; !exists {
+					byID[id] = raw
+				}
+			}
+			var orderedResponses []string
+			for _, call := range calls {
+				if call.id != "" {
+					if raw, ok := byID[call.id]; ok {
+						orderedResponses = append(orderedResponses, raw)
+						delete(byID, call.id)
+						continue
+					}
+				} else if len(unkeyed) > 0 {
+					orderedResponses = append(orderedResponses, unkeyed[0])
+					unkeyed = unkeyed[1:]
+					continue
+				}
+				fr := []byte(`{"functionResponse":{"name":"","response":{"result":"[Tool execution was interrupted or skipped]"}}}`)
+				if call.id != "" {
+					fr, _ = sjson.SetBytes(fr, "functionResponse.id", call.id)
+				}
+				fr, _ = sjson.SetBytes(fr, "functionResponse.name", call.name)
+				orderedResponses = append(orderedResponses, string(fr))
+			}
+			nextUser.parts = append(orderedResponses, others...)
+			nextUser.fromSystem = false
+			if len(nextUser.parts) > 0 {
+				paired = append(paired, nextUser)
+			}
+		}
+		merged = mergeGeminiTurns(paired, requireCallID)
+		if len(merged) > 0 && merged[len(merged)-1].role == "model" && geminiPartsHaveField(merged[len(merged)-1].parts, "functionCall") {
+			merged = merged[:len(merged)-1]
+		}
+	}
+	contentItems := make([]string, 0, len(merged))
+	for _, turn := range merged {
+		if len(turn.parts) > 0 {
+			contentItems = append(contentItems, geminiContentWithParts(turn.role, turn.parts))
+		}
+	}
+	return contentItems
 }
 
 // geminiContentWithParts builds one Gemini content object from a role and its raw

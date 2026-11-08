@@ -135,35 +135,36 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 				}
 				continue
 			}
-			if len(pending) > 0 && kind == pending[0].kind {
-				item := pending[0]
-				switch kind {
-				case "tool_use":
-					clientID := block.Get("id").String()
-					original := n.byID[clientID]
-					if item.wireName != "" && original != "" {
-						pending = pending[1:]
-						if prior := n.byWire[item.wireName]; prior != "" && prior != original {
-							return nil, fmt.Errorf("conflicting signed Gemini tool name %q", item.wireName)
-						}
-						if prior := n.byOriginal[original]; prior != "" && prior != item.wireName {
-							return nil, fmt.Errorf("conflicting signed Gemini aliases for tool %q", original)
-						}
-						n.byOriginal[original], n.byWire[item.wireName] = item.wireName, original
-						n.replayIDs[clientID] = item.wireID
-						n.skipCompanions[pos] = true
-						n.signedCallIDs[item.pos] = clientID
+			switch kind {
+			case "tool_use":
+				clientID := block.Get("id").String()
+				original := n.byID[clientID]
+				for idx, item := range pending {
+					if item.kind != "tool_use" || item.wireName == "" || original == "" {
 						continue
 					}
-				case "text":
-					if block.Get("text").String() == item.text {
-						pending = pending[1:]
+					pending = append(pending[:idx], pending[idx+1:]...)
+					if prior := n.byWire[item.wireName]; prior != "" && prior != original {
+						return nil, fmt.Errorf("conflicting signed Gemini tool name %q", item.wireName)
+					}
+					if prior := n.byOriginal[original]; prior != "" && prior != item.wireName {
+						return nil, fmt.Errorf("conflicting signed Gemini aliases for tool %q", original)
+					}
+					n.byOriginal[original], n.byWire[item.wireName] = item.wireName, original
+					n.replayIDs[clientID] = item.wireID
+					n.skipCompanions[pos] = true
+					n.signedCallIDs[item.pos] = clientID
+					break
+				}
+			case "text":
+				for idx, item := range pending {
+					if item.kind == "text" && block.Get("text").String() == item.text {
+						pending = append(pending[:idx], pending[idx+1:]...)
 						n.skipCompanions[pos] = true
-						continue
+						break
 					}
 				}
 			}
-			pending = nil
 		}
 	}
 	ordered := make([]string, 0, len(names))
