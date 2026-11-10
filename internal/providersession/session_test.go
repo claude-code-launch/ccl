@@ -12,27 +12,18 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func TestPrepareKeepsDirectAnthropicProviderDirect(t *testing.T) {
-	original := provider.Provider{
-		Name:     "anthropic-gateway",
-		Type:     "anthropic",
-		Endpoint: "https://example.test",
-		APIKey:   "test-key",
-		Model:    "claude-test",
-	}
-
-	session, err := Prepare(context.Background(), original)
-	if err != nil {
-		t.Fatalf("Prepare() error: %v", err)
-	}
-	t.Cleanup(session.Close)
-	if session.UseProxy || session.Runtime != nil {
-		t.Fatalf("direct Anthropic provider started a proxy: %+v", session)
-	}
-	if session.Provider.Name != original.Name || session.Provider.Type != original.Type ||
-		session.Provider.Endpoint != original.Endpoint || session.Provider.APIKey != original.APIKey ||
-		session.Provider.Model != original.Model || session.BaseURL != original.Endpoint {
-		t.Fatalf("direct provider changed: %+v", session)
+func TestPrepareRejectsRetiredProviders(t *testing.T) {
+	for _, p := range []provider.Provider{
+		{Name: "messages", Type: "anthropic"},
+		{Name: "old-claude", OAuthProvider: "claude"},
+		{Name: "old-zed", OAuthProvider: "zed"},
+	} {
+		t.Run(p.Name, func(t *testing.T) {
+			session, err := Prepare(t.Context(), p)
+			if session != nil || err == nil || !strings.Contains(err.Error(), "retired") {
+				t.Fatalf("Prepare = %v, %v", session, err)
+			}
+		})
 	}
 }
 
@@ -60,13 +51,13 @@ func TestPrepareDiscoversModelsAndStartsResponsesRuntime(t *testing.T) {
 		t.Fatalf("Prepare() error: %v", err)
 	}
 	t.Cleanup(session.Close)
-	if !session.UseProxy || session.Runtime == nil {
+	if session.Runtime == nil {
 		t.Fatal("Responses provider did not start the shared adapter")
 	}
 	if session.Provider.Model != "gpt-test" {
 		t.Fatalf("discovered model = %q", session.Provider.Model)
 	}
-	if !strings.HasPrefix(session.Provider.Endpoint, "http://127.0.0.1:") || session.BaseURL == original.Endpoint {
+	if !strings.HasPrefix(session.Provider.Endpoint, "http://127.0.0.1:") {
 		t.Fatalf("runtime endpoint was not resolved: %+v", session)
 	}
 	if session.Provider.APIKey == "" || session.Provider.APIKey == original.APIKey {
@@ -108,11 +99,11 @@ func TestPrepareStartsAutoClawRuntime(t *testing.T) {
 		t.Fatalf("Prepare() error: %v", err)
 	}
 	t.Cleanup(session.Close)
-	if !session.UseProxy || session.Runtime == nil {
+	if session.Runtime == nil {
 		t.Fatalf("AutoClaw provider did not start a runtime: %+v", session)
 	}
-	if !strings.HasPrefix(session.BaseURL, "http://127.0.0.1:") {
-		t.Fatalf("base URL = %q", session.BaseURL)
+	if !strings.HasPrefix(session.Provider.Endpoint, "http://127.0.0.1:") {
+		t.Fatalf("base URL = %q", session.Provider.Endpoint)
 	}
 	if session.Provider.APIKey == "" || session.Provider.APIKey == "plan-key.secret" {
 		t.Fatalf("runtime API key = %q", session.Provider.APIKey)

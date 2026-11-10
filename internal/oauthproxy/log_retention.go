@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Session logs accumulate one file per Claude session. PruneSessionLogs keeps
+// Session logs accumulate one file per runtime session. PruneSessionLogs keeps
 // the newest maxFiles that are younger than maxAge, deleting the rest. It only
 // touches ccl's own log files in its log directory and never fails a launch.
 const (

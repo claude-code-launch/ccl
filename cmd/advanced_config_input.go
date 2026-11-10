@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
-	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -31,7 +30,6 @@ var rowClickLabels = map[configRowKind]rowClickLabel{
 	rowProvider:   {en: "Provider"},
 	rowTest:       {en: "Auto Configure"},
 	rowProtocol:   {en: "Protocol", zh: "协议"},
-	rowAuth:       {en: "Auth", zh: "鉴权"},
 	rowFast:       {en: "Fast"},
 	rowOpus:       {en: "Opus"},
 	rowSonnet:     {en: "Sonnet"},
@@ -41,7 +39,6 @@ var rowClickLabels = map[configRowKind]rowClickLabel{
 	rowSubagent:   {en: "Subagent"},
 	rowTestModels: {en: "Check", zh: "检查"},
 	rowContext:    {en: "Context & Compact", zh: "上下文与压缩"},
-	rowStatusline: {en: "Status Line", zh: "状态栏"},
 	rowActive:     {en: "Set as active provider", zh: "设为当前激活 Provider"},
 	// The Save button also renders as "Save Provider" when activation is not
 	// chosen; matchRowLabel matches prefixes, so the shorter shared prefix of
@@ -142,7 +139,6 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 					apiKey:              m.live().probeAPIKey,
 					detectedType:        m.p.Type,
 					detectedEndpoint:    m.p.Endpoint,
-					anthropicAuth:       "",
 					discoveredModelsRaw: strings.Join(oauthproxy.AutoClawModelIDs(), ","),
 					modelInfos:          oauthproxy.AutoClawModelCatalog(),
 				}
@@ -154,7 +150,7 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 		m.live().detectFrame = 0
 		setDebugf("start detection endpoint=%q api_key_len=%d oauth=%t", m.live().probeEndpoint, len(m.live().probeAPIKey), m.usesOAuth())
 		if m.canSelectCustomProtocol() {
-			fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth)
+			fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type)
 		} else {
 			fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey)
 		}
@@ -174,7 +170,7 @@ func (m *AdvancedConfigModel) activateRow(kind configRowKind) {
 		m.modelTestFrame = 0
 		m.modelTestCanceled = false
 		setDebugf("model availability test started model_count=%d", len(m.live().modelPool))
-		testModelsAsync(m.availDone, ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, probeWireType(*m.p), m.p.AnthropicAuth, m.p.ModelProtocols, m.availabilitySmokeTestModel(), m.usesModelsDev() && m.live().keyVerified)
+		testModelsAsync(m.availDone, ctx, testID, m.live().modelPool, m.live().probeEndpoint, m.live().probeAPIKey, probeWireType(*m.p), m.p.ModelProtocols, m.availabilitySmokeTestModel(), m.usesModelsDev() && m.live().keyVerified)
 	}
 }
 
@@ -430,7 +426,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowStatusline, rowActive:
+			case rowSource, rowContext, rowProtocol, rowFast, rowActive:
 				m.adjustReviewField(-1)
 			}
 		}
@@ -448,7 +444,7 @@ func (m *AdvancedConfigModel) handleKey(ke tui.KeyEvent) {
 			m.toggleOneMAtRow(m.currentRow())
 		} else {
 			switch m.currentRow() {
-			case rowSource, rowContext, rowProtocol, rowAuth, rowFast, rowStatusline, rowActive:
+			case rowSource, rowContext, rowProtocol, rowFast, rowActive:
 				m.adjustReviewField(1)
 			}
 		}
@@ -641,9 +637,6 @@ func (m *AdvancedConfigModel) handleEnter() {
 		}
 		*advancedSlotRefs(m.p)[m.activeSlot].ptr = selectedModel
 		slotKey := modelSlotKeys[m.activeSlot]
-		if slotKey == "subagent" && m.p.Env != nil {
-			delete(m.p.Env, claude.SubagentModelEnv)
-		}
 		// A slot whose model was just changed must not keep a [1m] marker
 		// the backend rules out for the new model — toggleOneMAtRow refuses
 		// to enable one there, so leaving an enabled marker would be
@@ -680,7 +673,7 @@ func (m *AdvancedConfigModel) handleEnter() {
 		m.activateRow(rowProvider)
 	case rowTest:
 		m.activateRow(rowTest)
-	case rowProtocol, rowAuth, rowFast, rowStatusline:
+	case rowProtocol, rowFast:
 		m.adjustReviewField(1)
 	case rowOpus, rowSonnet, rowHaiku, rowFable, rowCustom, rowSubagent:
 		if !m.connectionReady() {

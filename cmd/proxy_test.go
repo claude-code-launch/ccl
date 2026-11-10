@@ -46,7 +46,7 @@ func TestProxyRejectsAmbiguousProviderSelection(t *testing.T) {
 // The default selector restores Codex's own route: by name or as the active
 // selection, it starts nothing and needs no third-party provider.
 func TestProxyStartOnDefaultStartsNothing(t *testing.T) {
-	saveToggleFixture(t, &provider.Config{ActiveProvider: provider.DefaultProvider, Providers: map[string]provider.Provider{
+	saveGrokFixture(t, &provider.Config{ActiveProvider: provider.DefaultProvider, Providers: map[string]provider.Provider{
 		"a": {Name: "a", Type: "openai", Endpoint: "https://example.com/v1", Model: "m"},
 	}})
 	// A regression would start a real proxy: keep its settings overlay away

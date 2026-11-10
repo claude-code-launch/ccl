@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -14,14 +13,8 @@ func providerAuthLabel(p provider.Provider) string {
 	if p.OAuthProvider != "" {
 		return "oauth/" + p.OAuthProvider
 	}
-	if provider.IsOpenAICompatibleType(p.Type) {
+	if provider.IsOpenAICompatibleType(p.Type) || provider.IsModelsDevType(p.Type) {
 		return "bearer"
-	}
-	if provider.IsAnthropicType(p.Type) {
-		if strings.EqualFold(p.AnthropicAuth, "bearer") {
-			return "bearer"
-		}
-		return "x-api-key"
 	}
 	return "unknown"
 }
@@ -30,9 +23,6 @@ func providerEffortSummary(p provider.Provider) string {
 	summary := "default"
 	if level := strings.TrimSpace(p.EffortLevel); level != "" {
 		summary = level
-	}
-	if p.Ultracode {
-		summary += " + ultracode"
 	}
 	return summary
 }
@@ -55,14 +45,7 @@ func subagentMappingDisplayWithNames(p provider.Provider, names map[string]strin
 	if model := strings.TrimSpace(p.SubagentModel); model != "" {
 		return providerCatalogModelLabel(model, names)
 	}
-	if model, ok := p.Env[claude.SubagentModelEnv]; ok && strings.TrimSpace(model) != "" {
-		return fmt.Sprintf("(env: %s)", providerCatalogModelLabel(strings.TrimSpace(model), names))
-	}
-	effective := strings.TrimSpace(claude.ResolveRuntimeSettings(p).SubagentModel)
-	if effective == "" {
-		return "(auto)"
-	}
-	return fmt.Sprintf("(auto: %s)", providerCatalogModelLabel(effective, names))
+	return "(auto)"
 }
 
 func providerCatalogModelLabel(model string, names map[string]string) string {
@@ -101,29 +84,18 @@ func providerOneMSummary(p provider.Provider) string {
 }
 
 func setProviderAuthHeaders(req *http.Request, p provider.Provider) {
-	if provider.IsOpenAICompatibleType(p.Type) {
-		req.Header.Set("Authorization", "Bearer "+p.APIKey)
-		return
-	}
-	if provider.IsAutoClawType(p.Type) || strings.EqualFold(p.AnthropicAuth, "bearer") {
-		// The local Messages adapter accepts the loopback Bearer key. The
-		// AutoClaw authorizer then replaces it with X-Authorization upstream.
-		req.Header.Set("Authorization", "Bearer "+p.APIKey)
-	} else {
-		req.Header.Set("x-api-key", p.APIKey)
-	}
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Authorization", "Bearer "+p.APIKey)
 }
 
 func printProviderExperienceWarnings(p provider.Provider) {
 	if level := strings.TrimSpace(p.EffortLevel); level != "" {
-		doctorInfo(fmt.Sprintf("Effort starts at %s each session (/effort still changes it; ccl provider effort default leaves it to Claude Code).", level))
+		doctorInfo(fmt.Sprintf("Effort starts at %s each session (ccl provider effort default leaves it to Grok Build).", level))
 	}
 	if p.FastMode {
 		doctorInfo("Fast is on: ccl asks the Codex upstream for priority service (faster, higher usage); turn it off in ccl set Review & Apply.")
 	}
 	if p.OAuthProvider == "" && provider.IsOpenAICompatibleType(p.Type) && endpointPathIsEmpty(p.Endpoint) {
-		doctorWarn("OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1 or re-run ccl set for Anthropic-compatible gateways.")
+		doctorWarn("OpenAI-compatible endpoint has no path; if model tests fail, try adding /v1.")
 	}
 }
 

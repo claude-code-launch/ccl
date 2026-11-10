@@ -43,7 +43,7 @@ type geminiStreamStepResult struct {
 	finishReason       string
 }
 
-func flushGeminiPendingSignedParts(assembler *anthropicResponseAssembler, pending *[]string) error {
+func flushGeminiPendingSignedParts(assembler *responseAssembler, pending *[]string) error {
 	if len(*pending) == 0 {
 		return nil
 	}
@@ -69,7 +69,7 @@ func flushGeminiPendingSignedParts(assembler *anthropicResponseAssembler, pendin
 	return nil
 }
 
-func assemblerHasVisibleOutput(assembler *anthropicResponseAssembler) bool {
+func assemblerHasVisibleOutput(assembler *responseAssembler) bool {
 	if assembler.hasToolUse {
 		return true
 	}
@@ -81,7 +81,7 @@ func assemblerHasVisibleOutput(assembler *anthropicResponseAssembler) bool {
 	return false
 }
 
-func assemblerHasThinkingText(assembler *anthropicResponseAssembler) bool {
+func assemblerHasThinkingText(assembler *responseAssembler) bool {
 	for _, buffer := range assembler.buffers {
 		if buffer != nil && strings.TrimSpace(buffer.thinking.String()) != "" {
 			return true
@@ -90,7 +90,7 @@ func assemblerHasThinkingText(assembler *anthropicResponseAssembler) bool {
 	return false
 }
 
-func processGeminiStreamStep(reader io.Reader, assembler *anthropicResponseAssembler, toolCounter *int) (*geminiStreamStepResult, error) {
+func processGeminiStreamStep(reader io.Reader, assembler *responseAssembler, toolCounter *int) (*geminiStreamStepResult, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), geminiStreamScannerBuffer)
 	result := &geminiStreamStepResult{}
@@ -125,10 +125,10 @@ func processGeminiStreamStep(reader io.Reader, assembler *anthropicResponseAssem
 }
 
 // processGeminiStream consumes a Gemini/Antigravity SSE stream and emits an
-// Anthropic Messages stream through the assembler. Each SSE chunk carries an
+// OpenAI Responses stream through the assembler. Each SSE chunk carries an
 // incremental parts array (not a cumulative snapshot), so every part in every
 // chunk is processed exactly once.
-func processGeminiStream(reader io.Reader, assembler *anthropicResponseAssembler) error {
+func processGeminiStream(reader io.Reader, assembler *responseAssembler) error {
 	toolCounter := 0
 	result, err := processGeminiStreamStep(reader, assembler, &toolCounter)
 	if err != nil {
@@ -144,8 +144,8 @@ func processGeminiStream(reader io.Reader, assembler *anthropicResponseAssembler
 }
 
 // processGeminiNonStream consumes a non-streaming Gemini/Antigravity response
-// body and emits a single Anthropic Messages response through the assembler.
-func processGeminiNonStream(body []byte, assembler *anthropicResponseAssembler) error {
+// body and emits a single OpenAI Responses response through the assembler.
+func processGeminiNonStream(body []byte, assembler *responseAssembler) error {
 	toolCounter := 0
 	result := &geminiStreamStepResult{}
 	if err := processGeminiChunkWithResult(body, assembler, &toolCounter, result); err != nil {
@@ -169,7 +169,7 @@ func processGeminiNonStream(body []byte, assembler *anthropicResponseAssembler) 
 // having emitted only thought parts and no text or tool_use blocks. Without
 // this fallback, Claude Code collapses the thinking block into "Baked for Xs · done"
 // with no visible response.
-func ensureGeminiVisibleOutput(assembler *anthropicResponseAssembler) error {
+func ensureGeminiVisibleOutput(assembler *responseAssembler) error {
 	if assembler.hasToolUse {
 		return nil
 	}
@@ -229,7 +229,7 @@ func geminiRefusalReason(reason string) bool {
 // processGeminiChunk processes one Gemini response JSON object: it unwraps the
 // Antigravity `response` envelope, feeds each part to the assembler, and applies
 // the terminal usageMetadata/finishReason when the chunk carries them.
-func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, toolCounter *int) error {
+func processGeminiChunk(payload []byte, assembler *responseAssembler, toolCounter *int) error {
 	result := &geminiStreamStepResult{}
 	if err := processGeminiChunkWithResult(payload, assembler, toolCounter, result); err != nil {
 		return err
@@ -237,7 +237,7 @@ func processGeminiChunk(payload []byte, assembler *anthropicResponseAssembler, t
 	return flushGeminiPendingSignedParts(assembler, &result.pendingSignedParts)
 }
 
-func processGeminiChunkWithResult(payload []byte, assembler *anthropicResponseAssembler, toolCounter *int, result *geminiStreamStepResult) error {
+func processGeminiChunkWithResult(payload []byte, assembler *responseAssembler, toolCounter *int, result *geminiStreamStepResult) error {
 	root := gjson.ParseBytes(payload)
 	if !gjson.ValidBytes(payload) {
 		return fmt.Errorf("invalid Gemini response JSON")
@@ -362,7 +362,7 @@ func processGeminiChunkWithResult(payload []byte, assembler *anthropicResponseAs
 	return nil
 }
 
-func geminiApplyUsage(root gjson.Result, assembler *anthropicResponseAssembler) {
+func geminiApplyUsage(root gjson.Result, assembler *responseAssembler) {
 	usage := geminiResponsePayload(root).Get("usageMetadata")
 	if !usage.Exists() {
 		usage = root.Get("usageMetadata")

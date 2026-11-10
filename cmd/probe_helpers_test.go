@@ -9,8 +9,8 @@ import (
 
 // Test-only shorthands over the live probe and layout helpers.
 
-func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, apiKey, wireProtocol, anthropicAuth string, timeout time.Duration) bool {
-	status, err := probeSingleModelForProtocolStatusContext(ctx, model, endpoint, apiKey, wireProtocol, anthropicAuth, timeout)
+func testSingleModelForProtocolContext(ctx context.Context, model, endpoint, apiKey, wireProtocol string, timeout time.Duration) bool {
+	status, err := probeSingleModelForProtocolStatusContext(ctx, model, endpoint, apiKey, wireProtocol, timeout)
 	return err == nil && status >= 200 && status < 300
 }
 

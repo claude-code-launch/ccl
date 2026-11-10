@@ -91,8 +91,8 @@ func TestRealCodexRetriesProviderCapacity(t *testing.T) {
 		if elapsed := time.Since(time.Unix(0, rejectedAt.Load())); elapsed < 1900*time.Millisecond {
 			t.Errorf("client retried before Retry-After: %s", elapsed)
 		}
-		writeMessage(w, []map[string]any{{"type": "text", "text": "capacity-recovered"}})
-	}, "anthropic", Options{Desktop: true})
+		writeChatText(w, r, "capacity-recovered")
+	}, "openai", Options{Desktop: true})
 	applyClientFixture(t, g, home)
 	output := run("-m", "ccl/chosen/model-a", "-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Reply to the fixture.")
 	if calls.Load() != 2 || !strings.Contains(output, "capacity-recovered") {
@@ -116,13 +116,13 @@ func TestRealCodexReadsScreenshotThroughConvertedProvider(t *testing.T) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if calls.Add(1) == 1 {
-			writeMessage(w, []map[string]any{{"type": "tool_use", "id": "screen_call", "name": findTool(t, body, "view_image"), "input": map[string]any{"path": path}}})
+			writeChatTool(w, r, "screen_call", findTool(t, body, "view_image"), map[string]any{"path": path})
 			return
 		}
 		raw := textValue(body["messages"])
-		sawImage.Store(strings.Contains(raw, `"type":"image"`) && strings.Contains(raw, `"media_type":"image/png"`))
-		writeMessage(w, []map[string]any{{"type": "text", "text": "image-roundtrip-done"}})
-	}, "anthropic", Options{Desktop: true})
+		sawImage.Store(strings.Contains(raw, `"type":"image_url"`) && strings.Contains(raw, "data:image/png;base64,"))
+		writeChatText(w, r, "image-roundtrip-done")
+	}, "openai", Options{Desktop: true})
 	editFixtureModels(g, func([]Model) []Model {
 		return []Model{newModel("ccl/chosen/model-a", "model-a", map[string]protocol.ModelInfo{"model-a": {InputModalities: []string{"text", "image"}}}, nil)}
 	})
@@ -152,31 +152,23 @@ func TestRealCodexResumesAcrossNativeAndConvertedModels(t *testing.T) {
 				if !strings.Contains(textValue(body["input"]), "keep-this-goal") {
 					t.Error("native model lost the goal")
 				}
-				w.Header().Set("Content-Type", "text/event-stream")
-				stream := newResponseStream(w, "native-fixture", true, nil)
-				_ = stream.start()
 				reasoning := map[string]any{"id": "rs_native_fixture", "type": "reasoning", "summary": []any{}, "encrypted_content": "opaque-native-fixture"}
-				_ = stream.emit("response.output_item.done", map[string]any{"output_index": 0, "item": reasoning})
-				message := map[string]any{"id": "msg_native_fixture", "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "native-continued", "annotations": []any{}}}}
-				_ = stream.emit("response.output_item.done", map[string]any{"output_index": 1, "item": message})
-				response := stream.response("completed")
-				response["output"] = []any{reasoning, message}
-				_ = stream.emit("response.completed", map[string]any{"response": response})
+				writeNativeFixture(w, []any{reasoning, migrationNoticeItem("native-continued")}, 3)
 			}))
 			t.Cleanup(native.Close)
 			g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 				var body map[string]any
 				_ = json.NewDecoder(r.Body).Decode(&body)
 				if convertedCalls.Add(1) == 1 {
-					writeMessage(w, []map[string]any{{"type": "thinking", "thinking": "fixture thinking"}, {"type": "text", "text": "converted-first"}})
+					writeChatFixture(w, r, map[string]any{"reasoning_content": "fixture thinking", "content": "converted-first"}, "stop", 3)
 					return
 				}
 				raw := textValue(body["messages"])
 				if !strings.Contains(raw, "native-continued") || !strings.Contains(raw, "keep-this-goal") || strings.Contains(raw, "opaque-native-fixture") {
 					t.Error("converted model did not resume native history correctly")
 				}
-				writeMessage(w, []map[string]any{{"type": "text", "text": "converted-continued"}})
-			}, "anthropic", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
+				writeChatText(w, r, "converted-continued")
+			}, "openai", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
 			applyClientFixture(t, g, home)
 			runTurn := func(args ...string) string {
 				if mode == "independent-provider" {

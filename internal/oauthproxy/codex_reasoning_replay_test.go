@@ -29,7 +29,7 @@ func TestResponsesNativeReasoningRoundTrip(t *testing.T) {
 			terminal, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"output": output}})
 			fmt.Fprintf(&stream, "data: %s\n\n", terminal)
 			writer := httptest.NewRecorder()
-			assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{stream: true}, writer)
+			assembler := newResponseAssembler(&adapterRequest{stream: true}, writer)
 			if err := processCodexResponsesStream(strings.NewReader(stream.String()), assembler); err != nil {
 				t.Fatal(err)
 			}
@@ -43,8 +43,10 @@ func TestResponsesNativeReasoningRoundTrip(t *testing.T) {
 				if err := json.Unmarshal(raw, &event); err != nil {
 					return err
 				}
-				if delta := mapValue(event["delta"]); stringValue(delta["type"]) == "signature_delta" {
-					signatures = append(signatures, stringValue(delta["signature"]))
+				if stringValue(event["type"]) == "response.output_item.done" {
+					if item := mapValue(event["item"]); stringValue(item["type"]) == "reasoning" {
+						signatures = append(signatures, stringValue(item["encrypted_content"]))
+					}
 				}
 				return nil
 			}); err != nil {
@@ -53,8 +55,16 @@ func TestResponsesNativeReasoningRoundTrip(t *testing.T) {
 			if len(signatures) != 2 || signatures[0] != blocks[0].Signature || signatures[1] != blocks[2].Signature {
 				t.Fatal("SSE signatures differ from persisted content")
 			}
-			stored, _ := json.Marshal(blocks)
-			items, err := codexMessageItems(anthropicMessage{Role: "assistant", Content: stored}, nil)
+			reqJSON, _ := json.Marshal(map[string]any{
+				"model": "gpt-5",
+				"tools": []any{map[string]any{"type": "function", "name": "lookup"}},
+				"input": assembler.outputItems(),
+			})
+			parsed, err := parseResponsesRequest(reqJSON)
+			if err != nil || len(parsed.Turns) != 1 {
+				t.Fatalf("parse replay turns: err=%v turns=%d", err, len(parsed.Turns))
+			}
+			items, err := codexTurnItems(parsed.Turns[0])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,27 +86,29 @@ func TestResponsesNativeReasoningRoundTrip(t *testing.T) {
 }
 
 func TestResponsesReasoningRejectsCorruptEnvelope(t *testing.T) {
-	for _, signature := range []string{codexReasoningSignaturePrefix + "broken", codexReasoningSignaturePrefix} {
+	for _, signature := range []string{codexReasoningSignaturePrefix + "broken", codexReasoningSignaturePrefix, "old+/="} {
 		if _, err := codexReasoningFromSignature(signature); err == nil {
-			t.Fatal("corrupt envelope accepted")
+			t.Fatalf("corrupt or unprefixed envelope accepted: %q", signature)
 		}
-	}
-	legacy, err := codexReasoningFromSignature("old+/=")
-	if err != nil || legacy.(map[string]any)["encrypted_content"] != "old+/=" {
-		t.Fatal("legacy signature changed")
 	}
 }
 
 func TestResponsesRuntimeIdentityStableAcrossTurns(t *testing.T) {
-	for _, metadata := range []*anthropicRequestMetadata{nil, {UserID: "user_without_session"}} {
-		first, cache := codexRequestIdentity(metadata, "runtime-session")
-		second, nextCache := codexRequestIdentity(metadata, "runtime-session")
-		if first != "runtime-session" || second != first || cache != nextCache {
-			t.Fatalf("unstable identity: %q %q %q %q", first, second, cache, nextCache)
-		}
+	raw := []byte(`{"model":"gpt-5","input":[{"role":"user","content":"hi"}]}`)
+	first, err := convertResponsesForUpstream(raw, "runtime-session")
+	if err != nil {
+		t.Fatal(err)
 	}
-	id, _ := codexRequestIdentity(&anthropicRequestMetadata{UserID: "user_session_123e4567-e89b-12d3-a456-426614174000"}, "runtime-session")
-	if id != "123e4567-e89b-12d3-a456-426614174000" {
-		t.Fatalf("explicit session lost: %s", id)
+	second, err := convertResponsesForUpstream(raw, "runtime-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.sessionID != "runtime-session" || second.sessionID != first.sessionID {
+		t.Fatalf("unstable identity: %q %q", first.sessionID, second.sessionID)
+	}
+	explicitRaw := []byte(`{"model":"gpt-5","prompt_cache_key":"123e4567-e89b-12d3-a456-426614174000","input":[{"role":"user","content":"hi"}]}`)
+	explicit, err := convertResponsesForUpstream(explicitRaw, "runtime-session")
+	if err != nil || !strings.Contains(string(explicit.body), `"prompt_cache_key":"123e4567-e89b-12d3-a456-426614174000"`) {
+		t.Fatalf("explicit prompt_cache_key lost: err=%v body=%s", err, explicit.body)
 	}
 }

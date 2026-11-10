@@ -13,7 +13,7 @@ import (
 )
 
 func TestRuntimePreservesEndpointQueryAndEscaping(t *testing.T) {
-	for _, dialect := range []string{"chat", "responses", "anthropic"} {
+	for _, dialect := range []string{"chat", "responses"} {
 		t.Run(dialect, func(t *testing.T) {
 			var got string
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,8 +25,6 @@ func TestRuntimePreservesEndpointQueryAndEscaping(t *testing.T) {
 				case "responses":
 					w.Header().Set("Content-Type", "text/event-stream")
 					io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n")
-				default:
-					io.WriteString(w, `{"type":"message","content":[]}`)
 				}
 			}))
 			defer up.Close()
@@ -41,15 +39,12 @@ func TestRuntimePreservesEndpointQueryAndEscaping(t *testing.T) {
 			case "responses":
 				rt, err = StartOpenAIResponsesAPI(context.Background(), endpoint, "fake", "m")
 				want += "responses?tenant=demo%2F"
-			default:
-				rt, err = StartMixedProtocolAPIKeyRuntime(context.Background(), endpoint, "fake", "m", map[string]string{"m": "anthropic"})
-				want += "messages?tenant=demo%2F&beta=true"
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer rt.Stop()
-			req, _ := http.NewRequest(http.MethodPost, rt.Endpoint()+"/messages", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+			req, _ := http.NewRequest(http.MethodPost, rt.Endpoint()+"/responses", strings.NewReader(`{"model":"m","input":[{"role":"user","content":"hi"}],"max_output_tokens":1}`))
 			req.Header.Set("x-api-key", rt.APIKey())
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -67,41 +62,35 @@ func TestRuntimePreservesEndpointQueryAndEscaping(t *testing.T) {
 	}
 }
 
-func TestNativeModelSuffixMessagesAndCountTokens(t *testing.T) {
-	for _, path := range []string{"/messages", "/messages/count_tokens"} {
-		t.Run(path, func(t *testing.T) {
-			var got []byte
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				got, _ = io.ReadAll(r.Body)
-				io.WriteString(w, `{"input_tokens":1}`)
-			}))
-			defer up.Close()
-			rt, err := StartMixedProtocolAPIKeyRuntime(context.Background(), up.URL, "fake", "claude-test[1m]", map[string]string{"claude-test": "anthropic"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer rt.Stop()
-			req, _ := http.NewRequest(http.MethodPost, rt.Endpoint()+path, strings.NewReader(`{"model":"claude-test[1m]","messages":[{"role":"user","content":"hi"}],"metadata":{"large":9007199254740993},"max_tokens":1}`))
-			req.Header.Set("x-api-key", rt.APIKey())
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode != 200 || gjson.GetBytes(got, "model").String() != "claude-test" {
-				t.Fatalf("status=%d body=%s", resp.StatusCode, got)
-			}
-			if gjson.GetBytes(got, "metadata.large").Raw != "9007199254740993" {
-				t.Fatalf("metadata changed: %s", got)
-			}
-		})
+func TestNativeModelSuffixResponses(t *testing.T) {
+	var got []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer up.Close()
+	rt, err := StartMixedProtocolAPIKeyRuntime(context.Background(), up.URL, "fake", "claude-test[1m]", map[string]string{"claude-test": "openai"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Stop()
+	req, _ := http.NewRequest(http.MethodPost, rt.Endpoint()+"/responses", strings.NewReader(`{"model":"claude-test[1m]","input":[{"role":"user","content":"hi"}],"max_output_tokens":1}`))
+	req.Header.Set("x-api-key", rt.APIKey())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || gjson.GetBytes(got, "model").String() != "claude-test" {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, got)
 	}
 }
 
 func TestChatToolImagesFollowAllToolReplies(t *testing.T) {
-	raw := []byte(`{"model":"vision","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"screenshot","input":{}},{"type":"tool_use","id":"b","name":"screenshot","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"text","text":"first"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]},{"type":"tool_result","tool_use_id":"b","content":[{"type":"image","source":{"type":"url","url":"https://example.com/b.png"}}]},{"type":"text","text":"compare these"}]}]}`)
-	c, err := convertAnthropicToChatCompletions(raw)
+	raw := []byte(`{"model":"vision","tools":[{"type":"function","name":"screenshot","parameters":{"type":"object"}}],"input":[{"type":"function_call","call_id":"a","name":"screenshot","arguments":"{}"},{"type":"function_call","call_id":"b","name":"screenshot","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":[{"type":"input_text","text":"first"},{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]},{"type":"function_call_output","call_id":"b","output":[{"type":"input_image","image_url":"https://example.com/b.png"}]},{"role":"user","content":[{"type":"input_text","text":"compare these"}]}]}`)
+	c, err := convertResponsesToChatCompletions(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +111,7 @@ func TestChatToolImagesFollowAllToolReplies(t *testing.T) {
 func TestZeroFreshInputUsageIsAuthoritative(t *testing.T) {
 	for _, dialect := range []string{"chat", "responses", "gemini"} {
 		t.Run(dialect, func(t *testing.T) {
-			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 777}, nil)
+			a := newResponseAssembler(&adapterRequest{inputTokens: 777}, nil)
 			switch dialect {
 			case "chat":
 				chatApplyUsage(a, map[string]any{"prompt_tokens": float64(100), "prompt_tokens_details": map[string]any{"cached_tokens": float64(100)}})
@@ -137,12 +126,15 @@ func TestZeroFreshInputUsageIsAuthoritative(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if got := a.usage(); got["input_tokens"] != 0 || got["cache_read_input_tokens"] != 100 {
-				t.Fatalf("usage=%v", got)
+			inTokens, _ := a.tokenTotals()
+			usage := a.usage()
+			details, _ := usage["input_tokens_details"].(map[string]any)
+			if inTokens != 0 || a.cacheReadTokens != 100 || usage["input_tokens"] != 100 || details["cached_tokens"] != 100 {
+				t.Fatalf("inTokens=%d cacheRead=%d usage=%+v", inTokens, a.cacheReadTokens, usage)
 			}
 		})
 	}
-	a := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 777}, nil)
+	a := newResponseAssembler(&adapterRequest{inputTokens: 777}, nil)
 	chatApplyUsage(a, map[string]any{})
 	if a.usage()["input_tokens"] != 777 {
 		t.Fatal("missing usage must retain estimate")

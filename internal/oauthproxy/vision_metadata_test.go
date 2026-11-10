@@ -1,7 +1,6 @@
 package oauthproxy
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -25,17 +24,17 @@ func TestProviderImageCapabilitiesReachRuntimeMetadata(t *testing.T) {
 
 func TestQoderPreservesToolScreenshotsAfterAllToolReplies(t *testing.T) {
 	for _, withText := range []bool{false, true} {
-		content := []any{map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}}
+		output := []conversationPart{{Kind: partImage, MediaType: "image/png", Data: "aGVsbG8="}}
 		if withText {
-			content = append(content, map[string]any{"type": "text", "text": "screen-text"})
+			output = append(output, conversationPart{Kind: partText, Text: "screen-text"})
 		}
-		raw, _ := json.Marshal([]any{
-			map[string]any{"type": "tool_result", "tool_use_id": "screen", "content": content},
-			map[string]any{"type": "tool_result", "tool_use_id": "other", "content": "other-result"},
-		})
-		messages, _, err := qoderTransformUserMessage(raw)
-		if err != nil || len(messages) != 3 {
-			t.Fatalf("messages=%+v err=%v", messages, err)
+		turnParts := []conversationPart{
+			{Kind: partToolResult, CallID: "screen", Output: output},
+			{Kind: partToolResult, CallID: "other", Output: []conversationPart{{Kind: partText, Text: "other-result"}}},
+		}
+		messages, _ := qoderTransformUserTurn(conversationTurn{Role: "user", Parts: turnParts})
+		if len(messages) != 3 {
+			t.Fatalf("messages=%+v", messages)
 		}
 		if messages[0].(map[string]any)["role"] != "tool" || messages[1].(map[string]any)["role"] != "tool" || messages[2].(map[string]any)["role"] != "user" {
 			t.Fatalf("image interrupted tool replies: %+v", messages)

@@ -179,8 +179,8 @@ func TestKimiOAuthRefreshesOnlyAfter401(t *testing.T) {
 		t.Fatalf("runtime models = %q", got)
 	}
 	body := postClaudeMessage(t, context.Background(), runtime, "kimi-for-coding")
-	if !strings.Contains(body, "hello kimi") || !strings.Contains(body, `"type":"message_stop"`) {
-		t.Fatalf("Messages response = %s", body)
+	if !strings.Contains(body, "hello kimi") || !strings.Contains(body, `"type":"response.completed"`) {
+		t.Fatalf("Responses body = %s", body)
 	}
 	if upstreamCalls.Load() != 2 || refreshCalls.Load() != 1 {
 		t.Fatalf("upstream calls=%d refresh calls=%d", upstreamCalls.Load(), refreshCalls.Load())

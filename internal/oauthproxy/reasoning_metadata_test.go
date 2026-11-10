@@ -42,8 +42,8 @@ func TestCodexAccountDiscoveryPreservesReasoningMetadata(t *testing.T) {
 
 func TestCodexBridgeAdaptiveEffortReachesChatUpstream(t *testing.T) {
 	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
-		raw, _ := json.Marshal(map[string]any{"model": "reasoner", "max_tokens": 4096, "messages": []any{map[string]any{"role": "user", "content": "fixture"}}, "thinking": map[string]any{"type": "adaptive"}, "output_config": map[string]any{"effort": effort}})
-		converted, err := convertAnthropicToChatCompletions(raw)
+		raw, _ := json.Marshal(map[string]any{"model": "reasoner", "max_output_tokens": 4096, "input": []any{map[string]any{"role": "user", "content": "fixture"}}, "reasoning": map[string]any{"effort": effort}})
+		converted, err := convertResponsesToChatCompletions(raw)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -1,614 +1,210 @@
 package oauthproxy
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/tidwall/gjson"
 )
 
-const codexResponsesNameLimit = 64
+// A Responses upstream normally receives the client's request unchanged (see
+// handleResponses). The conversion below is only for a request whose tool
+// dialect the upstream does not implement: it is re-rendered with every tool
+// flattened to a plain function, and the assembler maps returned calls back.
 
-// codexResponsesConvertedRequest is the CCL-owned wire representation of one
-// Anthropic Messages request. CCL performs the translation directly.
+// codexResponsesConvertedRequest is one Responses request re-rendered for a
+// Responses upstream.
 type codexResponsesConvertedRequest struct {
-	anthropicAdapterRequest
-	body              []byte
-	model             string
-	sessionID         string
-	compaction        bool
-	compactionReason  string
-	compactionSignals string
-	sourceMessages    int
-	compactionTokens  int
-	droppedItems      int
+	adapterRequest
+	body      []byte
+	model     string
+	sessionID string
 }
 
-func convertAnthropicToCodexResponses(raw []byte, fallbackSessionID ...string) (*codexResponsesConvertedRequest, error) {
-	return convertAnthropicToCodexResponsesWithHint(raw, "", fallbackSessionID...)
-}
-
-// convertAnthropicToCodexResponsesWithHint converts with Claude Code's own
-// statement of what the request is: compactionHint is the value of its
-// x-claude-code-compaction header (auto, manual, reactive), empty when absent.
-func convertAnthropicToCodexResponsesWithHint(raw []byte, compactionHint string, fallbackSessionID ...string) (*codexResponsesConvertedRequest, error) {
-	return convertAnthropicToCodexResponsesWith(raw, codexConvertHints{compaction: compactionHint}, fallbackSessionID...)
-}
-
-// codexConvertHints carry per-request facts from headers rather than the body.
-type codexConvertHints struct {
-	compaction string // x-claude-code-compaction value
-	fast       bool   // the session asked for priority service
-}
-
-func convertAnthropicToCodexResponsesWith(raw []byte, hints codexConvertHints, fallbackSessionID ...string) (*codexResponsesConvertedRequest, error) {
-	compactionHint := hints.compaction
-	var request anthropicMessagesRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
-		return nil, fmt.Errorf("invalid Anthropic Messages request: %w", err)
-	}
-	request.Model = strings.TrimSpace(request.Model)
-	if request.Model == "" {
-		return nil, fmt.Errorf("model is required")
-	}
-	if len(request.Messages) == 0 {
-		return nil, fmt.Errorf("messages must not be empty")
-	}
-	compactionReason, compactionSignals := codexClassifyCompactionRequest(&request)
-	// The header is authoritative when Claude Code sends it; phrase matching
-	// remains for versions or setups that do not.
-	if hint := strings.ToLower(strings.TrimSpace(compactionHint)); hint != "" {
-		compactionReason = "header_" + hint
-		compactionSignals = "header"
-	}
-	compaction := compactionReason != ""
-
-	upstreamModel := stripContextModelSuffix(request.Model)
-	originalToShort, shortToOriginal := codexToolNameMaps(request.Tools)
-	input := make([]any, 0, len(request.Messages)+1)
-	if system := codexSystemContent(request.System); len(system) > 0 {
-		input = append(input, map[string]any{
-			"type": "message", "role": "developer", "content": system,
-		})
-	}
-	for _, message := range request.Messages {
-		items, err := codexMessageItems(message, originalToShort)
-		if err != nil {
-			return nil, err
-		}
-		input = append(input, items...)
-	}
-
-	reasoningEffort := codexReasoningEffort(request.Thinking, request.OutputConfig)
-	if compaction {
-		// Conversation summarization benefits much less from deep reasoning than a
-		// normal coding turn. Avoid spending latency and output tokens on it.
-		reasoningEffort = "low"
-	}
-	reasoning := map[string]any{"effort": reasoningEffort}
-	if !compaction && request.Thinking != nil && !strings.EqualFold(strings.TrimSpace(request.Thinking.Type), "disabled") {
-		reasoning["summary"] = "auto"
-	}
-	body := map[string]any{
-		"model":               upstreamModel,
-		"instructions":        "",
-		"input":               input,
-		"parallel_tool_calls": !compaction && codexParallelToolCalls(request.ToolChoice),
-		"reasoning":           reasoning,
-		"stream":              true,
-		"store":               false,
-		"include":             []string{"reasoning.encrypted_content"},
-	}
-	if request.MaxTokens > 0 {
-		body["max_output_tokens"] = request.MaxTokens
-	}
-	format, err := messagesStructuredOutput(request.OutputConfig)
-	if err != nil {
-		return nil, err
-	}
-	if format != nil {
-		format["type"] = "json_schema"
-		body["text"] = map[string]any{"format": format}
-	}
-	if tier := codexServiceTier(request.ServiceTier, request.Speed); tier != "" {
-		body["service_tier"] = tier
-	} else if hints.fast {
-		body["service_tier"] = "priority"
-	}
-	if len(request.Tools) > 0 && !compaction {
-		tools, err := codexTools(request.Tools, originalToShort)
-		if err != nil {
-			return nil, err
-		}
-		body["tools"] = tools
-		body["tool_choice"] = codexToolChoice(request.ToolChoice, originalToShort)
-	}
-	sessionID, promptCacheKey := codexRequestIdentity(request.Metadata, fallbackSessionID...)
-	body["prompt_cache_key"] = promptCacheKey
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("encode Codex Responses request: %w", err)
-	}
-	thinkingEnabled := request.Thinking != nil && !strings.EqualFold(strings.TrimSpace(request.Thinking.Type), "disabled")
-	return &codexResponsesConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{
-			upstreamModel:     upstreamModel,
-			clientModel:       request.Model,
-			stream:            request.Stream,
-			thinkingEnabled:   thinkingEnabled,
-			thinkingSignature: "ccl-codex-signature-unavailable",
-			maxTokens:         request.MaxTokens,
-			inputTokens:       estimateApproxTokensBytes(raw),
-			toolNameMap:       shortToOriginal,
-		},
-		body: encoded, model: upstreamModel, sessionID: sessionID,
-		compaction: compaction, compactionReason: compactionReason,
-		compactionSignals: compactionSignals, sourceMessages: len(request.Messages),
-	}, nil
-}
-
-// codexClassifyCompactionRequest returns both the positive match reason and a
-// privacy-safe list of prompt signals. The signals make prompt drift visible in
-// DEBUG logs without recording the user's conversation text.
-func codexClassifyCompactionRequest(request *anthropicMessagesRequest) (reason, signals string) {
-	if request == nil {
-		return "", "none"
-	}
-	if codexIsCompactionSystem(request.System) {
-		return "system_summarizer", "system_summarizer"
-	}
-	// Claude Code 2.1.223 keeps its normal system prompt and puts the internal
-	// compaction instructions in one of the final user messages. Require two
-	// stable prompt phrases so a normal discussion about summaries cannot enter
-	// the destructive history-trimming path.
-	first := len(request.Messages) - 3
-	if first < 0 {
-		first = 0
-	}
-	seen := make(map[string]bool)
-	addSignal := func(name string, matched bool) {
-		if matched {
-			seen[name] = true
+// responsesNeedFlattening reports whether a request uses tool kinds only the
+// OpenAI/Codex backend implements: custom (freeform) tools, namespaces and
+// client-executed tool search.
+func responsesNeedFlattening(payload map[string]any) bool {
+	tools, _ := payload["tools"].([]any)
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		switch tool["type"] {
+		case "custom", "namespace":
+			return true
+		case "tool_search":
+			if tool["execution"] == "client" {
+				return true
+			}
 		}
 	}
-	for index := len(request.Messages) - 1; index >= first; index-- {
-		message := request.Messages[index]
-		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") {
-			continue
+	items, _ := payload["input"].([]any)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		switch item["type"] {
+		case "custom_tool_call", "custom_tool_call_output", "tool_search_call", "tool_search_output", "compaction":
+			return true
 		}
-		content := strings.ToLower(string(message.Content))
-		legacyDetailed := strings.Contains(content, "your task is to create a detailed summary of this conversation")
-		legacyContinuation := strings.Contains(content, "this summary will be placed at the start of a continuing session")
-		legacyTranscript := strings.Contains(content, "summarize this portion of a claude code session transcript")
-		focusMarker := strings.Contains(content, "focus on:")
-		sectionsMarker := strings.Contains(content, "your summary should include the following sections")
-		primaryRequestMarker := strings.Contains(content, "primary request and intent:")
-		plainTextMarker := strings.Contains(content, "respond with plain text only")
-		additionalInstructionsMarker := strings.Contains(content, "additional summarization instructions")
-		noToolsMarker := strings.Contains(content, "do not call any tools")
-		compactCommandMarker := strings.Contains(content, "<command-name>/compact</command-name>") ||
-			strings.Contains(content, `\u003ccommand-name\u003e/compact\u003c/command-name\u003e`)
-		addSignal("legacy_detailed", legacyDetailed)
-		addSignal("legacy_continuation", legacyContinuation)
-		addSignal("legacy_transcript", legacyTranscript)
-		addSignal("focus", focusMarker)
-		addSignal("summary_sections", sectionsMarker)
-		addSignal("primary_request", primaryRequestMarker)
-		addSignal("plain_text_only", plainTextMarker)
-		addSignal("additional_instructions", additionalInstructionsMarker)
-		addSignal("no_tools", noToolsMarker)
-		addSignal("compact_command", compactCommandMarker)
-		if legacyDetailed && legacyContinuation {
-			return "user_detailed_summary", joinCodexCompactionSignals(seen)
-		}
-		if legacyTranscript && focusMarker {
-			return "user_transcript_summary", joinCodexCompactionSignals(seen)
-		}
-		// Claude Code prompt wording changes across builds. These three
-		// structural labels describe the private compact protocol rather than a
-		// normal user request to summarize text.
-		if sectionsMarker && primaryRequestMarker && plainTextMarker &&
-			(additionalInstructionsMarker || noToolsMarker) {
-			return "user_structured_summary", joinCodexCompactionSignals(seen)
-		}
-	}
-	return "", joinCodexCompactionSignals(seen)
-}
-
-func joinCodexCompactionSignals(seen map[string]bool) string {
-	order := []string{
-		"system_summarizer", "legacy_detailed", "legacy_continuation", "legacy_transcript", "focus",
-		"summary_sections", "primary_request", "plain_text_only", "additional_instructions", "no_tools", "compact_command",
-	}
-	matched := make([]string, 0, len(seen))
-	for _, name := range order {
-		if seen[name] {
-			matched = append(matched, name)
-		}
-	}
-	if len(matched) == 0 {
-		return "none"
-	}
-	return strings.Join(matched, ",")
-}
-
-func codexRequestFingerprint(body []byte) string {
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:6])
-}
-
-func codexIsCompactionSystem(raw json.RawMessage) bool {
-	const marker = "tasked with summarizing conversations"
-	for _, item := range codexSystemContent(raw) {
-		block, _ := item.(map[string]any)
-		if strings.Contains(strings.ToLower(stringValue(block["text"])), marker) {
+		if namespace, _ := item["namespace"].(string); namespace != "" {
 			return true
 		}
 	}
 	return false
 }
 
-func codexRequestIdentity(metadata *anthropicRequestMetadata, fallbackSessionID ...string) (sessionID, promptCacheKey string) {
-	if metadata != nil {
-		userID := strings.TrimSpace(metadata.UserID)
-		if userID != "" {
-			promptCacheKey = userID
-			if match := kiroSessionUUIDPattern.FindStringSubmatch(userID); len(match) == 2 {
-				sessionID = match[1]
+// convertResponsesForUpstream re-renders a Responses request with plain
+// function tools.
+func convertResponsesForUpstream(raw []byte, sessionID string) (*codexResponsesConvertedRequest, error) {
+	request, err := parseResponsesRequest(raw)
+	if err != nil {
+		return nil, err
+	}
+	upstreamModel := stripContextModelSuffix(request.Model)
+	input := make([]any, 0, len(request.Turns))
+	for _, turn := range request.Turns {
+		items, err := codexTurnItems(turn)
+		if err != nil {
+			return nil, err
+		}
+		input = append(input, items...)
+	}
+	reasoning := map[string]any{}
+	if request.Effort != "" {
+		reasoning["effort"] = request.Effort
+	}
+	if request.thinkingEnabled() {
+		reasoning["summary"] = "auto"
+	}
+	body := map[string]any{
+		"model":        upstreamModel,
+		"instructions": request.System,
+		"input":        input,
+		"stream":       true,
+		"store":        false,
+		"include":      []string{"reasoning.encrypted_content"},
+	}
+	if len(reasoning) > 0 {
+		body["reasoning"] = reasoning
+	}
+	if request.ParallelToolCalls != nil {
+		body["parallel_tool_calls"] = *request.ParallelToolCalls
+	}
+	if request.MaxOutputTokens > 0 {
+		body["max_output_tokens"] = request.MaxOutputTokens
+	}
+	if format := structuredOutputSchema(request.Format); format != nil {
+		format["type"] = "json_schema"
+		body["text"] = map[string]any{"format": format}
+	}
+	switch request.ServiceTier {
+	case "priority", "flex", "default", "auto":
+		body["service_tier"] = request.ServiceTier
+	}
+	if len(request.Tools) > 0 {
+		tools := make([]any, 0, len(request.Tools))
+		for _, tool := range request.Tools {
+			parameters := map[string]any{}
+			if len(tool.Parameters) > 0 && string(tool.Parameters) != "null" {
+				if err := decodeProtocolJSON(tool.Parameters, &parameters); err != nil {
+					return nil, fmt.Errorf("invalid parameters for tool %s: %w", tool.Name, err)
+				}
 			}
+			if stringValue(parameters["type"]) == "" {
+				parameters["type"] = "object"
+			}
+			if parameters["type"] == "object" && parameters["properties"] == nil {
+				parameters["properties"] = map[string]any{}
+			}
+			delete(parameters, "$schema")
+			tools = append(tools, map[string]any{
+				"type": "function", "name": tool.Name, "description": tool.Description,
+				"parameters": parameters, "strict": false,
+			})
+		}
+		body["tools"] = tools
+		switch request.ToolChoice.Mode {
+		case toolChoiceTool:
+			body["tool_choice"] = map[string]any{"type": "function", "name": request.ToolChoice.Name}
+		case toolChoiceNone, toolChoiceRequired:
+			body["tool_choice"] = request.ToolChoice.Mode
+		default:
+			body["tool_choice"] = toolChoiceAuto
 		}
 	}
-	if sessionID == "" {
-		if len(fallbackSessionID) > 0 {
-			sessionID = fallbackSessionID[0]
-		}
+	if request.CacheKey != "" {
+		body["prompt_cache_key"] = request.CacheKey
+	} else if sessionID != "" {
+		body["prompt_cache_key"] = sessionID
 	}
-	if sessionID == "" {
-		sessionID = uuidString()
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("encode Responses request: %w", err)
 	}
-	if promptCacheKey == "" {
-		promptCacheKey = sessionID
-	}
-	return sessionID, promptCacheKey
+	return &codexResponsesConvertedRequest{
+		adapterRequest: request.adapter(upstreamModel),
+		body:           encoded, model: upstreamModel, sessionID: sessionID,
+	}, nil
 }
 
-func codexSystemContent(raw json.RawMessage) []any {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
+// codexTurnItems renders one conversation turn as Responses input items.
+func codexTurnItems(turn conversationTurn) ([]any, error) {
+	textType := "input_text"
+	if turn.Role == "assistant" {
+		textType = "output_text"
 	}
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		if text == "" {
-			return nil
-		}
-		return []any{map[string]any{"type": "input_text", "text": text}}
-	}
-	var blocks []map[string]any
-	if json.Unmarshal(raw, &blocks) != nil {
-		return nil
-	}
-	content := make([]any, 0, len(blocks))
-	for _, block := range blocks {
-		if block["type"] == "text" {
-			if value, _ := block["text"].(string); value != "" {
-				content = append(content, map[string]any{"type": "input_text", "text": value})
-			}
-		}
-	}
-	return content
-}
-
-func codexMessageItems(message anthropicMessage, toolNames map[string]string) ([]any, error) {
-	role := strings.ToLower(strings.TrimSpace(message.Role))
-	if role != "assistant" {
-		role = "user"
-	}
-	var stringContent string
-	if json.Unmarshal(message.Content, &stringContent) == nil {
-		contentType := "input_text"
-		if role == "assistant" {
-			contentType = "output_text"
-		}
-		return []any{map[string]any{"type": "message", "role": role, "content": []any{
-			map[string]any{"type": contentType, "text": stringContent},
-		}}}, nil
-	}
-
-	var blocks []map[string]any
-	if err := decodeProtocolJSON(message.Content, &blocks); err != nil {
-		return nil, fmt.Errorf("invalid %s message content: %w", role, err)
-	}
-	result := make([]any, 0, len(blocks))
-	content := make([]any, 0, len(blocks))
+	result := make([]any, 0, len(turn.Parts))
+	var content []any
 	flush := func() {
 		if len(content) == 0 {
 			return
 		}
-		result = append(result, map[string]any{"type": "message", "role": role, "content": content})
-		content = make([]any, 0, len(blocks))
+		result = append(result, map[string]any{"type": "message", "role": turn.Role, "content": content})
+		content = nil
 	}
-	for index, block := range blocks {
-		kind, _ := block["type"].(string)
-		switch kind {
-		case "text":
-			text, _ := block["text"].(string)
-			partType := "input_text"
-			if role == "assistant" {
-				partType = "output_text"
-			}
-			content = append(content, map[string]any{"type": partType, "text": text})
-		case "image":
-			if imageURL := codexDataURL(block["source"]); imageURL != "" {
-				content = append(content, map[string]any{"type": "input_image", "image_url": imageURL})
-			}
-		case "document":
-			if fileData := codexPDFDataURL(block["source"]); fileData != "" {
-				content = append(content, map[string]any{"type": "input_file", "file_data": fileData, "filename": "document.pdf"})
-			}
-		case "thinking", "redacted_thinking":
-			if role != "assistant" {
+	for _, part := range turn.Parts {
+		switch part.Kind {
+		case partText:
+			content = append(content, map[string]any{"type": textType, "text": part.Text})
+		case partImage:
+			content = append(content, map[string]any{"type": "input_image", "image_url": part.imageURL()})
+		case partReasoning:
+			if turn.Role != "assistant" || !strings.HasPrefix(part.Signature, codexReasoningSignaturePrefix) {
 				continue
 			}
-			signature, _ := block["signature"].(string)
-			if signature == "" {
-				signature, _ = block["data"].(string)
+			item, err := codexReasoningFromSignature(part.Signature)
+			if err != nil {
+				return nil, err
 			}
-			if codexReplayableSignature(signature) {
-				item, err := codexReasoningFromSignature(signature)
-				if err != nil {
-					return nil, err
+			flush()
+			result = append(result, item)
+		case partToolCall:
+			flush()
+			result = append(result, map[string]any{
+				"type": "function_call", "call_id": part.CallID, "name": part.Name, "arguments": string(part.Arguments),
+			})
+		case partToolResult:
+			flush()
+			var output any = part.outputText()
+			if images := part.outputImages(); len(images) > 0 {
+				parts := make([]any, 0, len(part.Output))
+				for _, piece := range part.Output {
+					if piece.Kind == partImage {
+						parts = append(parts, map[string]any{"type": "input_image", "image_url": piece.imageURL()})
+					} else if piece.Text != "" {
+						parts = append(parts, map[string]any{"type": "input_text", "text": piece.Text})
+					}
 				}
-				flush()
-				result = append(result, item)
+				output = parts
 			}
-		case "tool_use":
-			flush()
-			name, _ := block["name"].(string)
-			if short := toolNames[name]; short != "" {
-				name = short
-			} else {
-				name = codexShortName(name)
-			}
-			arguments := gjson.GetBytes(message.Content, fmt.Sprintf("%d.input", index)).Raw
-			if arguments == "" || arguments == "null" {
-				arguments = "{}"
-			}
-			result = append(result, map[string]any{
-				"type": "function_call", "call_id": codexShortCallID(stringValue(block["id"])),
-				"name": name, "arguments": arguments,
-			})
-		case "tool_result":
-			flush()
-			result = append(result, map[string]any{
-				"type": "function_call_output", "call_id": codexShortCallID(stringValue(block["tool_use_id"])),
-				"output": codexToolResultOutput(block["content"]),
-			})
+			result = append(result, map[string]any{"type": "function_call_output", "call_id": part.CallID, "output": output})
 		}
 	}
 	flush()
 	return result, nil
 }
 
-func codexDataURL(source any) string {
-	value, _ := source.(map[string]any)
-	if value == nil {
-		return ""
-	}
-	if strings.EqualFold(stringValue(value["type"]), "url") {
-		return stringValue(value["url"])
-	}
-	data := stringValue(value["data"])
-	if data == "" {
-		data = stringValue(value["base64"])
-	}
-	if data == "" {
-		return ""
-	}
-	mediaType := stringValue(value["media_type"])
-	if mediaType == "" {
-		mediaType = stringValue(value["mime_type"])
-	}
-	if mediaType == "" {
-		mediaType = "application/octet-stream"
-	}
-	return "data:" + mediaType + ";base64," + data
-}
-
-func codexPDFDataURL(source any) string {
-	value, _ := source.(map[string]any)
-	if value == nil || !strings.EqualFold(stringValue(value["media_type"]), "application/pdf") {
-		return ""
-	}
-	return codexDataURL(source)
-}
-
-func codexToolResultOutput(raw any) any {
-	if text, ok := raw.(string); ok {
-		return text
-	}
-	blocks, _ := raw.([]any)
-	output := make([]any, 0, len(blocks))
-	for _, item := range blocks {
-		block, _ := item.(map[string]any)
-		if block == nil {
-			continue
-		}
-		switch stringValue(block["type"]) {
-		case "text":
-			output = append(output, map[string]any{"type": "input_text", "text": stringValue(block["text"])})
-		case "image":
-			if value := codexDataURL(block["source"]); value != "" {
-				output = append(output, map[string]any{"type": "input_image", "image_url": value})
-			}
-		}
-	}
-	if len(output) == 0 {
-		return ""
-	}
-	return output
-}
-
-func codexTools(tools []anthropicTool, names map[string]string) ([]any, error) {
-	result := make([]any, 0, len(tools))
-	for _, tool := range tools {
-		name := names[tool.Name]
-		if name == "" {
-			name = codexShortName(tool.Name)
-		}
-		parameters := map[string]any{}
-		if len(tool.InputSchema) > 0 && string(tool.InputSchema) != "null" {
-			if err := decodeProtocolJSON(tool.InputSchema, &parameters); err != nil {
-				return nil, fmt.Errorf("invalid input_schema for tool %s: %w", tool.Name, err)
-			}
-		}
-		if stringValue(parameters["type"]) == "" {
-			parameters["type"] = "object"
-		}
-		if parameters["type"] == "object" && parameters["properties"] == nil {
-			parameters["properties"] = map[string]any{}
-		}
-		delete(parameters, "$schema")
-		result = append(result, map[string]any{
-			"type": "function", "name": name, "description": tool.Description,
-			"parameters": parameters, "strict": false,
-		})
-	}
-	return result, nil
-}
-
-func codexToolNameMaps(tools []anthropicTool) (map[string]string, map[string]string) {
-	originalToShort := make(map[string]string, len(tools))
-	shortToOriginal := make(map[string]string, len(tools))
-	used := make(map[string]bool, len(tools))
-	for _, tool := range tools {
-		candidate := codexShortName(tool.Name)
-		if used[candidate] {
-			digest := sha256.Sum256([]byte(tool.Name))
-			suffix := "_" + hex.EncodeToString(digest[:4])
-			limit := codexResponsesNameLimit - len(suffix)
-			if len(candidate) > limit {
-				candidate = candidate[:limit]
-			}
-			candidate += suffix
-		}
-		used[candidate] = true
-		originalToShort[tool.Name] = candidate
-		shortToOriginal[candidate] = tool.Name
-	}
-	return originalToShort, shortToOriginal
-}
-
-func codexShortName(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) <= codexResponsesNameLimit {
-		return value
-	}
-	if strings.HasPrefix(value, "mcp__") {
-		if index := strings.LastIndex(value, "__"); index > 0 {
-			value = "mcp__" + value[index+2:]
-		}
-	}
-	if len(value) > codexResponsesNameLimit {
-		value = value[:codexResponsesNameLimit]
-	}
-	return value
-}
-
-func codexShortCallID(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) <= codexResponsesNameLimit {
-		return value
-	}
-	digest := sha256.Sum256([]byte(value))
-	suffix := "_" + hex.EncodeToString(digest[:4])
-	return value[:codexResponsesNameLimit-len(suffix)] + suffix
-}
-
-func codexToolChoice(raw json.RawMessage, names map[string]string) any {
-	if len(raw) == 0 || string(raw) == "null" {
-		return "auto"
-	}
-	var choice map[string]any
-	if json.Unmarshal(raw, &choice) != nil {
-		return "auto"
-	}
-	switch strings.ToLower(stringValue(choice["type"])) {
-	case "any":
-		return "required"
-	case "none":
-		return "none"
-	case "tool":
-		name := stringValue(choice["name"])
-		if short := names[name]; short != "" {
-			name = short
-		}
-		return map[string]any{"type": "function", "name": name}
-	default:
-		return "auto"
-	}
-}
-
-func codexParallelToolCalls(raw json.RawMessage) bool {
-	var choice map[string]any
-	if json.Unmarshal(raw, &choice) == nil {
-		if disabled, ok := choice["disable_parallel_tool_use"].(bool); ok {
-			return !disabled
-		}
-	}
-	return true
-}
-
-func codexReasoningEffort(thinking *anthropicThinking, output *anthropicOutput) string {
-	if thinking == nil {
-		return "medium"
-	}
-	switch strings.ToLower(strings.TrimSpace(thinking.Type)) {
-	case "disabled":
-		return "none"
-	case "adaptive", "auto":
-		if output != nil {
-			if effort := strings.ToLower(strings.TrimSpace(output.Effort)); effort != "" {
-				return effort
-			}
-		}
-		return "xhigh"
-	case "enabled":
-		switch {
-		case thinking.BudgetTokens <= 0:
-			return "medium"
-		case thinking.BudgetTokens <= 2_000:
-			return "low"
-		case thinking.BudgetTokens <= 10_000:
-			return "medium"
-		case thinking.BudgetTokens <= 32_000:
-			return "high"
-		default:
-			return "xhigh"
-		}
-	default:
-		return "medium"
-	}
-}
-
-func codexServiceTier(tier, speed string) string {
-	if strings.EqualFold(strings.TrimSpace(speed), "fast") {
-		return "priority"
-	}
-	switch normalized := strings.ToLower(strings.TrimSpace(tier)); normalized {
-	case "priority", "flex", "default", "auto":
-		return normalized
-	default:
-		return ""
-	}
-}
-
-// The client persists signatures verbatim. Carry the entire native reasoning
-// item here so IDs, status, summary, null/absent fields and future fields survive
-// the Messages round trip, including across proxy restarts.
+// The client persists a reasoning item's encrypted_content verbatim. Carry the
+// entire upstream reasoning item there so IDs, status, summary, null/absent
+// fields and future fields survive the round trip, including across restarts.
 const codexReasoningSignaturePrefix = "ccl-responses-reasoning-v1:"
 
 func codexReasoningSignature(item map[string]any) (string, error) {
@@ -620,34 +216,13 @@ func codexReasoningSignature(item map[string]any) (string, error) {
 }
 
 func codexReasoningFromSignature(signature string) (any, error) {
-	if encoded, ok := strings.CutPrefix(signature, codexReasoningSignaturePrefix); ok {
-		raw, err := base64.StdEncoding.DecodeString(encoded)
-		var item map[string]json.RawMessage
-		if err != nil || json.Unmarshal(raw, &item) != nil || string(item["type"]) != `"reasoning"` {
-			return nil, fmt.Errorf("invalid CCL Responses reasoning signature")
-		}
-		return json.RawMessage(raw), nil
+	encoded, _ := strings.CutPrefix(signature, codexReasoningSignaturePrefix)
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	var item map[string]json.RawMessage
+	if err != nil || json.Unmarshal(raw, &item) != nil || string(item["type"]) != `"reasoning"` {
+		return nil, fmt.Errorf("invalid CCL Responses reasoning payload")
 	}
-	// Legacy sessions contain only the opaque encrypted payload. Keep their
-	// existing behavior; missing native fields cannot be reconstructed locally.
-	return map[string]any{"type": "reasoning", "summary": []any{}, "content": nil, "encrypted_content": signature}, nil
-}
-
-func codexReplayableSignature(signature string) bool {
-	signature = strings.TrimSpace(signature)
-	if strings.HasPrefix(signature, codexReasoningSignaturePrefix) {
-		return true
-	}
-	// Other adapters' envelopes and synthetic placeholders are not encrypted
-	// Responses state. Keep raw legacy Responses payloads replayable.
-	if strings.HasPrefix(signature, "ccl-") {
-		return false
-	}
-	switch signature {
-	case "", "kiro", "gemini", "qoder":
-		return false
-	}
-	return true
+	return json.RawMessage(raw), nil
 }
 
 func stringValue(value any) string {

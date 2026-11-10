@@ -117,8 +117,8 @@ func TestCodexPlanKeepsNativeProviderProfileAndEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
-		writeMessage(w, []map[string]any{{"type": "text", "text": "unused"}})
-	}, "anthropic", Options{Desktop: true})
+		writeChatText(w, r, "unused")
+	}, "openai", Options{Desktop: true})
 	overlay, err := Plan(context.Background(), g, t.TempDir())
 	if err != nil {
 		t.Fatal(err)

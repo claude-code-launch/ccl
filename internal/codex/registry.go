@@ -108,7 +108,7 @@ func (g *Gateway) ReplaceProviders(bindings []RuntimeBinding, persist func([]Mod
 	var cleanups []func()
 	for _, binding := range bindings {
 		p := binding.Provider
-		if binding.Runtime == nil || p.Name == "" || names[p.Name] || provider.IsClaudeAccount(p) || provider.IsDefaultProvider(p.Name) {
+		if binding.Runtime == nil || p.Name == "" || names[p.Name] || provider.ValidateRuntime(p) != nil {
 			return fmt.Errorf("invalid or duplicate Codex runtime binding")
 		}
 		names[p.Name] = true

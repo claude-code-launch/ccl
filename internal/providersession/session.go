@@ -1,5 +1,5 @@
 // Package providersession prepares the one provider runtime shape shared by
-// interactive Claude sessions and management commands.
+// Grok Build, Codex, and management commands.
 package providersession
 
 import (
@@ -18,59 +18,29 @@ import (
 type Session struct {
 	Provider provider.Provider
 	Runtime  *oauthproxy.Runtime
-	BaseURL  string
-	UseProxy bool
 
 	closeOnce sync.Once
 }
 
-// Prepare discovers any missing API-key gateway models, starts the shared
-// Anthropic Messages adapter when required, and returns the resolved endpoint.
+// Prepare discovers any missing API-key gateway models and starts a Responses runtime.
 func Prepare(ctx context.Context, configured provider.Provider) (*Session, error) {
-	return prepare(ctx, configured, false)
-}
-
-// PrepareProxy provides the local Messages endpoint used by Codex's protocol
-// adapter, including native Anthropic gateways that Claude can contact directly.
-func PrepareProxy(ctx context.Context, configured provider.Provider) (*Session, error) {
-	return prepare(ctx, configured, true)
-}
-
-func prepare(ctx context.Context, configured provider.Provider, forceProxy bool) (*Session, error) {
-	if provider.IsClaudeAccount(configured) {
-		return nil, fmt.Errorf("Claude subscription accounts use Claude Code's native login; use ccl --provider %s", configured.Name)
+	if err := provider.ValidateRuntime(configured); err != nil {
+		return nil, err
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	resolved := configured
 	resolved.Type = provider.EffectiveType(resolved)
-	session := &Session{
-		Provider: resolved,
-		BaseURL:  resolved.Endpoint,
-	}
-	session.UseProxy = forceProxy || provider.IsOpenAICompatibleType(resolved.Type) || provider.IsModelsDevType(resolved.Type) ||
-		strings.TrimSpace(resolved.OAuthProvider) != ""
-	if !session.UseProxy {
-		return session, nil
+
+	if strings.TrimSpace(resolved.OAuthProvider) == "" && strings.TrimSpace(resolved.Endpoint) == "" {
+		return nil, fmt.Errorf("provider %q requires an endpoint", resolved.Name)
 	}
 
 	// The provider has not declared its own model pool: discover it from the
 	// gateway's OpenAI-shaped model list before the runtime starts.
 	if resolved.OAuthProvider == "" && strings.TrimSpace(resolved.Model) == "" {
-		var models string
-		var err error
-		if provider.IsAnthropicType(resolved.Type) {
-			var infos []protocol.ModelInfo
-			infos, err = protocol.GetAnthropicModelInfosWithAuthContext(ctx, resolved.Endpoint, resolved.APIKey, resolved.AnthropicAuth)
-			ids := make([]string, 0, len(infos))
-			for _, info := range infos {
-				ids = append(ids, info.ID)
-			}
-			models = strings.Join(ids, ",")
-		} else {
-			models, err = protocol.GetOpenAIModelsContext(ctx, resolved.Endpoint, resolved.APIKey)
-		}
+		models, err := protocol.GetOpenAIModelsContext(ctx, resolved.Endpoint, resolved.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("discover OpenAI models before starting the provider runtime: %w", err)
 		}
@@ -81,7 +51,6 @@ func prepare(ctx context.Context, configured provider.Provider, forceProxy bool)
 		Protocol:               upstreamProtocol(resolved),
 		Endpoint:               resolved.Endpoint,
 		APIKey:                 resolved.APIKey,
-		AnthropicAuth:          resolved.AnthropicAuth,
 		ModelSpec:              provider.RuntimeModelSpec(resolved),
 		OAuthProvider:          resolved.OAuthProvider,
 		OAuthAccountCredential: resolved.OAuthAccountCredential,
@@ -102,16 +71,10 @@ func prepare(ctx context.Context, configured provider.Provider, forceProxy bool)
 			resolved.Model = strings.Join(runtimeModels, ",")
 		}
 	}
-	session.Provider = resolved
-	session.Runtime = runtime
-	session.BaseURL = runtime.ClaudeBaseURL()
-	return session, nil
+	return &Session{Provider: resolved, Runtime: runtime}, nil
 }
 
 func upstreamProtocol(p provider.Provider) oauthproxy.UpstreamProtocol {
-	if provider.IsAnthropicType(p.Type) {
-		return oauthproxy.ProtocolAnthropic
-	}
 	if provider.IsOpenAIResponsesType(p.Type) {
 		return oauthproxy.ProtocolOpenAIResponses
 	}

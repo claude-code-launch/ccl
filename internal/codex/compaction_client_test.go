@@ -20,13 +20,6 @@ import (
 // Exercise remote compaction with the real client's streaming decoder and
 // persisted history. A JSON-only gateway test cannot verify the second turn.
 func TestRealCodexContinuesAfterRemoteCompaction(t *testing.T) {
-	for _, protocol := range []string{"anthropic", "openai"} {
-		t.Run(protocol, func(t *testing.T) { realCodexContinuesAfterRemoteCompaction(t, protocol) })
-	}
-}
-
-func realCodexContinuesAfterRemoteCompaction(t *testing.T, protocol string) {
-	t.Helper()
 	executable := os.Getenv("CCL_TEST_CODEX")
 	if executable == "" {
 		t.Skip("set CCL_TEST_CODEX to the official Codex client")
@@ -53,14 +46,7 @@ func realCodexContinuesAfterRemoteCompaction(t *testing.T, protocol string) {
 		}
 		raw, _ := json.Marshal(body["messages"])
 		reply := func(text string, tokens int) {
-			if protocol == "openai" {
-				w.Header().Set("Content-Type", "text/event-stream")
-				chunk, _ := json.Marshal(map[string]any{"id": "chat_fixture", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": text}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": tokens, "completion_tokens": 2, "total_tokens": tokens + 2}})
-				fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg_fixture", "type": "message", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": text}}, "stop_reason": "end_turn", "usage": map[string]any{"input_tokens": tokens, "output_tokens": 2}})
+			writeChatFixture(w, r, map[string]any{"content": text}, "stop", tokens)
 		}
 		if strings.Contains(textValue(body["system"])+string(raw), "Summarize the conversation") {
 			compactions.Add(1)
@@ -85,7 +71,7 @@ func realCodexContinuesAfterRemoteCompaction(t *testing.T, protocol string) {
 			tokens = 400000
 		}
 		reply(fmt.Sprintf("turn-%d-done", turn), tokens)
-	}, provider.Provider{Name: "chosen", Type: protocol, Model: "model-a", ContextPreset: provider.ContextPresetNameBalanced500K}, Options{Desktop: true})
+	}, provider.Provider{Name: "chosen", Type: "openai", Model: "model-a", ContextPreset: provider.ContextPresetNameBalanced500K}, Options{Desktop: true})
 	overlay, err := Plan(context.Background(), g, filepath.Join(home, "proxy"))
 	if err != nil {
 		t.Fatal(err)

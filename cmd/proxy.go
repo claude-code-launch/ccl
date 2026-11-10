@@ -91,8 +91,8 @@ func runProxyStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if provider.IsClaudeAccount(p) {
-		return fmt.Errorf("Claude subscription accounts use Claude Code directly; use ccl --provider %s", name)
+	if err := provider.ValidateRuntime(p); err != nil {
+		return err
 	}
 	m, err := proxymanager.Default()
 	if err != nil {
@@ -196,7 +196,7 @@ with their saved model provider: restore --independent for ccl_proxy chats, or
 fork a chat to continue its history on a different provider. Use --shared to
 return to native models. Starts and menu switches inherit the running mode;
 after stopping the proxy, a start without either mode flag defaults to shared.
-Only Codex configuration is managed; ordinary ccl/Claude Code launches remain
+Only Codex configuration is managed; ordinary Grok Build launches remain
 independent. Stopping restores only unchanged owned fields, retaining user edits.
 Upgrading an older shared proxy also restores its legacy Claude settings once.`}
 	command.PersistentFlags().StringP("provider", "p", "", "Provider name (defaults to the active provider)")

@@ -53,7 +53,7 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  acp", "  oauth", "  bypass", "  log", "  ls", "  use", "  set", "  map", "  provider", "  cloud"} {
+	for _, want := range []string{"  codex", "  oauth", "  bypass", "  log", "  ls", "  use", "  set", "  map", "  provider", "  cloud"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
@@ -101,9 +101,9 @@ func TestProviderSubcommandAliasesExist(t *testing.T) {
 
 // TestResolveProviderIgnoresShellCredentials pins S11: with no provider
 // selected, keys exported in the shell for other tools must not become an
-// implicit, billed Claude Code provider.
+// implicit, billed Grok Build provider.
 func TestResolveProviderIgnoresShellCredentials(t *testing.T) {
-	saveToggleFixture(t, &provider.Config{})
+	saveGrokFixture(t, &provider.Config{})
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "bearer-token")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://token.sensenova.cn/v1")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-other-tool")
@@ -133,16 +133,6 @@ func TestProviderAuthLabelAcceptsDisplayProtocolLabels(t *testing.T) {
 			name: "openai agent display label",
 			p:    provider.Provider{Type: "openai(agent)"},
 			want: "bearer",
-		},
-		{
-			name: "anthropic bearer",
-			p:    provider.Provider{Type: "anthropic", AnthropicAuth: "bearer"},
-			want: "bearer",
-		},
-		{
-			name: "anthropic x-api-key",
-			p:    provider.Provider{Type: "anthropic"},
-			want: "x-api-key",
 		},
 	}
 
@@ -195,7 +185,7 @@ func TestCredentialPageShowsAPIKeyPlaintext(t *testing.T) {
 	m := NewAdvancedConfigModel(&p)
 	view := renderView(t, m)
 
-	for _, want := range []string{locale.T("端点 URL", "Endpoint URL"), "API Key", locale.T("协议: ", "Protocol: ") + "Anthropic"} {
+	for _, want := range []string{locale.T("端点 URL", "Endpoint URL"), "API Key", "‹ Retired ›"} {
 		if !contains(view, want) {
 			t.Fatalf("expected credential page to contain %q, got: %s", want, view)
 		}
@@ -210,7 +200,6 @@ func TestCredentialPageShowsAPIKeyPlaintext(t *testing.T) {
 func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	cfg := &provider.Config{
 		ActiveProvider: "beta",
-		ACPProvider:    "beta",
 		Providers: map[string]provider.Provider{
 			"beta": {
 				Name:        "beta",
@@ -229,7 +218,7 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"Registered providers:", "NAME", "USED BY", "TYPE/AUTH", "MODELS", "beta", "normal+ACP", "openai-chat/bearer", "4"} {
+	for _, want := range []string{"Registered providers:", "NAME", "USED BY", "TYPE/AUTH", "MODELS", "beta", "Grok Build", "openai-chat/bearer", "4"} {
 		if !contains(out, want) {
 			t.Fatalf("expected compact output to contain %q, got:\n%s", want, out)
 		}
@@ -249,10 +238,9 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 	}
 }
 
-func TestPrintProvidersShowsNormalAndACPSelections(t *testing.T) {
+func TestPrintProvidersShowsGrokSelection(t *testing.T) {
 	cfg := &provider.Config{
 		ActiveProvider: "normal-config",
-		ACPProvider:    "acp-config",
 		Providers: map[string]provider.Provider{
 			"normal-config": {Name: "normal-config", Type: "anthropic"},
 			"acp-config":    {Name: "acp-config", Type: "openai"},
@@ -265,7 +253,7 @@ func TestPrintProvidersShowsNormalAndACPSelections(t *testing.T) {
 		t.Fatalf("printProviders failed: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"normal-config  normal", "acp-config     ACP", "unused         -"} {
+	for _, want := range []string{"normal-config  Grok Build", "acp-config     -", "unused         -"} {
 		if !contains(out, want) {
 			t.Fatalf("provider selection %q missing from:\n%s", want, out)
 		}
@@ -279,7 +267,7 @@ func TestProviderTypeAuthSummaryUsesCompactOAuthBackend(t *testing.T) {
 		want string
 	}{
 		{name: "autoclaw oauth", p: provider.Provider{Type: "autoclaw", OAuthProvider: "autoclaw"}, want: "autoclaw/oauth"},
-		{name: "anthropic key", p: provider.Provider{Type: "anthropic"}, want: "anthropic-messages/x-api-key"},
+		{name: "anthropic key", p: provider.Provider{Type: "anthropic"}, want: "anthropic/retired/unknown"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,7 +281,6 @@ func TestProviderTypeAuthSummaryUsesCompactOAuthBackend(t *testing.T) {
 func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	cfg := &provider.Config{
 		ActiveProvider: "beta",
-		ACPProvider:    "beta",
 		Providers: map[string]provider.Provider{
 			"beta": {
 				Name:     "beta",
@@ -310,7 +297,7 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"beta", "Used By  : normal+ACP", "Endpoint : https://example.com/v1", "Models   : 4", "Pool IDs : pool-a,pool-b,pool-c,pool-d"} {
+	for _, want := range []string{"beta", "Used By  : Grok Build", "Endpoint : https://example.com/v1", "Models   : 4", "Pool IDs : pool-a,pool-b,pool-c,pool-d"} {
 		if !contains(out, want) {
 			t.Fatalf("expected detailed output to contain %q, got:\n%s", want, out)
 		}
@@ -435,7 +422,7 @@ func TestMapAutoClearsStaleContextPreset(t *testing.T) {
 	}
 	p := updated.Providers["mock"]
 	// ccl declares no context size any more, so a preset written by an older
-	// version is cleared and Claude Code sizes the session per slot.
+	// version is cleared and Grok Build sizes the session per slot.
 	for _, key := range []string{maxContextTokensEnv, autoCompactWindowEnv, autoCompactPctEnv} {
 		if value, ok := p.Env[key]; ok {
 			t.Fatalf("stale %s survived map auto: %q", key, value)

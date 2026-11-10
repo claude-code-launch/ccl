@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,8 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
-	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/cloudsync"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
@@ -44,8 +41,7 @@ masked key, protocol, runtime, slot mappings). For subscription providers it
 also summarizes credential health, including invalid and quota markers.
 
 Model pool (provider.Model) is an optional candidate list used by ccl set/map
-for discovery and bulk checks. Claude Code actually uses the slot mappings
-(Opus/Sonnet/Haiku/Fable/Custom/Subagent). An empty pool with filled slots is normal.
+for discovery and bulk checks. Grok Build uses mapped default and helper models. An empty pool with filled slots is normal.
 
 Doctor only reads: it lists models and checks the endpoint with a catalog
 request, and never changes ~/.ccl/config.yaml. --probe additionally sends a
@@ -53,7 +49,7 @@ request, and never changes ~/.ccl/config.yaml. --probe additionally sends a
 
 Note: root "ccl status" is cloud sync status (see "ccl cloud status"), not this command.
 For live request failures enable "ccl log on" and check the session log file
-when the Claude session ends (default ~/.ccl/logs/ccl-debug-claude_<id>.log).
+when the Grok Build session ends (default ~/.ccl/logs/ccl-debug-grok_<id>.log).
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor(cmd.Context(), probe, *target)
@@ -126,39 +122,31 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 
 	doctorSection("Environment")
 
-	// 1. Check Claude CLI. Claude Code ships as a native binary, so Node.js is
-	// no longer a prerequisite and is not checked.
-	claudeInstalled := IsInstalled()
-	if !claudeInstalled {
-		// Report it, do not fix it: doctor is a diagnostic, so it must not
-		// download and run an installer as a side effect of being asked for a
-		// health report. Launching a session offers that.
-		doctorErr("Claude Code CLI: not installed or not in PATH")
-		doctorHint("Run `ccl` to be offered the installer, or install manually: https://code.claude.com/")
+	if path, err := lookGrokBinary(); err == nil {
+		doctorOK("Grok Build CLI: " + path)
 	} else {
-		claudePath, _ := exec.LookPath("claude")
-		doctorOK("Claude Code CLI: " + claudePath)
-	}
-	// ccl acp only: a missing adapter is not an error for normal launches.
-	if adapter, err := resolveACPAdapter(""); err != nil {
-		doctorInfo("ACP adapter (ccl acp only): not installed")
-		doctorHint(acpInstallHint())
-	} else if _, err := resolveNode(); err != nil {
-		doctorWarn("ACP adapter: " + adapter + "; " + err.Error())
-	} else {
-		doctorOK("ACP adapter: " + adapter)
+		doctorErr("Grok Build CLI: not installed")
+		doctorHint("Install Grok Build from https://x.ai/cli")
 	}
 
-	// 2. Check Configuration File
 	cfg, err := config.Load()
 	if err != nil {
 		doctorErr(fmt.Sprintf("Config: %v", err))
 		return nil
 	}
+	if provider.IsDefaultProvider(cfg.ActiveProvider) && target.name == "" {
+		if strings.TrimSpace(cfg.LegacyClaudeDefault) != "" {
+			doctorErr("The default Claude account has been retired. Run ccl use default or choose another provider.")
+		} else {
+			doctorInfo("Active provider: default (Grok Build's own login)")
+		}
+		printCloudSyncDiagnostics()
+		return nil
+	}
 	doctorOK("Config: " + config.ConfigPath())
 	printCloudSyncDiagnostics()
 
-	// 3. Check the provider (active, or --provider / --acp)
+	// 3. Check the provider (active, or --provider)
 	name, err := target.resolve(cfg)
 	if err != nil {
 		doctorSection("Provider")
@@ -167,22 +155,6 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 	}
 	doctorSection("Provider · " + name)
 	p := cfg.Providers[name]
-	if provider.IsClaudeAccount(p) {
-		doctorSection("Claude subscription account")
-		store, err := claudeaccount.Open()
-		if err != nil {
-			doctorErr(err.Error())
-			return nil
-		}
-		profile, err := store.Profile(p.OAuthAccountCredential)
-		if err != nil {
-			doctorErr(err.Error())
-			return nil
-		}
-		doctorOK("Local Claude profile: " + profile)
-		doctorHint("Claude Code manages sign-in, token refresh and model selection")
-		return nil
-	}
 
 	printDoctorProviderIdentity(p)
 	printDoctorProviderDetails(p)
@@ -208,16 +180,8 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 	printDoctorContextBudget(p, configuredProvider, modelNames)
 
 	// 4. Test Endpoint reachability and API Authentication key
-	endpointReachable := false
-	switch {
-	case provider.IsAutoClawType(configuredProvider.Type) || provider.IsAutoClawType(p.Type):
-		// AutoClaw is prepared as a local Anthropic runtime. This minimal probe
-		// crosses that runtime and therefore verifies the local credential binding,
-		// CCL's request conversion, and the managed Chat route together.
-		endpointReachable = checkDoctorAutoClawConnectivity(ctx, p)
-	case p.Endpoint != "":
-		endpointReachable = checkDoctorConnectivity(ctx, p)
-	}
+	probeTarget := modelProbeTarget(configuredProvider, p)
+	endpointReachable := probeTarget.Endpoint != "" && checkDoctorConnectivity(ctx, probeTarget)
 
 	// 5. Optionally send a 1-token request to each pooled model. It costs real
 	// requests (Qoder credits), so it only runs on
@@ -231,8 +195,7 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 				doctorHint("Run `ccl doctor --probe` or `ccl models --probe` to send a 1-token test to each (billed).")
 				return nil
 			}
-			probeTarget := modelProbeTarget(configuredProvider, p)
-			availableSet := testModelsConcurrently(ctx, configuredModels, probeTarget.Endpoint, probeTarget.APIKey, probeWireType(probeTarget), probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
+			availableSet := testModelsConcurrently(ctx, configuredModels, probeTarget.Endpoint, probeTarget.APIKey, probeWireType(probeTarget), probeTarget.ModelProtocols)
 			available, unavailable := classifyModels(configuredModels, availableSet)
 			doctorKV("Summary", modelVerificationSummary(available, unavailable))
 			if len(unavailable) > 0 {
@@ -246,10 +209,8 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 
 // printDoctorContextBudget reports how this session will be sized.
 //
-// Default leaves Claude Code on its native 200K/1M per-slot behavior. The two
-// Balanced tiers declare a provider-wide 500K or 800K window and compact at 85%
-// (approximately 425K or 680K). This section shows the effective mode and checks
-// it against advertised backend windows.
+// Codex advertises a default 200K or 1M window and two Balanced presets
+// that compact at 85% of their advertised window.
 //
 // runtimeProvider carries the live endpoint/key of the embedded runtime;
 // configured carries the user's ccl config.
@@ -262,8 +223,8 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 	if contextEnv == nil {
 		contextEnv = configured.Env
 	}
-	maxContext := parseDoctorTokenEnv(contextEnv[maxContextTokensEnv])
-	compactWindow := parseDoctorTokenEnv(contextEnv[autoCompactWindowEnv])
+	maxContext := parseDoctorTokenEnv(contextEnv[provider.EnvMaxContextTokens])
+	compactWindow := parseDoctorTokenEnv(contextEnv[provider.EnvAutoCompactWindow])
 	compactPct := strings.TrimSpace(contextEnv[provider.EnvAutoCompactPct])
 	overridden := maxContext > 0 || compactWindow > 0 || compactPct != ""
 	// Never probe with an unset endpoint: NormalizeOpenAIModelsURL falls back to
@@ -273,7 +234,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 	var source string
 	if endpoint := strings.TrimSpace(runtimeProvider.Endpoint); endpoint != "" &&
 		!provider.IsAnthropicType(runtimeProvider.Type) {
-		windows, source = claude.AdvertisedContextWindows(endpoint, runtimeProvider.APIKey)
+		windows, source = advertisedContextWindows(endpoint, runtimeProvider.APIKey)
 	}
 	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
 
@@ -302,11 +263,11 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 		doctorKV("Auto-compact pct", fmt.Sprintf("85%% (~%s)", balancedCompactAt))
 	} else if unsupported {
 		doctorKV("Sizing", "Default (unsupported context override is ignored)")
-		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
+		doctorKV("Auto-compact at", "Codex default for the slot's window")
 		overridden = false
 	} else {
-		doctorKV("Sizing", "Default (Claude Code 200K / 1M)")
-		doctorKV("Auto-compact at", "Claude Code default for the slot's window")
+		doctorKV("Sizing", "Default (Codex 200K / 1M)")
+		doctorKV("Auto-compact at", "Codex default for the slot's window")
 	}
 
 	// Default sizes per slot; either Balanced tier intentionally applies one
@@ -321,7 +282,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 		}
 		advertised := "backend window unknown"
 		if window, ok := windows[strings.ToLower(slot.Model)]; ok && window > 0 {
-			advertised = "backend " + formatTokenCount(window) + ", " + claude.ContextClassLabel(window)
+			advertised = "backend " + formatTokenCount(window) + ", " + contextClassLabel(window)
 		}
 		doctorKV(slot.Slot, fmt.Sprintf("%s · %s · %s", providerCatalogModelLabel(slot.Model, modelNames), sizing, advertised))
 	}
@@ -335,7 +296,7 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 	}
 
 	printDoctorOneMConsistency(configured, windows)
-	if claude.MappedContextClassesDiffer(configured, windows) {
+	if mappedContextClassesDiffer(configured, windows) {
 		if balanced {
 			doctorInfo(fmt.Sprintf("Mapped models span both context classes; Default sizes them per slot, while Balanced applies one %s cap", balancedWindow))
 		} else {
@@ -344,25 +305,21 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 	}
 	printDoctorIgnoredContextEnv()
 	if !overridden {
-		doctorOK("Default mode; Claude Code keeps its native 200K/1M sizing")
+		doctorOK("Default mode; Codex keeps its native 200K/1M sizing")
 		return
 	}
 	if smallest > 0 && maxContext > smallest {
 		doctorWarn(fmt.Sprintf("Balanced context %s exceeds the %s window of %s",
 			formatTokenCount(maxContext), providerCatalogModelLabel(smallestModel, modelNames), formatTokenCount(smallest)))
-		doctorHint("Requests can be rejected with context_length_exceeded (HTTP 400) before Claude Code auto-compacts")
+		doctorHint("Requests can be rejected with context_length_exceeded (HTTP 400) before Codex auto-compacts")
 	}
-	doctorOK(fmt.Sprintf("Balanced mode; Claude Code compacts at 85%% of the %s window (~%s)", balancedWindow, balancedCompactAt))
+	doctorOK(fmt.Sprintf("Balanced mode; Codex compacts at 85%% of the %s window (~%s)", balancedWindow, balancedCompactAt))
 }
 
 // printDoctorOneMConsistency checks the [1m] markers against the advertised
 // windows.
 //
-// In Default mode the suffix tells Claude Code a slot runs the 1M variant: it
-// sizes the session for a 1M window and scales its auto-compact buffer to it, so
-// a [1m] marker on a model whose backend window is far smaller makes Claude Code
-// compact much too late and the upstream rejects the turn first. The suffix is
-// only an Anthropic capability signal — it never widens a third-party window.
+// The [1m] suffix tells Codex to use a 1M window and its matching compact limit.
 func printDoctorOneMConsistency(p provider.Provider, windows map[string]int) {
 	if len(windows) == 0 || provider.ProviderContextPreset(p) != provider.ContextPresetDefault {
 		return
@@ -381,7 +338,7 @@ func printDoctorOneMConsistency(p provider.Provider, windows map[string]int) {
 		}
 		doctorWarn(fmt.Sprintf("%s is marked [1m] but %s advertises only %s",
 			slot.Slot, slot.Model, formatTokenCount(window)))
-		doctorHint("Claude Code sizes the session (and its compact buffer) for 1M, so it compacts after the backend already refuses the request")
+		doctorHint("Codex sizes the session (and its compact buffer) for 1M, so it compacts after the backend already refuses the request")
 		doctorHint("Clear the Extended Context checkbox for that slot in `ccl set`, or confirm the backend really accepts 1M")
 	}
 }
@@ -411,7 +368,7 @@ func smallestMappedWindow(p provider.Provider, windows map[string]int) (smallest
 func printDoctorIgnoredContextEnv() {
 	for _, key := range provider.ManagedContextEnvKeys() {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-			doctorInfo(fmt.Sprintf("%s=%s is set in your shell and is ignored: ccl passes only its own variables to Claude Code", key, value))
+			doctorInfo(fmt.Sprintf("%s=%s is set in your shell and is ignored: ccl passes only its own variables to Codex", key, value))
 		}
 	}
 }
@@ -435,102 +392,6 @@ func formatTokenCount(tokens int) string {
 	default:
 		return strconv.Itoa(tokens)
 	}
-}
-
-// checkDoctorAutoClawConnectivity probes through CCL's local AutoClaw runtime.
-// The runtime loads and refreshes the bound OAuth/imported session itself, then
-// sends the converted request to AutoClaw's managed OpenAI Chat proxy.
-func checkDoctorAutoClawConnectivity(ctx context.Context, p provider.Provider) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	doctorSection("Connectivity")
-	doctorInfo("Checking the CCL AutoClaw runtime and managed Chat endpoint...")
-	status, body, err := probeAutoClawMessages(ctx, p)
-	if err != nil {
-		doctorErr(fmt.Sprintf("Endpoint is unreachable: %v", err))
-		return false
-	}
-	switch {
-	case status == http.StatusOK && autoClawResponseHasContent(body):
-		doctorOK(fmt.Sprintf("Connected and verified (HTTP %d)", status))
-		return true
-	case status == http.StatusOK:
-		doctorErr("Endpoint answered HTTP 200 with an empty stream")
-		doctorHint("Inspect the CCL debug log and confirm the selected AutoClaw model is available.")
-		return false
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		doctorErr(fmt.Sprintf("Authentication failed (HTTP %d). Run `ccl oauth autoclaw` again.", status))
-		return false
-	case status == http.StatusTooManyRequests:
-		doctorWarn(fmt.Sprintf("The coding plan is rate limited or out of quota (HTTP %d)", status))
-		return false
-	default:
-		if preview := doctorRedactBody(body, p.APIKey); preview != "" {
-			doctorWarn(fmt.Sprintf("Endpoint returned HTTP %d: %s", status, preview))
-		} else {
-			doctorWarn(fmt.Sprintf("Endpoint returned unexpected status (HTTP %d)", status))
-		}
-		return false
-	}
-}
-
-// probeAutoClawMessages sends one minimal Anthropic Messages request through
-// CCL's local AutoClaw adapter and returns the status/body for diagnostics.
-func probeAutoClawMessages(parent context.Context, p provider.Provider) (int, string, error) {
-	model := ""
-	if ids := oauthproxy.AutoClawModelIDs(); len(ids) > 0 {
-		model = ids[0]
-	}
-	payload, err := json.Marshal(map[string]any{
-		"model":      model,
-		"max_tokens": 1,
-		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-	})
-	if err != nil {
-		return 0, "", err
-	}
-	ctx, cancel := context.WithTimeout(parent, doctorProbeTimeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, buildAnthropicMessagesURL(p.Endpoint), bytes.NewReader(payload))
-	if err != nil {
-		return 0, "", err
-	}
-	setProviderAuthHeaders(request, p)
-	response, err := (&http.Client{Timeout: doctorProbeTimeout}).Do(request)
-	if err != nil {
-		return 0, "", err
-	}
-	defer response.Body.Close()
-	raw, readErr := io.ReadAll(io.LimitReader(response.Body, doctorProbeBodyLimit))
-	if readErr != nil {
-		return response.StatusCode, "", readErr
-	}
-	return response.StatusCode, string(raw), nil
-}
-
-// doctorProbeBodyLimit bounds the body a diagnostic probe keeps in memory.
-const doctorProbeBodyLimit = int64(64 << 10)
-
-// autoClawResponseHasContent reports whether a Messages response carried any
-// payload, either as inline JSON or as a non-empty SSE data event.
-func autoClawResponseHasContent(body string) bool {
-	for _, line := range strings.Split(body, "\n") {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case trimmed == "", strings.HasPrefix(trimmed, ":"), strings.HasPrefix(trimmed, "event:"):
-			continue
-		case strings.HasPrefix(trimmed, "data:"):
-			data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-			if data == "" || data == "[DONE]" {
-				continue
-			}
-			return true
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 // doctorRedactBody keeps an upstream diagnostic bounded and avoids echoing the
@@ -558,9 +419,6 @@ func checkDoctorConnectivity(ctx context.Context, p provider.Provider) bool {
 	client := &http.Client{Timeout: doctorProbeTimeout}
 
 	modelsURL := protocol.NormalizeOpenAIModelsURL(p.Endpoint)
-	if provider.IsAnthropicType(p.Type) {
-		modelsURL = protocol.NormalizeAnthropicModelsURL(p.Endpoint)
-	}
 
 	status, err := doctorProbeEndpoint(ctx, client, modelsURL, p)
 	if err != nil {
@@ -629,14 +487,8 @@ func printCloudSyncDiagnostics() {
 }
 
 // modelProbeTarget picks the provider a model-verification probe should hit.
-// An API-key provider (OpenAI-compatible, models.dev, direct Anthropic) is
-// probed on its configured upstream: the loopback runtime only exposes
-// /v1/messages, so upstream-shaped probes (Chat/Responses/Models) against it
-// systematically 404 and mark every healthy model unavailable. An OAuth
-// subscription has no HTTP endpoint of its own — its persisted endpoint is
-// oauth:// — so it keeps the loopback runtime, whose Anthropic Messages
-// surface is exactly what Claude Code talks to. This mirrors the ccl set page,
-// which probes probeEndpoint (raw input for API-key, runtime for OAuth).
+// API-key providers are probed on their configured upstream. OAuth providers
+// use the local Responses adapter with its bound credential.
 func modelProbeTarget(configured, runtime provider.Provider) provider.Provider {
 	if strings.TrimSpace(configured.OAuthProvider) != "" {
 		return runtime
@@ -649,7 +501,7 @@ func modelProbeTarget(configured, runtime provider.Provider) provider.Provider {
 // works. protocols carries the per-model wire table for mixed-protocol
 // models.dev gateways (nil for single-protocol providers).
 // Returns a set of model IDs that passed the test.
-func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string) map[string]bool {
+func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiKey, providerType string, protocols map[string]string) map[string]bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -687,7 +539,7 @@ func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiK
 			wg.Add(1)
 			go func(m string) {
 				defer wg.Done()
-				ok := testSingleModelWithProtocolsContext(ctx, m, endpoint, apiKey, providerType, anthropicAuth, protocols, modelProbeTimeout)
+				ok := testSingleModelWithProtocolsContext(ctx, m, endpoint, apiKey, providerType, protocols, modelProbeTimeout)
 				if ok {
 					mu.Lock()
 					available[m] = true
@@ -709,20 +561,17 @@ func testModelsConcurrently(ctx context.Context, models []string, endpoint, apiK
 // and native-Anthropic models behind one endpoint, so the probe for each model
 // must follow that model's declared wire protocol — probing them all as Chat
 // Completions marks working models unavailable.
-func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, timeout time.Duration) bool {
-	status, err := probeSingleModelWithProtocolsStatusContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, timeout)
+func testSingleModelWithProtocolsContext(ctx context.Context, model, endpoint, apiKey, providerType string, protocols map[string]string, timeout time.Duration) bool {
+	status, err := probeSingleModelWithProtocolsStatusContext(ctx, model, endpoint, apiKey, providerType, protocols, timeout)
 	return err == nil && status >= 200 && status < 300
 }
 
-func probeSingleModelWithProtocolsStatusContext(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, timeout time.Duration) (int, error) {
+func probeSingleModelWithProtocolsStatusContext(ctx context.Context, model, endpoint, apiKey, providerType string, protocols map[string]string, timeout time.Duration) (int, error) {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	wire := "openai"
 	switch {
 	case provider.IsAutoClawType(providerType):
-		// AutoClaw's runtime is a local Anthropic Messages adapter. Probe that
-		// adapter rather than treating catalog membership as availability: plan
-		// quota and per-model entitlements can differ even when the route exists.
-		wire = "autoclaw"
+		wire = "openai_responses"
 	case provider.IsAnthropicType(providerType):
 		wire = "anthropic"
 	case provider.IsOpenAIResponsesType(providerType):
@@ -730,31 +579,28 @@ func probeSingleModelWithProtocolsStatusContext(ctx context.Context, model, endp
 	case provider.IsModelsDevType(providerType):
 		wire = probeProtocolForModel(protocols, model)
 	}
-	return probeSingleModelForProtocolStatusContext(ctx, model, endpoint, apiKey, wire, anthropicAuth, timeout)
+	return probeSingleModelForProtocolStatusContext(ctx, model, endpoint, apiKey, wire, timeout)
 }
 
 // probeProtocolForModel resolves the wire protocol a mixed-protocol models.dev
 // gateway uses for one model; unknown models fall back to chat, mirroring the
 // runtime's mixedProtocolForModel fallback.
 func probeProtocolForModel(protocols map[string]string, model string) string {
-	if proto, ok := protocols[strings.ToLower(strings.TrimSpace(model))]; ok && proto != "" {
-		return proto
+	for _, id := range []string{strings.TrimSpace(model), stripOneMSuffix(model)} {
+		if proto := protocols[strings.ToLower(id)]; proto != "" {
+			return proto
+		}
 	}
 	return "openai"
 }
 
-func probeSingleModelForProtocolStatusContext(ctx context.Context, model, endpoint, apiKey, wireProtocol, anthropicAuth string, timeout time.Duration) (int, error) {
+func probeSingleModelForProtocolStatusContext(ctx context.Context, model, endpoint, apiKey, wireProtocol string, timeout time.Duration) (int, error) {
 	model = stripOneMSuffix(model)
 	switch wireProtocol {
 	case "anthropic":
-		if strings.TrimSpace(anthropicAuth) == "" {
-			anthropicAuth = "x-api-key"
-		}
-		return probeSingleAnthropicModelStatusContext(ctx, model, endpoint, apiKey, anthropicAuth, timeout)
+		return 0, fmt.Errorf("Anthropic Messages has been retired")
 	case "openai_responses":
 		return protocol.ProbeOpenAIResponsesStatusContext(ctx, endpoint, apiKey, model, timeout)
-	case "autoclaw":
-		return probeSingleAnthropicModelStatusContext(ctx, model, endpoint, apiKey, "bearer", timeout)
 	default:
 		return probeSingleOpenAIModelStatusContext(ctx, model, endpoint, apiKey, timeout)
 	}
@@ -836,27 +682,9 @@ func probeSingleOpenAIModelStatusContext(parent context.Context, model, endpoint
 	return probeModelStatus(parent, buildChatURL(endpoint), payload(""), headers, timeout)
 }
 
-func probeSingleAnthropicModelStatusContext(parent context.Context, model, endpoint, apiKey, authStyle string, timeout time.Duration) (int, error) {
-	headers := map[string]string{"anthropic-version": "2023-06-01"}
-	if strings.EqualFold(authStyle, "bearer") {
-		headers["Authorization"] = "Bearer " + apiKey
-	} else {
-		headers["x-api-key"] = apiKey
-	}
-	return probeModelStatus(parent, buildAnthropicMessagesURL(endpoint), map[string]any{
-		"model":      model,
-		"max_tokens": 1,
-		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-	}, headers, timeout)
-}
-
 // buildChatURL constructs a chat completions endpoint URL from a provider endpoint.
 func buildChatURL(endpoint string) string {
 	return protocol.NormalizeOpenAIChatCompletionsURL(endpoint)
-}
-
-func buildAnthropicMessagesURL(endpoint string) string {
-	return protocol.NormalizeAnthropicMessagesURL(endpoint)
 }
 
 // classifyModels splits configured models into available and unavailable slices,
@@ -1144,7 +972,7 @@ func printDoctorProviderDetails(p provider.Provider) {
 		// It only feeds map/set discovery, defaults, and bulk availability checks.
 		if slotsConfigured > 0 {
 			doctorKV("Model pool", "0 (optional)")
-			doctorHint("Slot mappings below are what Claude Code uses; pool is only a candidate list for `ccl map`/`ccl set`")
+			doctorHint("Mapped models can be used even when the pool is empty")
 		} else {
 			doctorWarn("Model pool: 0 configured and no slot mappings")
 			doctorHint("Run `ccl set` or `ccl map` to detect models and fill the model slots")
@@ -1155,8 +983,6 @@ func printDoctorProviderDetails(p provider.Provider) {
 	doctorKV("Effort", providerEffortSummary(p))
 	doctorKV("Fast", providerFastSummary(p))
 	doctorKV("Context/Compact", providerOneMSummary(p))
-	doctorKV("Tools", providerToolsSummary(p))
-	doctorKV("Tool Search", providerToolSearchSummary(p))
 }
 
 func doctorConfiguredSlotCount(p provider.Provider) int {
@@ -1192,28 +1018,6 @@ func maskAPIKey(key string) string {
 		mid = 12
 	}
 	return string(runes[:4]) + strings.Repeat("*", mid) + string(runes[n-4:])
-}
-
-func providerToolsSummary(p provider.Provider) string {
-	value := strings.TrimSpace(p.Env[claude.ToolUseConcurrencyEnv])
-	if value == "" {
-		return "Claude default"
-	}
-	return value
-}
-
-func providerToolSearchSummary(p provider.Provider) string {
-	value := strings.TrimSpace(p.Env[claude.ToolSearchEnv])
-	switch strings.ToLower(value) {
-	case "":
-		return "Claude default"
-	case "false", "0", "off", "no":
-		return "off"
-	case "true", "1", "on", "yes":
-		return "on"
-	default:
-		return value
-	}
 }
 
 func printProviderModelMappings(p provider.Provider, modelNames map[string]string) {

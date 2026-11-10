@@ -31,7 +31,7 @@ func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
 	}
 	binary, _ = filepath.Abs(binary)
 	codex, _ = filepath.Abs(codex)
-	for _, protocol := range []string{"anthropic", "openai"} {
+	for _, protocol := range []string{"openai_responses", "openai"} {
 		t.Run(protocol, func(t *testing.T) {
 			home := filepath.Join(t.TempDir(), "user home \u6d4b\u8bd5")
 			codexHome := filepath.Join(home, "Codex config")
@@ -68,14 +68,8 @@ func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
 					http.Error(w, "wrong model", 400)
 					return
 				}
-				if protocol == "anthropic" {
-					if r.Header.Get("X-Api-Key") != "fake-provider-key" || r.Header.Get("Authorization") != "" {
-						t.Error("native credential reached provider")
-					}
-				} else {
-					if r.Header.Get("Authorization") != "Bearer fake-provider-key" {
-						t.Error("wrong Chat credentials")
-					}
+				if r.Header.Get("Authorization") != "Bearer fake-provider-key" || r.Header.Get("X-Api-Key") != "" {
+					t.Error("wrong upstream credentials")
 				}
 				if r.Header.Get("Cookie") != "" || r.Header.Get("Chatgpt-Account-Id") != "" {
 					t.Error("native identity reached provider")
@@ -103,21 +97,21 @@ func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
 					return
 				}
 				if !first {
-					raw, _ := json.Marshal(body["messages"])
-					if strings.Contains(string(raw), "call_local_exec") && strings.Contains(string(raw), "codex-tool-fixture") && (strings.Contains(string(raw), `"type":"tool_result"`) || strings.Contains(string(raw), `"role":"tool"`)) {
+					raw, _ := json.Marshal(body)
+					if strings.Contains(string(raw), "call_local_exec") && strings.Contains(string(raw), "codex-tool-fixture") && (strings.Contains(string(raw), `"type":"function_call_output"`) || strings.Contains(string(raw), `"role":"tool"`)) {
 						sawResult.Store(true)
 					}
 				}
 				arguments := map[string]any{"cmd": "echo codex-tool-fixture", "max_output_tokens": 1000}
-				if protocol == "anthropic" {
-					content := []any{map[string]any{"type": "text", "text": "codex-fixture-done"}}
-					stop := "end_turn"
+				if protocol == "openai_responses" {
+					item := map[string]any{"id": "msg_local", "type": "message", "status": "completed", "role": "assistant",
+						"content": []any{map[string]any{"type": "output_text", "text": "codex-fixture-done", "annotations": []any{}}}}
 					if first {
-						content = []any{map[string]any{"type": "tool_use", "id": "call_local_exec", "name": name, "input": arguments}}
-						stop = "tool_use"
+						raw, _ := json.Marshal(arguments)
+						item = map[string]any{"id": "fc_local", "type": "function_call", "status": "completed",
+							"call_id": "call_local_exec", "name": name, "arguments": string(raw)}
 					}
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg_local", "type": "message", "role": "assistant", "content": content, "stop_reason": stop, "usage": map[string]any{"input_tokens": 10, "output_tokens": 3}})
+					writeNativeResponsesFixture(w, calls.Load(), item)
 				} else {
 					w.Header().Set("Content-Type", "text/event-stream")
 					delta := map[string]any{"role": "assistant", "content": "codex-fixture-done"}
@@ -213,15 +207,15 @@ func TestRealCodexRejectsGeminiRouteAfterWorkBuddySwitch(t *testing.T) {
 	gemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		geminiCalls.Add(1)
 		var body map[string]any
-		if json.NewDecoder(r.Body).Decode(&body) != nil || body["model"] != "model-a" || r.Header.Get("X-Api-Key") != "fake-gemini-key" {
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body["model"] != "model-a" || r.Header.Get("Authorization") != "Bearer fake-gemini-key" {
 			http.Error(w, "wrong Gemini fixture request", 400)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg_gemini", "type": "message", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "gemini-sandbox-done"}}, "stop_reason": "end_turn", "usage": map[string]any{"input_tokens": 1, "output_tokens": 1}})
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"gemini-sandbox-done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	t.Cleanup(gemini.Close)
-	geminiProvider := provider.Provider{Name: "gemini-fixture", Type: "anthropic", Endpoint: gemini.URL + "/v1", APIKey: "fake-gemini-key", Model: "model-a", CustomModelID: "model-a"}
+	geminiProvider := provider.Provider{Name: "gemini-fixture", Type: "openai", Endpoint: gemini.URL + "/v1", APIKey: "fake-gemini-key", Model: "model-a", CustomModelID: "model-a"}
 	if err := config.Save(&provider.Config{ActiveProvider: geminiProvider.Name, Providers: map[string]provider.Provider{geminiProvider.Name: geminiProvider}}); err != nil {
 		t.Fatal(err)
 	}
@@ -318,4 +312,22 @@ func TestRealCodexRejectsGeminiRouteAfterWorkBuddySwitch(t *testing.T) {
 	if err != nil || !strings.Contains(output, "gemini-sandbox-done") || geminiCalls.Load() != 2 {
 		t.Fatalf("restored Gemini chat failed: %v calls=%d\n%s", err, geminiCalls.Load(), output)
 	}
+}
+
+func writeNativeResponsesFixture(w http.ResponseWriter, turn int32, item map[string]any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	response := map[string]any{"id": fmt.Sprintf("resp_fixture_%d", turn), "object": "response", "created_at": time.Now().Unix(),
+		"model": "model-a", "status": "in_progress", "output": []any{}}
+	write := func(kind string, sequence int, fields map[string]any) {
+		fields["type"], fields["sequence_number"] = kind, sequence
+		raw, _ := json.Marshal(fields)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, raw)
+	}
+	write("response.created", 0, map[string]any{"response": response})
+	write("response.output_item.added", 1, map[string]any{"output_index": 0, "item": item})
+	write("response.output_item.done", 2, map[string]any{"output_index": 0, "item": item})
+	response["status"], response["output"] = "completed", []any{item}
+	response["usage"] = map[string]any{"input_tokens": 10, "output_tokens": 3, "total_tokens": 13,
+		"input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens_details": map[string]any{"reasoning_tokens": 0}}
+	write("response.completed", 3, map[string]any{"response": response})
 }

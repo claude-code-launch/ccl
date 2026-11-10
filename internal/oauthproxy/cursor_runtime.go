@@ -20,8 +20,8 @@ import (
 
 // Cursor's agent API is a bidirectional Connect stream: CCL sends one Run
 // request and then keeps writing on the same request body while reading
-// interactions, exec requests and KV lookups back. Claude Code speaks Anthropic
-// Messages, so this runtime translates in both directions and, when Cursor asks
+// interactions, exec requests and KV lookups back. The local adapter speaks OpenAI
+// Responses, so this runtime translates in both directions and, when Cursor asks
 // for a tool, parks the open stream so the tool result can continue it on the
 // next request instead of replaying the whole conversation.
 
@@ -336,7 +336,7 @@ func (s *cursorSession) matches(callIDs []string) bool {
 	return false
 }
 
-// startHeartbeat keeps the parked stream warm while Claude Code runs the tool.
+// startHeartbeat keeps the parked stream warm while the client runs the tool.
 // The beating goroutine owns the stream until handoff, so the request goroutine
 // is the only reader while a turn runs.
 func (s *cursorSession) startHeartbeat() {
@@ -358,7 +358,7 @@ func (s *cursorSession) startHeartbeat() {
 				return
 			case <-ticker.C:
 				if ticks > int(cursorParkedLifetime/cursorHeartbeatInterval) {
-					// Claude Code abandoned the tool call; do not keep the
+					// the client abandoned the tool call; do not keep the
 					// upstream stream open forever.
 					s.close()
 					return
@@ -422,7 +422,7 @@ type cursorService struct {
 }
 
 func (s *cursorService) handler() http.Handler {
-	return anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
+	return loopbackFrontMux(s.apiKey, s.handleModels, s.handleResponses)
 }
 
 func (s *cursorService) authorized(request *http.Request) bool {
@@ -433,51 +433,33 @@ func (s *cursorService) handleModels(writer http.ResponseWriter, request *http.R
 	serveModelList(writer, request, s.apiKey, s.models)
 }
 
-func (s *cursorService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	raw, err := readAnthropicInboundBody(writer, request, cursorMaxInboundRequestBytes)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateApproxTokensBytes(raw)})
-}
-
-func (s *cursorService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+func (s *cursorService) handleResponses(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	started := time.Now()
 	if !s.authorized(request) {
 		LogWarnEvent("request_rejected", "component", "cursor", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusUnauthorized, "reason", "invalid_local_api_key")
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		writeProxyError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
 	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		writeProxyError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
-	raw, err := readAnthropicInboundBody(writer, request, cursorMaxInboundRequestBytes)
+	raw, err := readInboundBody(writer, request, cursorMaxInboundRequestBytes)
 	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Anthropic Messages request: request body is empty")
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Responses request: request body is empty")
 		return
 	}
-	converted, err := convertAnthropicToCursor(raw)
+	converted, err := convertResponsesToCursor(raw)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "cursor", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "request_conversion", "error", err)
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	var gate *cursorGateWriter
@@ -489,7 +471,7 @@ func (s *cursorService) handleMessages(writer http.ResponseWriter, request *http
 		gate = &cursorGateWriter{response: writer}
 		assemblerWriter = gate
 	}
-	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, assemblerWriter)
+	assembler := newResponseAssembler(&converted.adapterRequest, assemblerWriter)
 	if err := s.serve(requestCtx, converted, assembler, gate); err != nil {
 		status, errorType := cursorClientError(err)
 		LogErrorEvent("request_failed", "component", "cursor", "request_id", requestID,
@@ -498,10 +480,10 @@ func (s *cursorService) handleMessages(writer http.ResponseWriter, request *http
 		if converted.stream && gate != nil && gate.opened() {
 			// The message already started; a status line can no longer carry the
 			// failure, so report it as a stream error exactly like an upstream drop.
-			_ = assembler.emit("error", map[string]any{"type": "error", "error": map[string]any{"type": errorType, "message": err.Error()}})
+			assembler.fail(errorType, err.Error())
 			return
 		}
-		writeAnthropicError(writer, status, errorType, err.Error())
+		writeProxyError(writer, status, errorType, err.Error())
 		return
 	}
 	s.recordUsage(converted, assembler)
@@ -514,7 +496,7 @@ func (s *cursorService) handleMessages(writer http.ResponseWriter, request *http
 		"model", converted.clientModel, "status", http.StatusOK, "duration", logDuration(started))
 }
 
-func (s *cursorService) recordUsage(converted *cursorConvertedRequest, assembler *anthropicResponseAssembler) {
+func (s *cursorService) recordUsage(converted *cursorConvertedRequest, assembler *responseAssembler) {
 	if s.usage == nil {
 		return
 	}
@@ -522,8 +504,8 @@ func (s *cursorService) recordUsage(converted *cursorConvertedRequest, assembler
 	s.usage.Add(converted.clientModel, int64(input), int64(output), int64(assembler.cacheReadTokens), int64(assembler.cacheWriteTokens))
 }
 
-// cursorClientError maps a turn failure onto the status and Anthropic error
-// type Claude Code understands: 429 stays 429 so it backs off, 401 so it
+// cursorClientError maps a turn failure onto the status and proxy error
+// type the client understands: 429 stays 429 so it backs off, 401 so it
 // re-authenticates, 413 so it shrinks the request.
 func cursorClientError(err error) (int, string) {
 	status := 0
@@ -537,17 +519,17 @@ func cursorClientError(err error) (int, string) {
 	}
 	switch {
 	case status >= 400 && status < 500:
-		return status, anthropicErrorType(status)
+		return status, proxyErrorType(status)
 	case status >= 500:
-		return status, anthropicErrorType(status)
+		return status, proxyErrorType(status)
 	default:
 		return http.StatusBadGateway, "api_error"
 	}
 }
 
-// serve runs one Anthropic turn: resume the parked Cursor stream when Claude
-// Code is answering a tool call it owns, otherwise start a fresh Run.
-func (s *cursorService) serve(ctx context.Context, converted *cursorConvertedRequest, assembler *anthropicResponseAssembler, gate *cursorGateWriter) error {
+// serve runs one Responses turn: resume the parked Cursor stream when the
+// client is answering a tool call it owns, otherwise start a fresh Run.
+func (s *cursorService) serve(ctx context.Context, converted *cursorConvertedRequest, assembler *responseAssembler, gate *cursorGateWriter) error {
 	if session := s.takeParked(converted.resumeToolUseIDs()); session != nil {
 		defer session.close()
 		LogDebugEvent("cursor_resume", "call_count", len(converted.resume))
@@ -738,10 +720,10 @@ func (s *cursorService) openStream(ctx context.Context, frame []byte) (*cursorSe
 	return newCursorSession(response, pipeWriter, cancel), nil
 }
 
-// continueTurn relays one stream. A tool request from Cursor ends the Anthropic
-// response with a tool_use block and parks the stream; the next request that
+// continueTurn relays one stream. A tool request from Cursor ends the Responses
+// output with a function_call item and parks the stream; the next request that
 // carries matching tool results resumes it here.
-func (s *cursorService) continueTurn(ctx context.Context, session *cursorSession, converted *cursorConvertedRequest, assembler *anthropicResponseAssembler, gate *cursorGateWriter, resuming bool) error {
+func (s *cursorService) continueTurn(ctx context.Context, session *cursorSession, converted *cursorConvertedRequest, assembler *responseAssembler, gate *cursorGateWriter, resuming bool) error {
 	// message_start is emitted while the gate still holds every event, so a turn
 	// that fails before its first block still answers with a status code.
 	if err := assembler.start(); err != nil {
@@ -947,8 +929,8 @@ func (g *cursorGateWriter) Write(p []byte) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.openedOK {
-		if g.pending.Len()+len(p) > anthropicAssemblerMaxRetainedBytes {
-			return 0, fmt.Errorf("Cursor response buffering exceeds %d bytes", anthropicAssemblerMaxRetainedBytes)
+		if g.pending.Len()+len(p) > assemblerMaxRetainedBytes {
+			return 0, fmt.Errorf("Cursor response buffering exceeds %d bytes", assemblerMaxRetainedBytes)
 		}
 		return g.pending.Write(p)
 	}
@@ -1175,16 +1157,16 @@ func startCursorOAuth(parent context.Context, modelSpec, credentialFile string) 
 		case <-proxyRuntime.done:
 		}
 	}()
-	LogInfof("runtime start oauth provider=cursor backend=cursor protocol=anthropic port=%s credential_file=%s model_count=%d fallback_catalog=%t",
+	LogInfof("runtime start oauth provider=cursor backend=cursor protocol=responses port=%s credential_file=%s model_count=%d fallback_catalog=%t",
 		listener.Addr().String(), filepath.Base(path), len(models), catalogFallback)
 	return proxyRuntime, nil
 }
 
-// cursorConvertedRequest is one Anthropic turn expressed as a Cursor Run: the
+// cursorConvertedRequest is one Responses turn expressed as a Cursor Run: the
 // system prompt, the flattened history plus this turn's text, the images, the
-// tools Claude Code declared, and any tool results that answer a parked stream.
+// tools the client declared, and any tool results that answer a parked stream.
 type cursorConvertedRequest struct {
-	anthropicAdapterRequest
+	adapterRequest
 	model          string
 	system         string
 	history        string
@@ -1205,57 +1187,40 @@ func (c *cursorConvertedRequest) resumeToolUseIDs() []string {
 	return ids
 }
 
-func convertAnthropicToCursor(raw []byte) (*cursorConvertedRequest, error) {
-	var request anthropicMessagesRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
-		return nil, fmt.Errorf("invalid Anthropic Messages request: %w", err)
+func convertResponsesToCursor(raw []byte) (*cursorConvertedRequest, error) {
+	request, err := parseResponsesRequest(raw)
+	if err != nil {
+		return nil, err
 	}
-	request.Model = strings.TrimSpace(request.Model)
-	if request.Model == "" {
-		return nil, fmt.Errorf("model is required")
+	maxTokens := request.MaxOutputTokens
+	if maxTokens <= 0 {
+		maxTokens = 32_000
 	}
-	if len(request.Messages) == 0 {
-		return nil, fmt.Errorf("messages must not be empty")
-	}
-	if request.MaxTokens <= 0 {
-		request.MaxTokens = 32_000
-	}
-	last := request.Messages[len(request.Messages)-1]
+	last := request.Turns[len(request.Turns)-1]
 	if !strings.EqualFold(strings.TrimSpace(last.Role), "user") {
 		return nil, fmt.Errorf("messages must end with a user message")
 	}
-	history, current, images, resume, err := flattenCursorMessages(request.Messages)
+	history, current, images, resume, err := flattenCursorMessages(request.Turns)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := cursorToolsFromAnthropic(request.Tools)
+	tools, err := cursorToolsFromResponses(request.Tools)
 	if err != nil {
 		return nil, err
 	}
-	// Cursor only understands "enabled" and "adaptive" by presence; an explicit
-	// disabled thinking block must not open a reasoning window.
-	thinkingEnabled := request.Thinking != nil &&
-		strings.TrimSpace(request.Thinking.Type) != "" &&
-		!strings.EqualFold(strings.TrimSpace(request.Thinking.Type), "disabled")
 	model := stripContextModelSuffix(request.Model)
+	adapter := request.adapter(model)
+	adapter.maxTokens = maxTokens
+	adapter.toolNameMap = map[string]string{}
 	converted := &cursorConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{
-			upstreamModel:     model,
-			clientModel:       request.Model,
-			stream:            request.Stream,
-			thinkingEnabled:   thinkingEnabled,
-			thinkingSignature: ProviderCursor,
-			maxTokens:         request.MaxTokens,
-			inputTokens:       estimateApproxTokensBytes(raw),
-			toolNameMap:       map[string]string{},
-		},
+		adapterRequest: adapter,
 		model:          model,
-		system:         extractKiroSystem(request.System),
+		system:         strings.TrimSpace(request.System),
 		history:        history,
 		images:         images,
 		tools:          tools,
 		resume:         resume,
-		conversationID: kiroConversationID(request.Metadata),
+		conversationID: kiroConversationID(firstNonEmptyString(request.CacheKey, request.User)),
 	}
 	converted.userText = cursorTurnUserText(history, current, resume)
 	return converted, nil
@@ -1280,7 +1245,7 @@ func cursorTurnUserText(history, current string, results []cursorToolResult) str
 	return builder.String()
 }
 
-func cursorToolsFromAnthropic(tools []anthropicTool) ([]cursorMCPTool, error) {
+func cursorToolsFromResponses(tools []conversationTool) ([]cursorMCPTool, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
@@ -1290,12 +1255,12 @@ func cursorToolsFromAnthropic(tools []anthropicTool) ([]cursorMCPTool, error) {
 		if name == "" {
 			continue
 		}
-		schema := bytesTrimSpace(tool.InputSchema)
+		schema := bytesTrimSpace(tool.Parameters)
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
 		if !json.Valid(schema) {
-			return nil, fmt.Errorf("tool %s has an invalid input_schema", name)
+			return nil, fmt.Errorf("tool %s has an invalid schema", name)
 		}
 		out = append(out, cursorMCPTool{Name: name, Description: tool.Description, InputSchema: schema})
 	}

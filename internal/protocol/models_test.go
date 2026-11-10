@@ -52,54 +52,6 @@ func TestGetOpenAIModelsContextPreservesVersionedEndpoint(t *testing.T) {
 	}
 }
 
-func TestGetAnthropicModelsNormalizesV1Endpoint(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		if r.Header.Get("x-api-key") != "test-key" {
-			t.Fatalf("missing x-api-key header")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"claude-sonnet-4"}]}`))
-	}))
-	defer server.Close()
-
-	infos, err := protocol.GetAnthropicModelInfosWithAuth(server.URL+"/v1", "test-key", "")
-	if err != nil {
-		t.Fatalf("GetAnthropicModelInfosWithAuth failed: %v", err)
-	}
-	if len(infos) != 1 || infos[0].ID != "claude-sonnet-4" {
-		t.Fatalf("unexpected models: %+v", infos)
-	}
-}
-
-func TestGetAnthropicModelInfosIncludesCatalogMetadata(t *testing.T) {
-	rate := 0.5
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer test-key" {
-			t.Fatalf("missing bearer authorization header")
-		}
-		_, _ = w.Write([]byte(`{"data":[{"id":"qmodel","display_name":"Qwen Max","max_input_tokens":1000000,"max_output_tokens":32768,"rate_multiplier":0.5,"rate_unit":"credits","is_new":true,"promotion_available":true}]}`))
-	}))
-	t.Cleanup(server.Close)
-
-	infos, err := protocol.GetAnthropicModelInfosWithAuth(server.URL, "test-key", "bearer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(infos) != 1 {
-		t.Fatalf("model infos = %#v", infos)
-	}
-	got := infos[0]
-	if got.ID != "qmodel" || got.DisplayName != "Qwen Max" || got.ContextWindow != 1000000 || got.MaxOutputTokens != 32768 {
-		t.Fatalf("model info = %#v", got)
-	}
-	if got.RateMultiplier == nil || *got.RateMultiplier != rate || got.RateUnit != "credits" || !got.IsNew || !got.PromotionAvailable {
-		t.Fatalf("catalog extensions = %#v", got)
-	}
-}
-
 func TestNormalizeVersionedURLs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -132,16 +84,6 @@ func TestNormalizeVersionedURLs(t *testing.T) {
 			want: "https://example.com/api/v3/responses",
 		},
 		{
-			name: "anthropic messages from v3 base",
-			got:  protocol.NormalizeAnthropicMessagesURL("https://example.com/api/v3"),
-			want: "https://example.com/api/v3/messages",
-		},
-		{
-			name: "anthropic models from v3 messages",
-			got:  protocol.NormalizeAnthropicModelsURL("https://example.com/api/v3/messages"),
-			want: "https://example.com/api/v3/models",
-		},
-		{
 			name: "unversioned openai models appends directly",
 			got:  protocol.NormalizeOpenAIModelsURL("https://example.com"),
 			want: "https://example.com/models",
@@ -157,59 +99,9 @@ func TestNormalizeVersionedURLs(t *testing.T) {
 			want: "https://example.com/responses",
 		},
 		{
-			name: "unversioned anthropic messages appends v1",
-			got:  protocol.NormalizeAnthropicMessagesURL("https://example.com"),
-			want: "https://example.com/v1/messages",
-		},
-		{
-			name: "unversioned anthropic models appends v1",
-			got:  protocol.NormalizeAnthropicModelsURL("https://example.com"),
-			want: "https://example.com/v1/models",
-		},
-		{
-			name: "anthropic suffix messages appends v1",
-			got:  protocol.NormalizeAnthropicMessagesURL("https://example.com/api/anthropic"),
-			want: "https://example.com/api/anthropic/v1/messages",
-		},
-		{
-			name: "anthropic suffix models appends v1",
-			got:  protocol.NormalizeAnthropicModelsURL("https://example.com/api/anthropic"),
-			want: "https://example.com/api/anthropic/v1/models",
-		},
-		{
-			name: "claude suffix models appends v1",
-			got:  protocol.NormalizeAnthropicModelsURL("https://example.com/api/claude"),
-			want: "https://example.com/api/claude/v1/models",
-		},
-		{
-			name: "claude suffix messages appends v1",
-			got:  protocol.NormalizeAnthropicMessagesURL("https://example.com/api/claude"),
-			want: "https://example.com/api/claude/v1/messages",
-		},
-		{
 			name: "empty openai uses official v1 default",
 			got:  protocol.NormalizeOpenAIModelsURL(""),
 			want: "https://api.openai.com/v1/models",
-		},
-		{
-			name: "anthropic claude base strips v1",
-			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://token.sensenova.cn/v1"),
-			want: "https://token.sensenova.cn",
-		},
-		{
-			name: "anthropic claude base strips v1 messages",
-			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://token.sensenova.cn/v1/messages"),
-			want: "https://token.sensenova.cn",
-		},
-		{
-			name: "anthropic claude base strips v1 models",
-			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://token.sensenova.cn/v1/models"),
-			want: "https://token.sensenova.cn",
-		},
-		{
-			name: "anthropic claude base preserves custom path",
-			got:  protocol.NormalizeAnthropicBaseURLForClaude("https://example.com/api/v3"),
-			want: "https://example.com/api/v3",
 		},
 	}
 

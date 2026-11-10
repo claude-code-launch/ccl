@@ -42,7 +42,7 @@ func TestVerifyProviderAPIKeyRejectsAuthFailure(t *testing.T) {
 		}))
 		defer server.Close()
 
-		for _, proto := range []string{"anthropic", "openai_responses", "openai"} {
+		for _, proto := range []string{"openai_responses", "openai"} {
 			err := verifyProviderAPIKey(t.Context(), "test-model", server.URL, "fake-key", proto, 2*time.Second)
 			if err == nil {
 				t.Errorf("proto=%s status=%d: expected invalid-key error, got nil", proto, status)
@@ -64,7 +64,7 @@ func TestVerifyProviderAPIKeyAcceptsValidKey(t *testing.T) {
 		}))
 		defer server.Close()
 
-		for _, proto := range []string{"anthropic", "openai_responses", "openai"} {
+		for _, proto := range []string{"openai_responses", "openai"} {
 			if err := verifyProviderAPIKey(t.Context(), "test-model", server.URL, "good-key", proto, 2*time.Second); err != nil {
 				t.Errorf("proto=%s status=%d: expected nil (key passed auth), got %v", proto, status, err)
 			}
@@ -80,7 +80,7 @@ func TestVerifyProviderAPIKeyFailsOnServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	for _, proto := range []string{"anthropic", "openai_responses", "openai"} {
+	for _, proto := range []string{"openai_responses", "openai"} {
 		if err := verifyProviderAPIKey(t.Context(), "test-model", server.URL, "key", proto, 2*time.Second); err == nil {
 			t.Errorf("proto=%s: expected 5xx to fail verification, got nil", proto)
 		}
@@ -90,32 +90,10 @@ func TestVerifyProviderAPIKeyFailsOnServerError(t *testing.T) {
 // TestVerifyProviderAPIKeyFailsOnTransportError proves an unreachable endpoint
 // cannot be reported as "connected".
 func TestVerifyProviderAPIKeyFailsOnTransportError(t *testing.T) {
-	for _, proto := range []string{"anthropic", "openai_responses", "openai"} {
+	for _, proto := range []string{"openai_responses", "openai"} {
 		if err := verifyProviderAPIKey(t.Context(), "test-model", "http://127.0.0.1:1", "key", proto, 500*time.Millisecond); err == nil {
 			t.Errorf("proto=%s: expected transport error to fail verification, got nil", proto)
 		}
-	}
-}
-
-// TestVerifyProviderAPIKeyAnthropicUsesMessagesPath guards the URL normalization
-// so the anthropic branch actually hits /v1/messages (not /models), which is
-// where auth is enforced.
-func TestVerifyProviderAPIKeyAnthropicUsesMessagesPath(t *testing.T) {
-	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		if got := r.Header.Get("x-api-key"); got != "key-123" {
-			t.Errorf("x-api-key = %q", got)
-		}
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer server.Close()
-
-	if err := verifyProviderAPIKey(t.Context(), "claude-x", server.URL, "key-123", "anthropic", 2*time.Second); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if gotPath != "/v1/messages" {
-		t.Errorf("anthropic branch path = %q, want /v1/messages", gotPath)
 	}
 }
 

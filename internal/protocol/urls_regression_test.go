@@ -12,10 +12,4 @@ func TestEndpointNormalizationKeepsQueryAndEscaping(t *testing.T) {
 			}
 		}
 	}
-	if got := NormalizeAnthropicMessagesURL("https://example.com/anthropic?key=x"); got != "https://example.com/anthropic/v1/messages?key=x" {
-		t.Fatal(got)
-	}
-	if got := NormalizeAnthropicBaseURLForClaude("https://example.com/v1/messages?key=x"); got != "https://example.com?key=x" {
-		t.Fatal(got)
-	}
 }

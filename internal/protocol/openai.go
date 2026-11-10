@@ -66,8 +66,7 @@ type ModelResponse struct {
 		SupportedInputTypes   []string         `json:"supported_input_types,omitempty"`
 		ReasoningLevels       []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
 		DefaultReasoningLevel string           `json:"default_reasoning_level,omitempty"`
-		// Anthropic-shaped extensions some Anthropic-compatible gateways and
-		// CCL runtimes publish alongside the OpenAI list fields.
+		// Optional gateway and CCL model metadata.
 		RateMultiplier     *float64 `json:"rate_multiplier,omitempty"`
 		RateUnit           string   `json:"rate_unit,omitempty"`
 		IsNew              bool     `json:"is_new,omitempty"`

@@ -64,7 +64,7 @@ type Manager struct {
 
 // Bump when an existing daemon must be replaced to pick up a protocol fix.
 // Version 16 adds live runtime generations and account-bound Gemini catalogs.
-const proxyVersion = 16
+const proxyVersion = 17
 
 func Default() (*Manager, error) {
 	home, err := os.UserHomeDir()

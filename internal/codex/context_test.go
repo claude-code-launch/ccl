@@ -9,7 +9,7 @@ import (
 )
 
 func TestCodexGatewayPublishesContextAndClientSearchCapabilities(t *testing.T) {
-	for _, protocol := range []string{"anthropic", "openai", "openai_responses"} {
+	for _, protocol := range []string{"openai", "openai_responses"} {
 		t.Run(protocol, func(t *testing.T) {
 			g := fixtureProviderGateway(t, func(http.ResponseWriter, *http.Request) {}, provider.Provider{Name: "chosen", Type: protocol, Model: "model-a", ContextPreset: provider.ContextPresetNameBalanced800K}, Options{})
 			model := g.Models()[0]

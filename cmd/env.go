@@ -6,8 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
-	"github.com/claude-code-launch/ccl/internal/claudeaccount"
+	"github.com/claude-code-launch/ccl/internal/groklaunch"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/spf13/cobra"
@@ -21,8 +20,8 @@ func newEnvCommand(use string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: "Manage environment variables",
-		Long: `Manage extra environment variables ccl passes to Claude Code for a provider
-(the active one, or --provider NAME / --acp).
+		Long: `Manage extra environment variables ccl passes to Grok Build for a provider
+(the active one, or --provider NAME).
 
 Set or modify a variable:
   ccl provider env KEY VALUE
@@ -38,10 +37,7 @@ Rename a variable:
   ccl provider env mv OLD_KEY NEW_KEY
   ccl provider env mv OLD_KEY NEW_KEY -y   # overwrite an existing key
 
-Settings ccl manages itself — slot models, the subagent model, context
-sizing, and the connection — are not set here; the command names the one
-to use. A variable the installed Claude Code does not read is saved with a
-warning.
+ccl manages its own runtime endpoint, credentials, and model overlay.
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runEnvSet(args, *target)
@@ -57,16 +53,11 @@ warning.
 // with that field.
 func managedEnvKey(key string) (string, bool) {
 	switch strings.ToUpper(key) {
-	case "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
-		"ANTHROPIC_CUSTOM_MODEL_OPTION":
-		return "ccl map --opus|--sonnet|--haiku|--fable|--custom <model>", true
-	case claude.SubagentModelEnv:
-		return "ccl map --subagent <model>", true
 	case provider.EnvMaxContextTokens, provider.EnvAutoCompactWindow, provider.EnvAutoCompactPct:
 		return "ccl set (Context & Compact)", true
-	case "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN":
-		return "ccl set (Connection)", true
+	}
+	if groklaunch.ReservedEnvKey(key) {
+		return "ccl set (Connection and Model Mapping)", true
 	}
 	return "", false
 }
@@ -75,12 +66,9 @@ func runEnvSet(args []string, target providerTarget) error {
 	if len(args) != 2 {
 		return errors.New(locale.T("期望 KEY 和 VALUE 参数，或子命令（ls、rm、mv）。见 `ccl provider env --help`", "expected KEY and VALUE arguments, or a subcommand (ls, rm, mv). See ccl provider env --help"))
 	}
-	name, p, err := target.load()
+	name, _, err := target.load()
 	if err != nil {
 		return err
-	}
-	if provider.IsClaudeAccount(p) {
-		return claudeaccount.OptionsError(name)
 	}
 
 	key := strings.TrimSpace(args[0])
@@ -95,9 +83,6 @@ func runEnvSet(args []string, target providerTarget) error {
 		), key, command)
 	}
 	if err := updateProvider(name, func(p *provider.Provider) error {
-		if provider.IsClaudeAccount(*p) {
-			return claudeaccount.OptionsError(name)
-		}
 		if p.Env == nil {
 			p.Env = make(map[string]string)
 		}
@@ -108,12 +93,6 @@ func runEnvSet(args []string, target providerTarget) error {
 	}
 
 	fmt.Printf("✅ %s=%s\n", key, val)
-	if read, known := claudeReadsEnvVar(key); known && !read {
-		fmt.Printf(locale.T(
-			"⚠️ 已安装的 Claude Code 不读取 %s，设置后不会生效。\n",
-			"⚠️ The installed Claude Code does not read %s; it will have no effect.\n",
-		), key)
-	}
 	return nil
 }
 
@@ -236,9 +215,6 @@ func runEnvMove(oldArg, newArg string, force bool, target providerTarget) error 
 		return err
 	}
 	val, exists := p.Env[oldKey]
-	if provider.IsClaudeAccount(p) {
-		return claudeaccount.OptionsError(name)
-	}
 	if !exists {
 		return fmt.Errorf(locale.T("键 %q 不存在于 %q", "key %q not found in %q"), oldKey, name)
 	}
@@ -252,9 +228,6 @@ func runEnvMove(oldArg, newArg string, force bool, target providerTarget) error 
 	}
 
 	if err := updateProvider(name, func(p *provider.Provider) error {
-		if provider.IsClaudeAccount(*p) {
-			return claudeaccount.OptionsError(name)
-		}
 		if p.Env == nil {
 			p.Env = make(map[string]string)
 		}

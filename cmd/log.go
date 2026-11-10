@@ -21,9 +21,9 @@ func newLogCommand() *cobra.Command {
 		Long: `Configure the threshold for ccl's per-session runtime logs.
 
 The filename template is ~/.ccl/logs/ccl-debug.log by default (override with
-CCL_LOG_FILE). That shared file is not created: every ccl-launched Claude Code
+CCL_LOG_FILE). That shared file is not created: every ccl-launched Grok Build
 session or temporary provider runtime receives a suffixed file, for example
-ccl-debug-claude_<id>.log. All slog levels for that session share one file.
+ccl-debug-grok_<id>.log. All slog levels for that session share one file.
 
 Levels:
   on / info  Normal runtime events, including startup, model routing, upstream
@@ -45,7 +45,7 @@ Configure logging:
 
 Kiro and Qoder requests include a request_id for correlating retries
 and credential rotation. Plain Anthropic API-key providers are direct: their
-upstream 429/503 responses remain visible in Claude Code, not in ccl's log.
+upstream 429/503 responses remain visible in Grok Build, not in ccl's log.
 `,
 		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -69,7 +69,7 @@ func runLog(out io.Writer, args []string, levelFlag string) error {
 		level := configuredLogLevel(cfg.LogLevel)
 		fmt.Fprintf(out, "Configured log level = %s\n", level)
 		if level == oauthproxy.LogLevelOff {
-			fmt.Fprintln(out, "Enable with: ccl log on  (one file per Claude session under ~/.ccl/logs; CCL_LOG_FILE overrides)")
+			fmt.Fprintln(out, "Enable with: ccl log on  (one file per Grok session under ~/.ccl/logs; CCL_LOG_FILE overrides)")
 			return nil
 		}
 		printLogLocation(out)

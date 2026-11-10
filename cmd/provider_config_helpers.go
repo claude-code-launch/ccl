@@ -73,7 +73,7 @@ func applyOneMSuffixes(p *provider.Provider, oneMSlots map[string]bool) {
 // applyCompactConfig applies the per-slot [1m] markers and the context sizing
 // choice.
 //
-// Default clears every context override so Claude Code uses its native 200K/1M
+// Default clears every context override so Codex uses its default 200K/1M
 // behavior. Balanced writes the exact triplet selected by the UI.
 func applyCompactConfig(p *provider.Provider, oneMSlots map[string]bool, preset compactPreset) {
 	applyOneMSuffixes(p, oneMSlots)

@@ -186,8 +186,8 @@ func TestWorkBuddyRuntimeUsesCCLChatAdapterAndRefreshesOnce(t *testing.T) {
 		t.Fatalf("model details = %+v", details)
 	}
 	responseBody := postClaudeMessage(t, context.Background(), runtime, "wb-chat[1m]")
-	if !strings.Contains(responseBody, "hello from WorkBuddy") || !strings.Contains(responseBody, `"type":"message_stop"`) {
-		t.Fatalf("Messages response = %s", responseBody)
+	if !strings.Contains(responseBody, "hello from WorkBuddy") || !strings.Contains(responseBody, `"type":"response.completed"`) {
+		t.Fatalf("Responses body = %s", responseBody)
 	}
 	if chatAttempts.Load() != 2 || refreshes.Load() != 1 {
 		t.Fatalf("attempts=%d refreshes=%d", chatAttempts.Load(), refreshes.Load())
@@ -346,8 +346,8 @@ func testWorkBuddyRuntimeProviderError(t *testing.T, upstreamStatus int) {
 	defer runtime.Stop()
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		payload := []byte(`{"model":"wb-chat","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-		request, err := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", bytes.NewReader(payload))
+		payload := []byte(`{"model":"wb-chat","max_output_tokens":32,"stream":true,"input":[{"role":"user","content":"hi"}]}`)
+		request, err := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", bytes.NewReader(payload))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -575,14 +575,14 @@ func TestBuildWorkBuddyRoutesSkipsModelsWithdrawnFromCatalog(t *testing.T) {
 
 func TestBuildWorkBuddyRoutesMapsDisplayNames(t *testing.T) {
 	catalog := []workbuddyModel{
-		{ID: "fast-model", Name: "快速"},
-		{ID: "balanced-model", Name: "均衡"},
+		{ID: "fast-model", Name: "\u5feb\u901f"},
+		{ID: "balanced-model", Name: "\u5747\u8861"},
 		{ID: "deep-model"},
 	}
 	routes, _, _, _ := buildWorkBuddyRoutes("", catalog)
 	for _, want := range []runtimeModelRoute{
-		{Name: "fast-model", Alias: "快速"},
-		{Name: "balanced-model", Alias: "均衡"},
+		{Name: "fast-model", Alias: "\u5feb\u901f"},
+		{Name: "balanced-model", Alias: "\u5747\u8861"},
 	} {
 		if !slices.Contains(routes, want) {
 			t.Fatalf("missing display-name route %v in %+v", want, routes)
@@ -620,11 +620,11 @@ func TestBuildWorkBuddyRoutesKeepsFirstDisplayNameOwner(t *testing.T) {
 
 func TestBuildWorkBuddyRoutesKeepsOnlyModelsWithCredits(t *testing.T) {
 	catalog := []workbuddyModel{
-		{ID: "fast-model", Name: "快速", Credits: "x0.15"},
+		{ID: "fast-model", Name: "\u5feb\u901f", Credits: "x0.15"},
 		{ID: "hy3", Name: "Hy3", Credits: "x0.00"},
 		{ID: "codewise-jump"},
 		{ID: "Kling-Video-V3", Name: "Kling-Video-V3"},
-		{ID: "deep-model", Name: "极致", Credits: "x1"},
+		{ID: "deep-model", Name: "\u6781\u81f4", Credits: "x1"},
 	}
 	routes, models, _, details := buildWorkBuddyRoutes("codewise-jump,fast-model", catalog)
 	if got := strings.Join(models, ","); got != "fast-model,hy3,deep-model" {

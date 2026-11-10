@@ -107,15 +107,14 @@ func TestOAuthTypeIsDerivedNotPersisted(t *testing.T) {
 
 }
 
-// A fresh install has no provider yet, so normal and ACP launches use Claude
-// Code's own configuration: the "default" selector.
+// A fresh install uses Grok Build's own configuration: the "default" selector.
 func TestFreshInstallSelectsDefault(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	cfg, err := Load()
-	if err != nil || cfg.ActiveProvider != provider.DefaultProvider || cfg.EffectiveACPProvider() != provider.DefaultProvider {
-		t.Fatalf("fresh install: active=%q acp=%q err=%v", cfg.ActiveProvider, cfg.EffectiveACPProvider(), err)
+	if err != nil || cfg.ActiveProvider != provider.DefaultProvider {
+		t.Fatalf("fresh install: active=%q err=%v", cfg.ActiveProvider, err)
 	}
 	if err := Update(func(c *provider.Config) error { c.Lang = "en"; return nil }); err != nil {
 		t.Fatal(err)

@@ -2,7 +2,6 @@ package oauthproxy
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,17 +11,12 @@ import (
 )
 
 func TestChatToolChoiceNoneIsPreserved(t *testing.T) {
-	for _, raw := range []json.RawMessage{
-		json.RawMessage(`"none"`),
-		json.RawMessage(`{"type":"none"}`),
-	} {
-		choice, ok := chatToolChoice(raw)
-		if !ok {
-			t.Fatalf("chatToolChoice(%s) reported nothing to send", raw)
-		}
-		if choice != "none" {
-			t.Fatalf("chatToolChoice(%s) = %v, want none", raw, choice)
-		}
+	choice, ok := chatToolChoice(conversationToolChoice{Mode: toolChoiceNone})
+	if !ok {
+		t.Fatal("chatToolChoice(none) reported nothing to send")
+	}
+	if choice != "none" {
+		t.Fatalf("chatToolChoice(none) = %v, want none", choice)
 	}
 }
 
@@ -89,100 +83,56 @@ func TestMixedRuntimeSurfacesModelCatalog(t *testing.T) {
 	}
 }
 
-func TestAnthropicPassthroughRecordsUsage(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if !strings.HasSuffix(request.URL.Path, "/messages") || strings.Contains(request.URL.Path, "count_tokens") {
-			writer.WriteHeader(http.StatusNotFound)
-			return
-		}
+func TestMixedRuntimeExcludesAnthropicModels(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"id":"msg_1","model":"claude-test","usage":{"input_tokens":11,"output_tokens":7}}`)
+		_, _ = io.WriteString(writer, `{"object":"list","data":[]}`)
 	}))
 	defer upstream.Close()
-	usage := NewUsageTracker()
-	service := newAnthropicPassthroughService("local-key", upstream.URL, []string{"claude-test"}, &chatStaticAuthorizer{token: "upstream-key"}, usage)
-
-	body := `{"model":"claude-test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	request.Header.Set("x-api-key", "local-key")
-	recorder := httptest.NewRecorder()
-	service.handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("passthrough status = %d, body = %s", recorder.Code, recorder.Body.String())
+	runtime, err := StartMixedProtocolAPIKeyRuntime(context.Background(), upstream.URL, "upstream-key",
+		"chat-model,claude-model,responses-model",
+		map[string]string{
+			"chat-model":      "openai",
+			"claude-model":    "anthropic",
+			"responses-model": "openai_responses",
+		})
+	if err != nil {
+		t.Fatal(err)
 	}
-	totals, ok := usage.Snapshot()
-	if !ok || len(totals) != 1 {
-		t.Fatalf("usage snapshot = %+v, want one model entry", totals)
+	defer runtime.Stop()
+	models := runtime.Models()
+	if len(models) != 2 || models[0] != "chat-model" || models[1] != "responses-model" {
+		t.Fatalf("runtime models = %v, want [chat-model responses-model]", models)
 	}
-	if totals[0].Model != "claude-test" || totals[0].InputTokens != 11 || totals[0].OutputTokens != 7 {
-		t.Fatalf("usage totals = %+v, want claude-test 11/7", totals[0])
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, runtime.Endpoint()+"/responses",
+		strings.NewReader(`{"model":"claude-model","input":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestPassthroughUsageScannerExtractsStreamTotals(t *testing.T) {
-	scanner := &passthroughUsageScanner{}
-	scanner.feed([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":9,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}}\n\n"))
-	// Split the delta across feeds to exercise the line buffer.
-	scanner.feed([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":"))
-	scanner.feed([]byte("5}}\n\n"))
-
-	if !scanner.sawUsage {
-		t.Fatal("scanner did not observe usage events")
+	req.Header.Set("Authorization", "Bearer "+runtime.APIKey())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if scanner.model != "claude-test" {
-		t.Fatalf("scanner model = %q, want claude-test", scanner.model)
-	}
-	if scanner.input != 9 || scanner.cacheRead != 3 || scanner.cacheWrite != 2 {
-		t.Fatalf("scanner input/cache totals = %d/%d/%d, want 9/3/2", scanner.input, scanner.cacheRead, scanner.cacheWrite)
-	}
-	if scanner.output != 5 {
-		t.Fatalf("scanner output = %d, want 5", scanner.output)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unrouted anthropic model status = %d, want 400", resp.StatusCode)
 	}
 }
 
-func TestPassthroughUsageScannerWithoutStartUsage(t *testing.T) {
-	// A gateway that omits message_start usage but reports delta usage must
-	// still record the output total.
-	scanner := &passthroughUsageScanner{}
-	scanner.feed([]byte("data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n"))
-	scanner.feed([]byte("data: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":4}}\n\n"))
-	if !scanner.sawUsage {
-		t.Fatal("scanner ignored delta usage when message_start had none")
+func TestMixedRuntimeRejectsAnthropicOnlyGateway(t *testing.T) {
+	_, err := StartMixedProtocolAPIKeyRuntime(context.Background(), "http://127.0.0.1:1/v1", "upstream-key",
+		"claude-sonnet-4-6,claude-opus-4-6",
+		map[string]string{
+			"claude-sonnet-4-6": "anthropic",
+			"claude-opus-4-6":   "anthropic",
+		})
+	if err == nil {
+		t.Fatal("expected error when gateway models only offer anthropic protocol")
 	}
-	if scanner.output != 4 {
-		t.Fatalf("scanner output = %d, want 4", scanner.output)
-	}
-
-	// A stream with no usage events at all must not be flagged: recording it
-	// would create a phantom zero-token entry in the usage tracker.
-	empty := &passthroughUsageScanner{}
-	empty.feed([]byte("data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n"))
-	empty.feed([]byte("data: {\"type\":\"message_delta\",\"delta\":{}}\n\n"))
-	empty.flush()
-	if empty.sawUsage {
-		t.Fatal("scanner flagged usage for a stream that carried none")
-	}
-}
-
-func TestPassthroughUsageScannerOutputHighWaterMark(t *testing.T) {
-	// message_delta reports cumulative output_tokens; an out-of-order smaller
-	// value must not shrink the total.
-	scanner := &passthroughUsageScanner{}
-	scanner.feed([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n"))
-	scanner.feed([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n"))
-	if scanner.output != 7 {
-		t.Fatalf("scanner output = %d, want high-water mark 7", scanner.output)
-	}
-}
-
-func TestPassthroughUsageScannerRejectsUnboundedLine(t *testing.T) {
-	scanner := &passthroughUsageScanner{}
-	chunk := make([]byte, passthroughMaxPendingBytes+1)
-	if err := scanner.feed(chunk); err == nil {
-		t.Fatal("oversized newline-free usage stream was accepted")
-	}
-	if len(scanner.pending) != 0 {
-		t.Fatalf("pending bytes = %d after rejection", len(scanner.pending))
+	if !strings.Contains(strings.ToLower(err.Error()), "anthropic") || !strings.Contains(strings.ToLower(err.Error()), "no longer supports") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -194,5 +144,27 @@ func TestStreamingReadersBoundMultilineEvents(t *testing.T) {
 	}
 	if err := readCodexSSE(strings.NewReader(input), func([]byte) error { return nil }); err == nil {
 		t.Fatal("Codex multiline SSE event exceeded the limit without an error")
+	}
+}
+
+func TestResponsesThinkingBlockIncludesEncryptedSignature(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	assembler := newResponseAssembler(&adapterRequest{
+		clientModel:     "test-model",
+		thinkingEnabled: true,
+	}, recorder)
+	if err := assembler.start(); err != nil {
+		t.Fatalf("start() error: %v", err)
+	}
+	if err := assembler.addThinking("reasoning step"); err != nil {
+		t.Fatalf("addThinking() error: %v", err)
+	}
+	assembler.blocks[assembler.activeIndex].Signature = "test-sig"
+	if err := assembler.finish(); err != nil {
+		t.Fatalf("finish() error: %v", err)
+	}
+	stream := recorder.Body.String()
+	if !strings.Contains(stream, `"encrypted_content":"test-sig"`) {
+		t.Fatalf("stream missing encrypted_content on reasoning output item: %s", stream)
 	}
 }

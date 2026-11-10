@@ -239,7 +239,7 @@ func TestAutoClawManagedChatRuntimeUsesDesktopContract(t *testing.T) {
 	// Claude Code receives the readable catalog label; the adapter must map it
 	// back to AutoClaw's provider-prefixed route ID before sending upstream.
 	response := postClaudeMessage(t, ctx, proxyRuntime, "GLM-5.3-Flash")
-	if !strings.Contains(response, "managed ok") || !strings.Contains(response, `"type":"message_stop"`) {
+	if !strings.Contains(response, "managed ok") || !strings.Contains(response, `"type":"response.completed"`) {
 		t.Fatalf("managed Chat response = %s", response)
 	}
 	request := <-requests
@@ -297,8 +297,8 @@ func TestAutoClawManagedChatDoesNotReplayAmbiguousServerErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(runtime.Stop)
-	payload := strings.NewReader(`{"model":"GLM-5.3-Flash","max_tokens":1,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", payload)
+	payload := strings.NewReader(`{"model":"GLM-5.3-Flash","max_output_tokens":1,"stream":true,"input":[{"role":"user","content":"hi"}]}`)
+	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", payload)
 	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

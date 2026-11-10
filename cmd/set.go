@@ -4,11 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -123,8 +121,10 @@ func RunProviderSet(args []string) error {
 		nameGenerated = true
 	}
 
-	if provider.IsClaudeAccount(p) {
-		return fmt.Errorf("Claude accounts use Claude Code's own settings; re-login with ccl oauth claude %s", p.Name)
+	if p.OAuthProvider != "" {
+		if err := provider.ValidateRuntime(p); err != nil {
+			return err
+		}
 	}
 	// 🚀 运行基于特定域 v2 架构的超级大面板
 	m := NewAdvancedConfigModel(&p)
@@ -363,88 +363,44 @@ func stringInSlice(s string, slice []string) bool {
 }
 
 type protocolDetectionResult struct {
-	protocol      string
-	models        string
-	modelInfos    []protocol.ModelInfo
-	baseURL       string
-	anthropicAuth string
-	err           error
+	protocol   string
+	models     string
+	modelInfos []protocol.ModelInfo
+	baseURL    string
+	err        error
 }
 
-const (
-	anthropicAuthXAPIKey = "x-api-key"
-	anthropicAuthBearer  = "bearer"
-)
-
-// Respect a configured data plane first. A models list verifies credentials,
-// not Chat/Responses support; preserve that user choice without a paid probe.
+// A models list verifies credentials. Chat and Responses share that list,
+// so preserve a configured Responses choice without a generation probe.
 func detectProtocolAndModelsPreferred(endpoint, apiKey string, preference ...string) protocolDetectionResult {
-	if len(preference) == 0 || (!provider.IsOpenAICompatibleType(preference[0]) && !provider.IsAnthropicType(preference[0])) {
-		return detectProtocolAndModelsDetailed(endpoint, apiKey)
-	}
-	typ := preference[0]
 	base := normalizeModelBaseURL(endpoint)
-	candidate := modelProbeCandidate{name: "user-preference", baseURL: base, modelsURL: protocol.NormalizeOpenAIModelsURL(base), auth: modelProbeAuthBearer, expect: modelProbeExpectOpenAI}
-	if provider.IsAnthropicType(typ) {
-		candidate.modelsURL = protocol.NormalizeAnthropicModelsURL(base)
-		candidate.expect = modelProbeExpectAnthropic
-		candidate.auth = modelProbeAuthXAPIKey
-		if len(preference) > 1 && preference[1] == anthropicAuthBearer {
-			candidate.auth = modelProbeAuthBearer
-		}
+	if base == "" || strings.TrimSpace(apiKey) == "" {
+		return protocolDetectionResult{err: fmt.Errorf("endpoint and API key are required")}
 	}
-	if result, err := fetchCandidateModelsForDetection(candidate, apiKey); err == nil && result.models != "" {
-		detection := protocolDetectionResult{protocol: typ, models: result.models, modelInfos: result.modelInfos, baseURL: base}
-		if provider.IsAnthropicType(typ) {
-			detection.anthropicAuth = string(candidate.auth)
-		}
-		return detection
+	req, err := http.NewRequest(http.MethodGet, protocol.NormalizeOpenAIModelsURL(base), nil)
+	if err != nil {
+		return protocolDetectionResult{err: err}
 	}
-	return detectProtocolAndModelsDetailed(endpoint, apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	result, err := fetchModelListForDetection(req, 8*time.Second)
+	if err != nil {
+		return protocolDetectionResult{err: fmt.Errorf("OpenAI model-list probe failed: %w", err)}
+	}
+	if result.shape == modelListShapeAnthropic {
+		return protocolDetectionResult{err: fmt.Errorf("this endpoint serves the retired Anthropic Messages protocol; enter a Responses or Chat Completions endpoint")}
+	}
+	if result.models == "" {
+		return protocolDetectionResult{err: fmt.Errorf("endpoint returned no models")}
+	}
+	typ := "openai"
+	if len(preference) > 0 && provider.IsOpenAIResponsesType(preference[0]) {
+		typ = "openai_responses"
+	}
+	return protocolDetectionResult{protocol: typ, models: result.models, modelInfos: result.modelInfos, baseURL: base}
 }
 
 func detectProtocolAndModelsDetailed(endpoint, apiKey string) protocolDetectionResult {
-	endpoint = strings.TrimSuffix(endpoint, "/")
-	setDebugf("detectProtocolAndModelsDetailed start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
-
-	var failures []modelProbeFailure
-	for _, candidate := range buildModelProbeCandidates(endpoint) {
-		setDebugf("detect probe start name=%s auth=%s url=%q corrected_base=%q", candidate.name, candidate.auth, candidate.modelsURL, candidate.baseURL)
-		result, err := fetchCandidateModelsForDetection(candidate, apiKey)
-		if err != nil {
-			setDebugf("detect probe failed name=%s err=%v", candidate.name, err)
-			failures = append(failures, modelProbeFailure{candidate: candidate, err: err})
-			continue
-		}
-		if result.models == "" {
-			err := fmt.Errorf("empty model list shape=%q", result.shape)
-			setDebugf("detect probe empty name=%s shape=%q", candidate.name, result.shape)
-			failures = append(failures, modelProbeFailure{candidate: candidate, err: err})
-			continue
-		}
-		if detection, ok := classifyModelProbeResult(candidate, result); ok {
-			return detection
-		}
-		err = fmt.Errorf("unexpected model list shape %q for %s", result.shape, candidate.expect)
-		setDebugf("detect probe rejected name=%s shape=%q expect=%s", candidate.name, result.shape, candidate.expect)
-		failures = append(failures, modelProbeFailure{candidate: candidate, err: err})
-	}
-	return unsupportedProtocolResult(failures)
-}
-
-func unsupportedProtocolResult(failures []modelProbeFailure) protocolDetectionResult {
-	reason := summarizeProbeFailures(failures)
-	if reason != "" {
-		setDebugf("detect failed summary=%q", reason)
-		return protocolDetectionResult{err: fmt.Errorf("%s: %s", locale.T(
-			"暂不支持这个协议：Anthropic 与 OpenAI 模型列表探测均失败",
-			"unsupported protocol: the Anthropic and OpenAI model-list probes both failed",
-		), reason)}
-	}
-	return protocolDetectionResult{err: fmt.Errorf("%s", locale.T(
-		"暂不支持这个协议：Anthropic 与 OpenAI 模型列表探测均失败",
-		"unsupported protocol: the Anthropic and OpenAI model-list probes both failed",
-	))}
+	return detectProtocolAndModelsPreferred(endpoint, apiKey)
 }
 
 type modelListShape string
@@ -461,156 +417,11 @@ type modelListDetection struct {
 	shape      modelListShape
 }
 
-type modelProbeAuth string
-
-const (
-	modelProbeAuthBearer  modelProbeAuth = "bearer"
-	modelProbeAuthXAPIKey modelProbeAuth = "x-api-key"
-)
-
-type modelProbeExpectation string
-
-const (
-	modelProbeExpectOpenAI    modelProbeExpectation = "openai-compatible"
-	modelProbeExpectAnthropic modelProbeExpectation = "anthropic-native"
-)
-
-type modelProbeCandidate struct {
-	name      string
-	modelsURL string
-	baseURL   string
-	auth      modelProbeAuth
-	expect    modelProbeExpectation
-}
-
-type modelProbeFailure struct {
-	candidate modelProbeCandidate
-	err       error
-}
-
-func buildModelProbeCandidates(endpoint string) []modelProbeCandidate {
-	baseURL := normalizeModelBaseURL(endpoint)
-	if endpointLikelyAnthropic(baseURL) {
-		modelsURL := protocol.NormalizeAnthropicModelsURL(baseURL)
-		return []modelProbeCandidate{
-			{name: "anthropic-path-x-api-key", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthXAPIKey, expect: modelProbeExpectAnthropic},
-			{name: "anthropic-path-bearer", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthBearer, expect: modelProbeExpectAnthropic},
-		}
-	}
-	modelsURL := protocol.NormalizeOpenAIModelsURL(baseURL)
-	// A generic base URL is probed as OpenAI first and falls back to the
-	// Anthropic-shaped route with either auth style.
-	return []modelProbeCandidate{
-		{name: "openai-path-bearer", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthBearer, expect: modelProbeExpectOpenAI},
-		{name: "openai-path-x-api-key", modelsURL: modelsURL, baseURL: baseURL, auth: modelProbeAuthXAPIKey, expect: modelProbeExpectAnthropic},
-	}
-}
-
-func classifyModelProbeResult(candidate modelProbeCandidate, result modelListDetection) (protocolDetectionResult, bool) {
-	if result.shape == modelListShapeAnthropic {
-		auth := anthropicAuthXAPIKey
-		if candidate.auth == modelProbeAuthBearer {
-			auth = anthropicAuthBearer
-		}
-		setDebugf("detect selected anthropic auth=%s model_count=%d shape=%q probe=%s base_url=%q", auth, countCSV(result.models), result.shape, candidate.name, candidate.baseURL)
-		return protocolDetectionResult{protocol: "anthropic", models: result.models, modelInfos: result.modelInfos, baseURL: candidate.baseURL, anthropicAuth: auth}, true
-	}
-
-	if result.shape == modelListShapeOpenAI || candidate.expect == modelProbeExpectOpenAI {
-		setDebugf("detect selected openai family model_count=%d shape=%q probe=%s base_url=%q", countCSV(result.models), result.shape, candidate.name, candidate.baseURL)
-		return protocolDetectionResult{protocol: "openai", models: result.models, modelInfos: result.modelInfos, baseURL: candidate.baseURL}, true
-	}
-	if result.shape == modelListShapeUnknown && candidate.expect == modelProbeExpectAnthropic {
-		auth := anthropicAuthXAPIKey
-		if candidate.auth == modelProbeAuthBearer {
-			auth = anthropicAuthBearer
-		}
-		return protocolDetectionResult{protocol: "anthropic", models: result.models, modelInfos: result.modelInfos, baseURL: candidate.baseURL, anthropicAuth: auth}, true
-	}
-
-	return protocolDetectionResult{}, false
-}
-
-func fetchCandidateModelsForDetection(candidate modelProbeCandidate, apiKey string) (modelListDetection, error) {
-	if strings.TrimSpace(apiKey) == "" {
-		return modelListDetection{}, errors.New(locale.T("api key 不能为空", "api key is empty"))
-	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, candidate.modelsURL, nil)
-	if err != nil {
-		return modelListDetection{}, err
-	}
-	switch candidate.auth {
-	case modelProbeAuthBearer:
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	case modelProbeAuthXAPIKey:
-		req.Header.Set("x-api-key", apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return fetchModelListForDetection(req, 8*time.Second)
-}
-
-func endpointHasVersionSuffix(endpoint string) bool {
-	return endpointVersionSuffix(endpoint) != ""
-}
-
-func endpointLikelyAnthropic(endpoint string) bool {
-	if endpointHasVersionSuffix(endpoint) {
-		return false
-	}
-	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(endpoint), "/"))
-	if err != nil {
-		return false
-	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) == 0 {
-		return false
-	}
-	last := strings.ToLower(parts[len(parts)-1])
-	return last == "claude" || last == "anthropic"
-}
-
-func endpointVersionSuffix(endpoint string) string {
-	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(endpoint), "/"))
-	if err != nil {
-		return ""
-	}
-	path := strings.Trim(u.Path, "/")
-	if path == "" {
-		return ""
-	}
-	parts := strings.Split(path, "/")
-	if len(parts) > 0 {
-		last := strings.ToLower(parts[len(parts)-1])
-		if last == "models" || last == "messages" {
-			parts = parts[:len(parts)-1]
-		}
-	}
-	if len(parts) >= 2 && strings.EqualFold(parts[len(parts)-2], "chat") && strings.EqualFold(parts[len(parts)-1], "completions") {
-		parts = parts[:len(parts)-2]
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	last := strings.ToLower(parts[len(parts)-1])
-	if len(last) < 2 || last[0] != 'v' {
-		return ""
-	}
-	for _, r := range last[1:] {
-		if r < '0' || r > '9' {
-			return ""
-		}
-	}
-	return last
-}
-
 func normalizeModelBaseURL(endpoint string) string {
 	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	switch {
 	case strings.HasSuffix(endpoint, "/models"):
 		return strings.TrimSuffix(endpoint, "/models")
-	case strings.HasSuffix(endpoint, "/messages"):
-		return strings.TrimSuffix(endpoint, "/messages")
 	default:
 		return endpoint
 	}
@@ -627,58 +438,6 @@ func (e modelProbeHTTPError) Error() string {
 		return e.status
 	}
 	return fmt.Sprintf("%s body=%q", e.status, e.preview)
-}
-
-func summarizeProbeFailures(failures []modelProbeFailure) string {
-	if len(failures) == 0 {
-		return ""
-	}
-
-	hasUnauthorized := false
-	hasNotFound := false
-	hasMethodNotAllowed := false
-	hasNetwork := false
-	hasHTML := false
-	for _, failure := range failures {
-		var httpErr modelProbeHTTPError
-		if errors.As(failure.err, &httpErr) {
-			switch httpErr.statusCode {
-			case http.StatusUnauthorized, http.StatusForbidden:
-				hasUnauthorized = true
-			case http.StatusNotFound:
-				hasNotFound = true
-			case http.StatusMethodNotAllowed:
-				hasMethodNotAllowed = true
-			}
-			if strings.Contains(strings.ToLower(httpErr.preview), "<html") {
-				hasHTML = true
-			}
-			continue
-		}
-		if errors.Is(failure.err, context.DeadlineExceeded) {
-			hasNetwork = true
-			continue
-		}
-		var netErr interface{ Timeout() bool }
-		if errors.As(failure.err, &netErr) && netErr.Timeout() {
-			hasNetwork = true
-		}
-	}
-
-	switch {
-	case hasUnauthorized:
-		return locale.T("地址可访问，但 API Key 或鉴权方式不正确", "endpoint is reachable, but API key or auth type is invalid")
-	case hasNotFound:
-		return locale.T("模型列表路径不存在，请检查 endpoint 或确认服务商支持 /models", "model-list path was not found; check the endpoint or confirm the provider supports /models")
-	case hasMethodNotAllowed:
-		return locale.T("模型列表 endpoint 存在但不接受 GET 方法", "model-list endpoint exists but does not accept GET")
-	case hasHTML:
-		return locale.T("返回的是 HTML，可能填成了网页地址而不是 API 地址", "response was HTML; the URL may be a website URL rather than an API base URL")
-	case hasNetwork:
-		return locale.T("网络连接失败或请求超时", "network connection failed or timed out")
-	default:
-		return locale.T("返回体无法识别为 OpenAI 或 Anthropic 模型列表", "response body was not recognized as an OpenAI or Anthropic model list")
-	}
 }
 
 func fetchModelListForDetection(req *http.Request, timeout time.Duration) (modelListDetection, error) {

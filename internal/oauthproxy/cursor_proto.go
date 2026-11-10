@@ -1125,15 +1125,12 @@ func sha256SumBytes(data []byte) []byte {
 	return sum[:]
 }
 
-func flattenCursorMessages(messages []anthropicMessage) (history, current string, images []cursorImage, resume []cursorToolResult, err error) {
+func flattenCursorMessages(messages []conversationTurn) (history, current string, images []cursorImage, resume []cursorToolResult, err error) {
 	if len(messages) == 0 {
 		return "", "", nil, nil, fmt.Errorf("messages must not be empty")
 	}
 	last := messages[len(messages)-1]
-	lastContent, err := parseKiroContent(last.Content, nil)
-	if err != nil {
-		return "", "", nil, nil, err
-	}
+	lastContent := parseKiroContent(last, nil)
 	if strings.EqualFold(strings.TrimSpace(last.Role), "user") {
 		resume = cursorToolResultsFromContent(lastContent)
 		current = strings.TrimSpace(lastContent.text)
@@ -1153,13 +1150,10 @@ func flattenCursorMessages(messages []anthropicMessage) (history, current string
 	return history, current, images, resume, nil
 }
 
-func flattenCursorHistory(messages []anthropicMessage) (string, error) {
+func flattenCursorHistory(messages []conversationTurn) (string, error) {
 	var builder strings.Builder
 	for _, message := range messages {
-		content, err := parseKiroContent(message.Content, nil)
-		if err != nil {
-			return "", err
-		}
+		content := parseKiroContent(message, nil)
 		switch strings.ToLower(strings.TrimSpace(message.Role)) {
 		case "user":
 			if text := strings.TrimSpace(content.text); text != "" {
@@ -1216,7 +1210,7 @@ func cursorToolResultsFromContent(content kiroContent) []cursorToolResult {
 		}
 		id := metadataString(item, "toolUseId")
 		if id == "" {
-			id = metadataString(item, "tool_use_id")
+			id = metadataString(item, "call_id")
 		}
 		if id == "" {
 			continue
@@ -1297,7 +1291,7 @@ func cursorImagesFromKiro(images []any) []cursorImage {
 }
 
 // decodeBase64Flexible accepts standard and URL-safe base64, padded or not,
-// because upstream image payloads and Anthropic image blocks disagree on
+// because upstream image payloads and client image blocks disagree on
 // encoding and neither states which one it used.
 func decodeBase64Flexible(data string) ([]byte, error) {
 	data = strings.TrimSpace(data)
@@ -1316,7 +1310,7 @@ func decodeBase64Flexible(data string) ([]byte, error) {
 	if raw, err := base64.RawURLEncoding.DecodeString(data); err == nil {
 		return raw, nil
 	}
-	// A data: URL prefix is common in Anthropic image sources.
+	// A data: URL prefix is common in inline image sources.
 	if index := strings.Index(data, ","); index >= 0 {
 		return decodeBase64Flexible(data[index+1:])
 	}

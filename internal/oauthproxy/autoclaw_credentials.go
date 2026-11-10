@@ -104,7 +104,7 @@ func (a *autoClawOAuthAuthorizer) decorateHeader(header http.Header, converted *
 	header.Del("Authorization")
 	// AutoClaw's desktop model broker uses fetch/undici, whose request contract
 	// advertises a generic accept value even for streamed Chat Completions.
-	// Keep this separate from the local Anthropic response's SSE headers.
+	// Keep this separate from the local Responses SSE headers.
 	header.Set("Accept", "*/*")
 	// Undici's default User-Agent is literally "node". The origin is fronted by
 	// an Aliyun WAF that blocks Go's default Go-http-client/1.1 agent with a

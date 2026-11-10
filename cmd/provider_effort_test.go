@@ -9,7 +9,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func TestProviderEffortAndUltracode(t *testing.T) {
+func TestProviderEffort(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := config.Save(&provider.Config{ActiveProvider: "a", Providers: map[string]provider.Provider{
 		"a": {Name: "a", Type: "openai"}, "b": {Name: "b", Type: "openai"},
@@ -20,15 +20,9 @@ func TestProviderEffortAndUltracode(t *testing.T) {
 	if err := runProviderEffort(&out, []string{"xhigh"}, providerTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runProviderUltracode(&out, "on", providerTarget{name: "b"}); err != nil {
-		t.Fatal(err)
-	}
 	cfg, _ := config.Load()
 	if cfg.Providers["a"].EffortLevel != "xhigh" || cfg.Providers["b"].EffortLevel != "" {
 		t.Fatalf("effort = %q / %q", cfg.Providers["a"].EffortLevel, cfg.Providers["b"].EffortLevel)
-	}
-	if !cfg.Providers["b"].Ultracode || cfg.Providers["a"].Ultracode {
-		t.Fatal("ultracode went to the wrong provider")
 	}
 
 	if err := runProviderEffort(&out, []string{"default"}, providerTarget{}); err != nil {
@@ -41,7 +35,7 @@ func TestProviderEffortAndUltracode(t *testing.T) {
 		t.Fatal("an unknown level was accepted")
 	}
 	out.Reset()
-	if err := runProviderEffort(&out, nil, providerTarget{name: "b"}); err != nil || !strings.Contains(out.String(), "default + ultracode") {
+	if err := runProviderEffort(&out, nil, providerTarget{name: "b"}); err != nil || !strings.Contains(out.String(), "default") {
 		t.Fatalf("show = %q, %v", out.String(), err)
 	}
 }

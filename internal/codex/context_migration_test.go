@@ -87,8 +87,8 @@ func TestNativeCompactionMigrationContinuesConvertedConversation(t *testing.T) {
 		if tools, _ := body["tools"].([]any); len(tools) != 0 {
 			t.Error("historical tool was reauthorized")
 		}
-		writeMessage(w, []map[string]any{{"type": "text", "text": "continued-from-local-history"}})
-	}, "anthropic", Options{Desktop: true})
+		writeChatText(w, r, "continued-from-local-history")
+	}, "openai", Options{Desktop: true})
 	for _, stream := range []bool{false, true} {
 		requestBody := map[string]any{"model": "ccl/chosen/model-a", "stream": stream, "input": []any{map[string]any{"type": "compaction", "encrypted_content": "opaque-test-cipher"}, map[string]any{"role": "user", "content": "continue"}}}
 		raw, _ := json.Marshal(requestBody)

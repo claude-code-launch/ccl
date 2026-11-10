@@ -1,5 +1,5 @@
 // Package codex connects Codex clients to CCL providers without moving native
-// Codex or Claude credentials. The desktop picker and routing allow-list are
+// Codex credentials. The desktop picker and routing allow-list are
 // deliberately separate: only names owned by CCL can reach a CCL runtime.
 package codex
 
@@ -56,7 +56,6 @@ type Route struct {
 	Alias           string
 	Model           string
 	NativeResponses bool
-	ThinkingBudget  bool
 	MaxOutputTokens int
 }
 
@@ -101,8 +100,8 @@ func New(ctx context.Context, runtime *oauthproxy.Runtime, configured provider.P
 	if options.CatalogMode == CatalogRemote && !options.Independent {
 		return nil, fmt.Errorf("remote CCL catalogs require independent mode; shared mode uses local JSON")
 	}
-	if provider.IsClaudeAccount(configured) || provider.IsDefaultProvider(configured.Name) {
-		return nil, fmt.Errorf("native Claude accounts cannot be used by Codex; select a CCL API or OAuth provider")
+	if err := provider.ValidateRuntime(configured); err != nil {
+		return nil, err
 	}
 	address := options.ListenAddress
 	if address == "" {
@@ -145,8 +144,10 @@ func (g *Gateway) buildModels(runtime *oauthproxy.Runtime, configured provider.P
 	var err error
 	p := configured
 	p.Type = provider.EffectiveType(p)
-	native := len(p.ModelProtocols) == 0 && ((p.OAuthProvider == "" && provider.IsOpenAIResponsesType(p.Type)) ||
-		p.OAuthProvider == "gpt" || p.OAuthProvider == "grok")
+	oauth := strings.ToLower(strings.TrimSpace(p.OAuthProvider))
+	mixed := oauth == "" && len(p.ModelProtocols) > 0
+	native := oauth == "gpt" || oauth == "codex" || oauth == "grok" || oauth == "xai" ||
+		oauth == "" && !mixed && provider.IsOpenAIResponsesType(p.Type)
 	details, names := runtime.ModelDetails(), runtime.ModelDisplayNames()
 	models := runtime.Models()
 	if !native {
@@ -162,9 +163,14 @@ func (g *Gateway) buildModels(runtime *oauthproxy.Runtime, configured provider.P
 		if !ok {
 			info = details[strings.ToLower(model)]
 		}
-		g.routes[alias] = Route{Provider: p.Name, Alias: alias, Model: model, NativeResponses: native, ThinkingBudget: p.OAuthProvider == "" && provider.IsAnthropicType(p.Type), MaxOutputTokens: info.MaxOutputTokens}
+		modelProtocol := p.ModelProtocols[strings.ToLower(model)]
+		if modelProtocol == "" {
+			modelProtocol = p.ModelProtocols[strings.TrimSuffix(strings.ToLower(model), "[1m]")]
+		}
+		modelNative := native || mixed && provider.IsOpenAIResponsesType(modelProtocol)
+		g.routes[alias] = Route{Provider: p.Name, Alias: alias, Model: model, NativeResponses: modelNative, MaxOutputTokens: info.MaxOutputTokens}
 		entry := newModel(alias, model, details, names)
-		if native {
+		if modelNative {
 			entry["supports_search_tool"] = false
 		}
 		applyProviderContext(entry, model, p)
@@ -282,7 +288,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		g.forwardResponses(w, r, nativeHistory(body), route, path)
 		return
 	}
-	g.serveBridge(w, r, request, route, path == "/responses/compact")
+	g.serveBridge(w, r, body, request, route, path == "/responses/compact")
 }
 
 func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
@@ -312,22 +318,30 @@ func (g *Gateway) forwardResponses(w http.ResponseWriter, r *http.Request, body 
 	_ = json.Unmarshal(body, &fields)
 	fields["model"], _ = json.Marshal(route.Model)
 	body, _ = json.Marshal(fields)
-	request, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(g.requestRuntime(r).Endpoint(), "/")+path, bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer "+g.requestRuntime(r).APIKey())
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "text/event-stream")
-	for _, key := range []string{"Session_id", "X-Codex-Turn-Metadata", "X-Codex-Session-Id"} {
-		if value := r.Header.Get(key); value != "" {
-			request.Header.Set(key, value)
-		}
-	}
-	response, err := g.client.Do(request)
+	response, err := g.callRuntime(r, body, path)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", "CCL provider connection failed", "")
 		return
 	}
 	defer response.Body.Close()
 	relayResponse(w, response)
+}
+
+func (g *Gateway) callRuntime(r *http.Request, body []byte, path string) (*http.Response, error) {
+	runtime := g.requestRuntime(r)
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, runtime.Endpoint()+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "text/event-stream, application/json")
+	for _, key := range []string{"Session_id", "X-Codex-Turn-Metadata", "X-Codex-Session-Id"} {
+		if value := r.Header.Get(key); value != "" {
+			request.Header.Set(key, value)
+		}
+	}
+	return g.client.Do(request)
 }
 
 func (g *Gateway) serveNative(w http.ResponseWriter, r *http.Request, body []byte, path string) {

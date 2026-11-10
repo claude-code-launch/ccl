@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,19 +59,19 @@ func TestCodexClientToolSearchRoundTrip(t *testing.T) {
 					if strings.Contains(string(raw), `"order_id"`) {
 						t.Error("deferred schema reached first request")
 					}
-					writeMessage(w, []map[string]any{{"type": "tool_use", "id": "search_shipping", "name": findTool(t, body, "tool_search"), "input": map[string]any{"query": "shipping_eta"}}})
+					writeChatTool(w, r, "search_shipping", findTool(t, body, "tool_search"), map[string]any{"query": "shipping_eta"})
 				case 2:
 					if !strings.Contains(string(raw), `"order_id"`) {
 						t.Error("client search did not load selected schema")
 					}
-					writeMessage(w, []map[string]any{{"type": "tool_use", "id": "call_shipping", "name": findTool(t, body, "lookup_shipping_eta"), "input": map[string]any{"order_id": "order-42"}}})
+					writeChatTool(w, r, "call_shipping", findTool(t, body, "lookup_shipping_eta"), map[string]any{"order_id": "order-42"})
 				default:
 					if !strings.Contains(string(raw), "shipping-result") {
 						t.Error("client execution result was lost")
 					}
-					writeMessage(w, []map[string]any{{"type": "text", "text": "continued"}})
+					writeChatText(w, r, "continued")
 				}
-			}, "anthropic", Options{})
+			}, "openai", Options{})
 			catalog := append(largeToolCatalog(), clientToolSearch())
 			response := postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "Find shipping ETA", "tools": catalog, "stream": streaming})
 			raw, _ := io.ReadAll(response.Body)
@@ -115,25 +114,4 @@ func TestCodexClientToolSearchRoundTrip(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCodexDeferredToolsNeedClientSearchDeclaration(t *testing.T) {
-	request := responseRequest{}
-	for _, tool := range largeToolCatalog() {
-		request.Tools = append(request.Tools, tool.(map[string]any))
-	}
-	items := []map[string]any{{"role": "user", "content": "hi"}}
-	before, _, err := toMessages(request, items, Route{Model: "model-a"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Tools = append(request.Tools, clientToolSearch())
-	after, _, err := toMessages(request, items, Route{Model: "model-a"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(after, []byte("unrelated-service-documentation")) || len(after)*10 >= len(before) {
-		t.Fatalf("before=%d after=%d", len(before), len(after))
-	}
-	t.Logf("fixture request bytes: %d -> %d", len(before), len(after))
 }

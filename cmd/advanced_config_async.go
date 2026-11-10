@@ -8,10 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/protocol"
-	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
 // keyVerifyAsync sends one minimal, authenticated inference request for the
@@ -37,11 +35,7 @@ func verifyProviderAPIKey(parent context.Context, model, endpoint, apiKey, proto
 	var err error
 	switch proto {
 	case "anthropic":
-		status, err = probeModelStatus(parent, buildAnthropicMessagesURL(endpoint), map[string]any{
-			"model":      model,
-			"max_tokens": 1,
-			"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-		}, map[string]string{"anthropic-version": "2023-06-01", "x-api-key": apiKey}, timeout)
+		return fmt.Errorf("Anthropic Messages has been retired")
 	case "openai_responses":
 		status, err = protocol.ProbeOpenAIResponsesStatusContext(parent, endpoint, apiKey, model, timeout)
 	default: // "openai" (Chat Completions)
@@ -82,11 +76,18 @@ func (m *AdvancedConfigModel) firstRoutableModel() (model, proto string, ok bool
 		if trimmed == "" {
 			continue
 		}
-		if fallback == "" {
-			fallback = trimmed
-		}
-		if proto := m.p.ModelProtocols[strings.ToLower(trimmed)]; proto != "" {
-			return trimmed, proto, true
+		switch probeProtocolForModel(m.p.ModelProtocols, trimmed) {
+		case "anthropic":
+			continue
+		case "openai_responses":
+			return trimmed, "openai_responses", true
+		case "openai":
+			if _, explicit := m.p.ModelProtocols[strings.ToLower(trimmed)]; explicit {
+				return trimmed, "openai", true
+			}
+			if fallback == "" {
+				fallback = trimmed
+			}
 		}
 	}
 	if fallback == "" {
@@ -125,32 +126,24 @@ func fetchModelsAsync(done chan<- modelFetchDoneMsg, endpoint, apiKey string, pr
 		setDebugf("modelFetch start endpoint=%q api_key_len=%d", endpoint, len(apiKey))
 		result := detectProtocolAndModelsPreferred(endpoint, apiKey, preference...)
 		setDebugf(
-			"modelFetch done endpoint=%q detected_endpoint=%q protocol=%q anthropic_auth=%q model_count=%d err=%v",
+			"modelFetch done endpoint=%q detected_endpoint=%q protocol=%q model_count=%d err=%v",
 			endpoint,
 			result.baseURL,
 			result.protocol,
-			result.anthropicAuth,
 			countCSV(result.models),
 			result.err,
 		)
-		// Best-effort: pull context_window metadata for OpenAI-family catalogs.
-		// Failures are ignored — IDs still come from detection.
-		windows := map[string]int{}
-		if result.err == nil && result.protocol != "" && !provider.IsAnthropicType(result.protocol) {
-			// Subscription runtimes only expose windows through the Codex catalog,
-			// which AdvertisedContextWindows tries before the plain OpenAI list.
-			advertised, source := claude.AdvertisedContextWindows(result.baseURL, apiKey)
-			for id, window := range advertised {
-				windows[id] = window
+		windows := make(map[string]int)
+		for _, info := range result.modelInfos {
+			if info.ContextWindow > 0 {
+				windows[strings.ToLower(info.ID)] = info.ContextWindow
 			}
-			setDebugf("modelFetch context windows catalog=%q count=%d", source, len(windows))
 		}
 		done <- modelFetchDoneMsg{
 			endpoint:            endpoint,
 			apiKey:              apiKey,
 			detectedType:        result.protocol,
 			detectedEndpoint:    result.baseURL,
-			anthropicAuth:       result.anthropicAuth,
 			discoveredModelsRaw: result.models,
 			contextWindows:      windows,
 			modelInfos:          result.modelInfos,
@@ -163,7 +156,7 @@ func fetchModelsAsync(done chan<- modelFetchDoneMsg, endpoint, apiKey string, pr
 // statuses on the availability channel. A rejected probe is not necessarily
 // evidence that the model itself is unavailable; keyVerified lets a verified
 // models.dev source upgrade a 404 to a concrete "unavailable" verdict.
-func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, smokeTestModel string, keyVerified bool) {
+func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, testID uint64, models []string, endpoint, apiKey, providerType string, protocols map[string]string, smokeTestModel string, keyVerified bool) {
 	models = append([]string(nil), models...)
 	go func() {
 		statuses := make(map[string]modelAvailability, len(models))
@@ -172,7 +165,7 @@ func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, 
 			return
 		}
 		if smokeTestModel != "" {
-			status := probeModelAvailability(ctx, smokeTestModel, endpoint, apiKey, providerType, anthropicAuth, protocols, keyVerified)
+			status := probeModelAvailability(ctx, smokeTestModel, endpoint, apiKey, providerType, protocols, keyVerified)
 			if ctx.Err() == nil {
 				for _, model := range models {
 					statuses[model] = status
@@ -203,7 +196,7 @@ func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, 
 						if !ok {
 							return
 						}
-						status := probeModelAvailability(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, keyVerified)
+						status := probeModelAvailability(ctx, model, endpoint, apiKey, providerType, protocols, keyVerified)
 						if ctx.Err() != nil {
 							return
 						}
@@ -227,10 +220,10 @@ func testModelsAsync(done chan<- modelAvailabilityDoneMsg, ctx context.Context, 
 // 4xx stay inconclusive: 400 can be a parameter mismatch and 429 a rate limit.
 // keyVerified only flips the 404 verdict for models.dev-style sources whose
 // endpoint and per-model protocol table come from catalog metadata.
-func probeModelAvailability(ctx context.Context, model, endpoint, apiKey, providerType, anthropicAuth string, protocols map[string]string, keyVerified bool) modelAvailability {
+func probeModelAvailability(ctx context.Context, model, endpoint, apiKey, providerType string, protocols map[string]string, keyVerified bool) modelAvailability {
 	const attempts = 3
 	for attempt := range attempts {
-		status, err := probeSingleModelWithProtocolsStatusContext(ctx, model, endpoint, apiKey, providerType, anthropicAuth, protocols, modelProbeTimeout)
+		status, err := probeSingleModelWithProtocolsStatusContext(ctx, model, endpoint, apiKey, providerType, protocols, modelProbeTimeout)
 		if err != nil || status == 0 {
 			return modelAvailabilityInconclusive
 		}

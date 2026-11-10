@@ -30,7 +30,7 @@ func TestRealCodexIndependentAccountReadIgnoresCachedChatGPTLogin(t *testing.T) 
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("account/read triggered inference")
 		http.Error(w, "unexpected", 500)
-	}, "anthropic", Options{Independent: true})
+	}, "openai", Options{Independent: true})
 	applyClientFixture(t, g, home)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -19,14 +19,12 @@ import (
 )
 
 func TestRealCodexDiscoversAndExecutesDeferredMCPTool(t *testing.T) {
-	for _, protocol := range []string{"anthropic", "openai"} {
-		for _, approved := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/approved=%v", protocol, approved), func(t *testing.T) { realCodexDiscoversMCPTool(t, protocol, approved) })
-		}
+	for _, approved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("approved=%v", approved), func(t *testing.T) { realCodexDiscoversMCPTool(t, approved) })
 	}
 }
 
-func realCodexDiscoversMCPTool(t *testing.T, protocol string, approved bool) {
+func realCodexDiscoversMCPTool(t *testing.T, approved bool) {
 	t.Helper()
 	executable := os.Getenv("CCL_TEST_CODEX")
 	if executable == "" {
@@ -79,10 +77,6 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 			t.Error("large MCP descriptions were eagerly loaded")
 		}
 		reply := func(content []map[string]any) {
-			if protocol != "openai" {
-				writeMessage(w, content)
-				return
-			}
 			message := map[string]any{"role": "assistant"}
 			var text strings.Builder
 			var calls []any
@@ -99,9 +93,7 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 				message["tool_calls"] = calls
 				reason = "tool_calls"
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			chunk, _ := json.Marshal(map[string]any{"id": "chat_fixture", "choices": []any{map[string]any{"index": 0, "delta": message, "finish_reason": reason}}, "usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}})
-			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+			writeChatFixture(w, r, message, reason, 3)
 		}
 		switch calls.Add(1) {
 		case 1:
@@ -117,7 +109,7 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 			}
 			reply([]map[string]any{{"type": "text", "text": "tool-discovery-done"}})
 		}
-	}, protocol, Options{Desktop: true})
+	}, "openai", Options{Desktop: true})
 	g.server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			g.serve(w, r)

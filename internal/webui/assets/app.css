@@ -1,0 +1,117 @@
+:root {
+  --paper: #f7f4ed;
+  --panel: #ece8dd;
+  --ink: #25281f;
+  --muted: #615f54;
+  --line: #d4cfc0;
+  --accent: #a23f27;
+  --green: #425d3c;
+  --mono: "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --body: "Avenir Next", "Trebuchet MS", sans-serif;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 var(--body); }
+h1, h2, h3, p, pre { margin: 0; }
+button, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .52; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.masthead {
+  height: 52px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between;
+  background: #282a22; color: #fbf8ef; font: 600 11px/1 var(--mono); letter-spacing: .12em;
+}
+.brand, .local { display: flex; align-items: center; gap: 10px; }
+.brand-mark { display: grid; place-items: center; width: 22px; height: 22px; color: #22251e; background: #e6b993; font: 700 16px/1 var(--serif); }
+.brand-slash { color: #e6b993; }
+.local { color: #dedccd; }
+.dot { display: inline-block; width: 7px; height: 7px; background: currentColor; border-radius: 50%; }
+.local .dot { color: #b8c2a4; }
+.layout { display: grid; grid-template-columns: clamp(225px, 26vw, 310px) minmax(0, 1fr); height: calc(100dvh - 52px); }
+.sidebar { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; padding: 32px 20px 16px; }
+.eyebrow, .create label, .archive-heading, .path, .provider, .status { font: 600 10px/1.45 var(--mono); letter-spacing: .12em; color: var(--muted); }
+.sidebar h1 { font: 500 clamp(36px, 4vw, 48px)/1.12 var(--serif); letter-spacing: -.055em; margin: 6px 0 10px; }
+.sidebar h1 span, .empty h3 span { color: var(--accent); }
+.provider { text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
+.create { display: grid; gap: 7px; margin-top: 28px; }
+.create select { min-width: 0; width: 100%; background: var(--paper); border: 1px solid var(--line); padding: 7px 9px; border-radius: 2px; font: 12px/1.4 var(--mono); }
+.create button, .stop, .choice { border: 1px solid var(--line); border-radius: 2px; padding: 6px 12px; background: transparent; }
+.create button { text-align: left; font-weight: 600; }
+.create button span { font-size: 17px; margin-right: 5px; color: var(--accent); }
+.create button:hover:not(:disabled), .stop:hover, .choice:hover { background: #ded8c9; }
+.archive-heading { display: flex; justify-content: space-between; margin-top: 28px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+#sessions { overflow: auto; padding-bottom: 4px; }
+.session {
+  width: 100%; padding: 9px 10px; display: grid; grid-template-columns: 2ch minmax(0,1fr); gap: 8px; text-align: left;
+  border: 0; border-bottom: 1px solid var(--line); border-left: 2px solid transparent; background: transparent;
+}
+.session:hover { background: #e4dfd2; }
+.session[aria-current="true"] { background: var(--paper); border-left-color: var(--accent); }
+.serial { color: var(--accent); padding-top: 4px; font: 10px/1.4 var(--mono); }
+.session strong, .session small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session strong { font-size: 13px; font-weight: 650; }
+.session small { color: var(--muted); font: 11px/1.55 var(--mono); }
+.thread { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.thread-header { padding: 18px clamp(16px, 4vw, 52px); border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.thread-identity { min-width: 0; }
+.thread-header h2 { font: 500 clamp(22px, 3vw, 34px)/1.16 var(--serif); letter-spacing: -.035em; margin-top: 4px; overflow-wrap: anywhere; }
+.path { overflow-wrap: anywhere; letter-spacing: 0; margin-top: 4px; }
+.status { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 2px; flex: none; }
+.status[data-state="working"], .status[data-state="loading"], .status[data-state="stopping"] { color: var(--accent); }
+.status[data-state="idle"] .dot { color: var(--green); }
+.transcript { overflow: auto; flex: 1; padding: 28px clamp(16px, 5vw, 66px) 22px; min-height: 110px; }
+.empty {
+  margin: clamp(12px, 7vh, 72px) auto 24px; max-width: 720px; min-height: 208px;
+  border-block: 1px solid var(--line); padding: clamp(20px, 4vw, 42px) 0;
+  background-image: repeating-linear-gradient(0deg, transparent, transparent 27px, #d4cfc03d 27px, #d4cfc03d 28px);
+}
+.empty h3 { font: 500 clamp(30px, 6vw, 70px)/1 var(--serif); letter-spacing: -.065em; margin: 14px 0 12px; }
+.empty p:last-child { color: var(--muted); }
+#messages { max-width: 860px; margin: auto; display: grid; gap: 16px; }
+.message { max-width: 100%; min-width: 0; }
+.message header { margin-bottom: 5px; font: 650 10px/1.4 var(--mono); letter-spacing: .12em; color: var(--green); }
+.message.user { padding: 10px 13px; background: #ece8dd; border-left: 2px solid #ac9b7b; }
+.message.user header { color: var(--muted); }
+.message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool, .notice { border-block-start: 1px solid var(--line); padding: 6px 0; color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+.tool-state { margin-left: 8px; color: var(--green); }
+.notice[data-status="error"], .error { color: var(--accent); }
+.approvals { max-height: 35vh; overflow: auto; padding: 12px clamp(16px, 4vw, 52px); border-top: 1px solid #caa18c; background: #f4e4d6; }
+.approval + .approval { margin-top: 12px; border-top: 1px solid #caa18c; padding-top: 12px; }
+.approval h3 { font-size: 14px; overflow-wrap: anywhere; }
+.approval pre { margin: 5px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 var(--mono); }
+.approval .actions { margin-top: 6px; }
+.controls { padding: 12px clamp(16px, 4vw, 52px) 18px; border-top: 1px solid var(--line); }
+.error { margin-bottom: 8px; overflow-wrap: anywhere; }
+#composer { border: 1px solid var(--line); border-radius: 3px; background: #fffdf6; }
+#composer:focus-within { border-color: var(--accent); }
+#prompt { display: block; width: 100%; border: 0; background: transparent; padding: 11px 12px 5px; resize: vertical; min-height: 52px; max-height: 25vh; outline: none; }
+#prompt:disabled { opacity: .66; }
+.composer-footer, .actions { display: flex; align-items: center; gap: 8px; }
+.composer-footer { justify-content: space-between; padding: 5px 8px 8px 12px; }
+.shortcut, kbd { color: var(--muted); font: 10px/1.4 var(--mono); }
+.primary { background: var(--ink); color: var(--paper); border: 1px solid var(--ink); border-radius: 2px; padding: 6px 12px; font-weight: 600; }
+.primary:hover:not(:disabled) { background: var(--green); }
+.primary span { color: #f3c29e; margin-left: 5px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 640px) {
+  .masthead { height: 44px; padding: 0 12px; letter-spacing: .06em; }
+  .local { font-size: 9px; }
+  .layout { display: flex; flex-direction: column; height: calc(100dvh - 44px); }
+  .sidebar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 1fr); align-items: end; gap: 8px 12px; padding: 10px 12px; border: 0; border-bottom: 1px solid var(--line); }
+  .sidebar h1 { margin: 0 0 3px; font-size: 28px; }
+  .sidebar .eyebrow, .archive-heading { display: none; }
+  .create { margin: 0; gap: 3px; grid-template-columns: minmax(0, 1fr) auto; }
+  .create label { grid-column: 1 / -1; }
+  .create button { font-size: 0; padding: 0 8px; }
+  .create button span { margin: 0; }
+  #sessions { display: flex; grid-column: 1 / -1; overflow: auto; }
+  .session { min-width: 116px; max-width: 165px; width: auto; padding: 4px; border-bottom: 0; flex: 1 0 auto; }
+  .session small { display: none; }
+  .thread { flex: 1; }
+  .thread-header { padding-block: 9px; }
+  .transcript { padding-block: 14px; }
+  .empty { min-height: 0; margin-block: 12px; }
+  .controls { padding-block: 8px; }
+}

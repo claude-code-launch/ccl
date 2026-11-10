@@ -12,7 +12,7 @@ import (
 // upstreamFastRetryBackoff is the wait before each fast retry of a 429/5xx
 // upstream outcome, shared by every CCL data plane. At most three attempts:
 // the initial one plus one per entry. A longer Retry-After ends the fast loop
-// immediately so Claude Code can honor the upstream wait instead of CCL
+// immediately so the client can honor the upstream wait instead of CCL
 // sending requests ahead of it. No long sleeps or account rotation are added.
 // Var (not const) so tests can shorten it; no test in this package runs in
 // parallel.

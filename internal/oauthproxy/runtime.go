@@ -118,14 +118,12 @@ type UpstreamProtocol string
 const (
 	ProtocolOpenAIChat      UpstreamProtocol = "openai_chat"
 	ProtocolOpenAIResponses UpstreamProtocol = "openai_responses"
-	ProtocolAnthropic       UpstreamProtocol = "anthropic"
 )
 
 type StartOptions struct {
 	Protocol      UpstreamProtocol
 	Endpoint      string
 	APIKey        string
-	AnthropicAuth string
 	ModelSpec     string
 	OAuthProvider string
 	// OAuthAccountCredential optionally restricts the runtime to a single
@@ -142,9 +140,8 @@ type runtimeModelRoute struct {
 	Alias string
 }
 
-// StartProvider starts a loopback Anthropic Messages adapter. Every protocol
-// family is served by a CCL-owned data plane (Codex Responses, OpenAI Chat, or
-// the native Anthropic passthrough).
+// StartProvider starts a loopback OpenAI Responses adapter. Every protocol
+// family is served by a CCL-owned data plane (Codex Responses or OpenAI Chat).
 func StartProvider(parent context.Context, options StartOptions) (*Runtime, error) {
 	_, ownsLog, logErr := EnsureSessionLog("runtime")
 	if logErr != nil {
@@ -182,8 +179,6 @@ func startProvider(parent context.Context, options StartOptions) (*Runtime, erro
 		return StartOpenAIChatAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
 	case ProtocolOpenAIResponses:
 		return StartOpenAIResponsesAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec)
-	case ProtocolAnthropic:
-		return StartAnthropicAPI(parent, options.Endpoint, options.APIKey, options.ModelSpec, options.AnthropicAuth)
 	default:
 		return nil, fmt.Errorf("unsupported embedded proxy protocol %q", options.Protocol)
 	}
@@ -224,9 +219,6 @@ func StartOAuth(parent context.Context, providerName, modelSpec, credentialFile 
 	}
 	if backend == ProviderAutoClaw {
 		return startAutoClawOAuth(parent, AutoClawOpenAIBaseURL(), modelSpec, credentialFile)
-	}
-	if backend == ProviderZed {
-		return startZedOAuth(parent, modelSpec, credentialFile)
 	}
 	if backend == ProviderCursor {
 		return startCursorOAuth(parent, modelSpec, credentialFile)
@@ -345,13 +337,6 @@ func (r *Runtime) ListAuths() []*AuthInfo {
 		return r.listAuths()
 	}
 	return nil
-}
-
-// ClaudeBaseURL is the origin Claude Code uses before appending /v1/messages.
-// Endpoint includes /v1 because ccl's model and diagnostics clients expect an
-// OpenAI API root.
-func (r *Runtime) ClaudeBaseURL() string {
-	return strings.TrimSuffix(r.endpoint, "/v1")
 }
 
 func (r *Runtime) APIKey() string { return r.apiKey }

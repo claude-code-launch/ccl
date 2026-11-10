@@ -1,10 +1,7 @@
 package oauthproxy
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -14,7 +11,11 @@ import (
 func TestChatCountTokensUsesRoutedModelAndConvertedPayload(t *testing.T) {
 	// Unicode escapes keep this test compatible with the internal language rule.
 	text := strings.Repeat("\u8bf7\u68c0\u67e5\u4ee3\u7801\u4e2d\u7684\u5e76\u53d1\u95ee\u9898", 200)
-	payload, _ := json.Marshal(map[string]any{"model": "sonnet", "messages": []map[string]any{{"role": "user", "content": text}}, "tools": []map[string]any{{"name": "lookup", "input_schema": map[string]any{"type": "object", "properties": map[string]any{"code": map[string]any{"type": "string"}}}}}})
+	payload, _ := json.Marshal(map[string]any{
+		"model": "sonnet",
+		"input": []map[string]any{{"role": "user", "content": text}},
+		"tools": []map[string]any{{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object", "properties": map[string]any{"code": map[string]any{"type": "string"}}}}},
+	})
 	for _, tc := range []struct {
 		model   string
 		encoder *codec.Codec
@@ -32,18 +33,9 @@ func TestChatCountTokensUsesRoutedModelAndConvertedPayload(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", bytes.NewReader(payload))
-			r.Header.Set("x-api-key", "fake-session")
-			w := httptest.NewRecorder()
-			s.handleCountTokens(w, r)
-			var got struct {
-				Input int `json:"input_tokens"`
-			}
-			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-				t.Fatal(err)
-			}
-			if w.Code != 200 || got.Input != want {
-				t.Fatalf("status=%d count=%d, want %d", w.Code, got.Input, want)
+			got, _ := countChatInputTokens(tc.model, converted.body)
+			if got != want {
+				t.Fatalf("count=%d, want %d", got, want)
 			}
 		})
 	}

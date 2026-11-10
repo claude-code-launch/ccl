@@ -13,8 +13,7 @@ stores and shares data, including data from your Google account.
 ### 1. About ccl
 
 ccl is a free, open-source command-line tool for software developers. It
-starts Anthropic's Claude Code coding assistant and connects it to the model
-provider you choose. Source code: <https://github.com/claude-code-launch/ccl>.
+connects Grok Build and Codex to the model provider you choose. Source code: <https://github.com/claude-code-launch/ccl>.
 
 ccl runs entirely on your own computer. Its developers operate **no servers,
 no user accounts, no analytics and no telemetry**, and do not receive,
@@ -24,7 +23,7 @@ collect or store any of your data.
 
 | Data | Where it is kept | Why |
 | --- | --- | --- |
-| Model provider settings, API keys and OAuth tokens for services you connect | `~/.ccl/` on your computer, owner-only permissions (0600) | To start Claude Code with the provider you chose |
+| Model provider settings, API keys and OAuth tokens for services you connect | `~/.ccl/` on your computer, owner-only permissions (0600) | To connect the client to the provider you chose |
 | Google OAuth token (only if you turn on Google Drive sync) | `~/.ccl/cloud/` on your computer, owner-only permissions | To read and write ccl's sync file in your Google Drive |
 
 ccl sends network requests only to services you configure (model providers
@@ -117,7 +116,7 @@ Questions or requests: <https://github.com/claude-code-launch/ccl/issues>.
 
 ### 1. 关于 ccl
 
-ccl 是一款免费、开源的开发者命令行工具，用来启动 Anthropic 的编程助手 Claude Code，并让它连接你选择的模型 provider。源代码：<https://github.com/claude-code-launch/ccl>。
+ccl 是一款免费、开源的开发者命令行工具，用来为 Grok Build 和 Codex 接入你选择的模型 provider。源代码：<https://github.com/claude-code-launch/ccl>。
 
 ccl 完全在你自己的电脑上运行。其开发者**没有服务器、没有账号体系、没有分析或遥测**，不会接收、收集或存储你的任何数据。
 
@@ -125,7 +124,7 @@ ccl 完全在你自己的电脑上运行。其开发者**没有服务器、没�
 
 | 数据 | 存放位置 | 用途 |
 | --- | --- | --- |
-| 模型 provider 设置、API Key、你所连接服务的 OAuth 令牌 | 你电脑的 `~/.ccl/`，仅所有者可读写（0600） | 以你选择的 provider 启动 Claude Code |
+| 模型 provider 设置、API Key、你所连接服务的 OAuth 令牌 | 你电脑的 `~/.ccl/`，仅所有者可读写（0600） | 将客户端接入你选择的 provider |
 | Google OAuth 令牌（仅在开启 Google Drive 同步时） | 你电脑的 `~/.ccl/cloud/`，仅所有者可读写 | 读写 ccl 在你 Google Drive 中的同步文件 |
 
 ccl 只向你配置的服务（你添加的模型 provider、用于同步的 Google Drive 或 iCloud Drive）发送请求；运行 `ccl update` 时访问 GitHub。ccl 不包含任何分析、遥测或广告。

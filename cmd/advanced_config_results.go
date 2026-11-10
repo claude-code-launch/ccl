@@ -8,7 +8,6 @@ import (
 
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
-	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -28,7 +27,7 @@ func (m *AdvancedConfigModel) handleOAuthRuntimeDone(msg oauthRuntimeDoneMsg) {
 	setDebugf("oauth runtime ready endpoint=%q model_count=%d catalog_fallback=%t",
 		msg.endpoint, len(msg.models), msg.catalogFallback)
 	if msg.catalogFallback {
-		// The runtime is usable — Claude Code can still send requests through it —
+		// The runtime is usable — clients can still send requests through it —
 		// but its model list is a guess. Keeping the saved pool means a page that
 		// opens on a broken credential is not a page that quietly deletes the
 		// account's real models when it is saved.
@@ -43,7 +42,7 @@ func (m *AdvancedConfigModel) handleOAuthRuntimeDone(msg oauthRuntimeDoneMsg) {
 	m.markDirty()
 }
 
-func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, anthropicAuth, detectedEndpoint string, derr error) {
+func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discoveredModelsRaw, detectedEndpoint string, derr error) {
 	discoveredModels := uniqueModels(parseModelList(discoveredModelsRaw))
 	m.live().hadLocalModelPool = countCSV(m.p.Model) > 0
 	// Capture the raw detection inputs before probeEndpoint is normalized below,
@@ -51,10 +50,9 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 	detectedInputEndpoint := m.live().probeEndpoint
 	detectedInputKey := m.live().probeAPIKey
 	setDebugf(
-		"applyModelDetectionResult start detected_type=%q detected_endpoint=%q anthropic_auth=%q discovered_model_count=%d existing_model_count=%d err=%v",
+		"applyModelDetectionResult start detected_type=%q detected_endpoint=%q discovered_model_count=%d existing_model_count=%d err=%v",
 		detectedType,
 		detectedEndpoint,
-		anthropicAuth,
 		len(discoveredModels),
 		countCSV(m.p.Model),
 		derr,
@@ -64,26 +62,11 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 		m.live().probeEndpoint = detectedEndpoint
 	}
 	if !m.usesOAuth() && detectedType != "" {
-		// The probe can only tell apart the Anthropic and OpenAI families — it
-		// cannot distinguish OpenAI's Chat Completions from its Responses API
-		// (both are reached through the same GET /v1/models list).
-		// Reopening an existing openai_responses provider must not let the
-		// auto-probe downgrade its stored Type back to "openai" (chat); preserve
-		// the user's Responses choice when the probe still lands in the OpenAI
-		// family, and only overwrite the Type when the probe family disagrees.
+		// Both OpenAI formats share GET /models; keep an explicit Responses choice.
 		if !(provider.IsOpenAIResponsesType(m.p.Type) && provider.IsOpenAICompatibleType(detectedType)) {
 			m.p.Type = detectedType
 			m.p.AnthropicAuth = ""
 		}
-	}
-	if !m.usesOAuth() && detectedType == "anthropic" {
-		m.p.Endpoint = protocol.NormalizeAnthropicBaseURLForClaude(m.p.Endpoint)
-		if anthropicAuth != "" {
-			m.p.AnthropicAuth = anthropicAuth
-		}
-		m.live().anthropicAuth = m.p.AnthropicAuth
-	} else if !m.usesOAuth() && detectedType != "" {
-		m.live().anthropicAuth = ""
 	}
 
 	m.live().modelPool = []string{}
@@ -135,10 +118,9 @@ func (m *AdvancedConfigModel) applyModelDetectionResult(detectedType, discovered
 	m.applyRecommendation()
 	m.cursor = m.mainRowIndex(rowOpus)
 	setDebugf(
-		"applyModelDetectionResult success provider_type=%q endpoint=%q anthropic_auth=%q model_count=%d stale_slot_count=%d cursor=%d",
+		"applyModelDetectionResult success provider_type=%q endpoint=%q model_count=%d stale_slot_count=%d cursor=%d",
 		m.p.Type,
 		m.p.Endpoint,
-		m.p.AnthropicAuth,
 		len(m.live().modelPool),
 		m.staleSlotCount(),
 		m.cursor,
@@ -201,10 +183,9 @@ func (m *AdvancedConfigModel) handleFetchDone(msg modelFetchDoneMsg) {
 	m.live().detectProgress = 100
 	m.live().detecting = false
 	setDebugf(
-		"modelFetchDone accepted detected_type=%q detected_endpoint=%q anthropic_auth=%q model_count=%d err=%v",
+		"modelFetchDone accepted detected_type=%q detected_endpoint=%q model_count=%d err=%v",
 		msg.detectedType,
 		msg.detectedEndpoint,
-		msg.anthropicAuth,
 		countCSV(msg.discoveredModelsRaw),
 		msg.err,
 	)
@@ -227,7 +208,7 @@ func (m *AdvancedConfigModel) handleFetchDone(msg modelFetchDoneMsg) {
 			m.live().modelContextWindows[id] = window
 		}
 	}
-	m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.anthropicAuth, msg.detectedEndpoint, msg.err)
+	m.applyModelDetectionResult(msg.detectedType, msg.discoveredModelsRaw, msg.detectedEndpoint, msg.err)
 	m.markDirty()
 }
 

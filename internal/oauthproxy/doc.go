@@ -1,33 +1,29 @@
 // Package oauthproxy implements ccl's local subscription and protocol runtimes.
 //
-// Claude Code talks to an Anthropic Messages endpoint. CCL directly owns every
-// data plane: Codex Responses (GPT and openai_responses API-key gateways),
-// OpenAI Chat (manual API-key providers, Kimi, and WorkBuddy), Grok (cli-chat-proxy Responses with Grok Build identity), the
-// native-Anthropic Messages passthrough (models.dev @ai-sdk/anthropic models
-// and Zed native-Messages models), Gemini (Antigravity conversion), and Cursor
-// (Connect bidirectional agent stream).
-// Zed's mixed catalog, Kiro, and Qoder run entirely
-// on CCL-owned runtimes too. Direct Anthropic API-key gateways bypass
-// this package altogether. AutoClaw uses a CCL-owned Anthropic-to-OpenAI Chat
+// Clients talk to the OpenAI Responses or Chat Completions loopback endpoints.
+// CCL directly owns every data plane: Codex Responses (GPT and openai_responses
+// API-key gateways), OpenAI Chat (manual API-key providers, Kimi, and WorkBuddy),
+// Grok (cli-chat-proxy Responses with Grok Build identity), Gemini (Antigravity
+// conversion), and Cursor (Connect bidirectional agent stream). Kiro and Qoder
+// run entirely on CCL-owned runtimes too. AutoClaw uses a CCL-owned OpenAI Chat
 // runtime with its desktop OAuth refresh session and managed-proxy headers.
 //
 // Error recovery follows the data-plane owner. Every CCL-owned data plane
 // first applies the shared fast-retry loop (retry.go): an upstream 429 or 5xx
 // outcome is retried at most twice more after 500ms and 1s. A longer
-// Retry-After ends the fast loop immediately and is relayed so Claude Code
+// Retry-After ends the fast loop immediately and is relayed so the client
 // can honor the upstream wait without CCL sending more requests first.
 // Per-provider recovery happens INSIDE one attempt: Codex Responses, Grok, and
 // Kimi refresh once after a 401; WorkBuddy refreshes once after a 401/403;
 // Gemini starts from its discovered catalog base URL and falls back to the
 // secondary Antigravity base (daily <-> prod) on network errors, 429s
-// and 5xx responses (one attempt is then up to 2 upstream calls); Qoder uses its single bound credential and re-signs COSY per attempt; the Zed
-// gateway mints one fresh LLM token and resends once when the service reports
-// the cached one expired. Three layers are deliberately outside the loop: Kiro
-// keeps its own longer 1/2/4s budget with per-round credential rotation
-// (stacking would double the backoff), and the WorkBuddy and Zed
-// loopback gateways are the INNER hop of a two-hop path — the outer
-// chat/responses/messages service owns the fast retry, so wrapping the gateway
-// too would retry 3×3 = 9 times per request.
+// and 5xx responses (one attempt is then up to 2 upstream calls); Qoder uses
+// its single bound credential and re-signs COSY per attempt. Two layers are
+// deliberately outside the loop: Kiro keeps its own longer 1/2/4s budget with
+// per-round credential rotation (stacking would double the backoff), and the
+// WorkBuddy loopback gateway is the INNER hop of a two-hop path — the outer
+// chat service owns the fast retry, so wrapping the gateway too would retry
+// 3×3 = 9 times per request.
 //
 // # Direct data planes
 //
@@ -36,24 +32,24 @@
 // runtime:
 //
 //  1. Codex Responses ownership (codex_responses_*.go)
-//     CCL owns Messages-to-Responses translation, Codex identity headers, GPT
-//     token refresh, upstream errors, Responses SSE decoding, and usage.
+//     CCL owns Responses forwarding and tool flattening, Codex identity headers,
+//     GPT token refresh, upstream errors, Responses SSE decoding, and usage.
 //
 //  2. Qoder direct runtime (qoder_*.go)
 //     Qoder browser OAuth, refresh, COSY signing, WAF body encoding, model
-//     discovery, and Anthropic Messages translation all run in this process.
+//     discovery, and Responses translation all run in this process.
 //     The upstream request's session_type="qodercli" is a protocol identity
 //     field only; do not replace the direct runtime with a qodercli subprocess.
 //
 //  3. Kiro direct runtime (kiro_*.go)
 //     Kiro Portal PKCE / Builder ID auth, credential refresh, model discovery,
-//     Messages-to-Amazon-Q conversion, retry, and AWS EventStream decoding all
+//     Responses-to-Amazon-Q conversion, retry, and AWS EventStream decoding all
 //     run in ccl. Keep Kiro's direct request path and upstream identity intact.
 //
 //  4. WorkBuddy runtime (workbuddy_*.go)
 //     CCL owns the official external-link login polling, credential refresh,
 //     /v3/config model catalog, WorkBuddy identity/session headers, and the
-//     Anthropic Messages <-> OpenAI Chat Completions conversion (via the shared
+//     OpenAI Responses <-> OpenAI Chat Completions conversion (via the shared
 //     chatCompletionsService). Codex effort controls are resolved centrally
 //     from the local models.dev cache, not WorkBuddy reasoning details.
 //     WorkBuddy has two public deployments that run
@@ -62,50 +58,30 @@
 //     workbuddyDeployment carries the origin, and the public OAuth provider
 //     name is also the credential `type`, so the two account stores never mix.
 //
-//  5. Native Messages passthrough (anthropic_passthrough.go)
-//     The anthropicPassthroughService serves native Anthropic models for
-//     models.dev @ai-sdk/anthropic models and Zed native-Messages models
-//     (static key). It resolves the upstream credential and refreshes once
-//     after a 401.
-//
-//  6. AutoClaw runtime (autoclaw_*.go)
+//  5. AutoClaw runtime (autoclaw_*.go)
 //     `ccl oauth autoclaw` owns the Google browser callback and Aliyun human
 //     verification page, then stores the returned refreshable session under
 //     ~/.ccl/auth (0600). `ccl oauth autoclaw --from-desktop` remains the optional path for
 //     copying AutoClaw's encrypted desktop auth.json. The loopback adapter
-//     converts Claude Messages to the managed OpenAI Chat endpoint, refreshes
+//     converts Responses to the managed OpenAI Chat endpoint, refreshes
 //     access_token with refresh_token, sends the desktop-compatible
 //     X-Authorization/X-Request-Model/X-Harness-Type headers, and never starts
 //     or modifies AutoClaw at runtime.
 //
-//  7. Zed direct runtime (zed_*.go)
-//     `ccl oauth zed` runs zed.dev's native-app sign-in: an RSA-2048 key is
-//     generated per login, zed.dev redirects the OAEP-SHA256-encrypted access
-//     token to a loopback port, and CCL stores the decrypted long-lived token
-//     under ~/.ccl/auth (0600). At runtime CCL exchanges it for a short-lived
-//     LLM token, reads the account's model catalog, and routes each model by
-//     its provider: Anthropic models on the native Messages passthrough, OpenAI
-//     on the Codex Responses adapter, xAI on the Chat adapter, and Google on
-//     zedGeminiService (the Gemini converter plus stream decoder). Every service
-//     talks its provider's native protocol to the inner zedGateway, which wraps
-//     requests in Zed's {provider, model, provider_request} envelope and
-//     unwraps its NDJSON {event}/{status} stream. Zed's cloud only streams, so
-//     non-streaming Claude Code requests are folded back from the Anthropic SSE.
-//
-//  8. Gemini Antigravity runtime (gemini_*.go)
+//  6. Gemini Antigravity runtime (gemini_*.go)
 //     `ccl oauth gemini` discovers the bound account's Antigravity catalog via
 //     loadCodeAssist and fetchAvailableModels, caches validated wire IDs and
 //     modalities per account digest, groups thinking variants into families,
 //     normalizes readable display aliases to canonical catalog IDs, and
-//     translates Anthropic Messages to Antigravity streams.
+//     translates OpenAI Responses to Antigravity streams.
 //
-//  9. Cursor direct runtime (cursor_*.go)
+//  7. Cursor direct runtime (cursor_*.go)
 //     `ccl oauth cursor` runs PKCE sign-in and polls for tokens. At runtime it
-//     bridges Anthropic Messages over Cursor's Connect bidirectional agent
+//     bridges OpenAI Responses over Cursor's Connect bidirectional agent
 //     stream (Run + GetUsableModels), parking the open stream across tool calls
-//     so tool results resume the active turn while Claude Code owns execution.
+//     so tool results resume the active turn while the client owns execution.
 //
-//  10. Session credentials
+//  8. Session credentials
 //     All runtimes bind 127.0.0.1 only and use a random per-session API key
 //     that is never written back to ~/.ccl/config.yaml. OAuth credentials live
 //     under ~/.ccl/auth and are filtered per backend so multi-login providers do

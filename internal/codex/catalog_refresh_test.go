@@ -16,9 +16,9 @@ import (
 
 func TestCatalogRefreshKeepsRoutesHistoryAndNativeRows(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	p := provider.Provider{Name: "chosen", Type: "anthropic", Model: "model-a[1m]"}
+	p := provider.Provider{Name: "chosen", Type: "openai", Model: "model-a[1m]"}
 	g := fixtureProviderGateway(t, func(w http.ResponseWriter, r *http.Request) {
-		writeMessage(w, []map[string]any{{"type": "text", "text": "still connected"}})
+		writeChatText(w, r, "still connected")
 	}, p, Options{})
 	editFixtureModels(g, func(models []Model) []Model { models[0]["tool_mode"] = "code_mode_only"; return models })
 	before := g.Models()[0]
@@ -86,7 +86,7 @@ func TestCatalogRefreshUpdatesEffortWithoutRacingReaders(t *testing.T) {
 		}
 	}
 	writeMetadata(`["low","high"]`)
-	p := provider.Provider{Name: "chosen", Type: "anthropic", Model: "model-a", ModelsDevProvider: "fixture"}
+	p := provider.Provider{Name: "chosen", Type: "openai", Model: "model-a", ModelsDevProvider: "fixture"}
 	g := fixtureProviderGateway(t, func(http.ResponseWriter, *http.Request) {}, p, Options{})
 	writeMetadata(`["low","high","max"]`)
 	var readers sync.WaitGroup

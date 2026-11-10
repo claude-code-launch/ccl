@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestRemovedProxyCommandDoesNotLaunchClaude(t *testing.T) {
+func TestRetiredCommandsDoNotLaunchGrok(t *testing.T) {
 	binary := os.Getenv("CCL_TEST_BINARY")
 	if binary == "" {
 		t.Skip("set CCL_TEST_BINARY to a built native ccl binary")
@@ -26,13 +26,20 @@ func TestRemovedProxyCommandDoesNotLaunchClaude(t *testing.T) {
 	} {
 		t.Setenv(key, value)
 	}
-	for _, args := range [][]string{{"proxy"}, {"proxy", "start"}, {"proxy", "stop"}, {"proxy", "status"}, {"proxy", "--help"}} {
+	for _, args := range [][]string{
+		{"proxy"}, {"proxy", "start"}, {"proxy", "stop"}, {"proxy", "status"}, {"proxy", "--help"},
+		{"claude", "--help"}, {"acp"}, {"sign"}, {"statusline"},
+	} {
+		message := "ccl " + args[0] + " has been retired"
+		if args[0] == "proxy" {
+			message = "ccl proxy has been removed; use ccl codex start/status/stop"
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		command := exec.CommandContext(ctx, binary, args...)
 		command.Dir = home
 		output, err := command.CombinedOutput()
 		cancel()
-		if err == nil || !strings.Contains(string(output), "ccl proxy has been removed; use ccl codex start/status/stop") {
+		if err == nil || !strings.Contains(string(output), message) {
 			t.Fatalf("ccl %v: err=%v output=%s", args, err, output)
 		}
 	}

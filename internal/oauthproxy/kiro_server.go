@@ -132,7 +132,7 @@ func startKiroOAuth(parent context.Context, modelSpec, credentialFile string) (*
 		case <-proxyRuntime.done:
 		}
 	}()
-	LogInfof("runtime start oauth provider=kiro backend=kiro protocol=anthropic port=%s credential_file=%s model_count=%d",
+	LogInfof("runtime start oauth provider=kiro backend=kiro protocol=responses port=%s credential_file=%s model_count=%d",
 		listener.Addr().String(), filepath.Base(credentialFile), len(models))
 	return proxyRuntime, nil
 }
@@ -143,8 +143,7 @@ func kiroRuntimeModels(modelSpec string) []string {
 }
 
 func (s *kiroService) handler() http.Handler {
-	mux := anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
-	return mux
+	return loopbackFrontMux(s.apiKey, s.handleModels, s.handleResponses)
 }
 
 func (s *kiroService) authorized(request *http.Request) bool {
@@ -158,23 +157,17 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 	models, err := s.availableModels(request.Context())
 	if err != nil {
 		LogErrorf("kiro models discovery failed error=%v", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", "Unable to load available models from Kiro: "+err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", "Unable to load available models from Kiro: "+err.Error())
 		return
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
 	data := make([]map[string]any, 0, len(models))
-	ids := make([]string, 0, len(models))
 	for _, model := range models {
 		displayName := strings.TrimSpace(model.ModelName)
 		if displayName == "" {
 			displayName = model.ModelID
 		}
-		item := map[string]any{
-			"id":           model.ModelID,
-			"type":         "model",
-			"display_name": displayName,
-			"created_at":   now,
-		}
+		item := modelListEntry(model.ModelID)
+		item["display_name"] = displayName
 		if model.Description != "" {
 			item["description"] = model.Description
 		}
@@ -196,75 +189,49 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 			item["supported_input_types"] = model.SupportedInputTypes
 		}
 		data = append(data, item)
-		ids = append(ids, model.ModelID)
 	}
-	firstID, lastID := modelPageBounds(ids)
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"data":     data,
-		"has_more": false,
-		"first_id": firstID,
-		"last_id":  lastID,
-	})
+	writeModelList(writer, data)
 }
 
-func (s *kiroService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	raw, err := readAnthropicInboundBody(writer, request, kiroMaxInboundRequestBytes)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateApproxTokensBytes(raw)})
-}
-
-func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+func (s *kiroService) handleResponses(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	started := time.Now()
 	if !s.authorized(request) {
 		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusUnauthorized, "reason", "invalid_local_api_key")
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		writeProxyError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
 	if request.Method != http.MethodPost {
 		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
 			"path", request.URL.Path, "method", request.Method, "status", http.StatusMethodNotAllowed,
 			"reason", "unsupported_method")
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		writeProxyError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
 	LogDebugEvent("request_received", "component", "kiro", "request_id", requestID,
 		"path", request.URL.RequestURI(), "content_length", request.ContentLength,
 		"transfer_encoding_count", len(request.TransferEncoding), "content_type", request.Header.Get("Content-Type"),
 		"content_encoding", request.Header.Get("Content-Encoding"))
-	raw, err := readAnthropicInboundBody(writer, request, kiroMaxInboundRequestBytes)
+	raw, err := readInboundBody(writer, request, kiroMaxInboundRequestBytes)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "read_body", "error", err)
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	LogDebugEvent("request_body_read", "component", "kiro", "request_id", requestID, "body_bytes", len(raw))
 	if len(bytes.TrimSpace(raw)) == 0 {
 		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "empty_body")
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Anthropic Messages request: request body is empty")
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Responses request: request body is empty")
 		return
 	}
-	converted, err := convertAnthropicToKiro(raw)
+	converted, err := convertResponsesToKiro(raw)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "kiro", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "request_conversion", "error", err)
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	if converted.droppedMedia > 0 || converted.dedupedMedia > 0 ||
@@ -293,26 +260,22 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		"body_bytes", len(raw))
 	upstream, err := s.callUpstream(requestCtx, converted)
 	if err != nil {
-		// Forward upstream client errors unchanged (status and Anthropic error
-		// type) so Claude Code can apply its own handling: back off on 429,
-		// re-authenticate on 401, shrink the request on 413. Collapsing them all
-		// into 400 made every one of those look like a malformed request.
 		var upstreamErr *kiroUpstreamError
 		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
-			errorType := anthropicErrorType(upstreamErr.status)
+			errorType := proxyErrorType(upstreamErr.status)
 			LogUpstreamEvent(upstreamErr.status, "request_failed", "component", "kiro", "request_id", requestID,
 				"model", converted.model, "status", upstreamErr.status, "returned_status", upstreamErr.status,
 				"error_type", errorType, "stream", converted.stream, "duration", logDuration(started))
 			// err, not upstreamErr: the wrapper carries extra context such as a
 			// failed token refresh.
-			writeAnthropicError(writer, upstreamErr.status, errorType, err.Error())
+			writeProxyError(writer, upstreamErr.status, errorType, err.Error())
 			return
 		}
 		// Everything else is a proxy-side or upstream server failure.
 		LogErrorEvent("request_failed", "component", "kiro", "request_id", requestID,
 			"model", converted.model, "returned_status", http.StatusBadGateway, "stream", converted.stream,
 			"duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer upstream.Body.Close()
@@ -321,7 +284,7 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("Cache-Control", "no-cache")
 		writer.Header().Set("Connection", "keep-alive")
-		assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, writer)
+		assembler := newResponseAssembler(&converted.adapterRequest, writer)
 		if err := assembler.start(); err != nil {
 			return
 		}
@@ -330,13 +293,7 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		if streamErr != nil {
 			LogErrorEvent("stream_conversion_failed", "component", "kiro", "request_id", requestID,
 				"model", converted.model, "duration", logDuration(started), "error", streamErr)
-			_ = assembler.emit("error", map[string]any{
-				"type": "error",
-				"error": map[string]any{
-					"type":    "api_error",
-					"message": streamErr.Error(),
-				},
-			})
+			assembler.fail("api_error", streamErr.Error())
 		}
 		if streamErr == nil {
 			LogDebugEvent("request_complete", "component", "kiro", "request_id", requestID,
@@ -345,12 +302,12 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 		return
 	}
 
-	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
+	assembler := newResponseAssembler(&converted.adapterRequest, nil)
 	if err := processKiroEventStream(upstream.Body, assembler); err != nil {
 		LogErrorEvent("stream_conversion_failed", "component", "kiro", "request_id", requestID,
 			"model", converted.model, "returned_status", http.StatusBadGateway,
 			"duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	s.recordKiroUsage(converted, assembler)
@@ -364,7 +321,7 @@ func (s *kiroService) handleMessages(writer http.ResponseWriter, request *http.R
 // usage tracker, keyed by the model the client requested (the [1m]-suffixed
 // alias when present) rather than the upstream model id, so it matches the slot
 // name Claude Code shows the user.
-func (s *kiroService) recordKiroUsage(converted *kiroConvertedRequest, assembler *anthropicResponseAssembler) {
+func (s *kiroService) recordKiroUsage(converted *kiroConvertedRequest, assembler *responseAssembler) {
 	if s.usage == nil {
 		return
 	}
@@ -372,21 +329,21 @@ func (s *kiroService) recordKiroUsage(converted *kiroConvertedRequest, assembler
 	s.usage.Add(converted.clientModel, int64(input), int64(output), 0, 0)
 }
 
-func readAnthropicInboundBody(writer http.ResponseWriter, request *http.Request, maxBytes int64) ([]byte, error) {
+func readInboundBody(writer http.ResponseWriter, request *http.Request, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
-		return nil, fmt.Errorf("invalid Anthropic request body limit")
+		return nil, fmt.Errorf("invalid request body limit")
 	}
 	if request.ContentLength > maxBytes {
-		return nil, fmt.Errorf("Anthropic Messages request body exceeds %s limit", requestLimitLabel(maxBytes))
+		return nil, fmt.Errorf("request body exceeds %s limit", requestLimitLabel(maxBytes))
 	}
 	request.Body = http.MaxBytesReader(writer, request.Body, maxBytes)
 	raw, err := io.ReadAll(request.Body)
 	if err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
-			return nil, fmt.Errorf("Anthropic Messages request body exceeds %s limit", requestLimitLabel(maxBytes))
+			return nil, fmt.Errorf("request body exceeds %s limit", requestLimitLabel(maxBytes))
 		}
-		return nil, fmt.Errorf("read Anthropic Messages request body: %w", err)
+		return nil, fmt.Errorf("read request body: %w", err)
 	}
 	return raw, nil
 }
@@ -583,10 +540,10 @@ func (s *kiroService) doUpstreamRequest(ctx context.Context, converted *kiroConv
 	return response, nil
 }
 
-// anthropicErrorType maps an HTTP status onto the error type the Anthropic
-// Messages API uses for it, so a forwarded status stays self-consistent for
+// proxyErrorType maps an HTTP status onto the error type the local
+// Responses adapter uses for it, so a forwarded status stays self-consistent for
 // clients that branch on error.type rather than on the status code.
-func anthropicErrorType(status int) string {
+func proxyErrorType(status int) string {
 	switch status {
 	case http.StatusUnauthorized:
 		return "authentication_error"
@@ -608,27 +565,6 @@ func anthropicErrorType(status int) string {
 		}
 		return "invalid_request_error"
 	}
-}
-
-func writeAnthropicError(writer http.ResponseWriter, status int, errorType, message string) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"type": "error",
-		"error": map[string]any{
-			"type":    errorType,
-			"message": message,
-		},
-	})
-}
-
-// modelPageBounds reports the first and last model id of a page, or empty
-// strings when the page is empty.
-func modelPageBounds(models []string) (string, string) {
-	if len(models) == 0 {
-		return "", ""
-	}
-	return models[0], models[len(models)-1]
 }
 
 func uuidString() string {

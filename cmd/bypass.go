@@ -10,16 +10,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const dangerouslySkipPermissionsFlag = "--dangerously-skip-permissions"
-
 var bypassCmd = newBypassCommand()
 
 func newBypassCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "bypass [on|off]",
-		Short: "Toggle Claude Code permission bypass for ccl launches",
-		Long: `Toggle permission bypass for every Claude Code session launched by ccl.
-When enabled, ccl passes --dangerously-skip-permissions.
+		Short: "Toggle Grok Build permission bypass for ccl launches",
+		Long: `Toggle permission bypass for every Grok Build session launched by ccl.
+When enabled, ccl passes --always-approve.
 
 Show status:
   ccl bypass
@@ -28,7 +26,7 @@ Enable or disable:
   ccl bypass on
   ccl bypass off
 
-Warning: bypass mode allows Claude Code to execute supported operations without
+Warning: bypass mode allows Grok Build to execute supported operations without
 interactive permission prompts. Only enable it in environments you trust.
 `,
 		Args: cobra.RangeArgs(0, 1),
@@ -62,7 +60,7 @@ func runBypass(out io.Writer, args []string) error {
 
 	fmt.Fprintf(out, "Bypass = %s\n", onOff(enabled))
 	if enabled {
-		fmt.Fprintln(out, "Warning: Claude Code will start with --dangerously-skip-permissions.")
+		fmt.Fprintln(out, "Warning: Grok Build will start with --always-approve.")
 	}
 	return nil
 }
@@ -83,46 +81,6 @@ func onOff(enabled bool) string {
 		return "on"
 	}
 	return "off"
-}
-
-// applyBypassMode adds Claude Code's permission-skip flag once, preserving the
-// caller's argument order after the injected flag and never mutating input.
-// It stays out of the way when the user chose a permission mode for this run
-// (--permission-mode plan would conflict) and when the arguments run a Claude
-// Code subcommand (mcp, doctor, ...) rather than a session.
-func applyBypassMode(args []string, enabled bool) []string {
-	out := append([]string(nil), args...)
-	if !enabled {
-		return out
-	}
-	for _, arg := range out {
-		if arg == dangerouslySkipPermissionsFlag ||
-			arg == "--permission-mode" || strings.HasPrefix(arg, "--permission-mode=") {
-			return out
-		}
-	}
-	if len(out) > 0 && isClaudeSubcommand(out[0]) {
-		return out
-	}
-	return append([]string{dangerouslySkipPermissionsFlag}, out...)
-}
-
-// claudeSubcommands are Claude Code's own subcommands (claude --help,
-// 2.1.287). They are not sessions, so a session flag does not belong on them,
-// and a ccl root command must not shadow one by accident.
-var claudeSubcommands = []string{
-	"agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install",
-	"logs", "mcp", "plugin", "project", "respawn", "rm", "setup-token", "stop",
-	"ultrareview", "update",
-}
-
-func isClaudeSubcommand(arg string) bool {
-	for _, name := range claudeSubcommands {
-		if arg == name {
-			return true
-		}
-	}
-	return false
 }
 
 func init() {

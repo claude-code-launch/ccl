@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Grok Build · CCL</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">C</span> CCL <span class="brand-slash">/</span> GROK BUILD</div>
+    <div class="local"><span class="dot"></span> LOCAL SESSION SERVER</div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Workspace sessions">
+      <div class="sidebar-heading">
+        <p class="eyebrow">WORKBENCH</p>
+        <h1>Sessions<span>.</span></h1>
+        <p class="provider" id="provider"></p>
+      </div>
+      <form id="create" class="create">
+        <label for="workspace">WORKSPACE</label>
+        <select id="workspace" required disabled></select>
+        <button id="create-button" type="submit" disabled><span aria-hidden="true">+</span> New session</button>
+      </form>
+      <div class="archive-heading">
+        <span>SESSION LOG</span>
+        <span id="count">00</span>
+      </div>
+      <nav id="sessions" aria-label="Session log"></nav>
+    </aside>
+    <main class="thread" aria-label="Conversation">
+      <header class="thread-header">
+        <div class="thread-identity">
+          <p class="eyebrow">CONVERSATION</p>
+          <h2 id="title">Grok Build</h2>
+          <p id="path" class="path"></p>
+        </div>
+        <div id="status" class="status" role="status" data-state="idle"><span class="dot"></span><span id="status-label">Connecting</span></div>
+      </header>
+      <section class="transcript" id="transcript" aria-label="Message history" tabindex="0">
+        <div id="empty" class="empty">
+          <p class="eyebrow">01 / START HERE</p>
+          <h3>Ready to build<span>.</span></h3>
+          <p id="empty-hint">Choose a workspace and start a session.</p>
+        </div>
+        <div id="messages"></div>
+      </section>
+      <section class="approvals" id="approvals" aria-label="Tool approvals" hidden></section>
+      <footer class="controls">
+        <p class="error" id="error" role="alert" hidden></p>
+        <form id="composer">
+          <label class="sr-only" for="prompt">Message Grok Build</label>
+          <textarea id="prompt" placeholder="Message Grok Build…" rows="2" disabled></textarea>
+          <div class="composer-footer">
+            <span class="shortcut"><kbd>⌘</kbd> / <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send</span>
+            <div class="actions">
+              <button id="stop" class="stop" type="button" hidden>Stop</button>
+              <button id="send" class="primary" type="submit" disabled>Send <span aria-hidden="true">↗</span></button>
+            </div>
+          </div>
+        </form>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

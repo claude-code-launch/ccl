@@ -2,13 +2,11 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
 	tui "github.com/grindlemire/go-tui"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
@@ -72,7 +70,6 @@ const (
 	rowCopyURL  // click the endpoint value to copy the URL
 	rowTest     // Auto Configure
 	rowProtocol
-	rowAuth
 	rowFast
 	rowOpus
 	rowSonnet
@@ -82,7 +79,6 @@ const (
 	rowSubagent
 	rowTestModels // Test model availability (optional, costs quota)
 	rowContext    // Context & Compact entry
-	rowStatusline // Status Line on/off pin
 	rowActive
 	rowSave
 	rowCancel
@@ -123,10 +119,6 @@ type connDraft struct {
 	modelContextWindows map[string]int
 	oneMSlots           map[string]bool
 	compactPreset       compactPreset
-	// anthropicAuth remembers the direct Anthropic authentication style while the
-	// custom protocol selector is temporarily on Chat or Responses. The provider
-	// field itself stays empty for non-Anthropic protocols.
-	anthropicAuth string
 
 	probeEndpoint string
 	probeAPIKey   string
@@ -332,7 +324,6 @@ type modelFetchDoneMsg struct {
 	apiKey              string
 	detectedType        string
 	detectedEndpoint    string
-	anthropicAuth       string
 	discoveredModelsRaw string
 	contextWindows      map[string]int
 	modelInfos          []protocol.ModelInfo
@@ -438,7 +429,6 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 			configRow{kind: rowTestModels, editable: ready},
 			configRow{kind: rowContext, editable: ready},
 			configRow{kind: rowFast, editable: ready},
-			configRow{kind: rowStatusline, editable: ready},
 			configRow{kind: rowActive, editable: ready},
 			configRow{kind: rowSave},
 			configRow{kind: rowCancel},
@@ -454,9 +444,6 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 			configRow{kind: rowAPIKey},
 			configRow{kind: rowProtocol},
 		)
-		if m.canSelectCustomProtocol() && provider.IsAnthropicType(m.p.Type) {
-			rows = append(rows, configRow{kind: rowAuth})
-		}
 		rows = append(rows, configRow{kind: rowTest})
 	} else {
 		// models.dev: endpoint and protocol come from metadata (read-only); the
@@ -472,7 +459,7 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 	ready := m.connectionReady()
 	modelTestReady := ready && (!m.usesModelsDev() || m.live().keyVerified)
 	// Render order matches View: Connection → Model Mapping → Context →
-	// Runtime (Fast/Status Line) → Active → actions.
+	// Runtime (Fast) → Active → actions.
 	rows = append(rows,
 		configRow{kind: rowOpus, editable: ready},
 		configRow{kind: rowSonnet, editable: ready},
@@ -483,7 +470,6 @@ func (m *AdvancedConfigModel) visibleRows() []configRow {
 		configRow{kind: rowTestModels, editable: modelTestReady},
 		configRow{kind: rowContext, editable: ready},
 		configRow{kind: rowFast, editable: ready},
-		configRow{kind: rowStatusline, editable: ready},
 		configRow{kind: rowActive, editable: ready},
 		configRow{kind: rowSave},
 		configRow{kind: rowCancel},
@@ -637,7 +623,7 @@ func (m *AdvancedConfigModel) toggleOneMAtRow(row configRowKind) bool {
 		setDebugf("1M blocked slot=%s model=%q", slot, model)
 		return false
 	}
-	if slot == "subagent" && !m.live().oneMSlots[slot] && !m.materializeSubagentModel() {
+	if slot == "subagent" && !m.live().oneMSlots[slot] && strings.TrimSpace(model) == "" {
 		return false
 	}
 	m.live().oneMSlots[slot] = !m.live().oneMSlots[slot]
@@ -814,7 +800,6 @@ func NewAdvancedConfigModel(p *provider.Provider) *AdvancedConfigModel {
 		modelContextWindows:  make(map[string]int),
 		modelDisplayMetadata: make(map[string]protocol.ModelInfo),
 		compactPreset:        compactPresetFromProvider(*customP),
-		anthropicAuth:        customP.AnthropicAuth,
 		probeEndpoint:        customP.Endpoint,
 		probeAPIKey:          customP.APIKey,
 		inputEndpoint:        customP.Endpoint,
@@ -952,27 +937,6 @@ func (m *AdvancedConfigModel) availabilitySmokeTestModel() string {
 	}
 }
 
-// materializeSubagentModel fills the Subagent slot with the runtime default when
-// it is unset, so a [1m] marker can be attached. Returns false when no default
-// exists (nothing to materialize).
-func (m *AdvancedConfigModel) materializeSubagentModel() bool {
-	if m.p == nil {
-		return false
-	}
-	if strings.TrimSpace(m.p.SubagentModel) != "" {
-		return true
-	}
-	model := stripOneMSuffix(claude.ResolveRuntimeSettings(*m.p).SubagentModel)
-	if model == "" {
-		return false
-	}
-	m.p.SubagentModel = model
-	if m.p.Env != nil {
-		delete(m.p.Env, claude.SubagentModelEnv)
-	}
-	return true
-}
-
 func (m *AdvancedConfigModel) updateFilteredPool() {
 	q := strings.ToLower(m.filterText.Get())
 	if q == "" {
@@ -1054,14 +1018,7 @@ func (m *AdvancedConfigModel) subagentDisplayLabel() string {
 	if model := strings.TrimSpace(m.p.SubagentModel); model != "" {
 		return m.modelDisplayLabel(model)
 	}
-	if model, ok := m.p.Env[claude.SubagentModelEnv]; ok && strings.TrimSpace(model) != "" {
-		return fmt.Sprintf("(env: %s)", m.modelDisplayLabel(strings.TrimSpace(model)))
-	}
-	effective := strings.TrimSpace(claude.ResolveRuntimeSettings(*m.p).SubagentModel)
-	if effective == "" {
-		return "(auto)"
-	}
-	return fmt.Sprintf("(auto: %s)", m.modelDisplayLabel(effective))
+	return "(auto)"
 }
 
 func reorderModelsByAvailability(models []string, statuses map[string]modelAvailability) []string {
@@ -1218,26 +1175,10 @@ func (m *AdvancedConfigModel) getProtocol() string {
 	if m.p.Type != "" {
 		return provider.ProtocolLabelForProvider(*m.p)
 	}
-	if strings.Contains(strings.ToLower(m.urlText.Get()), "anthropic") {
-		return "anthropic-messages"
-	}
 	return "openai-chat"
 }
 
-func (m *AdvancedConfigModel) getProtocolFamily() string {
-	if m.p != nil {
-		switch {
-		case provider.IsAnthropicType(m.p.Type):
-			return "Anthropic"
-		case provider.IsOpenAICompatibleType(m.p.Type):
-			return "OpenAI"
-		}
-	}
-	if strings.Contains(strings.ToLower(m.urlText.Get()), "anthropic") {
-		return "Anthropic"
-	}
-	return "OpenAI"
-}
+func (m *AdvancedConfigModel) getProtocolFamily() string { return "OpenAI" }
 
 // canSelectCustomProtocol is true only for a manual Custom API-key provider
 // whose data plane can be selected by the user. OAuth and models.dev remain
@@ -1257,65 +1198,26 @@ func customProtocolLabel(providerType string) string {
 	case provider.IsOpenAIResponsesType(providerType):
 		return "Responses"
 	case provider.IsAnthropicType(providerType):
-		return "Anthropic"
+		return "Retired"
 	default:
 		return "Chat"
 	}
 }
 
-// cycleCustomProtocol moves a manual gateway through Chat, Responses, and native
-// Anthropic Messages. It reinterprets the last verified raw endpoint for the
-// selected protocol without changing the text the user entered.
+// cycleCustomProtocol toggles the two supported API-key protocols.
 func (m *AdvancedConfigModel) cycleCustomProtocol(delta int) {
 	if delta == 0 || !m.canSelectCustomProtocol() {
 		return
 	}
-	protocols := []string{"openai", "openai_responses", "anthropic"}
-	index := 0
-	for i, protocolType := range protocols {
-		if (provider.IsOpenAIResponsesType(m.p.Type) && protocolType == "openai_responses") ||
-			(provider.IsAnthropicType(m.p.Type) && protocolType == "anthropic") ||
-			(!provider.IsOpenAIResponsesType(m.p.Type) && !provider.IsAnthropicType(m.p.Type) && protocolType == "openai") {
-			index = i
-			break
-		}
+	switch {
+	case provider.IsOpenAIResponsesType(m.p.Type):
+		m.p.Type = "openai"
+	case provider.IsOpenAICompatibleType(m.p.Type), delta < 0:
+		m.p.Type = "openai_responses"
+	default:
+		m.p.Type = "openai"
 	}
-	if strings.TrimSpace(m.p.Type) == "" {
-		// An undetected provider starts one step before the first protocol, so the
-		// first forward step selects Chat rather than skipping it.
-		if delta > 0 {
-			index = -1
-		} else {
-			index = 0
-		}
-	}
-	if provider.IsAnthropicType(m.p.Type) {
-		m.live().anthropicAuth = m.p.AnthropicAuth
-	}
-	index = (index + delta) % len(protocols)
-	if index < 0 {
-		index += len(protocols)
-	}
-	m.p.Type = protocols[index]
-	if provider.IsAnthropicType(m.p.Type) {
-		m.p.AnthropicAuth = m.live().anthropicAuth
-	} else {
-		m.p.AnthropicAuth = ""
-	}
-
-	rawEndpoint := strings.TrimSpace(m.live().detectedInputEndpoint)
-	if rawEndpoint == "" {
-		rawEndpoint = strings.TrimSpace(m.urlText.Get())
-	}
-	if rawEndpoint != "" {
-		if provider.IsAnthropicType(m.p.Type) {
-			m.p.Endpoint = protocol.NormalizeAnthropicBaseURLForClaude(rawEndpoint)
-		} else {
-			m.p.Endpoint = normalizeModelBaseURL(rawEndpoint)
-		}
-		m.live().probeEndpoint = m.p.Endpoint
-	}
-	setDebugf("protocol selected type=%q label=%q anthropic_auth=%q endpoint=%q", m.p.Type, customProtocolLabel(m.p.Type), m.p.AnthropicAuth, m.p.Endpoint)
+	m.p.AnthropicAuth = ""
 }
 
 // Single-page cursor model.
@@ -1329,7 +1231,7 @@ func (m *AdvancedConfigModel) cycleCustomProtocol(delta int) {
 //
 // oneMSlotBlocked reports that the backend advertises a window well below 1M for
 // this slot's model, so the 1M variant must not be offered: it would only make
-// Claude Code size the session (and its compaction) for a window the backend
+// Codex size the session (and its compaction) for a window the backend
 // does not have, and the request is rejected before compaction runs.
 //
 // Unknown windows stay editable — the catalog is advisory and often absent.
@@ -1356,15 +1258,6 @@ func formatEditableValue(label string, isDefault bool) string {
 	return "‹ " + label + " ›"
 }
 
-// formatStatuslineLabel renders the ccl status-line opt-out. The stored field
-// is negative (statuslineDisabled), so On is the zero value.
-func formatStatuslineLabel(disabled bool) string {
-	if disabled {
-		return formatEditableValue("Off", false)
-	}
-	return formatEditableValue("On", false)
-}
-
 func formatFastLabel(on bool) string {
 	if on {
 		return formatEditableValue("On", false)
@@ -1384,20 +1277,6 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		m.cycleCustomProtocol(delta)
 		return
 	}
-	if m.currentRow() == rowAuth && m.canSelectCustomProtocol() {
-		if provider.IsAnthropicType(m.p.Type) {
-			values := []string{"", anthropicAuthXAPIKey, anthropicAuthBearer}
-			index := 0
-			for i, value := range values {
-				if value == m.p.AnthropicAuth {
-					index = i
-				}
-			}
-			m.p.AnthropicAuth = values[(index+delta%len(values)+len(values))%len(values)]
-			m.live().anthropicAuth = m.p.AnthropicAuth
-		}
-		return
-	}
 	if !m.connectionReady() {
 		return
 	}
@@ -1412,10 +1291,6 @@ func (m *AdvancedConfigModel) adjustReviewField(delta int) {
 		// Toggle like Protocol; left/right/enter all flip the pin.
 		m.p.FastMode = !m.p.FastMode
 		setDebugf("fast toggled fast_mode=%t", m.p.FastMode)
-	case rowStatusline:
-		// Toggle like Fast: left/right/enter all flip the pin.
-		m.p.StatuslineDisabled = !m.p.StatuslineDisabled
-		setDebugf("statusline toggled disabled=%t", m.p.StatuslineDisabled)
 	case rowActive:
 		if delta < 0 {
 			m.IsActiveChosen = true
@@ -1453,7 +1328,7 @@ func (m *AdvancedConfigModel) cycleCompactPreset(delta int) {
 
 // syncOneMForSameModels prompts-free: when a slot toggles [1m], apply the same
 // marker to every other configured slot that maps to the identical base model.
-// Claude Code reads [1m] per model env var, so Sonnet does not inherit from Custom.
+// The [1m] marker is stored on each model ID.
 func (m *AdvancedConfigModel) syncOneMForSameModels(sourceSlot string, enabled bool) int {
 	var sourceModel string
 	for _, slot := range advancedSlotRefs(m.p) {

@@ -1,15 +1,12 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
-	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/oauthproxy"
@@ -19,84 +16,61 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "ccl",
-	Short: "Multi-provider launcher for Claude Code",
-	Long: `ccl launches Claude Code with the active provider from ~/.ccl/config.yaml.
+	Short: "Multi-provider launcher for Grok Build and Codex",
+	Long: `ccl launches Grok Build with the active provider from ~/.ccl/config.yaml.
 
 Common commands:
-  ccl                         Start Claude Code with the active provider
-  ccl --provider <name>       Start once with a provider, without changing the selection
-  ccl ls                      List providers and normal/ACP selections
-  ccl use [name]              Switch the normal-mode provider; ccl use default
-                              uses the default Claude account (latest login)
-  ccl use --acp [name]        Select a shared provider configuration for ACP
-  ccl set [name]              Add/update an API-key or OAuth provider (TUI)
+  ccl                         Start Grok Build with the active provider
+  ccl --provider <name>       Launch once with another provider
+  ccl use [name]              Switch providers; default uses Grok Build's own login
+  ccl set [name]              Add or update a provider
+  ccl ls                      List providers
+  ccl oauth <backend>         Log in with a subscription account
   ccl codex -p <name>         Connect provider models to Codex
-  ccl oauth <claude|gpt|grok|workbuddy|...>
-                              Log in with a subscription account
-  ccl doctor                  Environment + provider + subscription health
-  ccl acp                     Agent Client Protocol on stdio (Xcode 27 and other ACP clients)
-  ccl serve                   Conversations and provider settings in a browser
-  ccl cloud login|push|pull   Encrypted multi-remote config sync
-  ccl sign on|off             Claude's commit/PR signature (off by default; --default also edits ~/.claude/settings.json)
-  ccl log on|off              Configure per-session logs (use ccl log --level debug for payload tracing)
+  ccl serve -p <name>         Use Grok Build in a local browser
+  ccl doctor                  Check environment and provider connectivity
+  ccl cloud login|push|pull   Manage encrypted configuration sync
+  ccl log on|off              Configure per-session logs
 
-Deprecated root shortcuts (removed in the next minor release):
-  ccl login/push/pull/status/...  → ccl cloud login/push/pull/status/...
-  ccl cp/mv/env/preview/models    → ccl provider cp/mv/env/preview/models
-
-Run "ccl <command> --help" for details. Extra args after ccl are passed through
-to Claude Code (for example: ccl resume, ccl -p "hello"). ccl doctor and
-ccl update are ccl's own; reach Claude Code's with ccl claude doctor and
-ccl claude update.
+Grok arguments pass through. Use ccl grok to bypass ccl command names
+(for example, ccl grok doctor and ccl grok update).
 `,
 	// Execute prints every error once; cobra printing it as well duplicated it.
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Arguments are valid by now: a launch failure such as a missing
-		// Claude Code needs its own message, not the command usage.
+		// Arguments are valid by now. A launch failure gets its own message.
 		cmd.SilenceUsage = true
-		return runClaude(args)
+		return runGrok(args, "")
 	},
 }
 
 func Execute() {
-	// Retired commands must not fall through to a paid Claude Code session.
-	if len(os.Args) > 1 && os.Args[1] == "proxy" {
-		fmt.Fprintln(os.Stderr, locale.T("ccl proxy 已移除，请使用 ccl codex start/status/stop", "ccl proxy has been removed; use ccl codex start/status/stop"))
-		os.Exit(1)
+	if len(os.Args) > 1 {
+		if err := retiredCommand(os.Args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
-	// The status line runs on every Claude Code refresh, so it is answered before
-	// anything else: no config load (which can rewrite the file), no logging
-	// setup, and no chance of falling through to a billed Claude session.
-	if len(os.Args) > 1 && os.Args[1] == "statusline" {
-		runStatusline()
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "acp" {
-		acpQuietErrors = true // Include flag/argument errors before PreRun.
-	}
-	if err := importLegacyClaudeAccounts(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "ccl: could not import previous Claude accounts: %v\n", err)
-	}
-	// Every claude lookup (launch, default, doctor) must see an install
-	// the official installer left outside PATH.
-	localClaudeDir = useLocalClaudeInstall()
 
 	configureLogging()
-	// ccl codex start/stop recover under their own lifecycle lock; serve is
-	// the proxy itself.
+	// ccl codex start/stop recover under their own lifecycle lock.
 	if len(os.Args) < 2 || os.Args[1] != "codex" {
 		recoverStaleProxy()
 	}
 
 	if len(os.Args) > 1 {
-		options, args, handled, err := parseLaunchOptions(os.Args[1:])
-		if handled {
+		name, args, handled, err := parseLaunchOptions(os.Args[1:])
+		first := os.Args[1]
+		if handled || !isCclCommand(first) {
+			if first == "grok" {
+				args = args[1:]
+			}
 			if err == nil {
-				err = runClaudeWithOptions(args, options)
+				err = runGrok(args, name)
 			}
 			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
 					os.Exit(exitErr.ExitCode())
 				}
 				fmt.Fprintln(os.Stderr, err)
@@ -104,35 +78,12 @@ func Execute() {
 			}
 			return
 		}
-		firstArg := os.Args[1]
-
-		if !isCclCommand(firstArg) {
-			var argsToPass []string
-			if firstArg == "claude" {
-				argsToPass = os.Args[2:]
-			} else {
-				argsToPass = os.Args[1:]
-			}
-
-			if err := runClaude(argsToPass); err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					os.Exit(exitErr.ExitCode())
-				}
-				fmt.Println(err)
-				os.Exit(1)
-			}
-			os.Exit(0)
-		}
 	}
 
 	rootCmd.FParseErrWhitelist.UnknownFlags = true
 
 	if err := rootCmd.Execute(); err != nil {
-		if acpQuietErrors {
-			fmt.Fprintln(os.Stderr, err)
-		} else {
-			fmt.Println(err)
-		}
+		fmt.Fprintln(os.Stderr, err)
 		var exitCoder interface{ ExitCode() int }
 		if errors.As(err, &exitCoder) {
 			os.Exit(exitCoder.ExitCode())
@@ -142,22 +93,18 @@ func Execute() {
 }
 
 // configureLogging makes the persisted threshold available without opening a
-// shared file. A Claude session or temporary provider runtime opens its own.
+// shared file. A Grok session or temporary provider runtime opens its own.
 func configureLogging() {
 	cfg, err := config.Load()
 	if err != nil {
 		return
 	}
 	oauthproxy.ConfigureLogLevel(configuredLogLevel(cfg.LogLevel))
-	// Every launch path (normal, codex serve, ACP) reads the same switch.
-	claude.ConfigureSignOn(cfg.SignOn)
 }
 
 func isCclCommand(arg string) bool {
 	switch arg {
-	// --version asks about ccl, so it cannot fall through to Claude Code: that
-	// path starts a real session. -v is deliberately not listed, because Claude
-	// Code may use it and `ccl -v` should keep reaching it.
+	// --version asks about ccl. -v is forwarded to Grok.
 	case "help", "completion", "-h", "--help", "--version":
 		return true
 	}
@@ -176,116 +123,60 @@ func isCclCommand(arg string) bool {
 	return false
 }
 
-func runClaude(args []string) error {
-	return runClaudeWithOptions(args, launchOptions{})
+// Retired launcher commands must fail before falling through to a Grok prompt.
+func retiredCommand(command string) error {
+	switch command {
+	case "proxy":
+		return errors.New(locale.T("ccl proxy 已移除，请使用 ccl codex start/status/stop", "ccl proxy has been removed; use ccl codex start/status/stop"))
+	case "claude", "acp", "sign", "statusline":
+		return fmt.Errorf(locale.T("ccl %s 已退役。普通启动现使用 Grok Build", "ccl %s has been retired. Normal launches now use Grok Build"), command)
+	default:
+		return nil
+	}
 }
 
-type launchOptions struct {
-	provider string
+// Only a leading --provider selects a CCL provider. Grok flags such as
+// --agent are passed through. -- separates CCL's option from Grok arguments.
+func parseLaunchOptions(args []string) (name string, rest []string, handled bool, err error) {
+	if len(args) == 0 {
+		return "", args, false, nil
+	}
+	key, value, inline := strings.Cut(args[0], "=")
+	if key != "--provider" {
+		return "", args, false, nil
+	}
+	rest = args[1:]
+	if !inline && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		value, rest = rest[0], rest[1:]
+	}
+	name = strings.TrimSpace(value)
+	if name == "" {
+		return "", nil, true, fmt.Errorf("--provider requires a name")
+	}
+	if len(rest) > 0 {
+		key, _, _ := strings.Cut(rest[0], "=")
+		switch key {
+		case "--provider":
+			return "", nil, true, fmt.Errorf("--provider may be specified only once")
+		case "--":
+			rest = rest[1:]
+		}
+	}
+	return name, rest, true, nil
 }
 
-// Only leading CCL options are consumed. Once the Claude argument list starts,
-// its flags and values are forwarded verbatim (including -p and --provider).
-func parseLaunchOptions(args []string) (launchOptions, []string, bool, error) {
-	var options launchOptions
-	consumed := 0
-	for consumed < len(args) {
-		arg := args[consumed]
-		key, value, hasValue := strings.Cut(arg, "=")
-		if key != "--provider" {
-			break
-		}
-		consumed++
-		if !hasValue {
-			if consumed == len(args) || strings.HasPrefix(args[consumed], "-") {
-				return options, nil, true, fmt.Errorf("%s requires a name", key)
-			}
-			value = args[consumed]
-			consumed++
-		}
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return options, nil, true, fmt.Errorf("%s requires a name", key)
-		}
-		if options.provider != "" {
-			return options, nil, true, fmt.Errorf("--provider may be specified only once")
-		}
-		options.provider = value
-	}
-	if consumed == 0 {
-		return options, args, false, nil
-	}
-	if consumed < len(args) && args[consumed] == "--" {
-		consumed++
-	}
-	return options, args[consumed:], true, nil
-}
-
-func runClaudeWithOptions(args []string, options launchOptions) error {
+func runGrok(args []string, name string) error {
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("load ccl config for launcher options: %w", err)
+		return fmt.Errorf("load ccl config: %w", err)
 	}
-	name := cfg.ActiveProvider
-	if options.provider != "" {
-		name = options.provider
+	if name == "" {
+		name = cfg.ActiveProvider
 	}
-	var p provider.Provider
-	accountDefault := false
-	if provider.IsDefaultProvider(name) {
-		p, accountDefault, err = cfg.ResolveDefault()
-		if err != nil {
-			return err
-		}
-	} else {
-		p, err = resolveProviderFromConfig(cfg, name)
-		if err != nil {
-			return err
-		}
-	}
-	if provider.IsClaudeAccount(p) {
-		store, err := claudeaccount.Open()
-		if err != nil {
-			return err
-		}
-		if _, err := store.Profile(p.OAuthAccountCredential); err != nil {
-			return err
-		}
-	}
-	if localClaudeDir != "" {
-		printLocalClaudeHint(os.Stderr, localClaudeDir)
-	}
-	if !IsInstalled() {
-		if err := AutoInstall(); err != nil {
-			return err
-		}
-	}
-
-	if provider.IsDefaultProvider(name) && !accountDefault {
-		return runClaudeWithoutProvider(applyBypassMode(args, cfg.BypassMode))
-	}
-	if provider.IsClaudeAccount(p) {
-		return runClaudeAccount(p, applyBypassMode(args, cfg.BypassMode))
-	}
-
-	// Record the configured threshold; claude.Run opens the uniquely named file
-	// before its embedded runtime starts.
-	level := configuredLogLevel(cfg.LogLevel)
-	oauthproxy.ConfigureLogLevel(level)
-
-	err = claude.Run(p, applyBypassMode(args, cfg.BypassMode))
-	if logPath := oauthproxy.LogFilePath(); logPath != "" {
-		fmt.Fprintf(os.Stderr, "\n[ccl log] run finished · file: %s\n", logPath)
-		oauthproxy.CloseLog()
-	}
-	return err
+	return runGrokAgent(cfg, name, args)
 }
 
-// resolveProvider returns the active provider. ccl no longer builds an
-// implicit provider from OPENAI_API_KEY / ANTHROPIC_API_KEY in the shell: a key
-// exported for another tool would quietly bill a Claude Code session. Without
-// a selection, the user picks one, or runs Claude Code on its own login with
-// `ccl use default`.
+// resolveProvider returns the active configured provider.
 func resolveProvider() (provider.Provider, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -297,8 +188,8 @@ func resolveProvider() (provider.Provider, error) {
 func resolveProviderFromConfig(cfg *provider.Config, name string) (provider.Provider, error) {
 	if name == "" {
 		return provider.Provider{}, errors.New(locale.T(
-			"未选择 Provider。用 ccl set 添加、ccl use <name> 选择，或用 ccl use default 直接以 Claude Code 自身登录启动",
-			"no provider selected. Add one with ccl set, choose one with ccl use <name>, or run Claude Code on its own login with ccl use default",
+			"未选择 Provider。用 ccl set 添加、ccl use <name> 选择，或用 ccl use default 直接以 Grok Build 自身登录启动",
+			"no provider selected. Add one with ccl set, choose one with ccl use <name>, or run Grok Build on its own login with ccl use default",
 		))
 	}
 	p, ok := cfg.Providers[name]

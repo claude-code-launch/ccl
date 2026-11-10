@@ -55,7 +55,8 @@ func TestMessagesWirePreservesArgumentsSchemaAndLimits(t *testing.T) {
 				if backend == "chat" {
 					_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`)
 				} else {
-					_, _ = io.WriteString(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`)
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n")
 				}
 			}))
 			defer upstream.Close()
@@ -74,8 +75,8 @@ func TestMessagesWirePreservesArgumentsSchemaAndLimits(t *testing.T) {
 				}
 				handler = newResponsesService("local", upstream.URL, routes, authorizer, NewUsageTracker(), backend == "xai").handler()
 			}
-			raw := `{"model":"alias","max_tokens":37,"tools":[{"name":"lookup","input_schema":` + requestSchema + `}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"output_config":{"format":{"type":"json_schema","name":"answer","schema":` + requestSchema + `}},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call1","name":"lookup","input":` + exactToolArguments + `}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call1","content":"ok"}]}]}`
-			r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(raw))
+			raw := `{"model":"alias","max_output_tokens":37,"parallel_tool_calls":false,"tools":[{"type":"function","name":"lookup","parameters":` + requestSchema + `}],"tool_choice":"auto","text":{"format":{"type":"json_schema","name":"answer","strict":true,"schema":` + requestSchema + `}},"input":[{"type":"function_call","call_id":"call1","name":"lookup","arguments":` + strconvQuote(exactToolArguments) + `},{"type":"function_call_output","call_id":"call1","output":"ok"}]}`
+			r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(raw))
 			r.Header.Set("x-api-key", "local")
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, r)
@@ -86,9 +87,14 @@ func TestMessagesWirePreservesArgumentsSchemaAndLimits(t *testing.T) {
 	}
 }
 
+func strconvQuote(value string) string {
+	raw, _ := json.Marshal(value)
+	return string(raw)
+}
+
 func TestMessagesChatPreservesImageOrderAndURLs(t *testing.T) {
-	raw := []byte(`{"model":"test","messages":[{"role":"user","content":[{"type":"text","text":"before"},{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}},{"type":"text","text":"after"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`)
-	req, err := convertAnthropicToChatCompletions(raw)
+	raw := []byte(`{"model":"test","input":[{"role":"user","content":[{"type":"input_text","text":"before"},{"type":"input_image","image_url":"https://example.com/a.png"},{"type":"input_text","text":"after"},{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`)
+	req, err := convertResponsesToChatCompletions(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,17 +117,20 @@ func TestMessagesStructuredOutputOptionalProperties(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}},"additionalProperties":false}`,
 		`{"type":"object","properties":{"x":{"type":"object","properties":{"optional":{"type":"integer"}},"additionalProperties":false}},"required":["x"],"additionalProperties":false}`,
 	} {
-		output := &anthropicOutput{Format: json.RawMessage(`{"type":"json_schema","schema":` + schema + `}`)}
-		format, err := messagesStructuredOutput(output)
+		parsedFormat, err := responsesStructuredFormat(json.RawMessage(`{"type":"json_schema","schema":` + schema + `}`))
 		if err != nil {
 			t.Fatal(err)
+		}
+		format := structuredOutputSchema(parsedFormat)
+		if format == nil {
+			t.Fatal("expected structured output schema")
 		}
 		if format["strict"] != false || string(format["schema"].(json.RawMessage)) != schema {
 			t.Fatalf("optional schema changed: %v", format)
 		}
 	}
 	for _, raw := range []string{`{"type":"other"}`, `{"type":"json_schema","schema":null}`} {
-		if _, err := messagesStructuredOutput(&anthropicOutput{Format: json.RawMessage(raw)}); err == nil {
+		if parsedFormat, err := responsesStructuredFormat(json.RawMessage(raw)); err == nil && structuredOutputSchema(parsedFormat) != nil {
 			t.Fatal("invalid output format silently accepted")
 		}
 	}

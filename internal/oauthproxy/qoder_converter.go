@@ -31,7 +31,7 @@ type qoderConvertedRequest struct {
 	model       qoderModel
 	stream      bool
 	body        map[string]any
-	anthropic   *anthropicAdapterRequest
+	adapter     *adapterRequest
 	inputTokens int
 }
 
@@ -44,34 +44,24 @@ type qoderToolCall struct {
 	} `json:"function"`
 }
 
-func convertAnthropicToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedRequest, error) {
-	var request anthropicMessagesRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
-		return nil, fmt.Errorf("invalid Anthropic Messages request: %w", err)
-	}
-	request.Model = strings.TrimSpace(request.Model)
-	if request.Model == "" {
-		return nil, fmt.Errorf("model is required")
-	}
-	if len(request.Messages) == 0 {
-		return nil, fmt.Errorf("messages must not be empty")
+func convertResponsesToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedRequest, error) {
+	request, err := parseResponsesRequest(raw)
+	if err != nil {
+		return nil, err
 	}
 	model, ok := qoderSelectModel(request.Model, catalog)
 	if !ok {
 		return nil, fmt.Errorf("Qoder has no available models")
 	}
-	messages, lastUser, err := qoderTransformMessages(request.Messages)
-	if err != nil {
-		return nil, err
-	}
-	if system := extractKiroSystem(request.System); strings.TrimSpace(system) != "" {
+	messages, lastUser := qoderTransformTurns(request.Turns)
+	if system := strings.TrimSpace(request.System); system != "" {
 		messages = append([]any{map[string]any{"role": "system", "content": system}}, messages...)
 	}
 	tools, err := qoderTransformTools(request.Tools)
 	if err != nil {
 		return nil, err
 	}
-	maxTokens := request.MaxTokens
+	maxTokens := request.MaxOutputTokens
 	if maxTokens <= 0 {
 		maxTokens = 32_768
 	}
@@ -94,24 +84,14 @@ func convertAnthropicToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedR
 	}
 	parameters := map[string]any{"max_tokens": maxTokens}
 	if levels, _ := qoderReasoningLevels(model.Config); len(levels) > 0 {
-		asked := ""
-		if request.OutputConfig != nil {
-			asked = request.OutputConfig.Effort
-		}
-		thinkingOff := request.Thinking != nil && strings.EqualFold(request.Thinking.Type, "disabled")
-		if matched := qoderMatchEffort(levels, asked); matched != "" && !thinkingOff {
+		thinkingOff := strings.EqualFold(request.Effort, "none")
+		if matched := qoderMatchEffort(levels, request.Effort); matched != "" && !thinkingOff {
 			parameters["enable_thinking"] = true
 			parameters["reasoning_effort"] = matched
 		}
 	}
 	recordID := qoderStableID("qoder-record", request.Model, string(raw), fmt.Sprintf("mt=%d", maxTokens))
-	sessionSeed := ""
-	if request.Metadata != nil {
-		sessionSeed = strings.TrimSpace(request.Metadata.UserID)
-	}
-	if sessionSeed == "" {
-		sessionSeed = uuid.NewString()
-	}
+	sessionSeed := firstNonEmptyString(strings.TrimSpace(request.CacheKey), strings.TrimSpace(request.User), uuid.NewString())
 	sessionID := qoderStableID("qoder-session", model.ID, sessionSeed) + "-" + sessionSeed
 	body := map[string]any{
 		"request_id":       uuid.NewString(),
@@ -157,25 +137,16 @@ func convertAnthropicToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedR
 			"begin_at": time.Now().UnixMilli(),
 		},
 	}
-	thinkingEnabled := request.Thinking != nil &&
-		(strings.EqualFold(request.Thinking.Type, "enabled") || strings.EqualFold(request.Thinking.Type, "adaptive"))
-	anthropic := &anthropicAdapterRequest{
-		upstreamModel:     model.ID,
-		clientModel:       request.Model,
-		stream:            request.Stream,
-		thinkingEnabled:   thinkingEnabled,
-		thinkingSignature: "qoder",
-		maxTokens:         maxTokens,
-		inputTokens:       estimateApproxTokensBytes(raw),
-		toolNameMap:       map[string]string{},
-	}
+	adapter := request.adapter(model.ID)
+	adapter.maxTokens = maxTokens
+	adapter.toolNameMap = map[string]string{}
 	return &qoderConvertedRequest{
 		clientModel: request.Model,
 		model:       model,
 		stream:      request.Stream,
 		body:        body,
-		anthropic:   anthropic,
-		inputTokens: anthropic.inputTokens,
+		adapter:     &adapter,
+		inputTokens: adapter.inputTokens,
 	}, nil
 }
 
@@ -186,8 +157,6 @@ func qoderSelectModel(requested string, catalog []qoderModel) (qoderModel, bool)
 			return model, true
 		}
 	}
-	// Claude Code receives catalog display names for its /model UI. Resolve the
-	// selected display alias back to Qoder's stable technical key here.
 	for _, model := range catalog {
 		if strings.EqualFold(strings.TrimSpace(model.Name), base) {
 			return model, true
@@ -206,7 +175,7 @@ func qoderSelectModel(requested string, catalog []qoderModel) (qoderModel, bool)
 	return qoderModel{}, false
 }
 
-func qoderTransformTools(tools []anthropicTool) ([]any, error) {
+func qoderTransformTools(tools []conversationTool) ([]any, error) {
 	transformed := make([]any, 0, len(tools))
 	for _, tool := range tools {
 		name := strings.TrimSpace(tool.Name)
@@ -214,9 +183,9 @@ func qoderTransformTools(tools []anthropicTool) ([]any, error) {
 			return nil, fmt.Errorf("tool name is required")
 		}
 		var parameters any = map[string]any{"type": "object", "properties": map[string]any{}}
-		if len(tool.InputSchema) > 0 && string(tool.InputSchema) != "null" {
-			if err := json.Unmarshal(tool.InputSchema, &parameters); err != nil {
-				return nil, fmt.Errorf("tool %s has invalid input_schema: %w", name, err)
+		if len(tool.Parameters) > 0 && string(tool.Parameters) != "null" {
+			if err := json.Unmarshal(tool.Parameters, &parameters); err != nil {
+				return nil, fmt.Errorf("tool %s has invalid parameters: %w", name, err)
 			}
 		}
 		transformed = append(transformed, map[string]any{
@@ -231,73 +200,40 @@ func qoderTransformTools(tools []anthropicTool) ([]any, error) {
 	return transformed, nil
 }
 
-func qoderTransformMessages(messages []anthropicMessage) ([]any, string, error) {
-	transformed := make([]any, 0, len(messages)+2)
+func qoderTransformTurns(turns []conversationTurn) ([]any, string) {
+	transformed := make([]any, 0, len(turns)+2)
 	lastUser := ""
-	started := false
-	for _, message := range messages {
-		switch strings.ToLower(strings.TrimSpace(message.Role)) {
-		case "system":
-			// Claude Code's gateway-compatible Messages requests carry system
-			// turns in the message list: instructions before the conversation and
-			// reminders inside it, even after a tool result as the last message.
-			// GLM behind Qoder rejects a system message there (code 1214), so a
-			// reminder surfaces as a user message, as in the Chat converter.
-			content := extractKiroSystem(message.Content)
-			if content == "" {
-				continue
-			}
-			role := "system"
-			if started {
-				role = "user"
-			}
-			transformed = append(transformed, map[string]any{"role": role, "content": content})
+	for _, turn := range turns {
+		switch turn.Role {
 		case "user":
-			started = true
-			mapped, userText, err := qoderTransformUserMessage(message.Content)
-			if err != nil {
-				return nil, "", err
-			}
+			mapped, userText := qoderTransformUserTurn(turn)
 			transformed = append(transformed, mapped...)
 			if strings.TrimSpace(userText) != "" {
 				lastUser = userText
 			}
-		case "assistant":
-			started = true
-			mapped, err := qoderTransformAssistantMessage(message.Content)
-			if err != nil {
-				return nil, "", err
+		case "developer", "system":
+			var texts []string
+			for _, part := range turn.Parts {
+				if part.Kind == partText && strings.TrimSpace(part.Text) != "" {
+					texts = append(texts, part.Text)
+				}
 			}
-			transformed = append(transformed, mapped)
-		default:
-			return nil, "", fmt.Errorf("unsupported Anthropic message role %q", message.Role)
+			if len(texts) > 0 {
+				transformed = append(transformed, map[string]any{
+					"role":    "user",
+					"content": strings.Join(texts, "\n"),
+				})
+			}
+		case "assistant":
+			transformed = append(transformed, qoderTransformAssistantTurn(turn))
 		}
 	}
-	return transformed, lastUser, nil
+	return transformed, lastUser
 }
 
-func qoderTransformUserMessage(raw json.RawMessage) ([]any, string, error) {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return []any{map[string]any{"role": "user", "content": text}}, text, nil
-	}
-	var blocks []struct {
-		Type      string          `json:"type"`
-		Text      string          `json:"text"`
-		ToolUseID string          `json:"tool_use_id"`
-		Content   json.RawMessage `json:"content"`
-		Source    struct {
-			Type      string `json:"type"`
-			MediaType string `json:"media_type"`
-			Data      string `json:"data"`
-			URL       string `json:"url"`
-		} `json:"source"`
-	}
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return nil, "", fmt.Errorf("invalid Anthropic user content: %w", err)
-	}
-	messages := make([]any, 0, len(blocks))
-	parts := make([]any, 0, len(blocks))
+func qoderTransformUserTurn(turn conversationTurn) ([]any, string) {
+	messages := make([]any, 0, len(turn.Parts))
+	parts := make([]any, 0, len(turn.Parts))
 	var toolImages []any
 	var allText strings.Builder
 	flushUser := func() {
@@ -313,35 +249,32 @@ func qoderTransformUserMessage(raw json.RawMessage) ([]any, string, error) {
 		messages = append(messages, map[string]any{"role": "user", "content": content})
 		parts = nil
 	}
-	for _, block := range blocks {
-		switch block.Type {
-		case "text":
-			parts = append(parts, map[string]any{"type": "text", "text": block.Text})
-			allText.WriteString(block.Text)
-		case "image":
-			imageURL := strings.TrimSpace(block.Source.URL)
-			if imageURL == "" && block.Source.Data != "" {
-				imageURL = "data:" + block.Source.MediaType + ";base64," + block.Source.Data
-			}
-			if imageURL != "" {
+	for _, part := range turn.Parts {
+		switch part.Kind {
+		case partText:
+			parts = append(parts, map[string]any{"type": "text", "text": part.Text})
+			allText.WriteString(part.Text)
+		case partImage:
+			if imageURL := part.imageURL(); imageURL != "" {
 				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageURL}})
 			}
-		case "tool_result":
+		case partToolResult:
 			flushUser()
-			content := qoderRawContentText(block.Content)
-			contentBlocks, _ := chatParseContent(block.Content)
+			content := part.outputText()
 			var toolText []string
 			hasImage := false
 			// Tool messages carry text. Preserve screenshots as a subsequent
 			// user message, after all tool replies, like the Chat adapter.
-			for _, part := range contentBlocks {
-				if part.blockType == "text" {
-					toolText = append(toolText, part.text)
+			for _, sub := range part.Output {
+				if sub.Kind == partText {
+					toolText = append(toolText, sub.Text)
 				}
-				if part.blockType == "image" && part.imageURL != "" {
-					hasImage = true
-					toolText = append(toolText, "[image attached in the following user message]")
-					toolImages = append(toolImages, map[string]any{"type": "text", "text": "Image from tool result " + block.ToolUseID + ":"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": part.imageURL}})
+				if sub.Kind == partImage {
+					if imageURL := sub.imageURL(); imageURL != "" {
+						hasImage = true
+						toolText = append(toolText, "[image attached in the following user message]")
+						toolImages = append(toolImages, map[string]any{"type": "text", "text": "Image from tool result " + part.CallID + ":"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageURL}})
+					}
 				}
 			}
 			if hasImage {
@@ -349,11 +282,9 @@ func qoderTransformUserMessage(raw json.RawMessage) ([]any, string, error) {
 			}
 			messages = append(messages, map[string]any{
 				"role":         "tool",
-				"tool_call_id": block.ToolUseID,
+				"tool_call_id": part.CallID,
 				"content":      content,
 			})
-		default:
-			// Cache-control and other client-only blocks are intentionally omitted.
 		}
 	}
 	parts = append(parts, toolImages...)
@@ -361,42 +292,27 @@ func qoderTransformUserMessage(raw json.RawMessage) ([]any, string, error) {
 	if len(messages) == 0 {
 		messages = append(messages, map[string]any{"role": "user", "content": ""})
 	}
-	return messages, allText.String(), nil
+	return messages, allText.String()
 }
 
-func qoderTransformAssistantMessage(raw json.RawMessage) (any, error) {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return map[string]any{"role": "assistant", "content": text}, nil
-	}
-	var blocks []struct {
-		Type     string          `json:"type"`
-		Text     string          `json:"text"`
-		Thinking string          `json:"thinking"`
-		ID       string          `json:"id"`
-		Name     string          `json:"name"`
-		Input    json.RawMessage `json:"input"`
-	}
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return nil, fmt.Errorf("invalid Anthropic assistant content: %w", err)
-	}
+func qoderTransformAssistantTurn(turn conversationTurn) any {
 	var content strings.Builder
 	toolCalls := make([]qoderToolCall, 0)
-	for _, block := range blocks {
-		switch block.Type {
-		case "text":
-			content.WriteString(block.Text)
-		case "thinking":
+	for _, part := range turn.Parts {
+		switch part.Kind {
+		case partText:
+			content.WriteString(part.Text)
+		case partReasoning:
 			content.WriteString("<thinking>")
-			content.WriteString(block.Thinking)
+			content.WriteString(part.Text)
 			content.WriteString("</thinking>\n\n")
-		case "tool_use":
-			arguments := strings.TrimSpace(string(block.Input))
+		case partToolCall:
+			arguments := strings.TrimSpace(string(part.Arguments))
 			if arguments == "" || arguments == "null" {
 				arguments = "{}"
 			}
-			call := qoderToolCall{ID: block.ID, Type: "function"}
-			call.Function.Name = block.Name
+			call := qoderToolCall{ID: part.CallID, Type: "function"}
+			call.Function.Name = part.Name
 			call.Function.Arguments = arguments
 			toolCalls = append(toolCalls, call)
 		}
@@ -412,33 +328,7 @@ func qoderTransformAssistantMessage(raw json.RawMessage) (any, error) {
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 	}
-	return message, nil
-}
-
-func qoderRawContentText(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &blocks) == nil {
-		var combined strings.Builder
-		for _, block := range blocks {
-			if block.Type == "text" {
-				combined.WriteString(block.Text)
-			}
-		}
-		if combined.Len() > 0 {
-			return combined.String()
-		}
-	}
-	return string(raw)
+	return message
 }
 
 func qoderStableID(prefix string, values ...string) string {

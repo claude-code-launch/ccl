@@ -42,10 +42,10 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		switch calls.Add(1) {
 		case 1:
-			writeMessage(w, []map[string]any{{"type": "tool_use", "id": "classic_mcp_call", "name": findTool(t, body, "get_app_state"), "input": map[string]any{}}})
+			writeChatTool(w, r, "classic_mcp_call", findTool(t, body, "get_app_state"), map[string]any{})
 			return
 		case 2:
-			writeMessage(w, []map[string]any{{"type": "text", "text": "classic-computer-done"}})
+			writeChatText(w, r, "classic-computer-done")
 			return
 		case 3:
 			for _, rawMessage := range body["messages"].([]any) {
@@ -64,12 +64,12 @@ for await (const line of readline.createInterface({input:process.stdin})) {
 				names = append(names, raw.(map[string]any)["name"].(string))
 			}
 			t.Logf("code-mode tools: %v", names)
-			writeMessage(w, []map[string]any{{"type": "tool_use", "id": "code_mode_call", "name": findTool(t, body, toolWireName("", "exec")), "input": map[string]any{"input": `const tool = ALL_TOOLS.find(x => x.name.includes("get_app_state")); text(await tools[tool.name]({}));`}}})
+			writeChatTool(w, r, "code_mode_call", findTool(t, body, "exec"), map[string]any{"input": `const tool = ALL_TOOLS.find(x => x.name.includes("get_app_state")); text(await tools[tool.name]({}));`})
 			return
 		}
 		sawResult.Store(strings.Contains(textValue(body["messages"]), "computer-mcp-state-fixture"))
-		writeMessage(w, []map[string]any{{"type": "text", "text": "code-mode-computer-done"}})
-	}, "anthropic", Options{Desktop: true})
+		writeChatText(w, r, "code-mode-computer-done")
+	}, "openai", Options{Desktop: true})
 	// Begin with the classic harness, then resume that same conversation after
 	// loading code mode. A fresh-session-only test cannot catch stale tool calls.
 	editFixtureModels(g, func(models []Model) []Model { models[0]["supports_search_tool"] = false; return models })

@@ -100,7 +100,6 @@ func TestProviderCopyAndMoveOverwriteOnlyWithYes(t *testing.T) {
 func TestProviderRemoveRepairsACPSelection(t *testing.T) {
 	seedProviders(t, "keep", "keep", "drop")
 	cfg := loadProviders(t)
-	cfg.ACPProvider = "drop"
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +108,8 @@ func TestProviderRemoveRepairsACPSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg = loadProviders(t)
-	if cfg.ActiveProvider != "keep" || cfg.ACPProvider == "drop" {
-		t.Fatalf("provider selections = active:%q ACP:%q", cfg.ActiveProvider, cfg.ACPProvider)
+	if cfg.ActiveProvider != "keep" {
+		t.Fatalf("active provider = %q", cfg.ActiveProvider)
 	}
 }
 
@@ -130,7 +129,6 @@ func TestProviderRemoveNeverSwitchesToAnotherProvider(t *testing.T) {
 func TestProviderMoveRepairsACPSelection(t *testing.T) {
 	seedProviders(t, "keep", "keep", "src")
 	cfg := loadProviders(t)
-	cfg.ACPProvider = "src"
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -139,8 +137,8 @@ func TestProviderMoveRepairsACPSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg = loadProviders(t)
-	if cfg.ActiveProvider != "keep" || cfg.ACPProvider != "dst" {
-		t.Fatalf("provider selections = active:%q ACP:%q", cfg.ActiveProvider, cfg.ACPProvider)
+	if cfg.ActiveProvider != "keep" {
+		t.Fatalf("active provider = %q", cfg.ActiveProvider)
 	}
 }
 

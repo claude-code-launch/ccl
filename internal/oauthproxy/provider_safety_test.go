@@ -175,10 +175,10 @@ func TestQoderRelaysRetryAfterWithoutExtraUpstreamRequests(t *testing.T) {
 	writeQoderSafetyCredential(t, dir, "qoder.json", metadata)
 	pool := newQoderCredentialPool(dir, "qoder.json")
 	service := qoderService{apiKey: "fake-loopback", pool: pool, client: pool.client, models: []qoderModel{{ID: "qmodel"}}}
-	request := httptest.NewRequest(http.MethodPost, "/messages", bytes.NewBufferString(`{"model":"qmodel","max_tokens":32,"messages":[{"role":"user","content":"local fixture"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"qmodel","max_output_tokens":32,"input":[{"role":"user","content":"local fixture"}]}`))
 	request.Header.Set("X-Api-Key", "fake-loopback")
 	recorder := httptest.NewRecorder()
-	service.handleMessages(recorder, request)
+	service.handleResponses(recorder, request)
 	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") != "60" || attempts.Load() != 1 {
 		t.Fatalf("Qoder cooldown was lost: status=%d retry=%q attempts=%d", recorder.Code, recorder.Header().Get("Retry-After"), attempts.Load())
 	}
@@ -205,10 +205,10 @@ func TestQoderFailedRefreshPreservesAuthenticationFailure(t *testing.T) {
 	writeQoderSafetyCredential(t, dir, "qoder.json", metadata)
 	pool := newQoderCredentialPool(dir, "qoder.json")
 	service := qoderService{apiKey: "fake-loopback", pool: pool, client: pool.client, models: []qoderModel{{ID: "qmodel"}}}
-	request := httptest.NewRequest(http.MethodPost, "/messages", bytes.NewBufferString(`{"model":"qmodel","messages":[{"role":"user","content":"local fixture"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"qmodel","input":[{"role":"user","content":"local fixture"}]}`))
 	request.Header.Set("X-Api-Key", "fake-loopback")
 	recorder := httptest.NewRecorder()
-	service.handleMessages(recorder, request)
+	service.handleResponses(recorder, request)
 	if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "subscription authentication required") || chats.Load() != 1 || refreshes.Load() != 1 {
 		t.Fatalf("auth rejection was changed into a retryable failure: status=%d chats=%d refreshes=%d", recorder.Code, chats.Load(), refreshes.Load())
 	}

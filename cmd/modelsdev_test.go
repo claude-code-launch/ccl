@@ -52,9 +52,8 @@ func TestModelsDevProviderToDraft(t *testing.T) {
 	if strings.Contains(draft.Model, "glm-5.2") {
 		t.Fatalf("deprecated model leaked into pool: %q", draft.Model)
 	}
-	// Protocol table must be keyed by lowercase id.
-	if got := draft.ModelProtocols["qwen3.8-max"]; got != "anthropic" {
-		t.Fatalf("qwen3.8-max protocol = %q, want anthropic", got)
+	if _, exists := draft.ModelProtocols["qwen3.8-max"]; exists || strings.Contains(draft.Model, "qwen3.8-max") {
+		t.Fatalf("retired model leaked into pool: %q", draft.Model)
 	}
 	if got := draft.ModelProtocols["grok-4.5"]; got != "openai_responses" {
 		t.Fatalf("grok-4.5 protocol = %q, want openai_responses", got)
@@ -63,12 +62,12 @@ func TestModelsDevProviderToDraft(t *testing.T) {
 	if got := draft.ModelProtocols["kimi-k3"]; got != "openai" {
 		t.Fatalf("kimi-k3 protocol = %q, want openai (inherited)", got)
 	}
-	// Pool should be kimi-k3,qwen3.8-max,grok-4.5 in sorted id order.
-	if !strings.Contains(draft.Model, "grok-4.5") || !strings.Contains(draft.Model, "kimi-k3") || !strings.Contains(draft.Model, "qwen3.8-max") {
+	// The pool keeps both supported models.
+	if !strings.Contains(draft.Model, "grok-4.5") || !strings.Contains(draft.Model, "kimi-k3") {
 		t.Fatalf("pool missing models: %q", draft.Model)
 	}
 	// Metadata carries context window for the 1M advisory.
-	if info, ok := metadata["qwen3.8-max"]; !ok || info.ContextWindow != 1000000 {
-		t.Fatalf("qwen3.8-max metadata = %+v", metadata["qwen3.8-max"])
+	if info, ok := metadata["grok-4.5"]; !ok || info.ContextWindow != 500000 {
+		t.Fatalf("grok-4.5 metadata = %+v", metadata["grok-4.5"])
 	}
 }

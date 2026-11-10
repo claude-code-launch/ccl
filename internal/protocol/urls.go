@@ -52,38 +52,3 @@ func NormalizeOpenAIChatCompletionsURL(baseURL string) string {
 func NormalizeOpenAIResponsesURL(baseURL string) string {
 	return normalizeOpenAIPath(baseURL, "/responses")
 }
-
-func normalizeAnthropicPath(baseURL, suffix string) string {
-	return rewriteEndpointPath(normalizeEndpoint(baseURL, "https://api.anthropic.com/v1"), func(path string) string {
-		for _, existing := range []string{"/messages", "/models"} {
-			if strings.HasSuffix(path, existing) {
-				return strings.TrimSuffix(path, existing) + suffix
-			}
-		}
-		last := path[strings.LastIndex(path, "/")+1:]
-		if path == "" || strings.EqualFold(last, "anthropic") || strings.EqualFold(last, "claude") {
-			path += "/v1"
-		}
-		return path + suffix
-	})
-}
-
-func NormalizeAnthropicModelsURL(baseURL string) string {
-	return normalizeAnthropicPath(baseURL, "/models")
-}
-
-func NormalizeAnthropicMessagesURL(baseURL string) string {
-	return normalizeAnthropicPath(baseURL, "/messages")
-}
-
-// NormalizeAnthropicBaseURLForClaude removes the suffix Claude appends itself.
-func NormalizeAnthropicBaseURLForClaude(baseURL string) string {
-	return rewriteEndpointPath(normalizeEndpoint(baseURL, "https://api.anthropic.com"), func(path string) string {
-		for _, suffix := range []string{"/v1/messages", "/v1/models", "/v1"} {
-			if strings.HasSuffix(path, suffix) {
-				return strings.TrimSuffix(path, suffix)
-			}
-		}
-		return path
-	})
-}

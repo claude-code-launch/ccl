@@ -25,13 +25,17 @@ func TestGeminiSignedReplayKeepsNativeCallIDs(t *testing.T) {
 				part = `{"functionCall":{"id":"toolu_native","name":"exec","args":{}},"thoughtSignature":"opaque+/="}`
 			}
 			signature := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(part))
-			body, _ := json.Marshal(map[string]any{"model": "gemini-3-flash", "messages": []any{
-				map[string]any{"role": "user", "content": "run"},
-				map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "thinking", "signature": signature}}},
-				map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "old-client-id", "name": "exec", "input": map[string]any{}}}},
-				map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "old-client-id", "content": "ok"}}},
-			}})
-			converted, err := convertAnthropicToGemini(body)
+			body, _ := json.Marshal(map[string]any{
+				"model": "gemini-3-flash",
+				"tools": []any{map[string]any{"type": "function", "name": "exec", "parameters": map[string]any{"type": "object"}}},
+				"input": []any{
+					map[string]any{"role": "user", "content": "run"},
+					map[string]any{"id": "rs_ccl_1", "type": "reasoning", "encrypted_content": signature},
+					map[string]any{"type": "function_call", "call_id": "old-client-id", "name": "exec", "arguments": "{}"},
+					map[string]any{"type": "function_call_output", "call_id": "old-client-id", "output": "ok"},
+				},
+			})
+			converted, err := convertResponsesToGemini(body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -49,7 +53,7 @@ func TestGeminiSignedReplayKeepsNativeCallIDs(t *testing.T) {
 func TestGeminiResponsePreservesNativeToolID(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		body := `{"candidates":[{"content":{"parts":[{"functionCall":{"id":"toolu_native","name":"exec","args":{}},"thoughtSignature":"opaque+/="}]},"finishReason":"STOP"}]}`
-		assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+		assembler := newResponseAssembler(&adapterRequest{}, nil)
 		var err error
 		if streaming {
 			err = processGeminiStream(strings.NewReader("data: "+body+"\n\n"), assembler)
@@ -135,10 +139,10 @@ func TestGeminiRuntimeContinuesOnClaudeWithGeminiToolHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-	post := func(model string, messages []any) []byte {
+	post := func(model string, input []any) []byte {
 		t.Helper()
-		body, _ := json.Marshal(map[string]any{"model": model, "max_tokens": 1024, "messages": messages, "tools": []any{map[string]any{"name": "exec", "input_schema": map[string]any{"type": "object", "properties": map[string]any{"input": map[string]any{"type": "string"}}}}}})
-		req, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", bytes.NewReader(body))
+		body, _ := json.Marshal(map[string]any{"model": model, "max_output_tokens": 1024, "input": input, "tools": []any{map[string]any{"type": "function", "name": "exec", "parameters": map[string]any{"type": "object", "properties": map[string]any{"input": map[string]any{"type": "string"}}}}}})
+		req, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", bytes.NewReader(body))
 		req.Header.Set("X-Api-Key", runtime.APIKey())
 		req.Header.Set("Content-Type", "application/json")
 		response, err := http.DefaultClient.Do(req)
@@ -155,26 +159,30 @@ func TestGeminiRuntimeContinuesOnClaudeWithGeminiToolHistory(t *testing.T) {
 	messages := []any{map[string]any{"role": "user", "content": "run two calls"}}
 	first := post("gemini-3-flash", messages)
 	var toolUses, fullBlocks, results []any
-	for _, block := range gjson.GetBytes(first, "content").Array() {
+	for _, block := range gjson.GetBytes(first, "output").Array() {
 		fullBlocks = append(fullBlocks, json.RawMessage(block.Raw))
 		// Codex replays calls and outputs across model switches without the
-		// previous provider's opaque thinking/signature blocks.
-		if block.Get("type").String() == "tool_use" {
+		// previous provider's opaque reasoning/signature items.
+		if block.Get("type").String() == "function_call" {
 			toolUses = append(toolUses, json.RawMessage(block.Raw))
-			results = append(results, map[string]any{"type": "tool_result", "tool_use_id": block.Get("id").String(), "content": "ok"})
+			results = append(results, map[string]any{"type": "function_call_output", "call_id": block.Get("call_id").String(), "output": "ok"})
 		}
 	}
 	if len(toolUses) != 2 || len(fullBlocks) < 3 {
 		t.Fatalf("missing parallel calls: %s", first)
 	}
-	codexHistory := append(append([]any{}, messages...), map[string]any{"role": "assistant", "content": toolUses}, map[string]any{"role": "user", "content": results}, map[string]any{"role": "user", "content": "hi"})
+	codexHistory := append(append([]any{}, messages...), toolUses...)
+	codexHistory = append(codexHistory, results...)
+	codexHistory = append(codexHistory, map[string]any{"role": "user", "content": "hi"})
 	if raw := post("claude-sonnet-4-6", codexHistory); !strings.Contains(string(raw), "continued on sonnet") || calls.Load() != 2 {
-		t.Fatalf("model switch without thinking blocks failed: calls=%d response=%s", calls.Load(), raw)
+		t.Fatalf("model switch without reasoning items failed: calls=%d response=%s", calls.Load(), raw)
 	}
-	// Claude Code preserves signed thinking blocks alongside tool_use blocks.
-	claudeHistory := append(append([]any{}, messages...), map[string]any{"role": "assistant", "content": fullBlocks}, map[string]any{"role": "user", "content": results}, map[string]any{"role": "user", "content": "hi"})
+	// Full output replay preserves signed reasoning items alongside function_call items.
+	claudeHistory := append(append([]any{}, messages...), fullBlocks...)
+	claudeHistory = append(claudeHistory, results...)
+	claudeHistory = append(claudeHistory, map[string]any{"role": "user", "content": "hi"})
 	if raw := post("claude-sonnet-4-6", claudeHistory); !strings.Contains(string(raw), "continued on sonnet") || calls.Load() != 3 {
-		t.Fatalf("model switch with signed thinking blocks failed: calls=%d response=%s", calls.Load(), raw)
+		t.Fatalf("model switch with signed reasoning items failed: calls=%d response=%s", calls.Load(), raw)
 	}
 }
 
@@ -189,34 +197,26 @@ func TestGeminiSignedReplayGroupedCompanionsAndTurnBoundaries(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"model": "gemini-3-flash",
 		"tools": []any{
-			map[string]any{"name": "exec_one", "input_schema": map[string]any{"type": "object"}},
-			map[string]any{"name": "exec_two", "input_schema": map[string]any{"type": "object"}},
+			map[string]any{"type": "function", "name": "exec_one", "parameters": map[string]any{"type": "object"}},
+			map[string]any{"type": "function", "name": "exec_two", "parameters": map[string]any{"type": "object"}},
 		},
-		"messages": []any{
+		"input": []any{
 			map[string]any{"role": "user", "content": "run both"},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "thinking", "signature": sig1},
-				map[string]any{"type": "thinking", "signature": sig2},
-				map[string]any{"type": "tool_use", "id": "client-1", "name": "exec_one", "input": map[string]any{"n": 1}},
-				map[string]any{"type": "tool_use", "id": "native-2", "name": "exec_two", "input": map[string]any{"n": 2}},
-			}},
-			map[string]any{"role": "user", "content": []any{
-				map[string]any{"type": "tool_result", "tool_use_id": "client-1", "content": "ok-1"},
-				map[string]any{"type": "tool_result", "tool_use_id": "native-2", "content": "ok-2"},
-			}},
+			map[string]any{"id": "rs_ccl_1", "type": "reasoning", "encrypted_content": sig1},
+			map[string]any{"id": "rs_ccl_2", "type": "reasoning", "encrypted_content": sig2},
+			map[string]any{"type": "function_call", "call_id": "client-1", "name": "exec_one", "arguments": `{"n":1}`},
+			map[string]any{"type": "function_call", "call_id": "native-2", "name": "exec_two", "arguments": `{"n":2}`},
+			map[string]any{"type": "function_call_output", "call_id": "client-1", "output": "ok-1"},
+			map[string]any{"type": "function_call_output", "call_id": "native-2", "output": "ok-2"},
 			// Truncated signed text block without its companion in the previous turn must
 			// not swallow the first text block of the next assistant turn after a user message.
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "thinking", "signature": textSig},
-			}},
+			map[string]any{"id": "rs_ccl_3", "type": "reasoning", "encrypted_content": textSig},
 			map[string]any{"role": "user", "content": "next question"},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "text", "text": "fresh answer"},
-			}},
+			map[string]any{"role": "assistant", "content": "fresh answer"},
 			map[string]any{"role": "user", "content": "follow up"},
 		},
 	})
-	converted, err := convertAnthropicToGemini(body)
+	converted, err := convertResponsesToGemini(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,11 +246,10 @@ func TestGeminiClaudeStreamedThinkingSignatureRoundTrip(t *testing.T) {
 			`data: {"response":{"candidates":[{"content":{"parts":[{"text":"final answer"}]},"finishReason":"STOP"}]}}`,
 			"",
 		}, "\n\n")
-		assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{
-			upstreamModel:     "claude-opus-4-6-thinking",
-			clientModel:       "claude-opus-4-6-thinking",
-			thinkingEnabled:   true,
-			thinkingSignature: "gemini",
+		assembler := newResponseAssembler(&adapterRequest{
+			upstreamModel:   "claude-opus-4-6-thinking",
+			clientModel:     "claude-opus-4-6-thinking",
+			thinkingEnabled: true,
 		}, nil)
 		if err := processGeminiStream(strings.NewReader(sse), assembler); err != nil {
 			t.Fatal(err)
@@ -259,19 +258,16 @@ func TestGeminiClaudeStreamedThinkingSignatureRoundTrip(t *testing.T) {
 		if len(blocks) != 2 || blocks[0].Type != "thinking" || blocks[0].Thinking != "step 1, step 2" || !strings.HasPrefix(blocks[0].Signature, geminiPartSignaturePrefix) {
 			t.Fatalf("unexpected blocks: %+v", blocks)
 		}
-		rawBlocks, err := json.Marshal(blocks)
-		if err != nil {
-			t.Fatal(err)
+		inputItems := []any{map[string]any{"role": "user", "content": "think"}}
+		for _, item := range assembler.outputItems() {
+			inputItems = append(inputItems, item)
 		}
+		inputItems = append(inputItems, map[string]any{"role": "user", "content": "follow up"})
 		replayReq, _ := json.Marshal(map[string]any{
 			"model": "claude-opus-4-6-thinking",
-			"messages": []any{
-				map[string]any{"role": "user", "content": "think"},
-				map[string]any{"role": "assistant", "content": json.RawMessage(rawBlocks)},
-				map[string]any{"role": "user", "content": "follow up"},
-			},
+			"input": inputItems,
 		})
-		converted, err := convertAnthropicToAntigravity(replayReq)
+		converted, err := convertResponsesToAntigravity(replayReq)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -285,18 +281,16 @@ func TestGeminiClaudeStreamedThinkingSignatureRoundTrip(t *testing.T) {
 	emptyStandaloneSig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(`{"thought":true,"text":"","thoughtSignature":"sig-empty"}`))
 	legacyReq, _ := json.Marshal(map[string]any{
 		"model": "claude-opus-4-6-thinking",
-		"messages": []any{
+		"input": []any{
 			map[string]any{"role": "user", "content": "think"},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "thinking", "thinking": "recovered thought", "signature": "gemini"},
-				map[string]any{"type": "thinking", "thinking": "", "signature": emptyThoughtSig},
-				map[string]any{"type": "thinking", "thinking": "", "signature": emptyStandaloneSig},
-				map[string]any{"type": "text", "text": "done"},
-			}},
+			map[string]any{"id": "rs_ccl_1", "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "recovered thought"}}, "encrypted_content": "gemini"},
+			map[string]any{"id": "rs_ccl_2", "type": "reasoning", "encrypted_content": emptyThoughtSig},
+			map[string]any{"id": "rs_ccl_3", "type": "reasoning", "encrypted_content": emptyStandaloneSig},
+			map[string]any{"role": "assistant", "content": "done"},
 			map[string]any{"role": "user", "content": "next"},
 		},
 	})
-	converted, err := convertAnthropicToAntigravity(legacyReq)
+	converted, err := convertResponsesToAntigravity(legacyReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,43 +303,32 @@ func TestGeminiClaudeStreamedThinkingSignatureRoundTrip(t *testing.T) {
 func TestGeminiClaudeConcurrentToolUseAndSplitTurnNormalization(t *testing.T) {
 	thoughtSig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(`{"thought":true,"text":"plan two reads","thoughtSignature":"sig-claude"}`))
 	req, _ := json.Marshal(map[string]any{
-		"model":    "claude-opus-4-6-thinking",
-		"thinking": map[string]any{"type": "adaptive"},
+		"model":     "claude-opus-4-6-thinking",
+		"reasoning": map[string]any{"effort": "high"},
 		"tools": []any{
-			map[string]any{"name": "Read", "input_schema": map[string]any{"type": "object"}},
-			map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}},
+			map[string]any{"type": "function", "name": "Read", "parameters": map[string]any{"type": "object"}},
+			map[string]any{"type": "function", "name": "Bash", "parameters": map[string]any{"type": "object"}},
 		},
-		"messages": []any{
+		"input": []any{
 			map[string]any{"role": "user", "content": "inspect project"},
-			// Assistant blocks split across consecutive messages (thinking + text + 2 concurrent tool_use calls).
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "thinking", "thinking": "plan two reads", "signature": thoughtSig},
-			}},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "text", "text": "Reading both files concurrently."},
-			}},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "tool_use", "id": "toolu_read_1", "name": "Read", "input": map[string]any{"file_path": "a.go"}},
-			}},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "tool_use", "id": "toolu_bash_2", "name": "Bash", "input": map[string]any{"command": "ls"}},
-			}},
-			// System reminder + image-bearing tool_result + missing second tool_result split across user turns.
-			map[string]any{"role": "system", "content": "<system-reminder>hook note</system-reminder>"},
-			map[string]any{"role": "user", "content": []any{
-				map[string]any{
-					"type":        "tool_result",
-					"tool_use_id": "toolu_read_1",
-					"content": []any{
-						map[string]any{"type": "text", "text": "file a"},
-						map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AAAA"}},
-					},
+			map[string]any{"id": "rs_ccl_1", "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "plan two reads"}}, "encrypted_content": thoughtSig},
+			map[string]any{"role": "assistant", "content": "Reading both files concurrently."},
+			map[string]any{"type": "function_call", "call_id": "toolu_read_1", "name": "Read", "arguments": `{"file_path":"a.go"}`},
+			map[string]any{"type": "function_call", "call_id": "toolu_bash_2", "name": "Bash", "arguments": `{"command":"ls"}`},
+			// User reminder + image-bearing function_call_output + missing second tool result.
+			map[string]any{"role": "user", "content": "<system-reminder>hook note</system-reminder>"},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "toolu_read_1",
+				"output": []any{
+					map[string]any{"type": "input_text", "text": "file a"},
+					map[string]any{"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
 				},
-				map[string]any{"type": "tool_result", "tool_use_id": "toolu_orphan", "content": "stale"},
-			}},
+			},
+			map[string]any{"type": "function_call_output", "call_id": "toolu_orphan", "output": "stale"},
 		},
 	})
-	converted, err := convertAnthropicToAntigravity(req)
+	converted, err := convertResponsesToAntigravity(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,52 +352,49 @@ func TestGeminiClaudeConcurrentToolUseAndSplitTurnNormalization(t *testing.T) {
 
 func TestGeminiThinkingOnlyResponseAndHistoryRecovery(t *testing.T) {
 	// 1. A stream that finishes with only thought parts promotes the thought text
-	// into a visible text block so Claude Code does not render an empty turn.
+	// into a visible text block so the client does not render an empty turn.
+	const resumeStepText = "\u7ee7\u7eed\u6267\u884c\u4fee\u590d\u6b65\u9aa4"
+	const resumeWord = "\u7ee7\u7eed"
 	sse := strings.Join([]string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"继续执行修复步骤"}]}}]}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"` + resumeStepText + `"}]}}]}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"","thoughtSignature":"sig-argon"}]},"finishReason":"STOP"}]}}`,
 		"",
 	}, "\n\n")
-	assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{
-		upstreamModel:     "gemini-4-argon-high",
-		clientModel:       "gemini-4-argon",
-		thinkingEnabled:   true,
-		thinkingSignature: "gemini",
+	assembler := newResponseAssembler(&adapterRequest{
+		upstreamModel:   "gemini-4-argon-high",
+		clientModel:     "gemini-4-argon",
+		thinkingEnabled: true,
 	}, nil)
 	if err := processGeminiStream(strings.NewReader(sse), assembler); err != nil {
 		t.Fatal(err)
 	}
 	blocks := assembler.contentBlocks()
-	if len(blocks) != 2 || blocks[0].Type != "thinking" || blocks[1].Type != "text" || blocks[1].Text != "继续执行修复步骤" {
+	if len(blocks) != 2 || blocks[0].Type != "thinking" || blocks[1].Type != "text" || blocks[1].Text != resumeStepText {
 		t.Fatalf("expected thinking + promoted text block, got: %+v", blocks)
 	}
 
-	// 2. Historical thinking-only turns and interrupted tool calls followed by "继续"
+	// 2. Historical thinking-only turns and interrupted tool calls followed by resumeWord
 	// are repaired on Gemini routes.
 	thoughtOnlySig := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(`{"thought":true,"text":"baked only","thoughtSignature":"sig-baked"}`))
 	req, _ := json.Marshal(map[string]any{
-		"model":      "gemini-4-argon",
-		"max_tokens": 4096,
+		"model":             "gemini-4-argon",
+		"max_output_tokens": 4096,
 		"tools": []any{
-			map[string]any{"name": "Bash", "input_schema": map[string]any{"type": "object"}},
+			map[string]any{"type": "function", "name": "Bash", "parameters": map[string]any{"type": "object"}},
 		},
-		"messages": []any{
+		"input": []any{
 			map[string]any{"role": "user", "content": "start"},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "tool_use", "id": "toolu_interrupted", "name": "Bash", "input": map[string]any{"command": "ls"}},
-			}},
-			map[string]any{"role": "user", "content": "继续"},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{"type": "thinking", "thinking": "baked only", "signature": thoughtOnlySig},
-			}},
-			map[string]any{"role": "user", "content": "继续"},
+			map[string]any{"type": "function_call", "call_id": "toolu_interrupted", "name": "Bash", "arguments": `{"command":"ls"}`},
+			map[string]any{"role": "user", "content": resumeWord},
+			map[string]any{"id": "rs_ccl_1", "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "baked only"}}, "encrypted_content": thoughtOnlySig},
+			map[string]any{"role": "user", "content": resumeWord},
 		},
 	})
 	catalog, err := parseGeminiCatalog([]byte(geminiCatalogFixture))
 	if err != nil {
 		t.Fatal(err)
 	}
-	converted, err := convertAnthropicToAntigravityWithCatalog(req, catalog)
+	converted, err := convertResponsesToAntigravityWithCatalog(req, catalog)
 	if err != nil {
 		t.Fatal(err)
 	}

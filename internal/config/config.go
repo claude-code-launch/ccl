@@ -50,8 +50,7 @@ func read() (*provider.Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg.LogLevel = "off"
-			// A fresh install runs Claude Code on its own login (the "default"
-			// selector) for normal and ACP launches until a provider is chosen.
+			// A fresh install uses Grok Build's login until a provider is chosen.
 			cfg.ActiveProvider = provider.DefaultProvider
 			return cfg, nil
 		}

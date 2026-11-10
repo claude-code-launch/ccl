@@ -243,8 +243,8 @@ func (a *antigravityOAuthAuthorizer) refresh(ctx context.Context, credential *an
 }
 
 // geminiService is the CCL-owned data plane for the Gemini subscription. It
-// converts Anthropic Messages requests to the Antigravity generateContent
-// envelope and streams the Gemini response back as Anthropic Messages SSE.
+// converts OpenAI Responses requests to the Antigravity generateContent
+// envelope and streams the Gemini response back as OpenAI Responses SSE.
 type geminiService struct {
 	apiKey     string
 	authorizer chatAuthorizer
@@ -273,8 +273,7 @@ func (s *geminiService) setPreferredBaseURL(base string) {
 }
 
 func (s *geminiService) handler() http.Handler {
-	mux := anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
-	return mux
+	return loopbackFrontMux(s.apiKey, s.handleModels, s.handleResponses)
 }
 
 func (s *geminiService) authorized(request *http.Request) bool {
@@ -285,54 +284,33 @@ func (s *geminiService) handleModels(writer http.ResponseWriter, request *http.R
 	serveModelList(writer, request, s.apiKey, s.models)
 }
 
-func (s *geminiService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	raw, err := readAnthropicInboundBody(writer, request, chatMaxBodyBytes)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	// Gemini exposes no count_tokens endpoint, so estimate locally the same way
-	// the converter estimates the request input tokens.
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateApproxTokensBytes(raw)})
-}
-
-func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+func (s *geminiService) handleResponses(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	started := time.Now()
 	if !s.authorized(request) {
 		LogWarnEvent("request_rejected", "component", "gemini", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusUnauthorized, "reason", "invalid_local_api_key")
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		writeProxyError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
 	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		writeProxyError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
-	raw, err := readAnthropicInboundBody(writer, request, chatMaxBodyBytes)
+	raw, err := readInboundBody(writer, request, chatMaxBodyBytes)
 	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	converted, err := convertAnthropicToAntigravityWithCatalog(raw, s.catalog)
+	converted, err := convertResponsesToAntigravityWithCatalog(raw, s.catalog)
 	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	if s.catalog != nil {
-		effort := strings.TrimSpace(gjson.GetBytes(raw, "output_config.effort").String())
-		converted.upstreamModel, converted.geminiBody, err = s.catalog.resolve(converted.clientModel, effort, converted.geminiBody)
+		converted.upstreamModel, converted.geminiBody, err = s.catalog.resolve(converted.clientModel, converted.effort, converted.geminiBody)
 		if err != nil {
-			writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+			writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
 		converted.model = converted.upstreamModel
@@ -359,7 +337,7 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 			"model", converted.upstreamModel, "returned_status", http.StatusBadGateway,
 			"tools_count", toolsCount, "tool_mode", toolMode, "thinking_config", thinkingSummary,
 			"body_bytes", len(envelope), "duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer response.Body.Close()
@@ -372,7 +350,7 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 		return
 	}
 
-	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
+	assembler := newResponseAssembler(&converted.adapterRequest, nil)
 	if converted.stream {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("Cache-Control", "no-cache")
@@ -392,7 +370,6 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 				"input_tokens", inTokens, "output_tokens", outTokens,
 				"raw_parts", strings.Join(stepResult.rawParts, " | "),
 				"raw_chunks", strings.Join(stepResult.rawChunks, " || "),
-				"tail_messages", summarizeAnthropicTailMessages(raw, 6),
 				"tail_contents", summarizeGeminiTailContents(currentBody, 6),
 				"gen_config", gjson.GetBytes(currentBody, "generationConfig").Raw)
 			currentModel, currentBody = s.buildGeminiEmptyContinuation(currentModel, currentBody, stepResult.rawParts, contAttempt)
@@ -425,10 +402,7 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 		if streamErr != nil {
 			LogErrorEvent("stream_conversion_failed", "component", "gemini", "request_id", requestID,
 				"model", converted.upstreamModel, "duration", logDuration(started), "error", streamErr)
-			_ = assembler.emit("error", map[string]any{
-				"type":  "error",
-				"error": map[string]any{"type": "api_error", "message": streamErr.Error()},
-			})
+			assembler.fail("api_error", streamErr.Error())
 			return
 		}
 		inTokens, outTokens := assembler.tokenTotals()
@@ -445,14 +419,14 @@ func (s *geminiService) handleMessages(writer http.ResponseWriter, request *http
 		LogErrorEvent("stream_conversion_failed", "component", "gemini", "request_id", requestID,
 			"model", converted.upstreamModel, "returned_status", http.StatusBadGateway,
 			"duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	if err := processGeminiNonStream(body, assembler); err != nil {
 		LogErrorEvent("stream_conversion_failed", "component", "gemini", "request_id", requestID,
 			"model", converted.upstreamModel, "returned_status", http.StatusBadGateway,
 			"duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	s.recordGeminiUsage(converted, assembler)
@@ -500,54 +474,6 @@ func (s *geminiService) buildGeminiEmptyContinuation(model string, body []byte, 
 		out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "low")
 	}
 	return nextModel, out
-}
-
-func summarizeAnthropicTailMessages(raw []byte, limit int) string {
-	msgs := gjson.GetBytes(raw, "messages").Array()
-	start := 0
-	if len(msgs) > limit {
-		start = len(msgs) - limit
-	}
-	var items []string
-	for i := start; i < len(msgs); i++ {
-		msg := msgs[i]
-		role := msg.Get("role").String()
-		content := msg.Get("content")
-		if content.IsArray() {
-			var blocks []string
-			for _, b := range content.Array() {
-				kind := b.Get("type").String()
-				switch kind {
-				case "thinking":
-					sig := b.Get("signature").String()
-					if len(sig) > 24 {
-						sig = sig[:24] + "..."
-					}
-					blocks = append(blocks, fmt.Sprintf("thinking(len=%d,sig=%s)", len(b.Get("thinking").String()), sig))
-				case "text":
-					txt := strings.TrimSpace(b.Get("text").String())
-					if len(txt) > 32 {
-						txt = txt[:32] + "..."
-					}
-					blocks = append(blocks, fmt.Sprintf("text(len=%d,%q)", len(b.Get("text").String()), txt))
-				case "tool_use":
-					blocks = append(blocks, fmt.Sprintf("tool_use(%s:%s)", b.Get("name").String(), b.Get("id").String()))
-				case "tool_result":
-					blocks = append(blocks, fmt.Sprintf("tool_result(%s)", b.Get("tool_use_id").String()))
-				default:
-					blocks = append(blocks, kind)
-				}
-			}
-			items = append(items, fmt.Sprintf("%d:%s[%s]", i, role, strings.Join(blocks, ",")))
-		} else {
-			txt := strings.TrimSpace(content.String())
-			if len(txt) > 32 {
-				txt = txt[:32] + "..."
-			}
-			items = append(items, fmt.Sprintf("%d:%s(%q)", i, role, txt))
-		}
-	}
-	return strings.Join(items, "; ")
 }
 
 func summarizeGeminiTailContents(geminiBody []byte, limit int) string {
@@ -702,7 +628,7 @@ func (s *geminiService) forwardUpstreamError(writer http.ResponseWriter, respons
 	_, _ = writer.Write(body)
 }
 
-func (s *geminiService) recordGeminiUsage(converted *geminiConvertedRequest, assembler *anthropicResponseAssembler) {
+func (s *geminiService) recordGeminiUsage(converted *geminiConvertedRequest, assembler *responseAssembler) {
 	if s.usage == nil {
 		return
 	}

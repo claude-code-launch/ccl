@@ -89,7 +89,7 @@ func (e *chatCompletionsUpstreamError) Error() string {
 func (e *chatCompletionsUpstreamError) upstreamStatus() int        { return e.status }
 func (e *chatCompletionsUpstreamError) upstreamRetryAfter() string { return e.retryAfter }
 
-// startOpenAIChatRuntime starts a CCL-owned Anthropic Messages entrypoint that
+// startOpenAIChatRuntime starts a CCL-owned Responses entrypoint that
 // translates requests to OpenAI Chat Completions upstream. It mirrors
 // startCodexResponsesRuntime's loopback/server lifecycle with no OAuth and no
 // compaction, since neither applies to a static-key Chat gateway.
@@ -206,8 +206,7 @@ func newChatCompletionsServiceWithAuthorizer(apiKey, endpoint string, routes []r
 }
 
 func (s *chatCompletionsService) handler() http.Handler {
-	mux := anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
-	return mux
+	return loopbackFrontMux(s.apiKey, s.handleModels, s.handleResponses)
 }
 
 func (s *chatCompletionsService) authorized(request *http.Request) bool {
@@ -218,33 +217,7 @@ func (s *chatCompletionsService) handleModels(writer http.ResponseWriter, reques
 	serveModelList(writer, request, s.apiKey, s.models)
 }
 
-func (s *chatCompletionsService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	raw, err := readAnthropicInboundBody(writer, request, chatMaxBodyBytes)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	converted, err := s.convertRequest(raw)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	tokens, estimator := countChatInputTokens(converted.model, converted.body)
-	LogDebugEvent("token_counted", "component", "openai_chat", "model", converted.model,
-		"body_bytes", len(converted.body), "input_tokens", tokens, "estimator", estimator)
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": tokens})
-}
-
-func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+func (s *chatCompletionsService) handleResponses(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	requestCtx = withClientSession(requestCtx, request)
 	started := time.Now()
@@ -253,23 +226,23 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 	if !s.authorized(request) {
 		LogWarnEvent("request_rejected", "component", "openai_chat", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusUnauthorized, "reason", "invalid_local_api_key")
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		writeProxyError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
 	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		writeProxyError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
-	raw, err := readAnthropicInboundBody(writer, request, chatMaxBodyBytes)
+	raw, err := readInboundBody(writer, request, chatMaxBodyBytes)
 	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	converted, err := s.convertRequest(raw)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "openai_chat", "request_id", requestID,
 			"status", http.StatusBadRequest, "reason", "request_conversion", "error", err)
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	LogDebugEvent("request_converted", "component", "openai_chat", "request_id", requestID,
@@ -289,12 +262,12 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 			LogUpstreamEvent(upstreamErr.status, "request_failed", "component", "openai_chat", "request_id", requestID,
 				"model", converted.model, "status", upstreamErr.status, "returned_status", upstreamErr.status,
 				"retry_after", upstreamErr.retryAfter, "duration", logDuration(started))
-			writeAnthropicError(writer, upstreamErr.status, anthropicErrorType(upstreamErr.status), upstreamErr.Error())
+			writeProxyError(writer, upstreamErr.status, proxyErrorType(upstreamErr.status), upstreamErr.Error())
 			return
 		}
 		LogErrorEvent("request_failed", "component", "openai_chat", "request_id", requestID,
 			"model", converted.model, "returned_status", http.StatusBadGateway, "duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer response.Body.Close()
@@ -302,11 +275,11 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("Cache-Control", "no-cache")
 		writer.Header().Set("Connection", "keep-alive")
-		assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, writer)
+		assembler := newResponseAssembler(&converted.adapterRequest, writer)
 		if err := processChatCompletionsStream(response.Body, assembler); err != nil {
 			LogErrorEvent("stream_conversion_failed", "component", "openai_chat", "request_id", requestID,
 				"model", converted.model, "duration", logDuration(started), "error", err)
-			_ = assembler.emit("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": err.Error()}})
+			assembler.fail("upstream_stream_error", err.Error())
 		}
 		s.recordUsage(converted, assembler)
 	} else {
@@ -314,14 +287,14 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 		if readErr != nil {
 			LogErrorEvent("response_read_failed", "component", "openai_chat", "request_id", requestID,
 				"model", converted.model, "returned_status", http.StatusBadGateway, "duration", logDuration(started), "error", readErr)
-			writeAnthropicError(writer, http.StatusBadGateway, "api_error", readErr.Error())
+			writeProxyError(writer, http.StatusBadGateway, "api_error", readErr.Error())
 			return
 		}
-		assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
+		assembler := newResponseAssembler(&converted.adapterRequest, nil)
 		if err := processChatCompletionsNonStream(body, assembler); err != nil {
 			LogErrorEvent("stream_conversion_failed", "component", "openai_chat", "request_id", requestID,
 				"model", converted.model, "returned_status", http.StatusBadGateway, "duration", logDuration(started), "error", err)
-			writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+			writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
 		s.recordUsage(converted, assembler)
@@ -332,7 +305,7 @@ func (s *chatCompletionsService) handleMessages(writer http.ResponseWriter, requ
 		"model", converted.model, "status", http.StatusOK, "stream", converted.stream, "duration", logDuration(started))
 }
 
-func (s *chatCompletionsService) recordUsage(converted *chatCompletionsConvertedRequest, assembler *anthropicResponseAssembler) {
+func (s *chatCompletionsService) recordUsage(converted *chatCompletionsConvertedRequest, assembler *responseAssembler) {
 	if s.usage == nil {
 		return
 	}
@@ -417,10 +390,10 @@ func chatDrainError(ctx context.Context, response *http.Response) error {
 	}
 }
 
-// convertRequest is shared by inference and count_tokens, so alias routing and
-// backend-specific normalization do not leave counting on a different payload.
+// convertRequest converts one inbound request and applies alias routing and
+// backend-specific normalization.
 func (s *chatCompletionsService) convertRequest(raw []byte) (*chatCompletionsConvertedRequest, error) {
-	converted, err := convertAnthropicToChatCompletions(raw)
+	converted, err := convertResponsesToChatCompletions(raw)
 	if err != nil {
 		return nil, err
 	}

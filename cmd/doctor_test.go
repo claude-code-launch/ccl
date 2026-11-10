@@ -67,7 +67,7 @@ func TestFormatTokenCountIsReadableAndExact(t *testing.T) {
 	}
 }
 
-func TestPrintDoctorOneMConsistencyFlagsOversizedMarkers(t *testing.T) {
+func TestPrintDoctorOneMConsistencyFlagsOversigrokMarkers(t *testing.T) {
 	// The check is output-only; assert the decision inputs it depends on, so a
 	// [1m] slot whose backend window is small is recognizable.
 	p := provider.Provider{
@@ -93,73 +93,11 @@ func TestPrintDoctorOneMConsistencyFlagsOversizedMarkers(t *testing.T) {
 	printDoctorOneMConsistency(p, nil)
 }
 
-// TestProbeAutoClawMessagesUsesLocalAdapter pins the request ccl sends when it
-// diagnoses AutoClaw: the local Messages route, the loopback Bearer key, and a
-// minimal payload for the catalog's first model.
-func TestProbeAutoClawMessagesUsesLocalAdapter(t *testing.T) {
-	var gotPath, gotBearer, gotKey, gotVersion, gotBody string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotBearer = r.Header.Get("Authorization")
-		gotKey = r.Header.Get("x-api-key")
-		gotVersion = r.Header.Get("anthropic-version")
-		raw, _ := io.ReadAll(r.Body)
-		gotBody = string(raw)
-		_, _ = w.Write([]byte("data: {\"type\":\"message_start\"}\n\n"))
-	}))
-	t.Cleanup(server.Close)
-
-	p := provider.Provider{
-		Type:     "autoclaw",
-		Endpoint: server.URL + "/v1",
-		APIKey:   "local-runtime-key",
-	}
-	status, body, err := probeAutoClawMessages(context.Background(), p)
-	if err != nil {
-		t.Fatalf("probeAutoClawMessages() error: %v", err)
-	}
-	if status != http.StatusOK {
-		t.Fatalf("status = %d", status)
-	}
-	if gotPath != "/v1/messages" {
-		t.Fatalf("probe path = %q", gotPath)
-	}
-	if gotBearer != "Bearer local-runtime-key" || gotKey != "" || gotVersion != "2023-06-01" {
-		t.Fatalf("auth headers = bearer %q / x-api-key %q / version %q", gotBearer, gotKey, gotVersion)
-	}
-	if !strings.Contains(gotBody, `"model":"zai_auto"`) || !strings.Contains(gotBody, `"max_tokens":1`) {
-		t.Fatalf("probe payload = %s", gotBody)
-	}
-	if !autoClawResponseHasContent(body) {
-		t.Fatalf("a message_start event must count as content: %q", body)
-	}
-}
-
-// TestAutoClawResponseHasContentDetectsEmptyStream pins the diagnosis for an
-// empty stream returned by the local adapter.
-func TestAutoClawResponseHasContentDetectsEmptyStream(t *testing.T) {
-	empty := map[string]bool{
-		"":                 false,
-		"\n\n":             false,
-		": keep-alive\n\n": false,
-		"event: ping\n\n":  false,
-		"data:\n\n":        false,
-		"data: [DONE]\n\n": false,
-		"event: message_start\n\ndata: {\"type\":\"message_start\"}\n\n": true,
-		`{"id":"msg_1","type":"message"}`:                                true,
-	}
-	for body, want := range empty {
-		if got := autoClawResponseHasContent(body); got != want {
-			t.Errorf("autoClawResponseHasContent(%q) = %t, want %t", body, got, want)
-		}
-	}
-}
-
 func TestAutoClawModelAvailabilityUsesLiveLocalRuntime(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		calls++
-		if request.URL.Path != "/v1/messages" || request.Header.Get("Authorization") != "Bearer local-key" {
+		if request.URL.Path != "/v1/responses" || request.Header.Get("Authorization") != "Bearer local-key" {
 			http.Error(writer, "wrong local runtime contract", http.StatusBadRequest)
 			return
 		}
@@ -173,10 +111,10 @@ func TestAutoClawModelAvailabilityUsesLiveLocalRuntime(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if !testSingleModelForProtocolContext(context.Background(), "available-model", server.URL+"/v1", "local-key", "autoclaw", "", time.Second) {
+	if !testSingleModelForProtocolContext(context.Background(), "available-model", server.URL+"/v1", "local-key", "openai_responses", time.Second) {
 		t.Fatal("working AutoClaw route reported unavailable")
 	}
-	if testSingleModelWithProtocolsContext(context.Background(), "quota-exhausted", server.URL+"/v1", "local-key", "autoclaw", "", nil, time.Second) {
+	if testSingleModelWithProtocolsContext(context.Background(), "quota-exhausted", server.URL+"/v1", "local-key", "openai_responses", nil, time.Second) {
 		t.Fatal("quota-exhausted AutoClaw route reported available")
 	}
 	if calls != 2 {
@@ -214,15 +152,6 @@ func TestModelProbeTargetUsesConfiguredUpstreamForKeyProviders(t *testing.T) {
 	}
 }
 
-// TestProbeWireTypeFollowsTheRuntimeSurface pins the second half of the probe
-// selection: WHICH route to use once the target is the loopback runtime. A
-// subscription persists only a compatibility type — "openai" for
-// Kimi/Gemini/WorkBuddy, "openai_responses" for GPT/Grok/Zed — while
-// every embedded runtime serves the Anthropic Messages surface and nothing
-// else. Probing the compatibility wire 404s every model of a healthy
-// subscription, which is how doctor reported 0/N on a working Zed or Kimi
-// account. AutoClaw keeps its own type: its probe branch crosses the adapter
-// with bearer auth.
 func TestProbeWireTypeFollowsTheRuntimeSurface(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -232,22 +161,22 @@ func TestProbeWireTypeFollowsTheRuntimeSurface(t *testing.T) {
 		{
 			name:     "kimi chat compatibility type",
 			provider: provider.Provider{Type: "openai", OAuthProvider: "kimi"},
-			want:     "anthropic",
+			want:     "openai_responses",
 		},
 		{
-			name:     "zed responses compatibility type",
-			provider: provider.Provider{Type: "openai_responses", OAuthProvider: "zed"},
-			want:     "anthropic",
+			name:     "grok responses compatibility type",
+			provider: provider.Provider{Type: "openai_responses", OAuthProvider: "grok"},
+			want:     "openai_responses",
 		},
 		{
 			name:     "qoder already anthropic",
 			provider: provider.Provider{Type: "anthropic", OAuthProvider: "qoder"},
-			want:     "anthropic",
+			want:     "openai_responses",
 		},
 		{
 			name:     "autoclaw keeps its adapter probe",
 			provider: provider.Provider{Type: "autoclaw", OAuthProvider: "autoclaw"},
-			want:     "autoclaw",
+			want:     "openai_responses",
 		},
 		{
 			name:     "api-key gateway is unchanged",
@@ -269,24 +198,19 @@ func TestProbeWireTypeFollowsTheRuntimeSurface(t *testing.T) {
 	}
 }
 
-// TestModelVerificationProbesOAuthRuntimeMessagesSurface is the subscription
-// shape of the doctor 0/N failure: the loopback runtime serves only
-// /v1/messages, and the provider's persisted Type is the openai_responses
-// compatibility value. Verification must reach the runtime on its Messages
-// surface and report the account's models available.
-func TestModelVerificationProbesOAuthRuntimeMessagesSurface(t *testing.T) {
-	var chatProbes, anthropicProbes int32
+func TestModelVerificationProbesOAuthRuntimeResponses(t *testing.T) {
+	var chatProbes, responsesProbes int32
 	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/messages":
-			atomic.AddInt32(&anthropicProbes, 1)
-			if r.Header.Get("x-api-key") != "ccl-local-key" {
+		case "/v1/responses":
+			atomic.AddInt32(&responsesProbes, 1)
+			if r.Header.Get("Authorization") != "Bearer ccl-local-key" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
-		case "/v1/responses", "/v1/chat/completions":
+		case "/v1/chat/completions", "/v1/messages":
 			atomic.AddInt32(&chatProbes, 1)
 			w.WriteHeader(http.StatusNotFound)
 		default:
@@ -296,76 +220,26 @@ func TestModelVerificationProbesOAuthRuntimeMessagesSurface(t *testing.T) {
 	defer loopback.Close()
 
 	configured := provider.Provider{
-		Name: "work", Type: "openai_responses", Endpoint: "oauth://zed",
-		OAuthProvider: "zed", OAuthAccountCredential: "zed-user.json",
+		Name: "work", Type: "openai_responses", Endpoint: "oauth://grok",
+		OAuthProvider: "grok", OAuthAccountCredential: "grok-user.json",
 	}
 	// The runtime provider is a copy of the configured one with only Endpoint and
 	// APIKey rewritten, so it still carries OAuthProvider.
 	runtime := provider.Provider{
 		Name: "work", Type: "openai_responses", Endpoint: loopback.URL + "/v1",
-		APIKey: "ccl-local-key", OAuthProvider: "zed", OAuthAccountCredential: "zed-user.json",
+		APIKey: "ccl-local-key", OAuthProvider: "grok", OAuthAccountCredential: "grok-user.json",
 	}
 	models := []string{"claude-sonnet-test", "gpt-test"}
 
 	target := modelProbeTarget(configured, runtime)
-	available := testModelsConcurrently(context.Background(), models, target.Endpoint, target.APIKey, probeWireType(target), target.AnthropicAuth, target.ModelProtocols)
+	available := testModelsConcurrently(context.Background(), models, target.Endpoint, target.APIKey, probeWireType(target), target.ModelProtocols)
 	if len(available) != len(models) {
 		t.Fatalf("OAuth runtime verification available = %d/%d, want %d", len(available), len(models), len(models))
 	}
 	if got := atomic.LoadInt32(&chatProbes); got != 0 {
-		t.Fatalf("probes hit OpenAI-shaped routes %d times; the runtime serves none", got)
+		t.Fatalf("probes hit non-Responses routes %d times", got)
 	}
-	if got := atomic.LoadInt32(&anthropicProbes); got != int32(len(models)) {
-		t.Fatalf("Messages-surface probes = %d, want %d", got, len(models))
-	}
-}
-
-// TestModelVerificationProbesLoopbackMessagesSurface reproduces the doctor 0/18
-// failure shape: a loopback runtime that serves only the Anthropic Messages
-// surface (like every ccl embedded runtime) and an upstream that answers Chat
-// probes. Verification through modelProbeTarget must hit the upstream and
-// report the models available; probing the loopback the old way 404s them.
-func TestModelVerificationProbesLoopbackMessagesSurface(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
-
-	// The loopback runtime shape: /v1/messages and /v1/models only.
-	loopback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/models" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer loopback.Close()
-
-	configured := provider.Provider{
-		Type:           "modelsdev",
-		Endpoint:       upstream.URL + "/v1",
-		APIKey:         "upstream-key",
-		ModelProtocols: map[string]string{"model-a": "openai", "model-b": "openai"},
-	}
-	runtime := provider.Provider{
-		Type:     "modelsdev",
-		Endpoint: loopback.URL + "/v1",
-		APIKey:   "ccl-local-key",
-	}
-	models := []string{"model-a", "model-b"}
-
-	target := modelProbeTarget(configured, runtime)
-	available := testModelsConcurrently(context.Background(), models, target.Endpoint, target.APIKey, target.Type, target.AnthropicAuth, target.ModelProtocols)
-	if len(available) != len(models) {
-		t.Fatalf("upstream verification available = %d/%d, want %d", len(available), len(models), len(models))
-	}
-
-	available = testModelsConcurrently(context.Background(), models, runtime.Endpoint, runtime.APIKey, runtime.Type, runtime.AnthropicAuth, runtime.ModelProtocols)
-	if len(available) != 0 {
-		t.Fatalf("loopback Chat probe available = %d, want 0 (runtime has no Chat route)", len(available))
+	if got := atomic.LoadInt32(&responsesProbes); got != int32(len(models)) {
+		t.Fatalf("Responses probes = %d, want %d", got, len(models))
 	}
 }

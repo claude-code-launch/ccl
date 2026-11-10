@@ -11,29 +11,20 @@ import (
 )
 
 // providerTarget selects which provider a per-provider command acts on: an
-// explicit --provider, ACP's provider with --acp, or the normal-mode one.
+// explicit --provider or the active one.
 type providerTarget struct {
 	name string
-	acp  bool
 }
 
 func addProviderTargetFlags(cmd *cobra.Command, target *providerTarget) {
 	flags := cmd.PersistentFlags()
 	flags.StringVar(&target.name, "provider", "", "Act on this provider instead of the active one")
-	flags.BoolVar(&target.acp, "acp", false, "Act on the provider ACP uses")
 }
 
 // resolve returns the provider name the command should act on.
 func (t providerTarget) resolve(cfg *provider.Config) (string, error) {
-	if t.name != "" && t.acp {
-		return "", errors.New("use either --provider or --acp, not both")
-	}
 	name := t.name
-	switch {
-	case name != "":
-	case t.acp:
-		name = cfg.EffectiveACPProvider()
-	default:
+	if name == "" {
 		name = cfg.ActiveProvider
 	}
 	if name == "" {
@@ -43,16 +34,9 @@ func (t providerTarget) resolve(cfg *provider.Config) (string, error) {
 		))
 	}
 	if provider.IsDefaultProvider(name) {
-		p, managed, err := cfg.ResolveDefault()
-		if err != nil {
-			return "", err
-		}
-		if managed {
-			return p.Name, nil
-		}
 		return "", errors.New(locale.T(
-			"default 使用 Claude Code 自身配置，没有可修改的 ccl 设置；请加 --provider <name>",
-			"default uses Claude Code's own configuration and has no ccl settings to change; pass --provider <name>",
+			"default 使用 Grok Build 自身配置，没有可修改的 ccl 设置；请加 --provider <name>",
+			"default uses Grok Build's own configuration and has no ccl settings to change; pass --provider <name>",
 		))
 	}
 	if _, ok := cfg.Providers[name]; !ok {

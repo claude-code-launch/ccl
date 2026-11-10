@@ -277,19 +277,11 @@ func (m *AdvancedConfigModel) viewConnectionSection() []*tui.Element {
 	// Auth row: how the upstream verifies requests (API key / OAuth binding).
 	// For OAuth providers the Connection block is subscription metadata, and
 	// the Auth row above already carries this information.
-	if m.canSelectCustomProtocol() && provider.IsAnthropicType(m.p.Type) {
-		value := m.p.AnthropicAuth
-		if value == "" {
-			value = "Auto"
-		}
-		rows = append(rows, m.stepperRow(locale.T("鉴权", "Auth"), "‹ "+value+" ›", m.cursor == m.mainRowIndex(rowAuth)))
-	} else {
-		value := providerAuthLabel(*m.p)
-		if strings.TrimSpace(m.p.Type) == "" {
-			value = "Auto"
-		}
-		rows = append(rows, m.kvRow(locale.T("鉴权", "Auth"), span(value, stAvailable)))
+	value := providerAuthLabel(*m.p)
+	if strings.TrimSpace(m.p.Type) == "" {
+		value = "Auto"
 	}
+	rows = append(rows, m.kvRow(locale.T("鉴权", "Auth"), span(value, stAvailable)))
 
 	// Custom alone needs a manual Auto Configure action; models.dev verifies
 	// credentials automatically and OAuth uses its managed runtime.
@@ -531,10 +523,7 @@ func (m *AdvancedConfigModel) viewRuntimeSection() []*tui.Element {
 	// values).
 	renderEditable(rowContext, locale.T("上下文与压缩", "Context & Compact"), "‹ "+m.compactSummary()+" ›")
 	renderEditable(rowFast, "Fast", formatFastLabel(m.p.FastMode))
-	// Status Line — ccl writes its own status line through Claude Code's
-	// --settings, which outranks ~/.claude/settings.json, so this is the only
 	// place a user can keep a personal one.
-	renderEditable(rowStatusline, locale.T("状态栏", "Status Line"), formatStatuslineLabel(m.p.StatuslineDisabled))
 
 	// Active checkbox.
 	activeBox := "[ ]"

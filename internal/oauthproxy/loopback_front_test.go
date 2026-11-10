@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -37,7 +38,6 @@ func TestLoopbackFrontsServeTheSameShape(t *testing.T) {
 	fronts := map[string]http.Handler{
 		"chat":  newChatCompletionsService("key", "http://upstream.invalid/v1", routes, "up", NewUsageTracker()).handler(),
 		"mixed": (&mixedProtocolRouter{apiKey: "key", models: []string{"m1", "m2"}}).handler(),
-		"zed":   (&zedProtocolRouter{apiKey: "key", models: []string{"m1", "m2"}}).handler(),
 	}
 	for name, front := range fronts {
 		for _, path := range []string{"/v1/models", "/models"} {
@@ -49,16 +49,19 @@ func TestLoopbackFrontsServeTheSameShape(t *testing.T) {
 				t.Fatalf("%s %s: status %d", name, path, recorder.Code)
 			}
 			var body struct {
-				Data    []map[string]any `json:"data"`
-				FirstID string           `json:"first_id"`
-				LastID  string           `json:"last_id"`
-				HasMore *bool            `json:"has_more"`
+				Object string           `json:"object"`
+				Data   []map[string]any `json:"data"`
 			}
 			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 				t.Fatalf("%s %s: %v", name, path, err)
 			}
-			if len(body.Data) != 2 || body.FirstID == "" || body.LastID == "" || body.HasMore == nil {
+			if body.Object != "list" || len(body.Data) != 2 {
 				t.Fatalf("%s %s: model list = %s", name, path, recorder.Body.String())
+			}
+			for _, entry := range body.Data {
+				if entry["api_backend"] != "responses" {
+					t.Fatalf("%s %s: api_backend = %v, want responses", name, path, entry["api_backend"])
+				}
 			}
 		}
 
@@ -66,6 +69,24 @@ func TestLoopbackFrontsServeTheSameShape(t *testing.T) {
 		front.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 		if unauthorized.Code != http.StatusUnauthorized {
 			t.Fatalf("%s: unauthenticated model list = %d", name, unauthorized.Code)
+		}
+		for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
+			// A rejected client gets the auth error even if its body is invalid.
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader("invalid JSON"))
+			unauthorized := httptest.NewRecorder()
+			front.ServeHTTP(unauthorized, request)
+			if unauthorized.Code != http.StatusUnauthorized {
+				t.Fatalf("%s: unauthenticated %s = %d", name, path, unauthorized.Code)
+			}
+		}
+		for _, path := range []string{"/v1/messages", "/messages", "/v1/messages/count_tokens", "/messages/count_tokens"} {
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+			request.Header.Set("Authorization", "Bearer key")
+			removed := httptest.NewRecorder()
+			front.ServeHTTP(removed, request)
+			if removed.Code != http.StatusNotFound {
+				t.Fatalf("%s: retired endpoint %s = %d", name, path, removed.Code)
+			}
 		}
 		post := httptest.NewRequest(http.MethodPost, "/v1/models", nil)
 		post.Header.Set("x-api-key", "key")

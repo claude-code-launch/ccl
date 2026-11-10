@@ -593,8 +593,8 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 		if name == "" || strings.EqualFold(name, model.ID) {
 			continue
 		}
-		// The model picker sends display names ("快速") as request IDs; map
-		// them back to the technical ID the upstream catalog expects.
+		// The model picker sends display names (e.g. localized tier labels) as
+		// request IDs; map them back to the technical ID the upstream catalog expects.
 		add(model.ID, name)
 	}
 	// The account catalog is authoritative: a saved model WorkBuddy has since

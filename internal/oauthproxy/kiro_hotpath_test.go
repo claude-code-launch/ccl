@@ -270,8 +270,8 @@ func postKiroMessages(t *testing.T, service *kiroService) (int, string, string) 
 	front := httptest.NewServer(service.handler())
 	defer front.Close()
 
-	body := `{"model":"claude-sonnet-4.6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
-	request, err := http.NewRequest(http.MethodPost, front.URL+"/v1/messages", strings.NewReader(body))
+	body := `{"model":"claude-sonnet-4.6","max_output_tokens":16,"input":[{"role":"user","content":"hi"}]}`
+	request, err := http.NewRequest(http.MethodPost, front.URL+"/v1/responses", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

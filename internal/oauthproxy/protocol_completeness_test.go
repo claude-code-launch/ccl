@@ -13,7 +13,7 @@ import (
 func TestStreamsRequireTerminalEvent(t *testing.T) {
 	cases := []struct {
 		name, partial, terminal string
-		process                 func(io.Reader, *anthropicResponseAssembler) error
+		process                 func(io.Reader, *responseAssembler) error
 	}{
 		{"responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n", "data: {\"type\":\"response.completed\",\"response\":{}}\n\n", processCodexResponsesStream},
 		{"chat", "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n", "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n", processChatCompletionsStream},
@@ -22,13 +22,13 @@ func TestStreamsRequireTerminalEvent(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, body := range []string{"", tc.partial} {
-				a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+				a := newResponseAssembler(&adapterRequest{}, nil)
 				err := tc.process(strings.NewReader(body), a)
 				if !errors.Is(err, io.ErrUnexpectedEOF) || a.finished {
 					t.Fatalf("truncated stream: err=%v finished=%v", err, a.finished)
 				}
 			}
-			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+			a := newResponseAssembler(&adapterRequest{}, nil)
 			if err := tc.process(strings.NewReader(tc.partial+tc.terminal), a); err != nil || !a.finished {
 				t.Fatalf("complete stream: err=%v finished=%v", err, a.finished)
 			}
@@ -37,17 +37,26 @@ func TestStreamsRequireTerminalEvent(t *testing.T) {
 }
 
 func TestResponsesDoesNotReplayOtherAdapterSignatures(t *testing.T) {
-	for _, sig := range []string{"kiro", "gemini", "qoder", "ccl-openai-chat-signature-unavailable", "ccl-anthropic-signature-unavailable", "ccl-gemini-part-v1:abc"} {
-		raw, _ := json.Marshal([]any{map[string]any{"type": "thinking", "thinking": "x", "signature": sig}, map[string]any{"type": "text", "text": "answer"}})
-		items, err := codexMessageItems(anthropicMessage{Role: "assistant", Content: raw}, nil)
+	for _, sig := range []string{"kiro", "gemini", "qoder", "ccl-openai-chat-signature-unavailable", "ccl-anthropic-signature-unavailable", "ccl-gemini-part-v1:abc", "legacy+/="} {
+		turn := conversationTurn{
+			Role: "assistant",
+			Parts: []conversationPart{
+				{Kind: partReasoning, Text: "x", Signature: sig},
+				{Kind: partText, Text: "answer"},
+			},
+		}
+		items, err := codexTurnItems(turn)
 		if err != nil || len(items) != 1 || items[0].(map[string]any)["type"] != "message" {
 			t.Fatalf("foreign signature %q leaked: %v %v", sig, items, err)
 		}
 	}
-	if !codexReplayableSignature("legacy+/=") {
-		t.Fatal("legacy replay disabled")
+	malformedTurn := conversationTurn{
+		Role: "assistant",
+		Parts: []conversationPart{
+			{Kind: partReasoning, Text: "x", Signature: codexReasoningSignaturePrefix + "broken"},
+		},
 	}
-	if !codexReplayableSignature(codexReasoningSignaturePrefix + "broken") {
+	if _, err := codexTurnItems(malformedTurn); err == nil {
 		t.Fatal("own malformed envelope must reach validation, not be silently dropped")
 	}
 }
@@ -59,7 +68,7 @@ func TestResponsesMultipleOutputMessagesAndParts(t *testing.T) {
 		"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"first\"}\n\n",
 		"data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"first\"}\n\n",
 	} {
-		a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+		a := newResponseAssembler(&adapterRequest{}, nil)
 		if err := processCodexResponsesStream(strings.NewReader(prefix+"data: "+terminal+"\n\n"), a); err != nil {
 			t.Fatal(err)
 		}
@@ -75,28 +84,39 @@ func TestResponsesMultipleOutputMessagesAndParts(t *testing.T) {
 
 func TestGeminiToolResultsResolveOpaqueIDs(t *testing.T) {
 	for _, name := range []string{"lookup.v1", "lookup:v1", "lookup-v1", "lookup_v1"} {
-		a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+		a := newResponseAssembler(&adapterRequest{}, nil)
 		upstream, _ := json.Marshal(map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"parts": []any{map[string]any{"functionCall": map[string]any{"name": name, "args": map[string]any{}}}}}, "finishReason": "STOP"}}})
 		if err := processGeminiNonStream(upstream, a); err != nil {
 			t.Fatal(err)
 		}
 		blocks := a.contentBlocks()
-		raw, _ := json.Marshal(map[string]any{"model": "gemini-test", "messages": []any{map[string]any{"role": "assistant", "content": blocks}, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": blocks[0].ID, "content": "ok"}}}}})
-		req, err := convertAnthropicToGemini(raw)
+		items := a.outputItems()
+		input := make([]any, 0, len(items)+1)
+		for _, item := range items {
+			input = append(input, item)
+		}
+		input = append(input, map[string]any{"type": "function_call_output", "call_id": blocks[0].ID, "output": "ok"})
+		raw, _ := json.Marshal(map[string]any{
+			"model": "gemini-test",
+			"tools": []any{map[string]any{"type": "function", "name": name, "parameters": map[string]any{"type": "object"}}},
+			"input": input,
+		})
+		req, err := convertResponsesToGemini(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
+		decl := gjson.GetBytes(req.geminiBody, "tools.0.functionDeclarations.0.name").String()
 		call := gjson.GetBytes(req.geminiBody, "contents.0.parts.0.functionCall.name").String()
 		result := gjson.GetBytes(req.geminiBody, "contents.1.parts.0.functionResponse.name").String()
-		if call != name || result != name {
-			t.Fatalf("name=%s call=%s result=%s", name, call, result)
+		if decl == "" || call != decl || result != decl || req.tools[req.toolNameMap[decl]].Name != name {
+			t.Fatalf("name=%s decl=%s call=%s result=%s", name, decl, call, result)
 		}
 	}
 }
 
 func TestChatTemperaturePresence(t *testing.T) {
 	for _, value := range []string{"", `,"temperature":0`, `,"temperature":0.7`} {
-		req, err := convertAnthropicToChatCompletions([]byte(`{"model":"test","messages":[{"role":"user","content":"hello"}]` + value + `}`))
+		req, err := convertResponsesToChatCompletions([]byte(`{"model":"test","input":[{"role":"user","content":"hello"}]` + value + `}`))
 		if err != nil {
 			t.Fatal(err)
 		}

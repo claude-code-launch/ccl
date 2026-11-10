@@ -15,8 +15,8 @@ import (
 
 func TestAntigravityClaudeToolSchema(t *testing.T) {
 	for _, model := range []string{"claude-sonnet-test", "gemini-test"} {
-		raw := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"test"}],"tools":[{"name":"read_file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]}`)
-		result, err := convertAnthropicToGemini(raw)
+		raw := []byte(`{"model":"` + model + `","input":[{"role":"user","content":"test"}],"tools":[{"type":"function","name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]}`)
+		result, err := convertResponsesToGemini(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +66,7 @@ func TestAntigravityRuntimeToolSchemaWireContract(t *testing.T) {
 		func() {
 			defer runtime.Stop()
 			body := postClaudeMessageWithTools(t, context.Background(), runtime, model)
-			if !strings.Contains(body, "tool_use") || !strings.Contains(body, "lookup") || !strings.Contains(body, "message_stop") {
+			if !strings.Contains(body, "function_call") || !strings.Contains(body, "lookup") || !strings.Contains(body, "response.completed") {
 				t.Fatalf("tool response did not roundtrip: %s", body)
 			}
 		}()

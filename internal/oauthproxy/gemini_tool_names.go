@@ -58,7 +58,7 @@ func (n *geminiToolNames) resultName(id string) string {
 	return id
 }
 
-func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
+func buildGeminiToolNames(request *conversationRequest) (*geminiToolNames, error) {
 	n := &geminiToolNames{
 		byOriginal:     map[string]string{},
 		byWire:         map[string]string{},
@@ -73,24 +73,23 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 			names[name] = true
 		}
 	}
-	for _, tool := range gjson.GetBytes(raw, "tools").Array() {
-		add(strings.TrimSpace(tool.Get("name").String()))
+	for _, tool := range request.Tools {
+		add(strings.TrimSpace(tool.Name))
 	}
-	add(gjson.GetBytes(raw, "tool_choice.name").String())
-	messages := gjson.GetBytes(raw, "messages").Array()
-	for _, message := range messages {
-		if message.Get("role").String() != "assistant" {
+	add(request.ToolChoice.Name)
+	for _, turn := range request.Turns {
+		if turn.Role != "assistant" {
 			continue
 		}
-		for _, block := range message.Get("content").Array() {
-			if block.Get("type").String() != "tool_use" {
+		for _, block := range turn.Parts {
+			if block.Kind != partToolCall {
 				continue
 			}
-			name := block.Get("name").String()
+			name := block.Name
 			if name == "" {
-				name = toolNameFromClaudeToolUseID(block.Get("id").String())
+				name = toolNameFromClaudeToolUseID(block.CallID)
 			}
-			n.byID[block.Get("id").String()] = name
+			n.byID[block.CallID] = name
 			add(name)
 		}
 	}
@@ -98,21 +97,20 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 	// assistant turn (including adjacent assistant messages or grouped thinking
 	// blocks), and clear pending companions across non-assistant boundaries.
 	var pending []geminiPendingCompanion
-	for msgIdx, message := range messages {
-		if message.Get("role").String() != "assistant" {
+	for msgIdx, turn := range request.Turns {
+		if turn.Role != "assistant" {
 			pending = nil
 		}
-		for blockIdx, block := range message.Get("content").Array() {
+		for blockIdx, block := range turn.Parts {
 			pos := geminiBlockPos{msgIdx: msgIdx, blockIdx: blockIdx}
-			kind := block.Get("type").String()
-			if kind == "tool_result" {
-				add(n.resultName(block.Get("tool_use_id").String()))
+			if block.Kind == partToolResult {
+				add(n.resultName(block.CallID))
 			}
-			if message.Get("role").String() != "assistant" {
+			if turn.Role != "assistant" {
 				continue
 			}
-			if kind == "thinking" {
-				if encoded, ok := strings.CutPrefix(block.Get("signature").String(), geminiPartSignaturePrefix); ok {
+			if block.Kind == partReasoning {
+				if encoded, ok := strings.CutPrefix(block.Signature, geminiPartSignaturePrefix); ok {
 					rawPart, err := base64.StdEncoding.DecodeString(encoded)
 					part := gjson.ParseBytes(rawPart)
 					if err != nil || !gjson.ValidBytes(rawPart) || !part.IsObject() || !part.Get("thoughtSignature").Exists() {
@@ -135,9 +133,9 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 				}
 				continue
 			}
-			switch kind {
-			case "tool_use":
-				clientID := block.Get("id").String()
+			switch block.Kind {
+			case partToolCall:
+				clientID := block.CallID
 				original := n.byID[clientID]
 				for idx, item := range pending {
 					if item.kind != "tool_use" || item.wireName == "" || original == "" {
@@ -156,9 +154,9 @@ func buildGeminiToolNames(raw []byte) (*geminiToolNames, error) {
 					n.signedCallIDs[item.pos] = clientID
 					break
 				}
-			case "text":
+			case partText:
 				for idx, item := range pending {
-					if item.kind == "text" && block.Get("text").String() == item.text {
+					if item.kind == "text" && block.Text == item.text {
 						pending = append(pending[:idx], pending[idx+1:]...)
 						n.skipCompanions[pos] = true
 						break

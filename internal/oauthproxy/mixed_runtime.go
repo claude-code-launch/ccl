@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 const mixedMaxBodyBytes = int64(128 << 20)
@@ -21,13 +19,12 @@ const mixedMaxBodyBytes = int64(128 << 20)
 type mixedRouteSet struct {
 	chat      []runtimeModelRoute
 	responses []runtimeModelRoute
-	anthropic []runtimeModelRoute
 	models    []string
 }
 
 // mixedProtocolForModel resolves a route's upstream protocol from the protocol
 // table, keyed by lowercase model ID. The alias is consulted first (it is what
-// Claude Code sends), then the technical name; an unknown model falls back to
+// the client sends), then the technical name; an unknown model falls back to
 // chat so a single hand-edited slot never blocks the whole runtime.
 func mixedProtocolForModel(protocols map[string]string, name, alias string) string {
 	if proto, ok := protocols[strings.ToLower(strings.TrimSpace(alias))]; ok && proto != "" {
@@ -41,7 +38,7 @@ func mixedProtocolForModel(protocols map[string]string, name, alias string) stri
 
 // buildMixedRoutes maps a model spec into per-protocol route buckets using an
 // explicit protocol table. It reports an error only when no usable route is
-// produced (empty spec, or every protocol unknown).
+// produced (empty spec, or every model uses an unsupported protocol).
 func buildMixedRoutes(modelSpec string, protocols map[string]string) (mixedRouteSet, error) {
 	routes := runtimeModelRoutes(modelSpec)
 	if len(routes) == 0 {
@@ -49,6 +46,8 @@ func buildMixedRoutes(modelSpec string, protocols map[string]string) (mixedRoute
 	}
 	result := mixedRouteSet{}
 	seen := make(map[string]bool)
+	modelSeen := make(map[string]bool)
+	skippedUnsupportedProtocol := ""
 	for _, route := range routes {
 		proto := mixedProtocolForModel(protocols, route.Name, route.Alias)
 		key := strings.ToLower(proto + "\x00" + route.Name + "\x00" + route.Alias)
@@ -58,27 +57,33 @@ func buildMixedRoutes(modelSpec string, protocols map[string]string) (mixedRoute
 		seen[key] = true
 		switch proto {
 		case "anthropic":
-			result.anthropic = append(result.anthropic, runtimeModelRoute{Name: route.Name, Alias: route.Alias})
+			skippedUnsupportedProtocol = proto
+			continue
 		case "openai_responses":
 			result.responses = append(result.responses, runtimeModelRoute{Name: route.Name, Alias: route.Alias})
 		default:
 			result.chat = append(result.chat, runtimeModelRoute{Name: route.Name, Alias: route.Alias})
 		}
+		alias := strings.TrimSpace(route.Alias)
+		aliasKey := strings.ToLower(alias)
+		if aliasKey != "" && !modelSeen[aliasKey] {
+			modelSeen[aliasKey] = true
+			result.models = append(result.models, alias)
+		}
 	}
-	for _, route := range routes {
-		result.models = append(result.models, route.Alias)
-	}
-	if len(result.chat)+len(result.responses)+len(result.anthropic) == 0 {
+	if len(result.chat)+len(result.responses) == 0 {
+		if skippedUnsupportedProtocol != "" {
+			return mixedRouteSet{}, fmt.Errorf("gateway models only offer the %s protocol, which CCL no longer supports", skippedUnsupportedProtocol)
+		}
 		return mixedRouteSet{}, fmt.Errorf("mixed-protocol runtime produced no usable model routes")
 	}
 	return result, nil
 }
 
-// StartMixedProtocolAPIKeyRuntime starts a single Anthropic Messages entrypoint
-// that routes each request to the correct upstream protocol for the requested
-// model: native Anthropic through a CCL passthrough, OpenAI Chat through CCL's
-// Chat Completions adapter, and OpenAI Responses through CCL's Codex Responses
-// adapter.
+// StartMixedProtocolAPIKeyRuntime starts a single Responses entrypoint that
+// routes each request to the correct upstream protocol for the requested
+// model: OpenAI Responses is forwarded, and OpenAI Chat goes through CCL's Chat
+// Completions adapter.
 func StartMixedProtocolAPIKeyRuntime(parent context.Context, endpoint, upstreamAPIKey, modelSpec string, protocols map[string]string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -96,48 +101,23 @@ func StartMixedProtocolAPIKeyRuntime(parent context.Context, endpoint, upstreamA
 	if err != nil {
 		return nil, err
 	}
-	LogInfof("runtime start mixed_protocol endpoint=%q local_endpoint=%q models_chat=%d models_responses=%d models_anthropic=%d",
-		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.endpoint), len(routes.chat), len(routes.responses), len(routes.anthropic))
+	LogInfof("runtime start mixed_protocol endpoint=%q local_endpoint=%q models_chat=%d models_responses=%d",
+		SafeLogEndpoint(endpoint), SafeLogEndpoint(proxyRuntime.endpoint), len(routes.chat), len(routes.responses))
 	return proxyRuntime, nil
 }
 
-// mixedProtocolRouter exposes an Anthropic Messages surface and dispatches each
-// request by model: Responses models to the CCL Codex adapter, Chat models to
-// the CCL Chat Completions adapter, and native Anthropic models to the CCL
-// Messages passthrough.
+// mixedProtocolRouter exposes the Responses front and dispatches each request
+// by model to the service for that model's upstream protocol.
 type mixedProtocolRouter struct {
-	apiKey       string
-	models       []string
-	responses    map[string]bool
-	chat         map[string]bool
-	anthropic    map[string]bool
-	codex        *codexResponsesService
-	chatSvc      *chatCompletionsService
-	anthropicSvc *anthropicPassthroughService
+	apiKey    string
+	models    []string
+	responses map[string]bool
+	chat      map[string]bool
+	codex     *codexResponsesService
+	chatSvc   *chatCompletionsService
 }
 
 func startMixedProtocolRouter(parent context.Context, endpoint, upstreamAPIKey string, routes mixedRouteSet) (*Runtime, error) {
-	return startMixedProtocolRouterWithAuth(parent, endpoint, upstreamAPIKey, routes, "bearer")
-}
-
-// StartAnthropicAPI serves a native Anthropic gateway through an authenticated
-// loopback endpoint without exposing the upstream credential to Claude Code.
-func StartAnthropicAPI(parent context.Context, endpoint, upstreamAPIKey, modelSpec, auth string) (*Runtime, error) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	if strings.TrimSpace(endpoint) == "" || strings.TrimSpace(upstreamAPIKey) == "" {
-		return nil, fmt.Errorf("Anthropic runtime requires endpoint and API key")
-	}
-	routes := runtimeModelRoutes(modelSpec)
-	if len(routes) == 0 {
-		return nil, fmt.Errorf("Anthropic runtime requires at least one model")
-	}
-	set := mixedRouteSet{anthropic: routes, models: runtimeModelAliases(modelSpec)}
-	return startMixedProtocolRouterWithAuth(parent, endpoint, upstreamAPIKey, set, auth)
-}
-
-func startMixedProtocolRouterWithAuth(parent context.Context, endpoint, upstreamAPIKey string, routes mixedRouteSet, auth string) (*Runtime, error) {
 	apiKey, err := sessionAPIKey()
 	if err != nil {
 		return nil, err
@@ -166,34 +146,16 @@ func startMixedProtocolRouterWithAuth(parent context.Context, endpoint, upstream
 		chatRoutes = append(chatRoutes, runtimeModelRoute{Name: route.Name, Alias: alias})
 		chatModels[strings.ToLower(alias)] = true
 	}
-	anthropicRoutes := make([]runtimeModelRoute, 0, len(routes.anthropic))
-	anthropicModels := make(map[string]bool, len(routes.anthropic))
-	for _, route := range routes.anthropic {
-		alias := route.Alias
-		if strings.TrimSpace(alias) == "" {
-			alias = route.Name
-		}
-		anthropicRoutes = append(anthropicRoutes, runtimeModelRoute{Name: route.Name, Alias: alias})
-		anthropicModels[strings.ToLower(alias)] = true
-	}
 	usage := NewUsageTracker()
 	router := &mixedProtocolRouter{
 		apiKey: apiKey, models: append([]string(nil), routes.models...), responses: responseModels,
-		chat: chatModels, anthropic: anthropicModels,
+		chat: chatModels,
 	}
 	if len(responseRoutes) > 0 {
 		router.codex = newCodexResponsesService(apiKey, endpoint, responseRoutes, &codexStaticAuthorizer{token: upstreamAPIKey}, usage)
 	}
 	if len(chatRoutes) > 0 {
 		router.chatSvc = newChatCompletionsService(apiKey, endpoint, chatRoutes, upstreamAPIKey, usage)
-	}
-	if len(anthropicRoutes) > 0 {
-		anthropicNames := make([]string, 0, len(anthropicRoutes))
-		for _, route := range anthropicRoutes {
-			anthropicNames = append(anthropicNames, route.Alias)
-		}
-		router.anthropicSvc = newAnthropicPassthroughService(apiKey, protocol.NormalizeAnthropicBaseURLForClaude(endpoint), anthropicNames, &chatStaticAuthorizer{token: upstreamAPIKey}, usage)
-		router.anthropicSvc.anthropicAuth = auth
 	}
 	runCtx, cancel := context.WithCancel(parent)
 	server := &http.Server{
@@ -216,9 +178,6 @@ func startMixedProtocolRouterWithAuth(parent context.Context, endpoint, upstream
 	if router.chatSvc != nil {
 		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.chatSvc.client))
 	}
-	if router.anthropicSvc != nil {
-		proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(router.anthropicSvc.client))
-	}
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -240,80 +199,40 @@ func startMixedProtocolRouterWithAuth(parent context.Context, endpoint, upstream
 }
 
 func (r *mixedProtocolRouter) handler() http.Handler {
-	mux := anthropicFrontMux(r.handleModels, r.handleMessages, r.handleCountTokens)
-	return mux
-}
-
-func (r *mixedProtocolRouter) authorized(request *http.Request) bool {
-	return loopbackAuthorized(request, r.apiKey)
+	return loopbackFrontMux(r.apiKey, r.handleModels, r.handleResponses)
 }
 
 func (r *mixedProtocolRouter) handleModels(writer http.ResponseWriter, request *http.Request) {
 	serveModelList(writer, request, r.apiKey, r.models)
 }
 
-func (r *mixedProtocolRouter) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	if !r.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+// handleResponses dispatches one Responses request to the service that owns
+// the requested model's upstream protocol.
+func (r *mixedProtocolRouter) handleResponses(writer http.ResponseWriter, request *http.Request) {
+	if !inferenceRequestAllowed(writer, request, r.apiKey) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, mixedMaxBodyBytes+1))
 	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	if int64(len(body)) > mixedMaxBodyBytes {
-		writeAnthropicError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "request body is too large")
-		return
-	}
-	request.Body = io.NopCloser(bytes.NewReader(body))
-	lower := strings.ToLower(requestModelID(body))
-	if r.codex != nil && r.responses[lower] {
-		r.codex.handleCountTokens(writer, request)
-		return
-	}
-	if r.chatSvc != nil && r.chat[lower] {
-		r.chatSvc.handleCountTokens(writer, request)
-		return
-	}
-	if r.anthropicSvc != nil && r.anthropic[lower] {
-		r.anthropicSvc.handleCountTokens(writer, request)
-		return
-	}
-	writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "model is not routed to a supported protocol")
-}
-
-func (r *mixedProtocolRouter) handleMessages(writer http.ResponseWriter, request *http.Request) {
-	if !r.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(request.Body, mixedMaxBodyBytes+1))
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	if int64(len(body)) > mixedMaxBodyBytes {
-		writeAnthropicError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "request body is too large")
+		writeProxyError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "request body is too large")
 		return
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	model := requestModelID(body)
 	lower := strings.ToLower(model)
 	if r.codex != nil && r.responses[lower] {
-		LogDebugEvent("protocol_route", "component", "mixed", "model", model, "protocol", "codex_responses", "owner", "ccl")
-		r.codex.handleMessages(writer, request)
+		LogDebugEvent("protocol_route", "component", "mixed", "model", model, "protocol", "openai_responses", "owner", "ccl")
+		r.codex.handleResponses(writer, request)
 		return
 	}
 	if r.chatSvc != nil && r.chat[lower] {
 		LogDebugEvent("protocol_route", "component", "mixed", "model", model, "protocol", "openai_chat", "owner", "ccl")
-		r.chatSvc.handleMessages(writer, request)
+		r.chatSvc.handleResponses(writer, request)
 		return
 	}
-	if r.anthropicSvc != nil && r.anthropic[lower] {
-		LogDebugEvent("protocol_route", "component", "mixed", "model", model, "protocol", "anthropic_messages", "owner", "ccl")
-		r.anthropicSvc.handleMessages(writer, request)
-		return
-	}
-	writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "model is not routed to a supported protocol")
+	writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", "model is not routed to a supported protocol")
 }

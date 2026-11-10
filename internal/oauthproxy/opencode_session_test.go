@@ -37,11 +37,12 @@ func TestOpenCodeReceivesTheClaudeCodeSession(t *testing.T) {
 					got, seen = r.Header.Get(openCodeSessionHeader), true
 					mu.Unlock()
 					_, _ = io.Copy(io.Discard, r.Body)
-					w.Header().Set("Content-Type", "application/json")
 					if backend == "chat" {
+						w.Header().Set("Content-Type", "application/json")
 						_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`)
 					} else {
-						_, _ = io.WriteString(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`)
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n")
 					}
 				}))
 				defer upstream.Close()
@@ -59,8 +60,8 @@ func TestOpenCodeReceivesTheClaudeCodeSession(t *testing.T) {
 					handler = service.handler()
 				}
 
-				request := httptest.NewRequest(http.MethodPost, "/v1/messages",
-					strings.NewReader(`{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+				request := httptest.NewRequest(http.MethodPost, "/v1/responses",
+					strings.NewReader(`{"model":"m","max_output_tokens":8,"input":[{"role":"user","content":"hi"}]}`))
 				request.Header.Set("x-api-key", "local")
 				request.Header.Set(claudeCodeSessionHeader, "0b3f846a-2502-40af-a13e-26620a6d305a")
 				recorder := httptest.NewRecorder()
@@ -87,7 +88,7 @@ func TestOpenCodeReceivesTheClaudeCodeSession(t *testing.T) {
 }
 
 func TestApplyOpenCodeSessionRules(t *testing.T) {
-	incoming := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	incoming := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	incoming.Header.Set(claudeCodeSessionHeader, " session-1 ")
 	ctx := withClientSession(context.Background(), incoming)
 

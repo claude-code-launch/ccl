@@ -21,7 +21,7 @@ type chatToolCall struct {
 }
 
 type chatCompletionsStreamState struct {
-	assembler    *anthropicResponseAssembler
+	assembler    *responseAssembler
 	tools        map[string]*chatToolCall
 	usage        map[string]any
 	retained     int
@@ -29,8 +29,8 @@ type chatCompletionsStreamState struct {
 }
 
 // processChatCompletionsStream converts an OpenAI Chat Completions SSE stream
-// into Anthropic Messages SSE, feeding the shared assembler.
-func processChatCompletionsStream(reader io.Reader, assembler *anthropicResponseAssembler) error {
+// into OpenAI Responses SSE, feeding the shared assembler.
+func processChatCompletionsStream(reader io.Reader, assembler *responseAssembler) error {
 	state := &chatCompletionsStreamState{
 		assembler: assembler,
 		tools:     make(map[string]*chatToolCall),
@@ -158,8 +158,8 @@ func (s *chatCompletionsStreamState) accumulateToolCall(raw map[string]any) erro
 	key := fmt.Sprintf("%d", index)
 	call := s.tools[key]
 	if call == nil {
-		if len(s.tools) >= anthropicAssemblerMaxToolCalls {
-			return fmt.Errorf("OpenAI Chat tool call stream exceeds %d concurrent tool calls", anthropicAssemblerMaxToolCalls)
+		if len(s.tools) >= assemblerMaxToolCalls {
+			return fmt.Errorf("OpenAI Chat tool call stream exceeds %d concurrent tool calls", assemblerMaxToolCalls)
 		}
 		call = &chatToolCall{index: index}
 		s.tools[key] = call
@@ -174,16 +174,16 @@ func (s *chatCompletionsStreamState) accumulateToolCall(raw map[string]any) erro
 				return err
 			}
 			if added := len(merged) - len(call.name); added > 0 {
-				if s.retained+added > anthropicAssemblerMaxRetainedBytes {
-					return fmt.Errorf("OpenAI Chat tool call names exceed %d bytes", anthropicAssemblerMaxRetainedBytes)
+				if s.retained+added > assemblerMaxRetainedBytes {
+					return fmt.Errorf("OpenAI Chat tool call names exceed %d bytes", assemblerMaxRetainedBytes)
 				}
 				s.retained += added
 			}
 			call.name = merged
 		}
 		if arguments := stringValue(function["arguments"]); arguments != "" {
-			if s.retained+len(arguments) > anthropicAssemblerMaxRetainedBytes {
-				return fmt.Errorf("OpenAI Chat tool call arguments exceed %d bytes", anthropicAssemblerMaxRetainedBytes)
+			if s.retained+len(arguments) > assemblerMaxRetainedBytes {
+				return fmt.Errorf("OpenAI Chat tool call arguments exceed %d bytes", assemblerMaxRetainedBytes)
 			}
 			s.retained += len(arguments)
 			call.arguments.WriteString(arguments)
@@ -284,8 +284,8 @@ func (s *chatCompletionsStreamState) emitTools() error {
 }
 
 // processChatCompletionsNonStream converts a complete OpenAI Chat Completions
-// JSON body into an Anthropic Messages response via the shared assembler.
-func processChatCompletionsNonStream(body []byte, assembler *anthropicResponseAssembler) error {
+// JSON body into an OpenAI Responses response via the shared assembler.
+func processChatCompletionsNonStream(body []byte, assembler *responseAssembler) error {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return fmt.Errorf("decode OpenAI Chat Completions response: %w", err)
@@ -299,7 +299,7 @@ func processChatCompletionsNonStream(body []byte, assembler *anthropicResponseAs
 	}
 	choice := mapValue(choices[0])
 	message := mapValue(choice["message"])
-	// reasoning_content precedes content, matching Anthropic block order.
+	// reasoning_content precedes content, matching Responses item order.
 	if reasoning := stringValue(message["reasoning_content"]); reasoning != "" {
 		if err := assembler.addThinking(reasoning); err != nil {
 			return err
@@ -348,7 +348,7 @@ func processChatCompletionsNonStream(body []byte, assembler *anthropicResponseAs
 // chatAddContent feeds an OpenAI assistant content field, which is a plain
 // string for text-only responses or an array of text/image parts for
 // multimodal ones.
-func chatAddContent(assembler *anthropicResponseAssembler, content any) error {
+func chatAddContent(assembler *responseAssembler, content any) error {
 	switch typed := content.(type) {
 	case string:
 		if typed != "" {
@@ -368,9 +368,9 @@ func chatAddContent(assembler *anthropicResponseAssembler, content any) error {
 }
 
 // chatApplyUsage records the OpenAI usage object onto the assembler, mapping
-// prompt_tokens/completion_tokens and cached prompt tokens to their Anthropic
+// prompt_tokens/completion_tokens and cached prompt tokens to the assembler's
 // usage fields.
-func chatApplyUsage(assembler *anthropicResponseAssembler, usage map[string]any) {
+func chatApplyUsage(assembler *responseAssembler, usage map[string]any) {
 	if usage == nil {
 		return
 	}
@@ -382,14 +382,14 @@ func chatApplyUsage(assembler *anthropicResponseAssembler, usage map[string]any)
 		assembler.cacheReadTokens = intValue(details["cached_tokens"])
 	}
 	// OpenAI prompt_tokens already includes cached tokens; report only fresh
-	// input in the Anthropic input_tokens field (see codex_responses_stream).
+	// input in contextTokens (see codex_responses_stream).
 	if value, ok := usage["prompt_tokens"]; ok && value != nil {
 		assembler.inputUsageKnown = true
 		assembler.contextTokens = max(0, in-assembler.cacheReadTokens)
 	}
 }
 
-// chatStopReason maps an OpenAI finish_reason onto the Anthropic stop_reason.
+// chatStopReason maps an OpenAI finish_reason onto the assembler stop_reason.
 func chatStopReason(reason string) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "length":

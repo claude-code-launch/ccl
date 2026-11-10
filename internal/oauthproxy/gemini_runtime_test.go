@@ -135,8 +135,8 @@ func TestGeminiRuntimeStreamsThrough(t *testing.T) {
 	}
 
 	body := postClaudeMessage(t, context.Background(), runtime, "gemini-3-flash")
-	if !strings.Contains(body, "message_start") || !strings.Contains(body, "hello from gemini") || !strings.Contains(body, "message_stop") {
-		t.Fatalf("Messages response = %s", body)
+	if !strings.Contains(body, "response.created") || !strings.Contains(body, "hello from gemini") || !strings.Contains(body, "response.completed") {
+		t.Fatalf("Responses response = %s", body)
 	}
 	if upstreamCalls.Load() != 2 {
 		t.Fatalf("upstream calls = %d, want 2 (401 then retry)", upstreamCalls.Load())

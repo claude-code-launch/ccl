@@ -1,33 +1,31 @@
 package oauthproxy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestConvertAnthropicToChatCompletionsToolRoundTrip(t *testing.T) {
+func TestConvertResponsesToChatCompletionsToolRoundTrip(t *testing.T) {
 	raw := []byte(`{
-		"model":"gpt-test[1m]","max_tokens":100,"stream":true,
-		"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},
-		"system":"be concise",
-		"tools":[{"name":"lookup","description":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],
-		"messages":[
+		"model":"gpt-test[1m]","max_output_tokens":100,"stream":true,
+		"reasoning":{"effort":"high","summary":"auto"},
+		"instructions":"be concise",
+		"tools":[{"type":"function","name":"lookup","description":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],
+		"input":[
 			{"role":"user","content":"find it"},
-			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":"x"}}]},
-			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}
+			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"done"}
 		]
 	}`)
-	converted, err := convertAnthropicToChatCompletions(raw)
+	converted, err := convertResponsesToChatCompletions(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,114 +66,17 @@ func TestConvertAnthropicToChatCompletionsToolRoundTrip(t *testing.T) {
 	}
 }
 
-func TestConvertAnthropicToChatCompletionsStripsClaudeCodeFingerprints(t *testing.T) {
-	raw := []byte(`{
-		"model":"gpt-test","max_tokens":32,"stream":true,
-		"system":[
-			{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.241.c95; cc_entrypoint=cli;"},
-			{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},
-			{"type":"text","text":"You are an interactive agent.\n\nMain branch (you will usually use this for PRs): main\n\nCurrent branch: main\nGit user: alice"}
-		],
-		"messages":[{"role":"user","content":"hi"}]
-	}`)
-	converted, err := convertAnthropicToChatCompletions(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(converted.body, &body); err != nil {
-		t.Fatal(err)
-	}
-	messages := body["messages"].([]any)
-	if len(messages) != 2 {
-		t.Fatalf("message count = %d, want 2 (system+user)", len(messages))
-	}
-	system := messages[0].(map[string]any)
-	content, ok := system["content"].([]any)
-	if !ok || len(content) != 1 {
-		t.Fatalf("system content = %#v, want a single text block", system["content"])
-	}
-	text := content[0].(map[string]any)["text"].(string)
-	if strings.Contains(text, "x-anthropic-billing-header") || strings.Contains(text, "You are Claude Code") {
-		t.Fatalf("system content still carries attribution: %q", text)
-	}
-	if strings.Contains(text, "Main branch") {
-		t.Fatalf("system content still carries git PR boilerplate: %q", text)
-	}
-	if !strings.Contains(text, "You are an interactive agent.") || !strings.Contains(text, "Current branch: main") {
-		t.Fatalf("system content lost real instructions: %q", text)
-	}
-}
-
-// The VS Code extension launches Claude Code through the Agent SDK, which uses
-// a different identity line than the interactive CLI. Leaving it in the body
-// lets an upstream gateway recognize Claude Code (WorkBuddy: code 11128).
-func TestConvertAnthropicToChatCompletionsStripsAgentSDKIdentity(t *testing.T) {
-	cases := []string{
-		"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
-		"You are a Claude agent, built on Anthropic's Claude Agent SDK.",
-	}
-	for _, identity := range cases {
-		raw := []byte(`{"model":"gpt-test","max_tokens":32,"stream":false,
-			"system":[{"type":"text","text":` + strconv.Quote(identity) + `},
-				{"type":"text","text":"You are an interactive agent."}],
-			"messages":[{"role":"user","content":"hi"}]}`)
-		converted, err := convertAnthropicToChatCompletions(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var body map[string]any
-		if err := json.Unmarshal(converted.body, &body); err != nil {
-			t.Fatal(err)
-		}
-		system := body["messages"].([]any)[0].(map[string]any)["content"].([]any)
-		if len(system) != 1 {
-			t.Fatalf("system blocks = %d, want 1: %#v", len(system), system)
-		}
-		text := system[0].(map[string]any)["text"].(string)
-		if strings.Contains(text, "You are Claude Code") || strings.Contains(text, "You are a Claude agent") {
-			t.Fatalf("system content still carries %q: %q", identity, text)
-		}
-		if !strings.Contains(text, "You are an interactive agent.") {
-			t.Fatalf("system content lost real instructions: %q", text)
-		}
-	}
-}
-
-// An identity line embedded in a larger instructions block is removed from it
-// without discarding the rest.
-func TestSanitizeChatSystemTextRemovesEmbeddedSDKIdentity(t *testing.T) {
-	text := "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.\n\nYou are an interactive agent."
-	got := sanitizeChatSystemText(text)
-	if strings.Contains(got, "You are Claude Code") {
-		t.Fatalf("sanitized text still carries the identity line: %q", got)
-	}
-	if !strings.Contains(got, "You are an interactive agent.") {
-		t.Fatalf("sanitized text lost real instructions: %q", got)
-	}
-}
-
-func TestConvertAnthropicToChatCompletionsReasoningEffort(t *testing.T) {
-	cases := []struct {
-		thinking map[string]any
-		want     string
-	}{
-		{map[string]any{"type": "disabled"}, ""},
-		{map[string]any{"type": "enabled", "budget_tokens": 1000}, "low"},
-		{map[string]any{"type": "enabled", "budget_tokens": 8000}, "medium"},
-		{map[string]any{"type": "enabled", "budget_tokens": 20000}, "high"},
-		{map[string]any{"type": "enabled", "budget_tokens": 64000}, "xhigh"},
-	}
-	for _, tc := range cases {
+func TestConvertResponsesToChatCompletionsReasoningEffort(t *testing.T) {
+	for _, effort := range []string{"", "low", "medium", "high", "xhigh"} {
 		payload := map[string]any{
-			"model": "gpt-test", "max_tokens": 32,
-			"messages": []map[string]any{{"role": "user", "content": "hi"}},
+			"model": "gpt-test", "max_output_tokens": 32,
+			"input": []map[string]any{{"role": "user", "content": "hi"}},
 		}
-		if tc.thinking != nil {
-			payload["thinking"] = tc.thinking
+		if effort != "" {
+			payload["reasoning"] = map[string]any{"effort": effort}
 		}
 		raw, _ := json.Marshal(payload)
-		converted, err := convertAnthropicToChatCompletions(raw)
+		converted, err := convertResponsesToChatCompletions(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -184,15 +85,15 @@ func TestConvertAnthropicToChatCompletionsReasoningEffort(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, _ := body["reasoning_effort"].(string)
-		if got != tc.want {
-			t.Fatalf("thinking=%v reasoning_effort=%q, want %q", tc.thinking, got, tc.want)
+		if got != effort {
+			t.Fatalf("effort=%q reasoning_effort=%q", effort, got)
 		}
 	}
 }
 
 func TestProcessChatCompletionsStream(t *testing.T) {
-	request := &anthropicAdapterRequest{clientModel: "gpt-test", thinkingEnabled: true}
-	assembler := newAnthropicResponseAssembler(request, nil)
+	request := &adapterRequest{clientModel: "gpt-test", thinkingEnabled: true}
+	assembler := newResponseAssembler(request, nil)
 	sse := strings.Join([]string{
 		`data: {"choices":[{"delta":{"role":"assistant","content":""},"index":0,"finish_reason":null}]}`,
 		`data: {"choices":[{"delta":{"reasoning_content":"thinking..."},"index":0,"finish_reason":null}]}`,
@@ -205,10 +106,9 @@ func TestProcessChatCompletionsStream(t *testing.T) {
 	if err := processChatCompletionsStream(strings.NewReader(sse), assembler); err != nil {
 		t.Fatal(err)
 	}
-	response := assembler.response()
-	blocks := response["content"].([]anthropicResponseBlock)
+	blocks := assembler.contentBlocks()
 	var thinking, text, toolName string
-	var toolInput map[string]any
+	var toolArgs string
 	for _, block := range blocks {
 		switch block.Type {
 		case "thinking":
@@ -217,23 +117,22 @@ func TestProcessChatCompletionsStream(t *testing.T) {
 			text = block.Text
 		case "tool_use":
 			toolName = block.Name
-			if block.Input != nil {
-				toolInput = *block.Input
-			}
+			toolArgs = string(block.Arguments)
 		}
 	}
 	if thinking != "thinking..." || text != "answer" {
 		t.Fatalf("thinking=%q text=%q", thinking, text)
 	}
-	if toolName != "lookup" || toolInput["q"] != "x" {
-		t.Fatalf("tool name=%q input=%v", toolName, toolInput)
+	if toolName != "lookup" || toolArgs != `{"q":"x"}` {
+		t.Fatalf("tool name=%q args=%s", toolName, toolArgs)
 	}
-	if response["stop_reason"] != "tool_use" {
-		t.Fatalf("stop_reason=%v", response["stop_reason"])
+	response := assembler.response()
+	if response["status"] != "completed" {
+		t.Fatalf("status=%v", response["status"])
 	}
-	usage := response["usage"].(map[string]any)
-	if usage["input_tokens"] != 6 || usage["output_tokens"] != 4 || usage["cache_read_input_tokens"] != 3 {
-		t.Fatalf("usage=%v", usage)
+	inTokens, outTokens := assembler.tokenTotals()
+	if inTokens != 6 || outTokens != 4 || assembler.cacheReadTokens != 3 {
+		t.Fatalf("tokens=%d/%d cache=%d", inTokens, outTokens, assembler.cacheReadTokens)
 	}
 }
 
@@ -262,7 +161,7 @@ func TestOpenAIChatEndToEndStreaming(t *testing.T) {
 	}
 	defer runtime.Stop()
 	body := postClaudeMessage(t, context.Background(), runtime, "gpt-test")
-	for _, want := range []string{"message_start", "text_delta", "hello", "message_stop"} {
+	for _, want := range []string{"response.created", "response.output_text.delta", "hello", "response.completed"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("response missing %q: %s", want, body)
 		}
@@ -283,8 +182,8 @@ func TestOpenAIChatEndToEndNonStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-	payload := strings.NewReader(`{"model":"gpt-test","max_tokens":32,"stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-	request, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, runtime.Endpoint()+"/messages", payload)
+	payload := strings.NewReader(`{"model":"gpt-test","max_output_tokens":32,"stream":false,"input":[{"role":"user","content":"hi"}]}`)
+	request, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, runtime.Endpoint()+"/responses", payload)
 	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
@@ -292,7 +191,7 @@ func TestOpenAIChatEndToEndNonStreaming(t *testing.T) {
 	}
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("non-stream")) {
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "non-stream") {
 		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
 }
@@ -316,8 +215,8 @@ func TestOpenAIChatErrorMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-	payload := strings.NewReader(`{"model":"gpt-test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", payload)
+	payload := strings.NewReader(`{"model":"gpt-test","max_output_tokens":32,"stream":true,"input":[{"role":"user","content":"hi"}]}`)
+	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", payload)
 	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

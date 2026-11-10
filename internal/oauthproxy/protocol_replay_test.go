@@ -25,7 +25,7 @@ func TestGeminiSignedPartsRoundTrip(t *testing.T) {
 				response := map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"parts": parts}, "finishReason": "STOP"}}}
 				raw, _ := json.Marshal(response)
 				writer := httptest.NewRecorder()
-				a := newAnthropicResponseAssembler(&anthropicAdapterRequest{stream: streaming}, writer)
+				a := newResponseAssembler(&adapterRequest{stream: streaming}, writer)
 				var err error
 				if streaming {
 					err = processGeminiStream(strings.NewReader("data: "+string(raw)+"\n\n"), a)
@@ -35,27 +35,26 @@ func TestGeminiSignedPartsRoundTrip(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if streaming && strings.Count(writer.Body.String(), geminiPartSignaturePrefix) != len(parts) {
+				if streaming && strings.Count(writer.Body.String(), geminiPartSignaturePrefix) < len(parts) {
 					t.Fatal("missing SSE signatures")
 				}
-				messages := []any{map[string]any{"role": "user", "content": "hello"}}
-				blocks := a.contentBlocks()
-				if splitMessages {
-					for _, block := range blocks {
-						messages = append(messages, map[string]any{"role": "assistant", "content": []any{block}})
-					}
-				} else {
-					messages = append(messages, map[string]any{"role": "assistant", "content": blocks})
+				input := []any{map[string]any{"role": "user", "content": "hello"}}
+				for _, item := range a.outputItems() {
+					input = append(input, item)
 				}
 				var toolID string
-				for _, block := range blocks {
+				for _, block := range a.contentBlocks() {
 					if block.Type == "tool_use" {
 						toolID = block.ID
 					}
 				}
-				messages = append(messages, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": toolID, "content": "found"}}})
-				request, _ := json.Marshal(map[string]any{"model": "gemini-test", "messages": messages})
-				converted, err := convertAnthropicToGemini(request)
+				input = append(input, map[string]any{"type": "function_call_output", "call_id": toolID, "output": "found"})
+				request, _ := json.Marshal(map[string]any{
+					"model": "gemini-test",
+					"tools": []any{map[string]any{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}}},
+					"input": input,
+				})
+				converted, err := convertResponsesToGemini(request)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -82,27 +81,26 @@ func TestGeminiSignedPartsRoundTrip(t *testing.T) {
 
 func TestGemini3UnsignedFunctionCallGetsBypassSignature(t *testing.T) {
 	tool := func(id, cmd string) map[string]any {
-		return map[string]any{"type": "tool_use", "id": id, "name": "exec", "input": map[string]any{"cmd": cmd}}
+		return map[string]any{"type": "function_call", "call_id": id, "name": "exec", "arguments": fmt.Sprintf(`{"cmd":%q}`, cmd)}
 	}
 	result := func(id, text string) map[string]any {
-		return map[string]any{"type": "tool_result", "tool_use_id": id, "content": text}
+		return map[string]any{"type": "function_call_output", "call_id": id, "output": text}
 	}
-	messages := []any{
+	input := []any{
 		map[string]any{"role": "user", "content": "run it"},
-		map[string]any{"role": "assistant", "content": []any{
-			map[string]any{"type": "text", "text": "checking"},
-			tool("call_1", "ls"),
-			tool("call_2", "pwd"),
-		}},
-		map[string]any{"role": "user", "content": []any{result("call_1", "a"), result("call_2", "b")}},
-		map[string]any{"role": "assistant", "content": []any{tool("call_3", "echo")}},
-		map[string]any{"role": "user", "content": []any{result("call_3", "ok")}},
+		map[string]any{"role": "assistant", "content": "checking"},
+		tool("call_1", "ls"),
+		tool("call_2", "pwd"),
+		result("call_1", "a"),
+		result("call_2", "b"),
+		tool("call_3", "echo"),
+		result("call_3", "ok"),
 	}
 	raw, _ := json.Marshal(map[string]any{
-		"model": "gemini-3-flash", "messages": messages,
-		"tools": []any{map[string]any{"name": "exec", "description": "run", "input_schema": map[string]any{"type": "object"}}},
+		"model": "gemini-3-flash", "input": input,
+		"tools": []any{map[string]any{"type": "function", "name": "exec", "description": "run", "parameters": map[string]any{"type": "object"}}},
 	})
-	converted, err := convertAnthropicToGemini(raw)
+	converted, err := convertResponsesToGemini(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +127,8 @@ func TestGemini3UnsignedFunctionCallGetsBypassSignature(t *testing.T) {
 		t.Fatalf("next step = %s", second.Raw)
 	}
 
-	claudeRaw, _ := json.Marshal(map[string]any{"model": "claude-sonnet-4-6", "messages": messages, "tools": []any{map[string]any{"name": "exec", "input_schema": map[string]any{"type": "object"}}}})
-	claude, err := convertAnthropicToAntigravity(claudeRaw)
+	claudeRaw, _ := json.Marshal(map[string]any{"model": "claude-sonnet-4-6", "input": input, "tools": []any{map[string]any{"type": "function", "name": "exec", "parameters": map[string]any{"type": "object"}}}})
+	claude, err := convertResponsesToAntigravity(claudeRaw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,23 +143,19 @@ func TestGemini3UnsignedFunctionCallGetsBypassSignature(t *testing.T) {
 func TestGemini3RealSignatureStaysWhileLaterCallIsSigned(t *testing.T) {
 	rawPart := `{"functionCall":{"name":"exec","args":{"cmd":"ls"}},"thoughtSignature":"opaque+/="}`
 	signature := geminiPartSignaturePrefix + base64.StdEncoding.EncodeToString([]byte(rawPart))
-	messages := []any{
+	input := []any{
 		map[string]any{"role": "user", "content": "run it"},
-		map[string]any{"role": "assistant", "content": []any{
-			map[string]any{"type": "thinking", "thinking": "check", "signature": signature},
-			map[string]any{"type": "tool_use", "id": "call_1", "name": "exec", "input": map[string]any{"cmd": "ls"}},
-			map[string]any{"type": "tool_use", "id": "call_2", "name": "exec", "input": map[string]any{"cmd": "pwd"}},
-		}},
-		map[string]any{"role": "user", "content": []any{
-			map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "a"},
-			map[string]any{"type": "tool_result", "tool_use_id": "call_2", "content": "b"},
-		}},
+		map[string]any{"id": "rs_ccl_1", "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "check"}}, "encrypted_content": signature},
+		map[string]any{"type": "function_call", "call_id": "call_1", "name": "exec", "arguments": `{"cmd":"ls"}`},
+		map[string]any{"type": "function_call", "call_id": "call_2", "name": "exec", "arguments": `{"cmd":"pwd"}`},
+		map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "a"},
+		map[string]any{"type": "function_call_output", "call_id": "call_2", "output": "b"},
 	}
 	raw, _ := json.Marshal(map[string]any{
-		"model": "gemini-3-flash", "messages": messages,
-		"tools": []any{map[string]any{"name": "exec", "description": "run", "input_schema": map[string]any{"type": "object"}}},
+		"model": "gemini-3-flash", "input": input,
+		"tools": []any{map[string]any{"type": "function", "name": "exec", "description": "run", "parameters": map[string]any{"type": "object"}}},
 	})
-	converted, err := convertAnthropicToGemini(raw)
+	converted, err := convertResponsesToGemini(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,13 +169,19 @@ func TestGemini3RealSignatureStaysWhileLaterCallIsSigned(t *testing.T) {
 }
 
 func TestGeminiStringMessagesAreObjectParts(t *testing.T) {
-	for _, role := range []string{"user", "assistant", "system"} {
-		raw, _ := json.Marshal(map[string]any{"model": "gemini-test", "messages": []any{map[string]any{"role": role, "content": "hello\n\"world\""}}})
-		converted, err := convertAnthropicToGemini(raw)
+	for _, role := range []string{"user", "assistant", "developer"} {
+		input := []any{map[string]any{"role": role, "content": "hello\n\"world\""}}
+		path := "contents.0.parts.0"
+		if role == "developer" {
+			input = append(input, map[string]any{"role": "user", "content": "hi"})
+			path = "systemInstruction.parts.0"
+		}
+		raw, _ := json.Marshal(map[string]any{"model": "gemini-test", "input": input})
+		converted, err := convertResponsesToGemini(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
-		part := gjson.GetBytes(converted.geminiBody, "contents.0.parts.0")
+		part := gjson.GetBytes(converted.geminiBody, path)
 		if !part.IsObject() || part.Get("text").String() != "hello\n\"world\"" {
 			t.Fatalf("invalid %s part: %s", role, part.Raw)
 		}
@@ -191,7 +191,7 @@ func TestGeminiStringMessagesAreObjectParts(t *testing.T) {
 func TestProtocolStreamErrorsDoNotFinishSuccessfully(t *testing.T) {
 	for _, protocol := range []string{"chat", "gemini"} {
 		t.Run(protocol, func(t *testing.T) {
-			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+			a := newResponseAssembler(&adapterRequest{}, nil)
 			var err error
 			switch protocol {
 			case "chat":

@@ -37,6 +37,9 @@ type reloadRequest struct {
 }
 
 func boundProviders(primary provider.Provider, additional []string) ([]provider.Provider, error) {
+	if err := provider.ValidateRuntime(primary); err != nil {
+		return nil, err
+	}
 	result := []provider.Provider{primary}
 	if len(additional) == 0 {
 		return result, nil
@@ -52,10 +55,13 @@ func boundProviders(primary provider.Provider, additional []string) ([]provider.
 		}
 		seen[name] = true
 		p, exists := cfg.Providers[name]
-		if !exists || provider.IsClaudeAccount(p) || provider.IsDefaultProvider(name) {
+		if !exists || provider.IsDefaultProvider(name) {
 			return nil, fmt.Errorf("provider %q cannot be attached to Codex", name)
 		}
 		p.Name = name
+		if err := provider.ValidateRuntime(p); err != nil {
+			return nil, fmt.Errorf("attach provider %q to Codex: %w", name, err)
+		}
 		result = append(result, p)
 	}
 	return result, nil
@@ -104,7 +110,7 @@ func prepareBindings(ctx context.Context, providers []provider.Provider) ([]code
 	done := make(chan struct{})
 	var once sync.Once
 	for _, p := range providers {
-		session, err := providersession.PrepareProxy(ctx, p)
+		session, err := providersession.Prepare(ctx, p)
 		if err != nil {
 			cleanup()
 			return nil, nil, func() {}, fmt.Errorf("prepare Codex provider %q failed: %w", p.Name, err)

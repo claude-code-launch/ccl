@@ -22,7 +22,7 @@ import (
 func registryBinding(t *testing.T, name, model, key string) RuntimeBinding {
 	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Api-Key") != key || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Chatgpt-Account-Id") != "" {
+		if r.Header.Get("X-Api-Key") != "" || r.Header.Get("Authorization") != "Bearer "+key || r.Header.Get("Cookie") != "" || r.Header.Get("Chatgpt-Account-Id") != "" {
 			t.Error("provider credential boundary crossed")
 		}
 		raw, _ := io.ReadAll(r.Body)
@@ -31,15 +31,15 @@ func registryBinding(t *testing.T, name, model, key string) RuntimeBinding {
 		if request["model"] != model {
 			t.Errorf("wrong route: %s", raw)
 		}
-		writeMessage(w, []map[string]any{{"type": "text", "text": name + ":" + model}})
+		writeChatText(w, r, name+":"+model)
 	}))
 	t.Cleanup(upstream.Close)
-	runtime, err := oauthproxy.StartAnthropicAPI(context.Background(), upstream.URL+"/v1", key, model, "")
+	runtime, err := oauthproxy.StartOpenAIChatAPI(context.Background(), upstream.URL+"/v1", key, model)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(runtime.Stop)
-	return RuntimeBinding{Provider: provider.Provider{Name: name, Type: "anthropic", Model: model}, Runtime: runtime, Close: runtime.Stop}
+	return RuntimeBinding{Provider: provider.Provider{Name: name, Type: "openai", Model: model}, Runtime: runtime, Close: runtime.Stop}
 }
 
 func TestRegistrySwapDrainsRequestsAndKeepsAccountsSeparate(t *testing.T) {
@@ -48,7 +48,7 @@ func TestRegistrySwapDrainsRequestsAndKeepsAccountsSeparate(t *testing.T) {
 	var once sync.Once
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"old generation completed\"}}\n\n")
+		writeChatDelta(w, "old generation completed")
 		_ = http.NewResponseController(w).Flush()
 		once.Do(func() { close(entered) })
 		select {
@@ -56,8 +56,8 @@ func TestRegistrySwapDrainsRequestsAndKeepsAccountsSeparate(t *testing.T) {
 		case <-r.Context().Done():
 			return
 		}
-		_, _ = io.WriteString(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-	}, "anthropic", Options{Desktop: true})
+		finishChatFixture(w)
+	}, "openai", Options{Desktop: true})
 	var retired atomic.Int32
 	g.OwnRuntime(func() { retired.Add(1) })
 	initialBase, initialToken := g.BaseURL(), g.Token()
@@ -132,7 +132,7 @@ func TestRegistrySwapDrainsRequestsAndKeepsAccountsSeparate(t *testing.T) {
 }
 
 func TestRemoteCatalogMergedETagAndAuthentication(t *testing.T) {
-	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "anthropic", Options{Desktop: true})
+	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "openai", Options{Desktop: true})
 	g.inheritClientToolMode(Catalog{Models: []Model{{"slug": "native-only", "unknown_native_field": "keep"}}})
 	get := func(tag string) *http.Response {
 		t.Helper()
@@ -159,7 +159,7 @@ func TestRemoteCatalogMergedETagAndAuthentication(t *testing.T) {
 	if response := get(first.Header.Get("ETag")); response.StatusCode != 200 || response.Header.Get("ETag") == first.Header.Get("ETag") {
 		t.Fatal("catalog revision did not advance")
 	}
-	independent := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "anthropic", Options{Independent: true, CatalogMode: CatalogRemote})
+	independent := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "openai", Options{Independent: true, CatalogMode: CatalogRemote})
 	response, err := http.Get(independent.BaseURL() + "/models")
 	if err != nil {
 		t.Fatal(err)

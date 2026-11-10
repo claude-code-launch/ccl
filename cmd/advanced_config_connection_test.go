@@ -35,31 +35,13 @@ func TestConnectionSelectorsBeforeDetection(t *testing.T) {
 	}
 	m.adjustReviewField(1)
 	m.adjustReviewField(1)
-	if m.p.Type != "anthropic" {
-		t.Fatalf("protocol = %q", m.p.Type)
-	}
-	m.cursor = m.mainRowIndex(rowAuth)
-	m.adjustReviewField(1)
-	if m.p.AnthropicAuth != anthropicAuthXAPIKey {
-		t.Fatalf("auth = %q", m.p.AnthropicAuth)
-	}
-	m.adjustReviewField(1)
-	if m.p.AnthropicAuth != anthropicAuthBearer {
-		t.Fatalf("auth = %q", m.p.AnthropicAuth)
-	}
-	m.cursor = m.mainRowIndex(rowProtocol)
-	m.adjustReviewField(1)
-	if m.p.AnthropicAuth != "" {
-		t.Fatal("anthropic auth leaked to OpenAI")
-	}
-	m.adjustReviewField(-1)
-	if m.p.AnthropicAuth != anthropicAuthBearer {
-		t.Fatal("auth choice lost")
+	if m.p.Type != "openai" {
+		t.Fatalf("protocol = %q, want Chat", m.p.Type)
 	}
 }
 
 func TestPreferredDetectionPreservesSelection(t *testing.T) {
-	for _, typ := range []string{"anthropic", "openai_responses"} {
+	for _, typ := range []string{"openai", "openai_responses"} {
 		t.Run(typ, func(t *testing.T) {
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,27 +52,10 @@ func TestPreferredDetectionPreservesSelection(t *testing.T) {
 				fmt.Fprint(w, `{"data":[{"id":"fake-model","object":"model"}]}`)
 			}))
 			defer server.Close()
-			result := detectProtocolAndModelsPreferred(server.URL, "fake-key", typ, "bearer")
+			result := detectProtocolAndModelsPreferred(server.URL, "fake-key", typ)
 			if result.err != nil || result.protocol != typ || calls != 1 {
 				t.Fatalf("result=%+v calls=%d", result, calls)
 			}
 		})
-	}
-}
-
-func TestPreferredDetectionFallsBack(t *testing.T) {
-	var auths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auths = append(auths, r.Header.Get("Authorization"))
-		if r.Header.Get("x-api-key") != "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		fmt.Fprint(w, `{"data":[{"id":"fake-model","object":"model"}]}`)
-	}))
-	defer server.Close()
-	result := detectProtocolAndModelsPreferred(server.URL, "fake-key", "anthropic", "x-api-key")
-	if result.err != nil || result.protocol != "openai" || len(auths) != 2 || auths[0] != "" || auths[1] != "Bearer fake-key" {
-		t.Fatalf("result=%+v auths=%v", result, auths)
 	}
 }

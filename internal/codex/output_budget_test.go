@@ -22,7 +22,7 @@ func TestConvertedOutputBudgetDefaultsAndExplicitLimits(t *testing.T) {
 		{"explicit limit", 1234, 65536, 1234},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			raw, _, err := toMessages(responseRequest{MaxOutputTokens: test.requested}, []map[string]any{{"role": "user", "content": "fixture"}}, Route{Model: "fixture", MaxOutputTokens: test.capacity})
+			raw, err := bridgeRequest([]byte(fmt.Sprintf(`{"max_output_tokens":%d}`, test.requested)), responseRequest{MaxOutputTokens: test.requested}, []map[string]any{{"role": "user", "content": "fixture"}}, Route{Model: "fixture", MaxOutputTokens: test.capacity}, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -30,30 +30,17 @@ func TestConvertedOutputBudgetDefaultsAndExplicitLimits(t *testing.T) {
 			if err := json.Unmarshal(raw, &body); err != nil {
 				t.Fatal(err)
 			}
-			if got := number(body["max_tokens"]); got != test.want {
-				t.Fatalf("max_tokens = %d, want %d", got, test.want)
+			if got := int(body["max_output_tokens"].(float64)); got != test.want {
+				t.Fatalf("max_output_tokens = %d, want %d", got, test.want)
 			}
 		})
-	}
-}
-
-func TestDefaultThinkingBudgetFitsAdvertisedOutputCapacity(t *testing.T) {
-	raw, _, err := toMessages(responseRequest{Reasoning: map[string]any{"effort": "max"}}, []map[string]any{{"role": "user", "content": "fixture"}}, Route{Model: "fixture", MaxOutputTokens: 8192, ThinkingBudget: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	_ = json.Unmarshal(raw, &body)
-	thinking := body["thinking"].(map[string]any)
-	if number(body["max_tokens"]) != 8192 || number(thinking["budget_tokens"]) != 4096 {
-		t.Fatalf("reasoning must leave answer space within the model capacity: %s", raw)
 	}
 }
 
 // The Chat provider returns length at 4K, reproducing the early cutoff seen in
 // Codex. A missing budget must no longer hit that adapter default, while a
 // genuinely exhausted explicit budget must still report an incomplete response.
-func TestChatOutputBudgetAndTruncationSurviveBothConversions(t *testing.T) {
+func TestChatOutputBudgetAndTruncationSurviveResponsesBridge(t *testing.T) {
 	for _, requested := range []int{0, 128} {
 		t.Run(fmt.Sprint(requested), func(t *testing.T) {
 			g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
@@ -65,15 +52,14 @@ func TestChatOutputBudgetAndTruncationSurviveBothConversions(t *testing.T) {
 				if want == 0 {
 					want = 32768
 				}
-				if number(body["max_tokens"]) != want {
+				if int(body["max_tokens"].(float64)) != want {
 					t.Errorf("upstream max_tokens = %v, want %d", body["max_tokens"], want)
 				}
 				reason := "stop"
-				if number(body["max_tokens"]) <= 4096 {
+				if int(body["max_tokens"].(float64)) <= 4096 {
 					reason = "length"
 				}
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fixture\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":%q}]}\n\ndata: [DONE]\n\n", reason)
+				writeChatFixture(w, r, map[string]any{"content": "fixture"}, reason, 3)
 			}, "openai", Options{})
 			payload := map[string]any{"model": "ccl/chosen/model-a", "input": "fixture", "reasoning": map[string]any{"effort": "max"}}
 			if requested > 0 {

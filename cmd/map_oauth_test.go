@@ -14,16 +14,16 @@ import (
 	"github.com/claude-code-launch/ccl/internal/slotrec"
 )
 
-// newMockOAuthMessagesServer stands in for a subscription's loopback runtime:
-// it answers the Anthropic Messages surface with the ccl session key and 404s
-// every OpenAI-shaped route. An
+// newMockOAuthResponsesServer stands in for a subscription's loopback runtime:
+// it answers the Responses surface with the ccl session key and 404s
+// other routes. An
 // availability probe that follows the persisted compatibility type (openai /
 // openai_responses) rather than the surface 404s all of its models.
-func newMockOAuthMessagesServer(t *testing.T) *httptest.Server {
+func newMockOAuthResponsesServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "ccl-local-key" {
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer ccl-local-key" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -37,7 +37,7 @@ func newMockOAuthMessagesServer(t *testing.T) *httptest.Server {
 
 func TestMapAutoUsesDiscoveredOAuthRuntimeCatalog(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	server := newMockOAuthMessagesServer(t)
+	server := newMockOAuthResponsesServer(t)
 	cfg := &provider.Config{
 		ActiveProvider: "oauth-test",
 		Providers: map[string]provider.Provider{
@@ -58,7 +58,7 @@ func TestMapAutoUsesDiscoveredOAuthRuntimeCatalog(t *testing.T) {
 			t.Fatalf("mapping catalog input = %+v", p)
 		}
 		// A subscription's compatibility type is only a local-dispatch value; the
-		// surface it serves is Anthropic Messages, exactly as the loopback runtime
+		// surface it serves is Responses, exactly as the loopback runtime
 		// does. Kimi/Gemini/WorkBuddy persist "openai" here.
 		p.Type = "openai"
 		p.Endpoint = server.URL + "/v1"

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func (a *anthropicResponseAssembler) process(frame *kiroEventFrame) error {
+func (a *responseAssembler) process(frame *kiroEventFrame) error {
 	messageType := frame.headers[":message-type"]
 	switch messageType {
 	case "", "event":
@@ -28,7 +28,7 @@ func (a *anthropicResponseAssembler) process(frame *kiroEventFrame) error {
 	}
 }
 
-func (a *anthropicResponseAssembler) processEvent(eventType string, payload []byte) error {
+func (a *responseAssembler) processEvent(eventType string, payload []byte) error {
 	switch eventType {
 	case "assistantResponseEvent":
 		var event struct {
@@ -54,27 +54,7 @@ func (a *anthropicResponseAssembler) processEvent(eventType string, payload []by
 			return err
 		}
 		if event.RedactedContent != "" {
-			if err := a.retain(len(event.RedactedContent)); err != nil {
-				return err
-			}
-			if len(a.blocks) >= anthropicAssemblerMaxBlocks {
-				return fmt.Errorf("Kiro response exceeds %d content blocks", anthropicAssemblerMaxBlocks)
-			}
-			if err := a.closeActive(); err != nil {
-				return err
-			}
-			index := a.appendBlock(anthropicResponseBlock{Type: "redacted_thinking", Data: event.RedactedContent})
-			if err := a.emit("content_block_start", anthropicBlockStartEvent{
-				Type:  "content_block_start",
-				Index: index,
-				ContentBlock: anthropicRedactedThinkingBlockStart{
-					Type: "redacted_thinking",
-					Data: event.RedactedContent,
-				},
-			}); err != nil {
-				return err
-			}
-			if err := a.emit("content_block_stop", anthropicBlockIndexEvent{Type: "content_block_stop", Index: index}); err != nil {
+			if err := a.addOpaqueReasoning(event.RedactedContent); err != nil {
 				return err
 			}
 		}
@@ -105,10 +85,10 @@ func (a *anthropicResponseAssembler) processEvent(eventType string, payload []by
 		}
 		accumulator := a.tools[event.ToolUseID]
 		if accumulator == nil {
-			if len(a.tools) >= anthropicAssemblerMaxToolCalls {
-				return fmt.Errorf("Kiro tool use stream exceeds %d concurrent tool calls", anthropicAssemblerMaxToolCalls)
+			if len(a.tools) >= assemblerMaxToolCalls {
+				return fmt.Errorf("Kiro tool use stream exceeds %d concurrent tool calls", assemblerMaxToolCalls)
 			}
-			accumulator = &anthropicToolAccumulator{name: event.Name}
+			accumulator = &assemblerToolAccumulator{name: event.Name}
 			a.tools[event.ToolUseID] = accumulator
 		}
 		if event.Name != "" {
@@ -135,7 +115,7 @@ func (a *anthropicResponseAssembler) processEvent(eventType string, payload []by
 		if event.ContextUsagePercentage > 0 {
 			a.contextTokens = int(event.ContextUsagePercentage / 100 * float64(kiroContextWindow(a.request.upstreamModel)))
 			if event.ContextUsagePercentage >= 100 {
-				a.stopReason = "model_context_window_exceeded"
+				a.stopReason = stopMaxTokens
 			}
 		}
 	case "meteringEvent":
@@ -154,7 +134,7 @@ func (a *anthropicResponseAssembler) processEvent(eventType string, payload []by
 	return nil
 }
 
-func processKiroEventStream(reader io.Reader, assembler *anthropicResponseAssembler) error {
+func processKiroEventStream(reader io.Reader, assembler *responseAssembler) error {
 	// Frames are read in two small chunks (prelude, then remainder), so reading
 	// straight from the network body would cost two syscalls per frame.
 	buffered := bufio.NewReaderSize(reader, kiroEventReadBufferSize)

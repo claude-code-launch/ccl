@@ -30,14 +30,14 @@ func TestStandaloneProxyAddsCodexModelsAndRestoresUserEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Api-Key") != "fake-upstream" || r.Header.Get("Authorization") != "" {
+		if r.Header.Get("X-Api-Key") != "" || r.Header.Get("Authorization") != "Bearer fake-upstream" {
 			t.Error("incorrect provider authentication")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"codex-fixture"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"codex-fixture"},"finish_reason":"stop"}]}`)
 	}))
 	defer upstream.Close()
-	p := provider.Provider{Name: "chosen", Type: "anthropic", Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream", Model: "model-a", CustomModelID: "model-a"}
+	p := provider.Provider{Name: "chosen", Type: "openai", Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream", Model: "model-a", CustomModelID: "model-a"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

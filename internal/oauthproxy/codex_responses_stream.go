@@ -19,7 +19,7 @@ type codexFunctionCall struct {
 }
 
 type codexResponsesStreamState struct {
-	assembler          *anthropicResponseAssembler
+	assembler          *responseAssembler
 	functions          map[string]*codexFunctionCall
 	retained           int
 	textPartsSeen      map[string]bool
@@ -41,12 +41,12 @@ type codexResponsesStreamMetrics struct {
 	terminalType         string
 }
 
-func processCodexResponsesStream(reader io.Reader, assembler *anthropicResponseAssembler) error {
+func processCodexResponsesStream(reader io.Reader, assembler *responseAssembler) error {
 	_, err := processCodexResponsesStreamObserved(reader, assembler)
 	return err
 }
 
-func processCodexResponsesStreamObserved(reader io.Reader, assembler *anthropicResponseAssembler) (codexResponsesStreamMetrics, error) {
+func processCodexResponsesStreamObserved(reader io.Reader, assembler *responseAssembler) (codexResponsesStreamMetrics, error) {
 	state := &codexResponsesStreamState{
 		assembler: assembler,
 		functions: make(map[string]*codexFunctionCall),
@@ -136,7 +136,7 @@ func (s *codexResponsesStreamState) process(payload []byte) error {
 	if !s.assembler.started {
 		if response := mapValue(event["response"]); response != nil {
 			if id := stringValue(response["id"]); id != "" {
-				s.assembler.messageID = id
+				s.assembler.responseID = id
 			}
 		}
 		if err := s.assembler.start(); err != nil {
@@ -187,8 +187,8 @@ func (s *codexResponsesStreamState) process(payload []byte) error {
 	case "response.function_call_arguments.delta":
 		call := s.functionForEvent(event)
 		if delta := stringValue(event["delta"]); delta != "" {
-			if len(s.functions) > anthropicAssemblerMaxToolCalls {
-				return fmt.Errorf("Codex Responses function call stream exceeds %d concurrent calls", anthropicAssemblerMaxToolCalls)
+			if len(s.functions) > assemblerMaxToolCalls {
+				return fmt.Errorf("Codex Responses function call stream exceeds %d concurrent calls", assemblerMaxToolCalls)
 			}
 			if err := s.retainArguments(len(delta)); err != nil {
 				return err
@@ -198,8 +198,8 @@ func (s *codexResponsesStreamState) process(payload []byte) error {
 	case "response.function_call_arguments.done":
 		call := s.functionForEvent(event)
 		if arguments := stringValue(event["arguments"]); arguments != "" {
-			if len(s.functions) > anthropicAssemblerMaxToolCalls {
-				return fmt.Errorf("Codex Responses function call stream exceeds %d concurrent calls", anthropicAssemblerMaxToolCalls)
+			if len(s.functions) > assemblerMaxToolCalls {
+				return fmt.Errorf("Codex Responses function call stream exceeds %d concurrent calls", assemblerMaxToolCalls)
 			}
 			if err := s.retainArguments(len(arguments)); err != nil {
 				return err
@@ -377,9 +377,9 @@ func (s *codexResponsesStreamState) processTerminal(eventType string, response m
 	if s.assembler.cacheWriteTokens == 0 {
 		s.assembler.cacheWriteTokens = intValue(usage["cache_write_tokens"])
 	}
-	// Responses input_tokens already includes cached/ written tokens; subtract
-	// them so the Anthropic input_tokens field holds only fresh input, matching
-	// qoder and keeping cache tokens out of the billed/ reported input total.
+	// Responses input_tokens already includes cached/written tokens; subtract
+	// them so contextTokens holds only fresh input, matching qoder and keeping
+	// cache tokens out of the fresh input total.
 	if value, ok := usage["input_tokens"]; ok && value != nil {
 		s.assembler.inputUsageKnown = true
 		s.assembler.contextTokens = max(0, in-s.assembler.cacheReadTokens-s.assembler.cacheWriteTokens)
@@ -400,8 +400,8 @@ func (s *codexResponsesStreamState) processTerminal(eventType string, response m
 }
 
 func (s *codexResponsesStreamState) retainArguments(size int) error {
-	if s.retained+size > anthropicAssemblerMaxRetainedBytes {
-		return fmt.Errorf("Codex Responses function call arguments exceed %d bytes", anthropicAssemblerMaxRetainedBytes)
+	if s.retained+size > assemblerMaxRetainedBytes {
+		return fmt.Errorf("Codex Responses function call arguments exceed %d bytes", assemblerMaxRetainedBytes)
 	}
 	s.retained += size
 	return nil
@@ -428,8 +428,8 @@ func (s *codexResponsesStreamState) updateFunction(event, item map[string]any) (
 			s.functions[key] = call
 		}
 	}
-	if len(s.functions) > anthropicAssemblerMaxToolCalls {
-		return nil, fmt.Errorf("Codex Responses function call stream exceeds %d concurrent calls", anthropicAssemblerMaxToolCalls)
+	if len(s.functions) > assemblerMaxToolCalls {
+		return nil, fmt.Errorf("Codex Responses function call stream exceeds %d concurrent calls", assemblerMaxToolCalls)
 	}
 	if value := stringValue(item["call_id"]); value != "" {
 		call.callID = value

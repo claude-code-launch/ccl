@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -105,8 +104,8 @@ func TestCodexResponsesDoesNotRewrite403As503(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-	payload := strings.NewReader(`{"model":"gpt-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
-	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", payload)
+	payload := strings.NewReader(`{"model":"gpt-test","max_output_tokens":32,"input":[{"role":"user","content":"hi"}]}`)
+	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", payload)
 	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -119,39 +118,20 @@ func TestCodexResponsesDoesNotRewrite403As503(t *testing.T) {
 }
 
 func TestCodexResponsesCountTokensUsesCodexTokenizer(t *testing.T) {
-	runtime, err := StartOpenAIResponsesAPI(context.Background(), "http://127.0.0.1:1/v1", "key", "gpt-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Stop()
-
 	content := strings.Repeat(`if err != nil { return fmt.Errorf("item[%d]: %w", index, err) }\n`, 200)
 	payload, err := json.Marshal(map[string]any{
-		"model": "gpt-test", "max_tokens": 32,
-		"metadata": map[string]any{"user_id": "user_session_123e4567-e89b-12d3-a456-426614174000"},
-		"messages": []map[string]any{{"role": "user", "content": content}},
+		"model": "gpt-test", "max_output_tokens": 32,
+		"prompt_cache_key": "123e4567-e89b-12d3-a456-426614174000",
+		"input":            []map[string]any{{"role": "user", "content": content}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages/count_tokens", bytes.NewReader(payload))
-	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
-	response, err := http.DefaultClient.Do(request)
+	converted, err := convertResponsesForUpstream(payload, "runtime-session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
-	var result struct {
-		InputTokens int `json:"input_tokens"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d", response.StatusCode)
-	}
-
-	converted, err := convertAnthropicToCodexResponses(payload)
+	got, err := countCodexResponsesInputTokens(converted.body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,186 +143,22 @@ func TestCodexResponsesCountTokensUsesCodexTokenizer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.InputTokens != want {
-		t.Fatalf("input_tokens=%d, want Codex tokenizer count %d", result.InputTokens, want)
+	if got != want {
+		t.Fatalf("input_tokens=%d, want Codex tokenizer count %d", got, want)
 	}
-	if result.InputTokens == estimateApproxTokensBytes(payload) {
-		t.Fatalf("input_tokens still uses the old rune estimate: %d", result.InputTokens)
-	}
-}
-
-func TestCodexCompactionRequestTrimsOldestHistoryOnly(t *testing.T) {
-	messages := make([]map[string]any, 0, 24)
-	for index := 0; index < 24; index++ {
-		messages = append(messages, map[string]any{
-			"role":    "user",
-			"content": fmt.Sprintf("history-%02d %s", index, strings.Repeat("const value = object[index]; ", 80)),
-		})
-	}
-	payload, err := json.Marshal(map[string]any{
-		"model": "gpt-test", "max_tokens": 1024,
-		"system":        "You are a helpful AI assistant tasked with summarizing conversations.",
-		"thinking":      map[string]any{"type": "adaptive"},
-		"output_config": map[string]any{"effort": "xhigh"},
-		"tools": []map[string]any{{
-			"name": "unused_during_compaction", "description": "unused",
-			"input_schema": map[string]any{"type": "object"},
-		}},
-		"metadata": map[string]any{"user_id": "user_session_123e4567-e89b-12d3-a456-426614174000"},
-		"messages": messages,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	converted, err := convertAnthropicToCodexResponses(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !converted.compaction {
-		t.Fatal("Claude Code compaction system prompt was not detected")
-	}
-	var wire map[string]any
-	if err := json.Unmarshal(converted.body, &wire); err != nil {
-		t.Fatal(err)
-	}
-	reasoning, _ := wire["reasoning"].(map[string]any)
-	if reasoning["effort"] != "low" || reasoning["summary"] != nil {
-		t.Fatalf("compaction reasoning = %+v, want low without reasoning summary", reasoning)
-	}
-	if wire["tools"] != nil || wire["parallel_tool_calls"] != false {
-		t.Fatalf("compaction retained unnecessary tools: %+v", wire["tools"])
-	}
-	originalTokens, err := countCodexResponsesInputTokens(converted.body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trimmed, stats, err := trimCodexCompactionBody(converted.body, originalTokens/2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	targetTokens := originalTokens / 2
-	if stats.droppedItems == 0 || stats.finalTokens > targetTokens {
-		t.Fatalf("trim stats = %+v, target=%d", stats, originalTokens/2)
-	}
-	if stats.finalTokens < targetTokens*3/4 {
-		t.Fatalf("trim discarded too much recent context: stats=%+v target=%d", stats, targetTokens)
-	}
-	if stats.tokenizerPasses > 5 {
-		t.Fatalf("trim used %d tokenizer passes, want at most 5", stats.tokenizerPasses)
-	}
-	text := string(trimmed)
-	if strings.Contains(text, "history-00") {
-		t.Fatal("oldest history was retained")
-	}
-	if !strings.Contains(text, "history-23") || !strings.Contains(text, codexCompactionTruncationNotice) {
-		t.Fatal("newest history or truncation notice was lost")
-	}
-	if !strings.Contains(text, "tasked with summarizing conversations") {
-		t.Fatal("summarizer system message was lost")
+	if got == estimateApproxTokensBytes(payload) {
+		t.Fatalf("input_tokens still uses the old rune estimate: %d", got)
 	}
 }
 
-func TestCodexCompactionDetectsClaudeCodeUserPrompt(t *testing.T) {
-	payload := []byte(`{
-		"model":"gpt-5.6-sol[1m]","max_tokens":4096,"stream":true,
-		"system":"You are Claude Code.",
-		"messages":[
-			{"role":"user","content":"ordinary work"},
-			{"role":"user","content":"Your task is to create a detailed summary of this conversation. This summary will be placed at the start of a continuing session; newer messages that build on this context will follow after your summary."}
-		]
-	}`)
-	converted, err := convertAnthropicToCodexResponses(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !converted.compaction {
-		t.Fatal("Claude Code 2.1.223 user-message compact prompt was not detected")
-	}
-	if converted.model != "gpt-5.6-sol" {
-		t.Fatalf("selected model changed: %q", converted.model)
-	}
-	if converted.compactionReason != "user_detailed_summary" {
-		t.Fatalf("legacy compact reason = %q signals=%q", converted.compactionReason, converted.compactionSignals)
-	}
-
-	structured := []byte(`{
-		"model":"gpt-5.6-sol","max_tokens":4096,"stream":false,
-		"system":"You are Claude Code.",
-		"messages":[{"role":"user","content":"Your summary should include the following sections:\n1. Primary Request and Intent: preserve the user's intent.\nThere may be additional summarization instructions provided in the included context.\nREMINDER: Do NOT call any tools. Respond with plain text only."}]
-	}`)
-	converted, err = convertAnthropicToCodexResponses(structured)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !converted.compaction || converted.compactionReason != "user_structured_summary" {
-		t.Fatalf("structured compact classification = %v reason=%q signals=%q",
-			converted.compaction, converted.compactionReason, converted.compactionSignals)
-	}
-	for _, signal := range []string{"summary_sections", "primary_request", "plain_text_only", "additional_instructions", "no_tools"} {
-		if !strings.Contains(converted.compactionSignals, signal) {
-			t.Fatalf("structured compact signals %q missing %q", converted.compactionSignals, signal)
-		}
-	}
-
-	normal := []byte(`{
-		"model":"gpt-5.6-sol","max_tokens":32,
-		"messages":[{"role":"user","content":"How should an app summarize this conversation?"}]
-	}`)
-	converted, err = convertAnthropicToCodexResponses(normal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if converted.compaction {
-		t.Fatal("ordinary summarization discussion was classified as compaction")
-	}
-}
-
-func TestCodexCompactionBuffersSSEOverflow(t *testing.T) {
-	converted, err := convertAnthropicToCodexResponses([]byte(`{
-		"model":"gpt-test","max_tokens":32,"stream":true,
-		"system":"You are a helpful AI assistant tasked with summarizing conversations.",
-		"messages":[{"role":"user","content":"summarize"}]
-	}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stream := strings.NewReader(
-		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_compact\"}}\n\n" +
-			"data: {\"type\":\"error\",\"message\":\"Your input exceeds the context window of this model\"}\n\n",
-	)
-	_, buffered, metrics, err := bufferCodexCompactionResponseObserved(stream, converted)
-	if err == nil || !isCodexContextOverflow(err) {
-		t.Fatalf("buffered compaction error = %v", err)
-	}
-	if len(buffered) != 0 {
-		t.Fatalf("partial SSE escaped before retry: %q", buffered)
-	}
-	if metrics.events != 2 || metrics.terminalType != "error" || metrics.firstEventAt.IsZero() {
-		t.Fatalf("stream metrics = %+v", metrics)
-	}
-}
-
-func TestCodexCompactionRetriesSSEOverflowOnce(t *testing.T) {
-	var calls atomic.Int32
-	var requestSizes []int
-	var requestTokens []int
-	var sizesMu sync.Mutex
+func TestCodexResponsesCompactPassthrough(t *testing.T) {
+	var upstreamPath string
+	var acceptHeader string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, _ := io.ReadAll(request.Body)
-		tokens, _ := countCodexResponsesInputTokens(body)
-		sizesMu.Lock()
-		requestSizes = append(requestSizes, len(body))
-		requestTokens = append(requestTokens, tokens)
-		sizesMu.Unlock()
-		call := calls.Add(1)
-		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_compact\"}}\n\n")
-		if call == 1 {
-			_, _ = fmt.Fprint(writer, "data: {\"type\":\"error\",\"message\":\"Your input exceeds the context window of this model\"}\n\n")
-			return
-		}
-		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"compact summary\"}\n\n")
-		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\",\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":2}}}\n\n")
+		upstreamPath = request.URL.Path
+		acceptHeader = request.Header.Get("Accept")
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"resp_compact","object":"response.compaction","output":[]}`)
 	}))
 	defer upstream.Close()
 	runtime, err := StartOpenAIResponsesAPI(context.Background(), upstream.URL+"/v1", "key", "gpt-test")
@@ -350,82 +166,19 @@ func TestCodexCompactionRetriesSSEOverflowOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-
-	messages := make([]map[string]any, 0, 242)
-	chunk := strings.Repeat("value := object[index] ?? fallback\n", 300)
-	for index := 0; index < 240; index++ {
-		messages = append(messages, map[string]any{"role": "user", "content": fmt.Sprintf("history-%03d\n%s", index, chunk)})
-	}
-	messages = append(messages, map[string]any{
-		"role": "user",
-		"content": "Your task is to create a detailed summary of this conversation. " +
-			"This summary will be placed at the start of a continuing session; newer messages will follow.",
-	})
-	payload, err := json.Marshal(map[string]any{
-		"model": "gpt-test", "max_tokens": 4096, "stream": true,
-		"system": "You are Claude Code.", "messages": messages,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", bytes.NewReader(payload))
+	request, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses/compact", strings.NewReader(`{"model":"gpt-test","input":[]}`))
 	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
-	// Counting tokens on this ~2.6MB request twice takes a few seconds, and far
-	// longer under -race on a loaded CI runner; the timeout only guards a hang.
-	response, err := (&http.Client{Timeout: 90 * time.Second}).Do(request)
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("compact summary")) {
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("resp_compact")) {
 		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
-	if calls.Load() != 2 {
-		t.Fatalf("upstream calls=%d, want exactly 2", calls.Load())
-	}
-	sizesMu.Lock()
-	defer sizesMu.Unlock()
-	if len(requestSizes) != 2 || requestSizes[1] >= requestSizes[0] {
-		t.Fatalf("request sizes=%v, want a smaller single retry", requestSizes)
-	}
-	if len(requestTokens) != 2 || requestTokens[0] < codexCompactionSoftTargetTokens*3/4 ||
-		requestTokens[0] > codexCompactionSoftTargetTokens+2_000 {
-		t.Fatalf("preflight tokens=%v, want recent context close to %d", requestTokens, codexCompactionSoftTargetTokens)
-	}
-	if requestTokens[1] >= requestTokens[0] || requestTokens[1] > codexCompactionRetryTargetTokens+2_000 {
-		t.Fatalf("retry tokens=%v, want a smaller retry near or below %d", requestTokens, codexCompactionRetryTargetTokens)
-	}
-}
-
-func TestCodexCompactionTrimDropsOrphanedToolOutput(t *testing.T) {
-	input := []any{
-		map[string]any{"type": "function_call_output", "call_id": "old", "output": "orphan"},
-		map[string]any{"type": "function_call", "call_id": "kept"},
-		map[string]any{"type": "function_call_output", "call_id": "kept", "output": "paired"},
-	}
-	kept := codexDropOrphanedToolOutputs(input)
-	encoded, _ := json.Marshal(kept)
-	if strings.Contains(string(encoded), "orphan") || !strings.Contains(string(encoded), "paired") {
-		t.Fatalf("normalized tool items = %s", encoded)
-	}
-}
-
-func TestCodexContextOverflowClassification(t *testing.T) {
-	if !isCodexContextOverflow(&codexResponsesUpstreamError{
-		status: http.StatusBadRequest,
-		body:   `{"error":{"message":"Your input exceeds the context window of this model"}}`,
-	}) {
-		t.Fatal("context overflow was not classified")
-	}
-	if isCodexContextOverflow(&codexResponsesUpstreamError{
-		status: http.StatusBadRequest,
-		body:   `{"error":{"message":"invalid tool schema"}}`,
-	}) {
-		t.Fatal("unrelated 400 was classified as context overflow")
-	}
-	if !isCodexContextOverflow(fmt.Errorf("Codex Responses stream error: input exceeds the context window")) {
-		t.Fatal("SSE context overflow was not classified")
+	if upstreamPath != "/v1/responses/compact" || acceptHeader != "application/json" {
+		t.Fatalf("upstreamPath=%q acceptHeader=%q", upstreamPath, acceptHeader)
 	}
 }
 
@@ -440,33 +193,39 @@ func TestCodexResponsesReasoningAndUsageSSE(t *testing.T) {
 		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_reasoning\",\"status\":\"completed\",\"usage\":{\"input_tokens\":9,\"output_tokens\":4,\"input_tokens_details\":{\"cached_tokens\":3}}}}\n\n")
 	}))
 	defer upstream.Close()
-	runtime, err := StartOpenAIResponsesAPI(context.Background(), upstream.URL+"/v1", "key", "gpt-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Stop()
-	body := postClaudeMessage(t, context.Background(), runtime, "gpt-test")
-	for _, want := range []string{"thinking_delta", codexReasoningSignaturePrefix, "answer", `"input_tokens":6`, `"cache_read_input_tokens":3`} {
+	usage := NewUsageTracker()
+	service := newXaiResponsesService("local-key", upstream.URL+"/v1", []runtimeModelRoute{{Alias: "gpt-test", Name: "gpt-test"}}, &codexStaticAuthorizer{token: "key"}, usage)
+	raw := `{"model":"gpt-test","stream":true,"tools":[{"type":"custom","name":"exec"}],"input":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(raw))
+	request.Header.Set("Authorization", "Bearer local-key")
+	recorder := httptest.NewRecorder()
+	service.handler().ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	for _, want := range []string{"response.reasoning_summary_text.delta", codexReasoningSignaturePrefix, "answer", `"input_tokens":9`, `"cached_tokens":3`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("response missing %q: %s", want, body)
 		}
 	}
+	totals, ok := usage.Snapshot()
+	if !ok || len(totals) != 1 || totals[0].InputTokens != 6 || totals[0].CacheReadTokens != 3 || totals[0].OutputTokens != 4 {
+		t.Fatalf("usage snapshot = %+v", totals)
+	}
 }
 
-func TestConvertAnthropicToCodexResponsesToolRoundTrip(t *testing.T) {
+func TestConvertResponsesForUpstreamToolRoundTrip(t *testing.T) {
 	raw := []byte(`{
-		"model":"gpt-test[1m]","max_tokens":100,"stream":true,
-		"metadata":{"user_id":"user_session_123e4567-e89b-12d3-a456-426614174000"},
-		"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},
-		"system":"be concise",
-		"tools":[{"name":"lookup","description":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],
-		"messages":[
+		"model":"gpt-test[1m]","max_output_tokens":100,"stream":true,
+		"prompt_cache_key":"user_session_123e4567-e89b-12d3-a456-426614174000",
+		"reasoning":{"effort":"high","summary":"auto"},
+		"instructions":"be concise",
+		"tools":[{"type":"function","name":"lookup","description":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],
+		"input":[
 			{"role":"user","content":"find it"},
-			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":"x"}}]},
-			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}
+			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"done"}
 		]
 	}`)
-	converted, err := convertAnthropicToCodexResponses(raw)
+	converted, err := convertResponsesForUpstream(raw, "fallback-session")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +244,7 @@ func TestConvertAnthropicToCodexResponsesToolRoundTrip(t *testing.T) {
 		t.Fatalf("reasoning = %+v", reasoning)
 	}
 	encoded := string(converted.body)
-	for _, want := range []string{`"role":"developer"`, `"type":"function_call"`, `"type":"function_call_output"`, `"type":"function"`} {
+	for _, want := range []string{`"instructions":"be concise"`, `"type":"function_call"`, `"type":"function_call_output"`, `"type":"function"`} {
 		if !strings.Contains(encoded, want) {
 			t.Fatalf("wire body missing %s: %s", want, encoded)
 		}
@@ -494,10 +253,8 @@ func TestConvertAnthropicToCodexResponsesToolRoundTrip(t *testing.T) {
 
 func TestCodexResponsesNonStreamingClaudeResponse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		// A compatible gateway may ignore stream=true and return one Responses
-		// object. The CCL adapter accepts both wire forms.
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, `{"id":"resp_nonstream","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"non-stream"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_nonstream\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"non-stream\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
 	}))
 	defer upstream.Close()
 	runtime, err := StartOpenAIResponsesAPI(context.Background(), upstream.URL+"/v1", "key", "gpt-test")
@@ -505,8 +262,8 @@ func TestCodexResponsesNonStreamingClaudeResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-	payload := strings.NewReader(`{"model":"gpt-test","max_tokens":32,"stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-	request, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, runtime.Endpoint()+"/messages", payload)
+	payload := strings.NewReader(`{"model":"gpt-test","max_output_tokens":32,"stream":false,"input":[{"role":"user","content":"hi"}]}`)
+	request, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, runtime.Endpoint()+"/responses", payload)
 	request.Header.Set("Authorization", "Bearer "+runtime.APIKey())
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {

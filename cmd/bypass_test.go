@@ -26,7 +26,7 @@ func TestRunBypassToggleAndShow(t *testing.T) {
 	if !cfg.BypassMode {
 		t.Fatal("BypassMode is false after on")
 	}
-	if !bytes.Contains(out.Bytes(), []byte(dangerouslySkipPermissionsFlag)) {
+	if !bytes.Contains(out.Bytes(), []byte(grokAlwaysApproveFlag)) {
 		t.Fatalf("on output lacks warning: %q", out.String())
 	}
 
@@ -58,31 +58,31 @@ func TestRunBypassRejectsInvalidValue(t *testing.T) {
 	}
 }
 
-func TestApplyBypassMode(t *testing.T) {
+func TestApplyGrokBypassMode(t *testing.T) {
 	input := []string{"--model", "sonnet"}
-	got := applyBypassMode(input, true)
-	want := []string{dangerouslySkipPermissionsFlag, "--model", "sonnet"}
+	got := applyGrokBypassMode(input, true)
+	want := []string{grokAlwaysApproveFlag, "--model", "sonnet"}
 	if !slices.Equal(got, want) {
-		t.Fatalf("applyBypassMode = %v, want %v", got, want)
+		t.Fatalf("applyGrokBypassMode = %v, want %v", got, want)
 	}
 	if !slices.Equal(input, []string{"--model", "sonnet"}) {
 		t.Fatalf("input mutated: %v", input)
 	}
 
-	got = applyBypassMode([]string{dangerouslySkipPermissionsFlag, "--model", "opus"}, true)
-	if got[0] != dangerouslySkipPermissionsFlag || len(got) != 3 {
+	got = applyGrokBypassMode([]string{grokAlwaysApproveFlag, "--model", "opus"}, true)
+	if got[0] != grokAlwaysApproveFlag || len(got) != 3 {
 		t.Fatalf("duplicate flag injected: %v", got)
 	}
 
-	got = applyBypassMode(input, false)
+	got = applyGrokBypassMode(input, false)
 	if !slices.Equal(got, input) {
 		t.Fatalf("disabled bypass changed args: %v", got)
 	}
 }
 
-// TestApplyBypassModeStaysOutOfTheWay pins S15: an explicit permission mode for
-// this run, and a Claude Code subcommand, are passed through untouched.
-func TestApplyBypassModeStaysOutOfTheWay(t *testing.T) {
+// TestApplyGrokBypassModeStaysOutOfTheWay pins S15: an explicit permission mode for
+// this run, and a Grok Build subcommand, are passed through untouched.
+func TestApplyGrokBypassModeStaysOutOfTheWay(t *testing.T) {
 	for _, args := range [][]string{
 		{"--permission-mode", "plan"},
 		{"--permission-mode=acceptEdits", "-p", "hi"},
@@ -90,12 +90,12 @@ func TestApplyBypassModeStaysOutOfTheWay(t *testing.T) {
 		{"doctor"},
 		{"update"},
 	} {
-		if got := applyBypassMode(args, true); !slices.Equal(got, args) {
-			t.Fatalf("applyBypassMode(%v) = %v", args, got)
+		if got := applyGrokBypassMode(args, true); !slices.Equal(got, args) {
+			t.Fatalf("applyGrokBypassMode(%v) = %v", args, got)
 		}
 	}
 	// A session that merely mentions a subcommand name later still gets it.
-	if got := applyBypassMode([]string{"-p", "mcp"}, true); got[0] != dangerouslySkipPermissionsFlag {
+	if got := applyGrokBypassMode([]string{"-p", "mcp"}, true); got[0] != grokAlwaysApproveFlag {
 		t.Fatalf("a prompt mentioning mcp lost bypass: %v", got)
 	}
 }

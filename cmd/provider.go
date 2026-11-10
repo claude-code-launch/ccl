@@ -22,17 +22,13 @@ var providerCmd = &cobra.Command{
 Subcommands:
   set [name]     Interactive add/update (TUI)
   ls             List providers
-  use [--acp] [name]
-                 Switch the provider selected by normal or ACP mode
+  use [name]     Switch the active provider
   cp/mv/rm       Copy, rename, delete
   map            Slot → model mapping (Opus/Sonnet/Haiku/Fable/Custom)
   models         Availability check for the model pool
   env            Provider-scoped environment variables
-  preview        Show settings JSON injected into Claude Code
-  on/off         Load the active provider, or run Claude Code with its own
-                 configuration (claude.ai subscription)
-  effort         Effort a provider's sessions start at (/effort still works)
-  ultracode      Claude Code's ultracode on/off for a provider
+  preview        Show the Grok Build model overlay
+  effort         Set the default reasoning effort for Grok Build
 
 Root shortcuts: ccl set / ccl ls / ccl use / ccl map.
 `,
@@ -49,92 +45,17 @@ func newProviderSetCommand(use string) *cobra.Command {
 }
 
 func newProviderUseCommand(use string) *cobra.Command {
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   use,
-		Short: "Switch the provider used by normal or ACP mode",
-		Long: `Switch which shared provider configuration a launch mode uses.
-
-Without --acp, the selection applies to normal ccl launches. With --acp, the
-same provider entry is pinned for ccl acp; no provider settings are copied or
-maintained separately. Until pinned, ACP follows the normal-mode provider;
---acp --follow removes the pin again.
-
-default selects CCL's default Claude account. A successful Claude login makes
-that account the default; ccl use <account> --default sets it explicitly.
-Before a Claude account is configured, default uses Claude Code's original
-profile. ccl use default --default restores that original profile.
-
-Examples:
-  ccl use cc
-  ccl use claude-work --default
-  ccl use default
-  ccl use default --default
-  ccl use --acp cc
-  ccl use --acp default
-  ccl use --acp --follow`,
-		// Parse the tiny grammar without retaining mutable flag state between
-		// invocations of the reusable Cobra root used by embedders and tests.
-		DisableFlagParsing: true,
+		Short: "Switch providers; default uses Grok Build's own login",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			markDefault := false
-			filtered := make([]string, 0, len(args))
-			for _, arg := range args {
-				if arg == "--default" {
-					if markDefault {
-						return fmt.Errorf("--default may be specified only once")
-					}
-					markDefault = true
-				} else {
-					filtered = append(filtered, arg)
-				}
+			if len(args) == 0 {
+				return runProviderUse("")
 			}
-			name, forACP, follow, showHelp, err := parseProviderUseArgs(filtered)
-			if err != nil {
-				return err
-			}
-			if showHelp {
-				return cmd.Help()
-			}
-			if markDefault && (forACP || follow) {
-				return fmt.Errorf("--default applies to the normal Claude account selection")
-			}
-			if follow {
-				return runACPFollow()
-			}
-			return runProviderUseWithDefault(name, forACP, markDefault)
+			return runProviderUse(args[0])
 		},
 	}
-	// Register the flag for help and completion metadata. Parsing is handled
-	// above so repeated in-process command execution does not retain its value.
-	cmd.Flags().Bool("acp", false, "Switch the provider used by ACP mode")
-	cmd.Flags().Bool("follow", false, "With --acp: stop pinning ACP and follow the normal-mode provider")
-	cmd.Flags().Bool("default", false, "Make this Claude account the default; use default --default to restore the original Claude profile")
-	return cmd
-}
-
-func parseProviderUseArgs(args []string) (name string, forACP, follow, showHelp bool, err error) {
-	for _, arg := range args {
-		switch arg {
-		case "--acp":
-			forACP = true
-		case "--follow":
-			follow = true
-		case "-h", "--help":
-			showHelp = true
-		default:
-			if strings.HasPrefix(arg, "-") {
-				return "", false, false, false, fmt.Errorf("unknown flag: %s", arg)
-			}
-			if name != "" {
-				return "", false, false, false, fmt.Errorf("accepts at most 1 provider name, received %q and %q", name, arg)
-			}
-			name = arg
-		}
-	}
-	if follow && (!forACP || name != "") {
-		return "", false, false, false, fmt.Errorf("--follow is used as: ccl use --acp --follow")
-	}
-	return name, forACP, follow, showHelp, nil
 }
 
 func newProviderCopyCommand(use string) *cobra.Command {
@@ -189,109 +110,45 @@ func newProviderMoveCommand(use string) *cobra.Command {
 	return cmd
 }
 
-func runProviderUse(name string, forACP bool) error {
-	return runProviderUseWithDefault(name, forACP, false)
-}
-
-func runProviderUseWithDefault(name string, forACP, markDefault bool) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
+func runProviderUse(name string) error {
 	target := strings.TrimSpace(name)
 	if target == "" {
-		// 没有传 provider name：弹出与 `ccl set` 一致的已有 Provider 过滤列
-		// 表，选中即切换；取消则静默退出。
-		target, err = selectProviderToUse(cfg, forACP)
+		cfg, err := config.Load()
 		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		target, err = selectProviderToUse(cfg)
+		if err != nil || target == "" {
 			return err
 		}
-		if target == "" {
-			return nil
-		}
 	}
-
 	isDefault := provider.IsDefaultProvider(target)
-	if _, exists := cfg.Providers[target]; !exists && !isDefault {
-		return fmt.Errorf(locale.T("未找到 Provider %q。请先用 'ccl set' 添加，或用 'ccl ls' 检查拼写", "provider %q not found in configuration. Add it first using 'ccl set' or check spelling with 'ccl ls'"), target)
-	}
-	if isDefault && !markDefault {
-		if _, _, err := cfg.ResolveDefault(); err != nil {
-			return err
-		}
-	}
-	if markDefault && !isDefault && !provider.IsClaudeAccount(cfg.Providers[target]) {
-		return fmt.Errorf("--default requires a Claude subscription account, or default to restore the original profile")
-	}
-	var selectedDefault string
-	err = config.Update(func(c *provider.Config) error {
-		if _, exists := c.Providers[target]; !exists && !isDefault {
-			return fmt.Errorf(locale.T("未找到 Provider %q", "provider %q not found in configuration"), target)
-		}
-		if forACP {
-			c.ACPProvider = target
-			return nil
-		}
-		if markDefault {
-			if isDefault {
-				c.DefaultClaudeProvider = ""
-			} else {
-				if !provider.IsClaudeAccount(c.Providers[target]) {
-					return fmt.Errorf("provider %q is not a Claude account", target)
-				}
-				c.DefaultClaudeProvider = target
+	err := config.Update(func(c *provider.Config) error {
+		if !isDefault {
+			p, exists := c.Providers[target]
+			if !exists {
+				return fmt.Errorf(locale.T(
+					"未找到 Provider %q。请先用 'ccl set' 添加，或用 'ccl ls' 检查拼写",
+					"provider %q not found in configuration. Add it using 'ccl set' or check spelling with 'ccl ls'",
+				), target)
+			}
+			if err := provider.ValidateRuntime(p); err != nil {
+				return err
 			}
 		}
-		selectedDefault = c.DefaultClaudeProvider
+		if isDefault {
+			c.LegacyClaudeDefault = ""
+		}
 		c.ActiveProvider = target
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+		return err
 	}
-
-	switch {
-	case isDefault && forACP:
-		if cfg.DefaultClaudeProvider != "" {
-			fmt.Printf(locale.T("ACP 已切换到默认 Claude 账号：%s\n", "ACP now uses default Claude account: %s\n"), cfg.DefaultClaudeProvider)
-		} else {
-			fmt.Println(locale.T(
-				"ACP 已切换为 default：使用 Claude Code 自身配置（claude.ai 订阅）",
-				"ACP now uses default: Claude Code's own configuration (claude.ai subscription)",
-			))
-		}
-	case isDefault:
-		if selectedDefault != "" {
-			fmt.Printf(locale.T("已切换到默认 Claude 账号：%s\n", "Switched to default Claude account: %s\n"), selectedDefault)
-		} else {
-			fmt.Println(locale.T(
-				"已切换到 default：ccl 以 Claude Code 自身配置启动（claude.ai 订阅）",
-				"Switched to default: ccl starts Claude Code with its own configuration (claude.ai subscription)",
-			))
-		}
-	case forACP:
-		fmt.Printf(locale.T("ACP 已切换为使用 Provider 配置：%s\n", "ACP now uses provider configuration: %s\n"), target)
-	default:
-		fmt.Printf(locale.T("已切换到激活 Provider：%s\n", "Switched to active provider: %s\n"), target)
-	}
-	return nil
-}
-
-// runACPFollow removes the ACP pin so ACP follows the normal-mode provider.
-func runACPFollow() error {
-	var active string
-	if err := config.Update(func(c *provider.Config) error {
-		c.ACPProvider = ""
-		active = c.ActiveProvider
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-	if active != "" {
-		fmt.Printf(locale.T("ACP 现在跟随普通模式的 Provider（当前：%s）\n", "ACP now follows the normal-mode provider (currently %s)\n"), active)
+	if isDefault {
+		fmt.Println(locale.T("已切换到 default，使用 Grok Build 自身登录", "Switched to default using Grok Build's own login"))
 	} else {
-		fmt.Println(locale.T("ACP 现在跟随普通模式的 Provider。", "ACP now follows the normal-mode provider."))
+		fmt.Printf(locale.T("已切换到激活 Provider：%s\n", "Switched to active provider: %s\n"), target)
 	}
 	return nil
 }
@@ -300,23 +157,22 @@ func runACPFollow() error {
 // `ccl use` without arguments can switch interactively, mirroring the selection
 // list `ccl set` shows (but without the create-new entry — use only switches
 // between existing providers). It returns "" when the user cancels.
-func selectProviderToUse(cfg *provider.Config, forACP bool) (string, error) {
+func selectProviderToUse(cfg *provider.Config) (string, error) {
 	names := make([]string, 0, len(cfg.Providers)+1)
-	for name := range cfg.Providers {
-		names = append(names, name)
+	for name, p := range cfg.Providers {
+		if provider.ValidateRuntime(p) == nil {
+			names = append(names, name)
+		}
 	}
-	sort.Strings(names)
 	if len(names) == 0 {
 		return "", fmt.Errorf("%s", locale.T(
-			"没有可用的 Provider，请先用 'ccl set' 添加（ccl use default 使用 Claude Code 自身配置）",
-			"no providers configured. Add one first using 'ccl set' (ccl use default runs Claude Code's own configuration)",
+			"没有可用的 Provider。请用 'ccl set' 添加，或运行 ccl use default",
+			"no providers available. Add one with 'ccl set' or run ccl use default",
 		))
 	}
+	sort.Strings(names)
 	names = append([]string{provider.DefaultProvider}, names...)
 	selected := cfg.ActiveProvider
-	if forACP {
-		selected = cfg.EffectiveACPProvider()
-	}
 	labelFor := func(name string) string {
 		if name == selected {
 			return fmt.Sprintf("%s %s", name, locale.T("(当前使用)", "(active)"))
@@ -328,9 +184,6 @@ func selectProviderToUse(cfg *provider.Config, forACP bool) (string, error) {
 		items = append(items, labelFor(name))
 	}
 	prompt := locale.T("选择普通模式要使用的 Provider:", "Select the provider for normal mode:")
-	if forACP {
-		prompt = locale.T("选择 ACP 要使用的 Provider:", "Select the provider for ACP mode:")
-	}
 	chosen, err := runSelect(prompt, items)
 	if err != nil {
 		return "", err
@@ -372,8 +225,8 @@ func runProviderCopy(sourceName, targetName string, force bool) error {
 	}
 	if provider.IsDefaultProvider(target) {
 		return fmt.Errorf(locale.T(
-			"%q 是保留名（Claude Code 自身配置），请换一个名称",
-			"%q is reserved for Claude Code's own configuration; choose another name",
+			"%q 是保留名（Grok Build 自身配置），请换一个名称",
+			"%q is reserved for Grok Build's own configuration; choose another name",
 		), target)
 	}
 	if source == target {
@@ -425,7 +278,7 @@ func runProviderRemove(name string, force, purge bool) error {
 	}
 
 	var removed provider.Provider
-	clearedActive, clearedACP := false, false
+	clearedActive := false
 	// Never switch to another provider on the user's behalf: that could quietly
 	// move the next session onto a different (billed) source. Clear the
 	// selection and say how to pick one.
@@ -436,10 +289,6 @@ func runProviderRemove(name string, force, purge bool) error {
 			c.ActiveProvider = ""
 			clearedActive = true
 		}
-		if c.ACPProvider == targetName {
-			c.ACPProvider = ""
-			clearedACP = true
-		}
 		cfg = c
 		return nil
 	})
@@ -448,9 +297,6 @@ func runProviderRemove(name string, force, purge bool) error {
 	}
 	if clearedActive {
 		fmt.Println(locale.T("当前 Provider 已清空，用 ccl use <name> 选择新的。", "Active provider cleared; choose one with ccl use <name>."))
-	}
-	if clearedACP {
-		fmt.Println(locale.T("ACP 的固定选择已清除，现在跟随普通模式的 Provider。", "ACP's pinned provider was cleared; ACP now follows the normal-mode provider."))
 	}
 
 	fmt.Printf("✅ %s %q\n", locale.T("已删除 Provider", "Successfully deleted provider"), targetName)
@@ -507,8 +353,8 @@ func runProviderMove(sourceName, targetName string, force bool) error {
 	}
 	if provider.IsDefaultProvider(target) {
 		return fmt.Errorf(locale.T(
-			"%q 是保留名（Claude Code 自身配置），请换一个名称",
-			"%q is reserved for Claude Code's own configuration; choose another name",
+			"%q 是保留名（Grok Build 自身配置），请换一个名称",
+			"%q is reserved for Grok Build's own configuration; choose another name",
 		), target)
 	}
 	if source == target {
@@ -540,12 +386,6 @@ func runProviderMove(sourceName, targetName string, force bool) error {
 		if c.ActiveProvider == source {
 			c.ActiveProvider = target
 		}
-		if c.DefaultClaudeProvider == source {
-			c.DefaultClaudeProvider = target
-		}
-		if c.ACPProvider == source {
-			c.ACPProvider = target
-		}
 		return nil
 	})
 	if err != nil {
@@ -560,7 +400,7 @@ func init() {
 	providerCmd.AddCommand(
 		newProviderSetCommand("set [name]"),
 		newProviderListCommand("ls"),
-		newProviderUseCommand("use [--acp] [provider]"),
+		newProviderUseCommand("use [provider]"),
 		newProviderCopyCommand("cp <source> <target>"),
 		newProviderMoveCommand("mv <source> <target>"),
 		newProviderRemoveCommand("rm <name>"),
@@ -569,7 +409,6 @@ func init() {
 		newModelsCommand("models"),
 		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
 		newProviderEffortCommand(),
-		newProviderUltracodeCommand(),
 	)
 	rootCmd.AddCommand(providerCmd)
 }

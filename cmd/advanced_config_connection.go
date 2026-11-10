@@ -46,7 +46,7 @@ func (m *AdvancedConfigModel) configureOAuthRuntime(endpoint, apiKey string, mod
 		// Same result the probe used to produce: pool from the runtime, Model
 		// persisted, empty slots auto-mapped. The endpoint and key stay in
 		// live() only — a subscription's persisted Endpoint is oauth://.
-		m.applyModelDetectionResult("", strings.Join(catalog, ","), "", "", nil)
+		m.applyModelDetectionResult("", strings.Join(catalog, ","), "", nil)
 	}
 	m.urlFocused = false
 	m.keyFocused = false
@@ -291,7 +291,7 @@ func (m *AdvancedConfigModel) startAutoDetect() {
 		m.live().detecting = true
 		m.live().detectProgress = 5
 		m.live().detectFrame = 0
-		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type, m.p.AnthropicAuth)
+		fetchModelsAsync(m.fetchDone, m.live().probeEndpoint, m.live().probeAPIKey, m.p.Type)
 	}
 }
 

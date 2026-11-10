@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -15,7 +14,6 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 
 	want := &provider.Config{
 		ActiveProvider: "gateway",
-		ACPProvider:    "gateway",
 		Providers: map[string]provider.Provider{
 			"gateway": {
 				Name:          "gateway",
@@ -49,42 +47,10 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 	if got.ActiveProvider != want.ActiveProvider ||
-		got.ACPProvider != want.ACPProvider ||
 		got.Providers["gateway"].APIKey != "secret" ||
 		got.Providers["gateway"].OAuthProvider != "gpt" ||
 		got.Providers["gateway"].SubagentModel != "model-subagent" {
 		t.Fatalf("loaded config = %+v, want %+v", got, want)
-	}
-}
-
-// TestLoadLeavesACPFollowingTheActiveProvider pins S9: an empty acp_provider
-// means "follow normal mode" and Load no longer pins (and rewrites) it.
-func TestLoadLeavesACPFollowingTheActiveProvider(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	configDir := filepath.Join(home, ".ccl")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(configDir, "config.yaml")
-	data := []byte("active_provider: alpha\nproviders:\n  alpha:\n    name: alpha\n    type: anthropic\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.ACPProvider != "" || cfg.EffectiveACPProvider() != "alpha" {
-		t.Fatalf("ACP selection = %q (effective %q), want unpinned following alpha", cfg.ACPProvider, cfg.EffectiveACPProvider())
-	}
-	persisted, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(persisted), "acp_provider") {
-		t.Fatalf("Load pinned the ACP provider into the file: %s", persisted)
 	}
 }
 

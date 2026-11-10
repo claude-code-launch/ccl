@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// startAutoClawOAuth runs a CCL-owned Anthropic-to-OpenAI adapter. Claude Code
-// still talks to the usual local /v1/messages endpoint, while CCL sends the
+// startAutoClawOAuth runs a CCL-owned Responses-to-OpenAI Chat adapter. The
+// client talks to the local loopback endpoint, while CCL sends the
 // converted request to AutoClaw's managed OpenAI Chat proxy with the exact
 // X-Authorization/X-Request-Model contract used by the desktop app.
 func startAutoClawOAuth(parent context.Context, _ string, modelSpec, credentialFile string) (*Runtime, error) {
@@ -178,7 +178,7 @@ func normalizeAutoClawRequest(converted *chatCompletionsConvertedRequest, contra
 			}
 		}
 	}
-	// The shared Anthropic-to-Chat converter requests a usage-only final chunk
+	// The shared Responses-to-Chat converter requests a usage-only final chunk
 	// from every OpenAI-compatible backend. AutoClaw's own broker only adds
 	// stream_options for its MiniMax/Moonshot routes; its managed ZAI routes
 	// forward the body without this field. Match that working ZCode shape.

@@ -83,35 +83,6 @@ func TestOAuthProviderOpensWithItsPersistedModelPool(t *testing.T) {
 	}
 }
 
-// The status line is ccl's own, injected through --settings, which outranks the
-// user's ~/.claude/settings.json. This row is the only place to opt out, so it
-// has to be reachable and it has to write the persisted field.
-func TestStatusLineRowRendersAndTogglesTheOptOut(t *testing.T) {
-	p := providerFrom("qoder", "https://example.invalid", "anthropic")
-	p.OAuthProvider = "qoder"
-	m := readyOAuthPage(NewAdvancedConfigModel(&p))
-
-	if view := renderView(t, m); !strings.Contains(view, locale.T("状态栏", "Status Line")) {
-		t.Fatalf("Runtime section is missing the status line row: %q", view)
-	}
-	m.cursor = m.mainRowIndex(rowStatusline)
-	if got := m.currentRow(); got != rowStatusline {
-		t.Fatalf("status line row is not navigable: current row = %v", got)
-	}
-	m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
-	if !m.p.StatuslineDisabled {
-		t.Fatal("right did not switch the status line off")
-	}
-	m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
-	if m.p.StatuslineDisabled {
-		t.Fatal("right did not switch the status line back on")
-	}
-	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
-	if !m.p.StatuslineDisabled {
-		t.Fatal("enter did not toggle the status line")
-	}
-}
-
 // The reported repro: `ccl set sharedchat`, turn 1M off on a model, save, then
 // reopen. The provider page re-probes on open, whose auto-recommendation used to
 // re-enable the marker for every allowlisted model — so the window came back.
@@ -121,7 +92,7 @@ func TestReopeningTheProviderPageKeepsTheOneMOptOut(t *testing.T) {
 	p.Model = "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"
 
 	m := NewAdvancedConfigModel(&p)
-	m.applyModelDetectionResult("openai", p.Model, "", m.live().probeEndpoint, nil)
+	m.applyModelDetectionResult("openai", p.Model, m.live().probeEndpoint, nil)
 	if m.live().oneMSlots["opus"] {
 		t.Fatal("opening the page re-enabled 1M on a slot with no persisted marker")
 	}
@@ -132,7 +103,7 @@ func TestReopeningTheProviderPageKeepsTheOneMOptOut(t *testing.T) {
 
 	// The opposite direction still works: a slot the user did open keeps it.
 	m.live().oneMSlots["opus"] = true
-	m.applyModelDetectionResult("openai", p.Model, "", m.live().probeEndpoint, nil)
+	m.applyModelDetectionResult("openai", p.Model, m.live().probeEndpoint, nil)
 	if !m.live().oneMSlots["opus"] {
 		t.Fatal("re-detection dropped a 1M marker the user had set")
 	}

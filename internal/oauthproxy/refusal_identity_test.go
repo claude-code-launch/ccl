@@ -8,7 +8,7 @@ import (
 func TestRefusalContentAndStopReason(t *testing.T) {
 	for _, kind := range []string{"chat-stream", "chat-json", "responses-stream", "responses-json"} {
 		t.Run(kind, func(t *testing.T) {
-			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+			a := newResponseAssembler(&adapterRequest{}, nil)
 			var err error
 			switch kind {
 			case "chat-stream":
@@ -34,7 +34,7 @@ func TestRefusalContentAndStopReason(t *testing.T) {
 func TestGeminiToolIDsUniqueAcrossResponses(t *testing.T) {
 	seen := make(map[string]bool)
 	for range 3 {
-		a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+		a := newResponseAssembler(&adapterRequest{}, nil)
 		if err := processGeminiNonStream([]byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}}]},"finishReason":"STOP"}]}`), a); err != nil {
 			t.Fatal(err)
 		}

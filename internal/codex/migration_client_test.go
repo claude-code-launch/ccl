@@ -35,38 +35,25 @@ func TestRealCodexSwitchesToIndependentAfterNativeCompaction(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if strings.HasSuffix(r.URL.Path, "/compact") {
 			compactions.Add(1)
-			writeJSON(w, 200, map[string]any{"id": "cmp_native_fixture", "object": "response.compaction", "output": []any{map[string]any{"type": "compaction", "id": "cmp_native_item", "encrypted_content": "opaque-native-compaction-fixture"}}, "usage": responseUsage()})
+			writeJSON(w, 200, map[string]any{"id": "cmp_native_fixture", "object": "response.compaction", "output": []any{map[string]any{"type": "compaction", "id": "cmp_native_item", "encrypted_content": "opaque-native-compaction-fixture"}}, "usage": fixtureResponseUsage(0)})
 			return
 		}
 		items, _ := inputItems(mustMarshalFixture(body["input"]))
 		_, triggered := hoistCompactionTrigger(items)
 		if triggered {
 			compactions.Add(1)
-			w.Header().Set("Content-Type", "text/event-stream")
-			stream := newResponseStream(w, "native-fixture", true, nil)
-			_ = stream.start()
 			item := map[string]any{"type": "compaction", "id": "cmp_native_item", "encrypted_content": "opaque-native-compaction-fixture"}
-			_ = stream.emit("response.output_item.added", map[string]any{"output_index": 0, "item": item})
-			_ = stream.emit("response.output_item.done", map[string]any{"output_index": 0, "item": item})
-			response := stream.response("completed")
-			response["output"] = []any{item}
-			_ = stream.emit("response.completed", map[string]any{"response": response})
+			writeNativeFixture(w, []any{item}, 425001)
 			return
 		}
 		turn := nativeTurns.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		stream := newResponseStream(w, "native-fixture", true, nil)
-		stream.usage = map[string]any{"input_tokens": 425001, "output_tokens": 2, "total_tokens": 425003, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens_details": map[string]any{"reasoning_tokens": 0}}
-		_ = stream.start()
-		_ = stream.addBlock(0, map[string]any{"type": "text", "text": fmt.Sprintf("native-turn-%d", turn)})
-		_ = stream.closeBlock(0)
-		stream.finish()
+		writeNativeFixture(w, []any{migrationNoticeItem(fmt.Sprintf("native-turn-%d", turn))}, 425001)
 	}))
 	defer native.Close()
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("converted provider called before switching")
 		http.Error(w, "unexpected", 500)
-	}, "anthropic", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
+	}, "openai", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
 	shared, err := Plan(context.Background(), g, home+"/shared")
 	if err != nil {
 		t.Fatal(err)
@@ -103,11 +90,11 @@ func TestRealCodexSwitchesToIndependentAfterNativeCompaction(t *testing.T) {
 			t.Error("native compacted context was not recovered")
 		}
 		if strings.Contains(text, "CONTEXT CHECKPOINT COMPACTION") {
-			writeMessage(w, []map[string]any{{"type": "text", "text": "keep-this-goal pending-fix migration handoff summary"}})
+			writeChatText(w, r, "keep-this-goal pending-fix migration handoff summary")
 			return
 		}
-		writeMessage(w, []map[string]any{{"type": "text", "text": "independent-resumed-after-native-compaction"}})
-	}, "anthropic", Options{Independent: true})
+		writeChatText(w, r, "independent-resumed-after-native-compaction")
+	}, "openai", Options{Independent: true})
 	applyClientFixture(t, converted, home)
 	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"OPENAI_API_KEY":`+strconv.Quote(converted.Token())+`}`), 0o600); err != nil {
 		t.Fatal(err)

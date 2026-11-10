@@ -20,6 +20,7 @@ import (
 	"github.com/claude-code-launch/ccl/internal/codexidentity"
 	"github.com/claude-code-launch/ccl/internal/fsutil"
 	"github.com/claude-code-launch/ccl/internal/protocol"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -90,8 +91,12 @@ type codexResponsesService struct {
 	// xai switches the Responses data plane from Codex identity to xAI/Grok
 	// identity: xAI Grok headers replace the Codex turn headers, and the
 	// Codex-specific client_metadata block is omitted. Both backends share the
-	// same OpenAI Responses wire protocol and CCL converter/stream pipeline.
+	// same OpenAI Responses wire protocol.
 	xai bool
+	// flattenTools re-renders requests that use tool kinds only the OpenAI
+	// backend implements (custom tools, namespaces, client tool search) as
+	// plain function tools. Grok needs it when Codex is the client.
+	flattenTools bool
 }
 
 type codexResponsesUpstreamError struct {
@@ -105,25 +110,6 @@ type codexResponsesUpstreamError struct {
 // upstream status, before any client-facing mapping.
 func (e *codexResponsesUpstreamError) upstreamStatus() int        { return e.status }
 func (e *codexResponsesUpstreamError) upstreamRetryAfter() string { return e.retryAfter }
-
-type codexBufferedSSEWriter struct {
-	bytes.Buffer
-	header http.Header
-}
-
-func newCodexBufferedSSEWriter() *codexBufferedSSEWriter {
-	return &codexBufferedSSEWriter{header: make(http.Header)}
-}
-
-func (writer *codexBufferedSSEWriter) Header() http.Header { return writer.header }
-func (*codexBufferedSSEWriter) WriteHeader(int)            {}
-
-func (writer *codexBufferedSSEWriter) Write(p []byte) (int, error) {
-	if writer.Len()+len(p) > anthropicAssemblerMaxRetainedBytes {
-		return 0, fmt.Errorf("compaction response exceeds %d bytes", anthropicAssemblerMaxRetainedBytes)
-	}
-	return writer.Buffer.Write(p)
-}
 
 func (e *codexResponsesUpstreamError) Error() string {
 	message := strings.TrimSpace(e.body)
@@ -285,18 +271,13 @@ func newResponsesService(apiKey, endpoint string, routes []runtimeModelRoute, au
 	return &codexResponsesService{
 		apiKey: apiKey, endpoint: endpoint, models: models, modelRoute: modelRoute,
 		authorizer: authorizer, usage: usage, installationID: uuidString(), windowID: uuidString(),
-		xai:    xai,
+		xai: xai, flattenTools: xai,
 		client: &http.Client{Transport: newUpstreamTransport(90 * time.Second)},
 	}
 }
 
 func (s *codexResponsesService) handler() http.Handler {
-	mux := anthropicFrontMux(s.handleModels, s.handleMessages, s.handleCountTokens)
-	mux.HandleFunc("/v1/responses", s.handleRawResponses)
-	mux.HandleFunc("/responses", s.handleRawResponses)
-	mux.HandleFunc("/v1/responses/compact", s.handleRawResponses)
-	mux.HandleFunc("/responses/compact", s.handleRawResponses)
-	return mux
+	return loopbackFrontMux(s.apiKey, s.handleModels, s.handleResponses)
 }
 
 func (s *codexResponsesService) authorized(request *http.Request) bool {
@@ -307,209 +288,84 @@ func (s *codexResponsesService) handleModels(writer http.ResponseWriter, request
 	serveModelList(writer, request, s.apiKey, s.models)
 }
 
-func (s *codexResponsesService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	_, requestID := withRequestLogID(request.Context())
-	started := time.Now()
-	if !s.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+// handleResponses serves one Responses request. The upstream speaks Responses
+// too, so the request is forwarded as the client sent it; only a request whose
+// tool dialect this upstream does not implement is re-rendered first.
+func (s *codexResponsesService) handleResponses(writer http.ResponseWriter, request *http.Request) {
+	if !inferenceRequestAllowed(writer, request, s.apiKey) {
 		return
 	}
-	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	raw, err := readAnthropicInboundBody(writer, request, codexResponsesMaxBodyBytes)
+	body, err := readInboundBody(writer, request, codexResponsesMaxBodyBytes)
 	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	converted, err := convertAnthropicToCodexResponsesWith(raw, codexConvertHints{
-		compaction: request.Header.Get(claudeCodeCompactionHeader),
-		fast:       request.Header.Get(cclFastModeHeader) != "",
-	}, s.windowID)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+	var payload map[string]any
+	if decodeProtocolJSON(body, &payload) != nil {
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Responses request JSON")
 		return
 	}
-	if route := s.modelRoute[strings.ToLower(converted.clientModel)]; route != "" {
-		var body map[string]any
-		if decodeProtocolJSON(converted.body, &body) == nil {
-			body["model"] = route
-			converted.body, _ = json.Marshal(body)
-		}
+	compact := strings.HasSuffix(request.URL.Path, "/compact")
+	if s.flattenTools && !compact && responsesNeedFlattening(payload) {
+		s.serveConverted(writer, request, body)
+		return
 	}
-	inputTokens, countErr := countCodexResponsesInputTokens(converted.body)
-	estimator := "o200k_base"
-	if countErr != nil {
-		inputTokens = conservativeCodexTokenEstimate(converted.body)
-		estimator = "bytes_over_2_fallback"
-		LogWarnEvent("token_count_fallback", "component", "codex_responses", "request_id", requestID,
-			"model", converted.model, "body_bytes", len(converted.body), "error", countErr)
-	}
-	LogDebugEvent("token_counted", "component", "codex_responses", "request_id", requestID,
-		"model", converted.model, "body_bytes", len(converted.body), "input_tokens", inputTokens,
-		"estimator", estimator, "compaction", converted.compaction,
-		"compaction_reason", converted.compactionReason, "compaction_signals", converted.compactionSignals,
-		"source_messages", converted.sourceMessages, "body_fingerprint", codexRequestFingerprint(converted.body),
-		"duration", logDuration(started))
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": inputTokens})
+	s.servePassthrough(writer, request, payload, compact)
 }
 
-func (s *codexResponsesService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+// serveConverted re-renders the request with plain function tools, then
+// assembles the upstream stream back into the client's own tool dialect.
+func (s *codexResponsesService) serveConverted(writer http.ResponseWriter, request *http.Request, raw []byte) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	requestCtx = withClientSession(requestCtx, request)
 	started := time.Now()
-	LogDebugEvent("request_received", "component", "codex_responses", "request_id", requestID,
-		"path", request.URL.Path, "method", request.Method)
-	if !s.authorized(request) {
-		LogWarnEvent("request_rejected", "component", "codex_responses", "request_id", requestID,
-			"path", request.URL.Path, "status", http.StatusUnauthorized, "reason", "invalid_local_api_key")
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	readStarted := time.Now()
-	raw, err := readAnthropicInboundBody(writer, request, codexResponsesMaxBodyBytes)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	LogDebugEvent("request_body_read", "component", "codex_responses", "request_id", requestID,
-		"body_bytes", len(raw), "duration", logDuration(readStarted))
-	convertStarted := time.Now()
-	converted, err := convertAnthropicToCodexResponsesWith(raw, codexConvertHints{
-		compaction: request.Header.Get(claudeCodeCompactionHeader),
-		fast:       request.Header.Get(cclFastModeHeader) != "",
-	}, s.windowID)
+	converted, err := convertResponsesForUpstream(raw, s.requestSessionID(request))
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "codex_responses", "request_id", requestID,
 			"status", http.StatusBadRequest, "reason", "request_conversion", "error", err)
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	if route := s.modelRoute[strings.ToLower(converted.clientModel)]; route != "" {
-		converted.model = route
-		converted.upstreamModel = route
-		var body map[string]any
-		if decodeProtocolJSON(converted.body, &body) == nil {
-			body["model"] = route
-			converted.body, _ = json.Marshal(body)
-		}
+	route, ok := s.modelRoute[strings.ToLower(converted.clientModel)]
+	if !ok {
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", "model is not in the provider catalog")
+		return
+	}
+	converted.model, converted.upstreamModel = route, route
+	var body map[string]any
+	if decodeProtocolJSON(converted.body, &body) == nil {
+		body["model"] = route
+		converted.body, _ = json.Marshal(body)
 	}
 	LogDebugEvent("request_converted", "component", "codex_responses", "request_id", requestID,
 		"client_model", converted.clientModel, "upstream_model", converted.model,
-		"stream", converted.stream, "compaction", converted.compaction,
-		"compaction_reason", converted.compactionReason, "compaction_signals", converted.compactionSignals,
-		"source_messages", converted.sourceMessages, "body_bytes", len(converted.body),
-		"body_fingerprint", codexRequestFingerprint(converted.body),
-		"duration", logDuration(convertStarted), "auth", map[bool]string{true: "oauth", false: "api_key"}[s.authorizer.isOAuth()])
-	if converted.compaction {
-		LogInfoEvent("compaction_detected", "component", "codex_responses", "request_id", requestID,
-			"model", converted.model, "reason", converted.compactionReason,
-			"signals", converted.compactionSignals, "source_messages", converted.sourceMessages,
-			"source_bytes", len(raw), "converted_bytes", len(converted.body))
-		trimStarted := time.Now()
-		trimmed, stats, trimErr := trimCodexCompactionBody(converted.body, codexCompactionSoftTargetTokens)
-		converted.compactionTokens = stats.finalTokens
-		if trimErr != nil {
-			LogWarnEvent("compaction_preflight_failed", "component", "codex_responses", "request_id", requestID,
-				"model", converted.model, "tokenizer_passes", stats.tokenizerPasses,
-				"duration", logDuration(trimStarted), "error", trimErr)
-		} else if stats.droppedItems > 0 {
-			converted.body = trimmed
-			converted.droppedItems += stats.droppedItems
-			LogWarnEvent("compaction_context_trimmed", "component", "codex_responses", "request_id", requestID,
-				"model", converted.model, "phase", "preflight", "original_tokens", stats.originalTokens,
-				"final_tokens", stats.finalTokens, "dropped_items", stats.droppedItems,
-				"tokenizer_passes", stats.tokenizerPasses, "duration", logDuration(trimStarted))
-		} else {
-			LogDebugEvent("compaction_preflight_complete", "component", "codex_responses", "request_id", requestID,
-				"model", converted.model, "input_tokens", stats.originalTokens,
-				"tokenizer_passes", stats.tokenizerPasses, "duration", logDuration(trimStarted))
-		}
-	}
-	if converted.compaction {
-		LogDebugEvent("compaction_upstream_start", "component", "codex_responses", "request_id", requestID,
-			"model", converted.model, "attempt", 1, "input_tokens", converted.compactionTokens,
-			"input_bytes", len(converted.body), "input_fingerprint", codexRequestFingerprint(converted.body),
-			"dropped_items", converted.droppedItems,
-			"elapsed", logDuration(started))
-	}
-	response, err := s.call(requestCtx, converted.body, converted.sessionID, !converted.compaction)
-	if err != nil && converted.compaction && isCodexContextOverflow(err) {
-		trimStarted := time.Now()
-		trimmed, stats, trimErr := trimCodexCompactionBody(converted.body, codexCompactionRecoveryTarget(converted.body))
-		if trimErr != nil {
-			LogWarnEvent("compaction_recovery_failed", "component", "codex_responses", "request_id", requestID,
-				"model", converted.model, "tokenizer_passes", stats.tokenizerPasses,
-				"duration", logDuration(trimStarted), "error", trimErr)
-		} else if stats.droppedItems > 0 {
-			converted.body = trimmed
-			converted.compactionTokens = stats.finalTokens
-			converted.droppedItems += stats.droppedItems
-			LogWarnEvent("compaction_context_trimmed", "component", "codex_responses", "request_id", requestID,
-				"model", converted.model, "phase", "retry", "original_tokens", stats.originalTokens,
-				"final_tokens", stats.finalTokens, "dropped_items", stats.droppedItems,
-				"tokenizer_passes", stats.tokenizerPasses, "duration", logDuration(trimStarted))
-			LogDebugEvent("compaction_upstream_start", "component", "codex_responses", "request_id", requestID,
-				"model", converted.model, "attempt", 2, "trigger", "http_context_overflow",
-				"input_tokens", converted.compactionTokens, "input_bytes", len(converted.body),
-				"input_fingerprint", codexRequestFingerprint(converted.body),
-				"dropped_items", converted.droppedItems, "elapsed", logDuration(started))
-			response, err = s.call(requestCtx, converted.body, converted.sessionID, false)
-		}
-	}
+		"stream", converted.stream, "body_bytes", len(converted.body))
+	response, err := s.call(requestCtx, converted.body, converted.sessionID, true)
 	if err != nil {
-		var upstreamErr *codexResponsesUpstreamError
-		if errors.As(err, &upstreamErr) {
-			if upstreamErr.retryAfter != "" {
-				writer.Header().Set("Retry-After", upstreamErr.retryAfter)
-			}
-			if upstreamErr.requestID != "" {
-				writer.Header().Set("X-Request-Id", upstreamErr.requestID)
-			}
-			LogUpstreamEvent(upstreamErr.status, "request_failed", "component", "codex_responses", "request_id", requestID,
-				"model", converted.model, "status", upstreamErr.status, "returned_status", upstreamErr.status,
-				"retry_after", upstreamErr.retryAfter, "duration", logDuration(started))
-			writeAnthropicError(writer, upstreamErr.status, anthropicErrorType(upstreamErr.status), upstreamErr.Error())
-			return
-		}
-		LogErrorEvent("request_failed", "component", "codex_responses", "request_id", requestID,
-			"model", converted.model, "returned_status", http.StatusBadGateway, "duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
-		return
-	}
-	if converted.compaction {
-		s.handleCompactionResponse(writer, requestCtx, requestID, started, converted, response)
+		s.writeUpstreamError(writer, requestID, converted.model, started, err)
 		return
 	}
 	defer response.Body.Close()
 	if converted.stream {
-		writer.Header().Set("Content-Type", "text/event-stream")
-		writer.Header().Set("Cache-Control", "no-cache")
-		writer.Header().Set("Connection", "keep-alive")
-		assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, writer)
+		prepareEventStream(writer)
+		assembler := newResponseAssembler(&converted.adapterRequest, writer)
 		err = processCodexResponsesStream(response.Body, assembler)
-		s.recordUsage(converted, assembler)
+		s.recordUsage(converted.clientModel, assembler)
 		if err != nil {
 			LogErrorEvent("stream_conversion_failed", "component", "codex_responses", "request_id", requestID,
 				"model", converted.model, "duration", logDuration(started), "error", err)
-			_ = assembler.emit("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": err.Error()}})
+			assembler.fail("api_error", err.Error())
 			return
 		}
 	} else {
-		assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
+		assembler := newResponseAssembler(&converted.adapterRequest, nil)
 		if err = processCodexResponsesStream(response.Body, assembler); err != nil {
 			LogErrorEvent("stream_conversion_failed", "component", "codex_responses", "request_id", requestID,
 				"model", converted.model, "returned_status", http.StatusBadGateway, "duration", logDuration(started), "error", err)
-			writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+			writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
-		s.recordUsage(converted, assembler)
+		s.recordUsage(converted.clientModel, assembler)
 		writer.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(writer).Encode(assembler.response())
 	}
@@ -517,138 +373,43 @@ func (s *codexResponsesService) handleMessages(writer http.ResponseWriter, reque
 		"model", converted.model, "status", http.StatusOK, "stream", converted.stream, "duration", logDuration(started))
 }
 
-// handleCompactionResponse buffers the upstream stream before exposing it to
-// Claude Code. Codex can return HTTP 200 and only then report context overflow
-// in an SSE error event; buffering lets CCL shrink and retry once without
-// Claude Code turning that event into a minutes-long retry loop.
-func (s *codexResponsesService) handleCompactionResponse(
-	writer http.ResponseWriter,
-	requestCtx context.Context,
-	requestID string,
-	started time.Time,
-	converted *codexResponsesConvertedRequest,
-	response *http.Response,
-) {
-	var (
-		assembler *anthropicResponseAssembler
-		stream    []byte
-		metrics   codexResponsesStreamMetrics
-		err       error
-	)
-	for attempt := 0; attempt < 2; attempt++ {
-		streamStarted := time.Now()
-		upstreamRequestID := firstHeader(response.Header, "X-Request-Id", "Request-Id")
-		assembler, stream, metrics, err = bufferCodexCompactionResponseObserved(response.Body, converted)
-		_ = response.Body.Close()
-		inputTokens, outputTokens := 0, 0
-		if assembler != nil {
-			inputTokens, outputTokens = assembler.tokenTotals()
+func (s *codexResponsesService) writeUpstreamError(writer http.ResponseWriter, requestID, model string, started time.Time, err error) {
+	var upstreamErr *codexResponsesUpstreamError
+	if errors.As(err, &upstreamErr) {
+		if upstreamErr.retryAfter != "" {
+			writer.Header().Set("Retry-After", upstreamErr.retryAfter)
 		}
-		attrs := []any{
-			"component", "codex_responses", "request_id", requestID, "model", converted.model,
-			"attempt", attempt + 1, "upstream_request_id", upstreamRequestID,
-			"input_tokens", inputTokens, "output_tokens", outputTokens,
-			"events", metrics.events, "text_delta_events", metrics.textDeltaEvents,
-			"reasoning_delta_events", metrics.reasoningDeltaEvents,
-			"text_bytes", metrics.textBytes, "reasoning_bytes", metrics.reasoningBytes,
-			"anthropic_stream_bytes", len(stream), "terminal_event", metrics.terminalType,
-			"time_to_first_event", codexStreamMilestone(streamStarted, metrics.firstEventAt),
-			"time_to_first_content", codexStreamMilestone(streamStarted, metrics.firstContentAt),
-			"stream_duration", logDuration(streamStarted), "total_elapsed", logDuration(started),
+		if upstreamErr.requestID != "" {
+			writer.Header().Set("X-Request-Id", upstreamErr.requestID)
 		}
-		if err != nil {
-			attrs = append(attrs, "context_overflow", isCodexContextOverflow(err), "error", err)
-			LogWarnEvent("compaction_stream_failed", attrs...)
-		} else {
-			LogDebugEvent("compaction_stream_complete", attrs...)
-		}
-		if err == nil || attempt > 0 || !isCodexContextOverflow(err) {
-			break
-		}
-
-		trimStarted := time.Now()
-		trimmed, stats, trimErr := trimCodexCompactionBody(converted.body, codexCompactionRecoveryTarget(converted.body))
-		if trimErr != nil || stats.droppedItems == 0 {
-			if trimErr != nil {
-				LogWarnEvent("compaction_recovery_failed", "component", "codex_responses", "request_id", requestID,
-					"model", converted.model, "tokenizer_passes", stats.tokenizerPasses,
-					"duration", logDuration(trimStarted), "error", trimErr)
-			}
-			break
-		}
-		converted.body = trimmed
-		LogWarnEvent("compaction_context_trimmed", "component", "codex_responses", "request_id", requestID,
-			"model", converted.model, "phase", "sse_retry", "original_tokens", stats.originalTokens,
-			"final_tokens", stats.finalTokens, "dropped_items", stats.droppedItems,
-			"tokenizer_passes", stats.tokenizerPasses, "duration", logDuration(trimStarted))
-		converted.compactionTokens = stats.finalTokens
-		converted.droppedItems += stats.droppedItems
-		LogDebugEvent("compaction_upstream_start", "component", "codex_responses", "request_id", requestID,
-			"model", converted.model, "attempt", attempt+2, "trigger", "sse_context_overflow",
-			"input_tokens", converted.compactionTokens, "input_bytes", len(converted.body),
-			"input_fingerprint", codexRequestFingerprint(converted.body),
-			"dropped_items", converted.droppedItems, "elapsed", logDuration(started))
-		response, err = s.call(requestCtx, converted.body, converted.sessionID, false)
-		if err != nil {
-			break
-		}
-	}
-	if err != nil {
-		LogErrorEvent("compaction_failed", "component", "codex_responses", "request_id", requestID,
-			"model", converted.model, "returned_status", http.StatusBadGateway,
-			"duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		LogUpstreamEvent(upstreamErr.status, "request_failed", "component", "codex_responses", "request_id", requestID,
+			"model", model, "status", upstreamErr.status, "returned_status", upstreamErr.status,
+			"retry_after", upstreamErr.retryAfter, "duration", logDuration(started))
+		writeProxyError(writer, upstreamErr.status, proxyErrorType(upstreamErr.status), upstreamErr.Error())
 		return
 	}
-	s.recordUsage(converted, assembler)
-	if converted.stream {
-		writer.Header().Set("Content-Type", "text/event-stream")
-		writer.Header().Set("Cache-Control", "no-cache")
-		writer.Header().Set("Connection", "keep-alive")
-		_, _ = writer.Write(stream)
-	} else {
-		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(assembler.response())
-	}
-	LogDebugEvent("request_complete", "component", "codex_responses", "request_id", requestID,
-		"model", converted.model, "status", http.StatusOK, "stream", converted.stream,
-		"compaction", true, "duration", logDuration(started))
+	LogErrorEvent("request_failed", "component", "codex_responses", "request_id", requestID,
+		"model", model, "returned_status", http.StatusBadGateway, "duration", logDuration(started), "error", err)
+	writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 }
 
-func bufferCodexCompactionResponseObserved(reader io.Reader, converted *codexResponsesConvertedRequest) (*anthropicResponseAssembler, []byte, codexResponsesStreamMetrics, error) {
-	if converted == nil {
-		return nil, nil, codexResponsesStreamMetrics{}, fmt.Errorf("missing converted compaction request")
+// requestSessionID is the client's conversation id, or a fresh one. Codex sends
+// Session_id; Grok Build sends x-grok-conv-id.
+func (s *codexResponsesService) requestSessionID(request *http.Request) string {
+	for _, name := range []string{"Session_id", "X-Grok-Conv-Id", "X-Session-Id"} {
+		if value := strings.TrimSpace(request.Header.Get(name)); value != "" && len(value) <= 256 {
+			return value
+		}
 	}
-	var buffered *codexBufferedSSEWriter
-	var writer http.ResponseWriter
-	if converted.stream {
-		buffered = newCodexBufferedSSEWriter()
-		writer = buffered
-	}
-	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, writer)
-	metrics, err := processCodexResponsesStreamObserved(reader, assembler)
-	if err != nil {
-		return assembler, nil, metrics, err
-	}
-	if buffered == nil {
-		return assembler, nil, metrics, nil
-	}
-	return assembler, append([]byte(nil), buffered.Bytes()...), metrics, nil
+	return uuidString()
 }
 
-func codexStreamMilestone(started, milestone time.Time) time.Duration {
-	if milestone.IsZero() {
-		return 0
-	}
-	return milestone.Sub(started).Round(time.Millisecond)
-}
-
-func (s *codexResponsesService) recordUsage(converted *codexResponsesConvertedRequest, assembler *anthropicResponseAssembler) {
+func (s *codexResponsesService) recordUsage(clientModel string, assembler *responseAssembler) {
 	if s.usage == nil {
 		return
 	}
 	input, output := assembler.tokenTotals()
-	s.usage.Add(converted.clientModel, int64(input), int64(output), int64(assembler.cacheReadTokens), int64(assembler.cacheWriteTokens))
+	s.usage.Add(clientModel, int64(input), int64(output), int64(assembler.cacheReadTokens), int64(assembler.cacheWriteTokens))
 }
 
 // call runs one upstream round-trip inside the shared fast-retry loop: a 429
@@ -832,35 +593,17 @@ func firstHeader(headers http.Header, names ...string) string {
 
 type codexCompactRequest struct{}
 
-// handleRawResponses is also the native Responses hop used by the standalone
-// Codex router. It shares authorization/refresh/retry with Messages requests.
-func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, request *http.Request) {
-	if !s.authorized(request) {
-		writeResponsesError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodPost {
-		writeResponsesError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	body, err := readAnthropicInboundBody(writer, request, codexResponsesMaxBodyBytes)
-	if err != nil {
-		writeResponsesError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	var payload map[string]any
-	if decodeProtocolJSON(body, &payload) != nil {
-		writeResponsesError(writer, http.StatusBadRequest, "invalid_request_error", "invalid Responses request JSON")
-		return
-	}
+// servePassthrough forwards a Responses request to the Responses upstream. It
+// shares authorization, refresh and retry with converted requests, and reads
+// token usage off the relayed stream.
+func (s *codexResponsesService) servePassthrough(writer http.ResponseWriter, request *http.Request, payload map[string]any, compact bool) {
 	model, _ := payload["model"].(string)
 	resolved, ok := s.modelRoute[strings.ToLower(strings.TrimSpace(model))]
 	if !ok {
-		writeResponsesError(writer, 400, "invalid_request_error", "model is not in the provider catalog")
+		writeProxyError(writer, 400, "invalid_request_error", "model is not in the provider catalog")
 		return
 	}
 	payload["model"] = resolved
-	compact := strings.HasSuffix(request.URL.Path, "/compact")
 	wantsStream, _ := payload["stream"].(bool)
 	if !compact {
 		payload["stream"] = true
@@ -869,15 +612,13 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 			payload["include"] = []string{"reasoning.encrypted_content"}
 		}
 	}
-	sessionID := strings.TrimSpace(request.Header.Get("Session_id"))
-	if sessionID == "" || len(sessionID) > 256 {
-		sessionID = uuidString()
-	}
+	sessionID := s.requestSessionID(request)
 	if !compact && payload["prompt_cache_key"] == nil {
 		payload["prompt_cache_key"] = sessionID
 	}
-	body, _ = json.Marshal(payload)
+	body, _ := json.Marshal(payload)
 	ctx, _ := withRequestLogID(request.Context())
+	ctx = withClientSession(ctx, request)
 	if compact {
 		ctx = context.WithValue(ctx, codexCompactRequest{}, true)
 	}
@@ -888,10 +629,10 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 			if upstreamErr.retryAfter != "" {
 				writer.Header().Set("Retry-After", upstreamErr.retryAfter)
 			}
-			writeResponsesError(writer, upstreamErr.status, anthropicErrorType(upstreamErr.status), upstreamErr.Error())
+			writeProxyError(writer, upstreamErr.status, proxyErrorType(upstreamErr.status), upstreamErr.Error())
 			return
 		}
-		writeResponsesError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer response.Body.Close()
@@ -919,9 +660,12 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 			return nil
 		})
 		if err != nil || len(completed) == 0 {
-			writeResponsesError(writer, 502, "api_error", "upstream Responses stream did not complete")
+			writeProxyError(writer, 502, "api_error", "upstream Responses stream did not complete")
 			return
 		}
+		observer := &responsesUsageObserver{}
+		observer.event(completed)
+		s.recordObservedUsage(model, observer)
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(response.StatusCode)
 		_, _ = writer.Write(completed)
@@ -929,10 +673,13 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 	}
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.WriteHeader(response.StatusCode)
+	observer := &responsesUsageObserver{}
+	defer func() { s.recordObservedUsage(model, observer) }()
 	buffer := make([]byte, 32<<10)
 	for {
 		n, err := response.Body.Read(buffer)
 		if n > 0 {
+			observer.observe(buffer[:n])
 			if _, writeErr := writer.Write(buffer[:n]); writeErr != nil {
 				return
 			}
@@ -944,10 +691,63 @@ func (s *codexResponsesService) handleRawResponses(writer http.ResponseWriter, r
 	}
 }
 
-func writeResponsesError(writer http.ResponseWriter, status int, kind, message string) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{"type": kind, "message": message, "param": nil, "code": nil}})
+func (s *codexResponsesService) recordObservedUsage(clientModel string, observer *responsesUsageObserver) {
+	if s.usage == nil || !observer.seen {
+		return
+	}
+	s.usage.Add(clientModel, int64(max(0, observer.input-observer.cached)), int64(observer.output), int64(observer.cached), 0)
+}
+
+// responsesUsageObserver reads token usage off a relayed Responses stream (or
+// JSON body) without altering it. It keeps only the bytes of the event in
+// progress, and gives up on an event too large to be a usage report.
+type responsesUsageObserver struct {
+	pending               []byte
+	input, output, cached int
+	seen                  bool
+}
+
+const responsesUsageObserverMaxEvent = 8 << 20
+
+func (o *responsesUsageObserver) observe(data []byte) {
+	o.pending = append(o.pending, data...)
+	for {
+		end := bytes.Index(o.pending, []byte("\n\n"))
+		if end < 0 {
+			break
+		}
+		o.event(o.pending[:end])
+		o.pending = o.pending[end+2:]
+	}
+	if len(o.pending) > responsesUsageObserverMaxEvent {
+		o.pending = nil
+	}
+}
+
+func (o *responsesUsageObserver) event(raw []byte) {
+	if !bytes.Contains(raw, []byte(`"usage"`)) {
+		return
+	}
+	var data []byte
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if value, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			data = append(data, bytes.TrimSpace(value)...)
+		}
+	}
+	if len(data) == 0 {
+		data = bytes.TrimSpace(raw)
+	}
+	usage := gjson.GetBytes(data, "response.usage")
+	if !usage.Exists() {
+		usage = gjson.GetBytes(data, "usage")
+	}
+	if !usage.IsObject() {
+		return
+	}
+	o.seen = true
+	o.input = int(usage.Get("input_tokens").Int())
+	o.output = int(usage.Get("output_tokens").Int())
+	o.cached = int(usage.Get("input_tokens_details.cached_tokens").Int())
 }
 
 func (a *codexOAuthAuthorizer) isOAuth() bool { return true }

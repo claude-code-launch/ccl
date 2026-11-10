@@ -186,14 +186,13 @@ func startQoderOAuth(parent context.Context, _ string, credentialFile string) (*
 		case <-proxyRuntime.done:
 		}
 	}()
-	LogInfof("runtime start oauth provider=qoder backend=qoder protocol=anthropic port=%s credential_file=%s model_count=%d",
+	LogInfof("runtime start oauth provider=qoder backend=qoder protocol=responses port=%s credential_file=%s model_count=%d",
 		listener.Addr().String(), filepath.Base(credentialFile), len(modelIDs))
 	return proxyRuntime, nil
 }
 
 func (service *qoderService) handler() http.Handler {
-	mux := anthropicFrontMux(service.handleModels, service.handleMessages, service.handleCountTokens)
-	return mux
+	return loopbackFrontMux(service.apiKey, service.handleModels, service.handleResponses)
 }
 
 func (service *qoderService) authorized(request *http.Request) bool {
@@ -204,16 +203,10 @@ func (service *qoderService) handleModels(writer http.ResponseWriter, request *h
 	if !modelsRequestAllowed(writer, request, service.apiKey) {
 		return
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
 	data := make([]map[string]any, 0, len(service.models))
-	ids := make([]string, 0, len(service.models))
 	for _, model := range service.models {
-		item := map[string]any{
-			"id":           model.ID,
-			"type":         "model",
-			"display_name": model.Name,
-			"created_at":   now,
-		}
+		item := modelListEntry(model.ID)
+		item["display_name"] = model.Name
 		if model.ContextWindow > 0 {
 			item["max_input_tokens"] = model.ContextWindow
 		}
@@ -232,62 +225,39 @@ func (service *qoderService) handleModels(writer http.ResponseWriter, request *h
 			item["supported_input_types"] = []string{"text", "image"}
 		}
 		data = append(data, item)
-		ids = append(ids, model.ID)
 	}
-	firstID, lastID := modelPageBounds(ids)
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"data": data, "has_more": false, "first_id": firstID, "last_id": lastID,
-	})
+	writeModelList(writer, data)
 }
 
-func (service *qoderService) handleCountTokens(writer http.ResponseWriter, request *http.Request) {
-	if !service.authorized(request) {
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
-		return
-	}
-	if request.Method != http.MethodPost {
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
-		return
-	}
-	raw, err := readAnthropicInboundBody(writer, request, qoderMaxBodyBytes)
-	if err != nil {
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]any{"input_tokens": estimateApproxTokensBytes(raw)})
-}
-
-func (service *qoderService) handleMessages(writer http.ResponseWriter, request *http.Request) {
+func (service *qoderService) handleResponses(writer http.ResponseWriter, request *http.Request) {
 	requestCtx, requestID := withRequestLogID(request.Context())
 	started := time.Now()
 	if !service.authorized(request) {
 		LogWarnEvent("request_rejected", "component", "qoder", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusUnauthorized, "reason", "invalid_local_api_key")
-		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		writeProxyError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
 	if request.Method != http.MethodPost {
 		LogWarnEvent("request_rejected", "component", "qoder", "request_id", requestID,
 			"path", request.URL.Path, "method", request.Method, "status", http.StatusMethodNotAllowed,
 			"reason", "unsupported_method")
-		writeAnthropicError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
+		writeProxyError(writer, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
-	raw, err := readAnthropicInboundBody(writer, request, qoderMaxBodyBytes)
+	raw, err := readInboundBody(writer, request, qoderMaxBodyBytes)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "qoder", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "read_body", "error", err)
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	converted, err := convertAnthropicToQoder(raw, service.models)
+	converted, err := convertResponsesToQoder(raw, service.models)
 	if err != nil {
 		LogWarnEvent("request_rejected", "component", "qoder", "request_id", requestID,
 			"path", request.URL.Path, "status", http.StatusBadRequest, "reason", "request_conversion",
 			"body_bytes", len(raw), "error", err)
-		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeProxyError(writer, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	LogDebugEvent("request_converted", "component", "qoder", "request_id", requestID,
@@ -302,15 +272,15 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 		if errors.As(err, &upstreamErr) && upstreamErr.status >= 400 && upstreamErr.status < 500 {
 			LogUpstreamEvent(upstreamErr.status, "request_failed", "component", "qoder", "request_id", requestID,
 				"model", converted.model.ID, "status", upstreamErr.status, "returned_status", upstreamErr.status,
-				"error_type", anthropicErrorType(upstreamErr.status), "stream", converted.stream,
+				"error_type", proxyErrorType(upstreamErr.status), "stream", converted.stream,
 				"duration", logDuration(started))
-			writeAnthropicError(writer, upstreamErr.status, anthropicErrorType(upstreamErr.status), err.Error())
+			writeProxyError(writer, upstreamErr.status, proxyErrorType(upstreamErr.status), err.Error())
 			return
 		}
 		LogErrorEvent("request_failed", "component", "qoder", "request_id", requestID,
 			"model", converted.model.ID, "returned_status", http.StatusBadGateway,
 			"stream", converted.stream, "duration", logDuration(started), "error", err)
-		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error())
+		writeProxyError(writer, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	defer upstream.Body.Close()
@@ -319,13 +289,13 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("Cache-Control", "no-cache")
 		writer.Header().Set("Connection", "keep-alive")
-		assembler := newAnthropicResponseAssembler(converted.anthropic, writer)
+		assembler := newResponseAssembler(converted.adapter, writer)
 		usage, streamErr := processQoderEventStream(requestCtx, upstream.Body, assembler)
 		if streamErr == nil {
 			service.recordUsage(converted.model, usage)
 		}
 		if streamErr != nil {
-			if qoderAnthropicErrorType(streamErr) == "rate_limit_error" {
+			if qoderStreamErrorType(streamErr) == "rate_limit_error" {
 				logQoderQueue(requestCtx, converted.model.ID, streamErr)
 			} else {
 				LogErrorEvent("stream_conversion_failed", "component", "qoder", "request_id", requestID,
@@ -338,13 +308,7 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 				writeQoderStreamError(writer, streamErr)
 				return
 			}
-			detail := map[string]any{"type": qoderAnthropicErrorType(streamErr), "message": streamErr.Error()}
-			if seconds := qoderRetryAfterSeconds(streamErr); seconds > 0 {
-				detail["retry_after_seconds"] = seconds
-			}
-			_ = assembler.emit("error", map[string]any{
-				"type": "error", "error": detail,
-			})
+			assembler.fail(qoderStreamErrorType(streamErr), streamErr.Error())
 		}
 		if streamErr == nil {
 			LogDebugEvent("request_complete", "component", "qoder", "request_id", requestID,
@@ -353,11 +317,11 @@ func (service *qoderService) handleMessages(writer http.ResponseWriter, request 
 		return
 	}
 
-	assembler := newAnthropicResponseAssembler(converted.anthropic, nil)
+	assembler := newResponseAssembler(converted.adapter, nil)
 	usage, err := processQoderEventStream(requestCtx, upstream.Body, assembler)
 	if err != nil {
 		status := qoderStreamHTTPStatus(err)
-		if qoderAnthropicErrorType(err) == "rate_limit_error" {
+		if qoderStreamErrorType(err) == "rate_limit_error" {
 			logQoderQueue(requestCtx, converted.model.ID, err)
 		} else {
 			LogErrorEvent("stream_conversion_failed", "component", "qoder", "request_id", requestID,
@@ -832,7 +796,7 @@ type qoderToolState struct {
 	args     strings.Builder
 }
 
-func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *anthropicResponseAssembler) (qoderStreamUsage, error) {
+func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *responseAssembler) (qoderStreamUsage, error) {
 	usage := qoderStreamUsage{}
 	tools := make(map[int]*qoderToolState)
 	retainedArgs := 0
@@ -938,8 +902,8 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 			for _, toolCall := range delta.ToolCalls {
 				state := tools[toolCall.Index]
 				if state == nil {
-					if len(tools) >= anthropicAssemblerMaxToolCalls {
-						return usage, fmt.Errorf("Qoder tool call stream exceeds %d concurrent tool calls", anthropicAssemblerMaxToolCalls)
+					if len(tools) >= assemblerMaxToolCalls {
+						return usage, fmt.Errorf("Qoder tool call stream exceeds %d concurrent tool calls", assemblerMaxToolCalls)
 					}
 					state = &qoderToolState{}
 					tools[toolCall.Index] = state
@@ -951,8 +915,8 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *a
 					state.name = toolCall.Function.Name
 				}
 				if args := toolCall.Function.Arguments; args != "" {
-					if retainedArgs+len(args) > anthropicAssemblerMaxRetainedBytes {
-						return usage, fmt.Errorf("Qoder tool call arguments exceed %d bytes", anthropicAssemblerMaxRetainedBytes)
+					if retainedArgs+len(args) > assemblerMaxRetainedBytes {
+						return usage, fmt.Errorf("Qoder tool call arguments exceed %d bytes", assemblerMaxRetainedBytes)
 					}
 					retainedArgs += len(args)
 					state.args.WriteString(args)
@@ -1027,14 +991,14 @@ func qoderEnvelopeBody(data []byte) ([]byte, error) {
 	return envelope.Body, nil
 }
 
-func qoderAnthropicErrorType(err error) string {
+func qoderStreamErrorType(err error) string {
 	var streamErr *qoderStreamError
 	if errors.As(err, &streamErr) {
 		if streamErr.queue != nil {
 			return "rate_limit_error"
 		}
 		if streamErr.status >= 400 && streamErr.status < 500 {
-			return anthropicErrorType(streamErr.status)
+			return proxyErrorType(streamErr.status)
 		}
 	}
 	return "api_error"
@@ -1065,7 +1029,7 @@ func writeQoderStreamError(writer http.ResponseWriter, err error) {
 	if seconds := qoderRetryAfterSeconds(err); seconds > 0 {
 		writer.Header().Set("Retry-After", strconv.Itoa(seconds))
 	}
-	writeAnthropicError(writer, qoderStreamHTTPStatus(err), qoderAnthropicErrorType(err), err.Error())
+	writeProxyError(writer, qoderStreamHTTPStatus(err), qoderStreamErrorType(err), err.Error())
 }
 
 func logQoderQueue(ctx context.Context, model string, err error) {

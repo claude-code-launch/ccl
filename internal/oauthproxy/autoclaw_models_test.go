@@ -106,9 +106,9 @@ func TestNormalizeAutoClawRequestRoutesImagesToConfiguredImageModel(t *testing.T
 	useAutoClawRuntimeConfig(t, filepath.Join(t.TempDir(), "missing.json"))
 	contract, _ := autoClawEffectiveContract()
 	converted := &chatCompletionsConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{upstreamModel: "zai_auto"},
-		model:                   "zai_auto",
-		body:                    []byte(`{"model":"zai_auto","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}`),
+		adapterRequest: adapterRequest{upstreamModel: "zai_auto"},
+		model:          "zai_auto",
+		body:           []byte(`{"model":"zai_auto","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}`),
 	}
 	if err := normalizeAutoClawRequest(converted, contract); err != nil {
 		t.Fatal(err)

@@ -26,11 +26,11 @@ func TestGeminiJSONPayload(t *testing.T) {
 	}
 }
 
-func geminiTestAssembler(t *testing.T) *anthropicResponseAssembler {
+func geminiTestAssembler(t *testing.T) *responseAssembler {
 	t.Helper()
-	return newAnthropicResponseAssembler(&anthropicAdapterRequest{
+	return newResponseAssembler(&adapterRequest{
 		upstreamModel: "gemini-3-flash", clientModel: "gemini-3-flash", stream: true,
-		thinkingEnabled: true, thinkingSignature: "gemini", maxTokens: 32000, inputTokens: 10,
+		thinkingEnabled: true, maxTokens: 32000, inputTokens: 10,
 		toolNameMap: map[string]string{"get_weather": "get_weather_original"},
 	}, nil)
 }
@@ -62,8 +62,8 @@ func TestProcessGeminiStreamTextThinkingToolUse(t *testing.T) {
 	if blocks[2].Type != "tool_use" || blocks[2].Name != "get_weather_original" {
 		t.Errorf("block[2] = %+v, want tool_use named get_weather_original", blocks[2])
 	}
-	if blocks[2].Input == nil || (*blocks[2].Input)["city"] != "SF" {
-		t.Errorf("block[2].Input = %+v, want city=SF", blocks[2].Input)
+	if string(blocks[2].Arguments) != `{"city":"SF"}` {
+		t.Errorf("block[2].Arguments = %s, want {\"city\":\"SF\"}", blocks[2].Arguments)
 	}
 	if got := assembler.resolvedStopReason(); got != "tool_use" {
 		t.Errorf("stop reason = %q, want tool_use", got)

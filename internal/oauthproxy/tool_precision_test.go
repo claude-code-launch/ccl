@@ -10,7 +10,7 @@ import (
 func TestAssemblerToolArgumentPrecision(t *testing.T) {
 	const input = `{"id":9007199254740993,"nested":[1e1000,0.123456789012345678901]}`
 	w := httptest.NewRecorder()
-	a := newAnthropicResponseAssembler(&anthropicAdapterRequest{stream: true}, w)
+	a := newResponseAssembler(&adapterRequest{stream: true}, w)
 	if err := a.addToolUse("call1", "lookup", input); err != nil {
 		t.Fatal(err)
 	}

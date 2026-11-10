@@ -3,10 +3,10 @@ package cmd
 import "testing"
 
 func TestVersionFlagIsHandledByCclNotForwarded(t *testing.T) {
-	// Anything isCclCommand rejects is handed to Claude Code, which starts a
+	// Anything isCclCommand rejects is handed to Grok Build, which starts a
 	// real session. `ccl --version` asks about ccl, so it must not go there.
 	if !isCclCommand("--version") {
-		t.Fatal("--version is forwarded to Claude Code instead of printing ccl's version")
+		t.Fatal("--version is forwarded to Grok Build instead of printing ccl's version")
 	}
 
 	// Whitelisting alone is not enough: cobra only handles --version when
@@ -24,20 +24,20 @@ func TestVersionFlagIsHandledByCclNotForwarded(t *testing.T) {
 	}
 }
 
-func TestShortVerboseFlagStaysWithClaudeCode(t *testing.T) {
-	// -v is Claude Code's to interpret. Claiming it here would silently change
+func TestShortVerboseFlagStaysWithGrokBuild(t *testing.T) {
+	// -v is Grok Build's to interpret. Claiming it here would silently change
 	// what `ccl -v` does.
 	if isCclCommand("-v") {
-		t.Fatal("-v was claimed by ccl; it should reach Claude Code")
+		t.Fatal("-v was claimed by ccl; it should reach Grok Build")
 	}
 }
 
 func TestRegisteredCommandsAreNotForwarded(t *testing.T) {
 	// A command that ccl owns but isCclCommand misses would launch a billed
 	// session on a plain typo-free invocation.
-	for _, name := range []string{"doctor", "set", "ls", "use", "map", "lang", "version", "provider", "acp", "codex"} {
+	for _, name := range []string{"doctor", "set", "ls", "use", "map", "lang", "version", "provider", "codex"} {
 		if !isCclCommand(name) {
-			t.Fatalf("%q is a ccl command but would be forwarded to Claude Code", name)
+			t.Fatalf("%q is a ccl command but would be forwarded to Grok Build", name)
 		}
 	}
 }

@@ -27,8 +27,8 @@ func TestIndependentOverlayUsesSeparateAuthAndRestoresProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
-				writeMessage(w, []map[string]any{{"type": "text", "text": "done"}})
-			}, "anthropic", Options{Desktop: true, Independent: true})
+				writeChatText(w, r, "done")
+			}, "openai", Options{Desktop: true, Independent: true})
 			overlay, err := Plan(context.Background(), g, t.TempDir())
 			if err != nil {
 				t.Fatal(err)
@@ -127,8 +127,8 @@ func TestIndependentOverlayRetainsLaterUserEdits(t *testing.T) {
 func TestRealCodexIndependentProviderUsesOverlayCredential(t *testing.T) {
 	home, run := isolatedCodexClient(t)
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
-		writeMessage(w, []map[string]any{{"type": "text", "text": "independent-done"}})
-	}, "anthropic", Options{Independent: true})
+		writeChatText(w, r, "independent-done")
+	}, "openai", Options{Independent: true})
 	applyClientFixture(t, g, home)
 	output := run("-c", `web_search="disabled"`, "exec", "--json", "--skip-git-repo-check", "Reply.")
 	if !strings.Contains(output, "independent-done") {

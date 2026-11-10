@@ -141,11 +141,15 @@ func cursorTestStreamRequest(t *testing.T, service *cursorService) *http.Request
 	t.Helper()
 	payload := `{
 		"model":"composer-2",
-		"max_tokens":1024,
+		"max_output_tokens":1024,
 		"stream":true,
-		"messages":[{"role":"user","content":"hello there"}]
+		"tools":[
+			{"type":"function","name":"Read","parameters":{"type":"object"}},
+			{"type":"function","name":"Grep","parameters":{"type":"object"}}
+		],
+		"input":[{"role":"user","content":"hello there"}]
 	}`
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
 	request.Header.Set("x-api-key", service.apiKey)
 	request.Header.Set("Content-Type", "application/json")
 	return request
@@ -154,23 +158,23 @@ func cursorTestStreamRequest(t *testing.T, service *cursorService) *http.Request
 func cursorTestToolResultRequest(t *testing.T, service *cursorService, callID, result string) *http.Request {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{
-		"model":      "composer-2",
-		"max_tokens": 1024,
-		"stream":     true,
-		"messages": []map[string]any{
+		"model":             "composer-2",
+		"max_output_tokens": 1024,
+		"stream":            true,
+		"tools": []map[string]any{
+			{"type": "function", "name": "Read", "parameters": map[string]any{"type": "object"}},
+			{"type": "function", "name": "Grep", "parameters": map[string]any{"type": "object"}},
+		},
+		"input": []map[string]any{
 			{"role": "user", "content": "hello there"},
-			{"role": "assistant", "content": []map[string]any{
-				{"type": "tool_use", "id": callID, "name": "Read", "input": map[string]any{"path": "/tmp/a"}},
-			}},
-			{"role": "user", "content": []map[string]any{
-				{"type": "tool_result", "tool_use_id": callID, "content": result},
-			}},
+			{"type": "function_call", "call_id": callID, "name": "Read", "arguments": `{"path":"/tmp/a"}`},
+			{"type": "function_call_output", "call_id": callID, "output": result},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(payload)))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(payload)))
 	request.Header.Set("x-api-key", service.apiKey)
 	request.Header.Set("Content-Type", "application/json")
 	return request
@@ -228,20 +232,22 @@ func TestCursorStreamEmitsTextThenParksOnMcpCall(t *testing.T) {
 		t.Fatalf("authorization = %q", sawAuthorization)
 	}
 	for _, want := range []string{
-		"event: message_start",
-		`"type":"text_delta","text":"Hi "`,
-		`"type":"text_delta","text":"there"`,
-		`"type":"tool_use","id":"toolu_1","name":"Read"`,
-		`"type":"input_json_delta","partial_json":"{\"path\":\"/tmp/a\"}"`,
-		`"stop_reason":"tool_use"`,
-		"event: message_stop",
+		"event: response.created",
+		`"type":"response.output_text.delta"`,
+		`"delta":"Hi "`,
+		`"delta":"there"`,
+		`"type":"function_call"`,
+		`"call_id":"toolu_1"`,
+		`"name":"Read"`,
+		`"delta":"{\"path\":\"/tmp/a\"}"`,
+		"event: response.completed",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("stream missing %q:\n%s", want, body)
 		}
 	}
-	if !strings.Contains(body, "event: content_block_start") {
-		t.Fatalf("stream has no content block:\n%s", body)
+	if !strings.Contains(body, "event: response.output_item.added") {
+		t.Fatalf("stream has no output item:\n%s", body)
 	}
 	service.mu.Lock()
 	parked := service.parked
@@ -285,7 +291,7 @@ func TestCursorResumesParkedStreamWithToolResult(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("resume status = %d body=%s", status, body)
 	}
-	if !strings.Contains(body, `"type":"text_delta","text":"done"`) {
+	if !strings.Contains(body, `"delta":"done"`) {
 		t.Fatalf("resume stream missing the continued text:\n%s", body)
 	}
 	select {
@@ -460,7 +466,7 @@ func TestCursorStreamFailureBeforeFirstBlockSurfacesAsStatus(t *testing.T) {
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d body=%s, want the upstream 429", status, body)
 	}
-	if strings.Contains(body, "event: message_start") {
+	if strings.Contains(body, "event: response.created") {
 		t.Fatalf("a failed stream must not open, body=%s", body)
 	}
 }

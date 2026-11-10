@@ -116,68 +116,49 @@ type Provider struct {
 	// loopback address only in its runtime copy.
 	Endpoint string `yaml:"endpoint"`
 	APIKey   string `yaml:"apikey"`
-	// Model is ccl's local model pool used for TUI mapping, slot defaults, and
-	// availability checks. For OpenAI-family providers it also supplies the
-	// local runtime routes and aliases; direct Anthropic providers must expose
-	// their own /v1/models to Claude Code.
+	// Model supplies the local model pool, routes, and aliases.
 	Model string            `yaml:"model"`
 	Env   map[string]string `yaml:"env,omitempty"`
-	// AnthropicAuth controls how Claude Code authenticates direct Anthropic-compatible providers.
-	// Empty and "x-api-key" use ANTHROPIC_API_KEY; "bearer" uses ANTHROPIC_AUTH_TOKEN.
+	// AnthropicAuth is retained when editing saved legacy providers.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
 	// values are gpt, gemini, grok, qoder, kimi, kiro, workbuddy,
-	// workbuddycn, autoclaw, and zed. Load folds the retired chatgpt and
-	// codex values into gpt.
+	// workbuddycn, autoclaw, and cursor. Existing codex and xai bindings are
+	// also accepted.
 	OAuthProvider string `yaml:"oauthProvider,omitempty"`
 	// OAuthAccountCredential binds this provider to a single credential file
 	// (basename of the JSON under ~/.ccl/auth). Subscription runtimes require
 	// this binding and load only that account.
 	OAuthAccountCredential string `yaml:"oauthAccountCredential,omitempty"`
 
-	// Custom model configuration (Claude Code native features)
-	CustomModelID  string            `yaml:"customModelId,omitempty"`  // ANTHROPIC_CUSTOM_MODEL_OPTION
-	OpusModel      string            `yaml:"opusModel,omitempty"`      // ANTHROPIC_DEFAULT_OPUS_MODEL
-	SonnetModel    string            `yaml:"sonnetModel,omitempty"`    // ANTHROPIC_DEFAULT_SONNET_MODEL
-	HaikuModel     string            `yaml:"haikuModel,omitempty"`     // ANTHROPIC_DEFAULT_HAIKU_MODEL
-	FableModel     string            `yaml:"fableModel,omitempty"`     // ANTHROPIC_DEFAULT_FABLE_MODEL
-	SubagentModel  string            `yaml:"subagentModel,omitempty"`  // CLAUDE_CODE_SUBAGENT_MODEL
-	ModelOverrides map[string]string `yaml:"modelOverrides,omitempty"` // modelOverrides in settings.json
-	EffortLevel    string            `yaml:"effortLevel,omitempty"`    // CLAUDE_CODE_EFFORT_LEVEL; empty means Default/follow Claude
-	// FastMode mirrors the Claude Code settings.json fastMode flag, the same
-	// toggle flipped by the `/fast` slash command. It routes ChatGPT/Codex
-	// subscription accounts through Codex's faster responses (≈1.5x speed) at
-	// the cost of higher usage; only meaningful for the GPT/Codex Responses
-	// OAuth backend. Empty/zero leaves Claude Code's own setting.
+	// Model slots supply defaults and contribute to the runtime catalog.
+	CustomModelID  string            `yaml:"customModelId,omitempty"`
+	OpusModel      string            `yaml:"opusModel,omitempty"`
+	SonnetModel    string            `yaml:"sonnetModel,omitempty"`
+	HaikuModel     string            `yaml:"haikuModel,omitempty"`
+	FableModel     string            `yaml:"fableModel,omitempty"`
+	SubagentModel  string            `yaml:"subagentModel,omitempty"`
+	ModelOverrides map[string]string `yaml:"modelOverrides,omitempty"`
+	EffortLevel    string            `yaml:"effortLevel,omitempty"`
+	// FastMode requests priority service from GPT's Codex Responses backend.
 	FastMode bool `yaml:"fastMode,omitempty"`
-	// StatuslineDisabled turns off the status line ccl installs for this
-	// provider. ccl writes its status line through Claude Code's --settings,
-	// which outranks the user's own ~/.claude/settings.json, so this flag is the
-	// only way to keep a personal statusLine. Zero means ccl's line is used.
+	// StatuslineDisabled is a retained legacy setting.
 	StatuslineDisabled bool `yaml:"statuslineDisabled,omitempty"`
-	// ModelProtocols maps a lowercase model ID to its upstream protocol
-	// ("anthropic", "openai", or "openai_responses"). It is only used by the
-	// mixed-protocol gateway (Type == "modelsdev"), whose single endpoint serves
-	// models over different wire protocols. Empty means provider-level single
-	// protocol, selected by Type as before.
+	// ModelProtocols maps model IDs to the upstream protocol on a mixed gateway.
+	// Legacy Messages entries are kept in configuration and excluded from routing.
 	ModelProtocols map[string]string `yaml:"modelProtocols,omitempty"`
 	// ModelsDevProvider is the models.dev catalog ID a "modelsdev" provider was
 	// created from. It is separate from Name so the user can call the provider
 	// whatever they like; empty (configs saved before this field) falls back to
 	// Name, which used to be forced to the catalog ID.
 	ModelsDevProvider string `yaml:"modelsDevProvider,omitempty"`
-	// ContextPreset selects a provider-wide context tier ("balanced-500k" or
-	// "balanced-800k"); empty is Claude Code's default sizing. ccl derives the
-	// three Claude Code context variables from it at launch. Older configs
-	// encoded the tier as an exact env triplet, which Load converts.
+	// ContextPreset selects Codex context and compaction metadata.
 	ContextPreset string `yaml:"contextPreset,omitempty"`
-	// Ultracode turns on Claude Code's ultracode setting (a planned workflow per
-	// substantive task) for this provider's sessions.
+	// Ultracode is a retained legacy setting.
 	Ultracode bool `yaml:"ultracode,omitempty"`
 }
 
-// IsClaudeAccount identifies a native Claude subscription profile. It is
-// launched by Claude Code itself, without an embedded OAuth proxy.
+// IsClaudeAccount identifies a legacy profile with credentials outside the OAuth store.
 func IsClaudeAccount(p Provider) bool {
 	return strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "claude")
 }
@@ -190,83 +171,69 @@ func ModelsDevCatalogID(p Provider) string {
 	return strings.TrimSpace(p.Name)
 }
 
-// DefaultProvider is the reserved selector for Claude Code's own
-// configuration: its claude.ai login and ~/.claude settings. Selecting it
+// DefaultProvider is the reserved selector for Grok Build's own
+// login and settings. Selecting it
 // loads no provider; it is never a key of Config.Providers.
 const DefaultProvider = "default"
 
-// IsDefaultProvider reports whether name selects Claude Code's own
+// IsDefaultProvider reports whether name selects Grok Build's own
 // configuration.
 func IsDefaultProvider(name string) bool {
 	return strings.TrimSpace(name) == DefaultProvider
 }
 
-// EffectiveACPProvider is the provider name ACP sessions use: the explicit
-// `ccl use --acp` choice, or the normal-mode provider when none is pinned.
-func (c *Config) EffectiveACPProvider() string {
-	if c == nil {
-		return ""
-	}
-	if name := strings.TrimSpace(c.ACPProvider); name != "" {
-		return name
-	}
-	return strings.TrimSpace(c.ActiveProvider)
-}
-
 type Config struct {
 	ActiveProvider string `yaml:"active_provider"`
-	// DefaultClaudeProvider names the account selected by `ccl use default`.
-	// Empty preserves Claude Code's original profile for existing installations.
-	DefaultClaudeProvider string `yaml:"default_claude_provider,omitempty"`
-	// ACPProvider is only the name selected by `ccl use --acp`. Its settings stay
-	// in the shared Providers map; ACP never owns a duplicate provider config.
-	// Empty means ACP follows ActiveProvider (see EffectiveACPProvider).
-	ACPProvider string `yaml:"acp_provider,omitempty"`
-	Lang        string `yaml:"lang,omitempty"`
-	// BypassMode automatically passes --dangerously-skip-permissions to Claude
-	// Code for every ccl-launched session. It is a global launcher setting.
+	// Retain the legacy selection so upgrading cannot silently change accounts.
+	LegacyClaudeDefault string `yaml:"default_claude_provider,omitempty"`
+	Lang                string `yaml:"lang,omitempty"`
+	// BypassMode automatically passes --always-approve to Grok Build. It is a global launcher setting.
 	BypassMode bool `yaml:"bypass_mode,omitempty"`
 	// ConfigVersion is the schema the file was last written with; see
 	// config.CurrentVersion.
 	ConfigVersion int `yaml:"config_version,omitempty"`
 	// LogLevel is the threshold for ccl's per-session slog files: debug, info,
 	// warn, error, or off. Config loading normalizes an omitted value to off.
-	LogLevel string `yaml:"log_level,omitempty"`
-	// SignOn keeps Claude Code's git/PR attribution in ccl-launched sessions.
-	// It is off unless asked for: ccl writes Claude Code's attribution setting
-	// with empty texts, so commits get no Co-Authored-By trailer.
-	SignOn    bool                `yaml:"sign_on,omitempty"`
+	LogLevel  string              `yaml:"log_level,omitempty"`
 	Providers map[string]Provider `yaml:"providers"`
 }
 
-// ResolveDefault resolves the reserved default selector. An absent account
-// retains the original native Claude configuration; an invalid reference is
-// an error so a removed account cannot silently switch billing identities.
-func (c *Config) ResolveDefault() (Provider, bool, error) {
-	name := strings.TrimSpace(c.DefaultClaudeProvider)
-	if name == "" {
-		return Provider{}, false, nil
+// ValidateRuntime rejects retired providers without changing the saved entry
+// or treating their credentials as belonging to another backend.
+func ValidateRuntime(p Provider) error {
+	if IsDefaultProvider(p.Name) {
+		return fmt.Errorf("select a configured CCL provider for the Responses runtime")
 	}
-	p, ok := c.Providers[name]
-	if !ok || !IsClaudeAccount(p) {
-		return Provider{}, false, fmt.Errorf("default Claude account %q is unavailable; select another with ccl use <name> --default, or restore the original with ccl use default --default", name)
+	if backend := strings.ToLower(strings.TrimSpace(p.OAuthProvider)); backend != "" {
+		if _, ok := OAuthRuntimeType(backend); ok {
+			return nil
+		}
+		switch backend {
+		case "claude", "zed":
+			return fmt.Errorf("OAuth provider %q has been retired; select another provider with ccl use", backend)
+		default:
+			return fmt.Errorf("unsupported OAuth provider %q", backend)
+		}
 	}
-	p.Name = name
-	return p, true, nil
+	switch {
+	case IsOpenAICompatibleType(p.Type), IsModelsDevType(p.Type):
+		return nil
+	case IsAnthropicType(p.Type):
+		return fmt.Errorf("provider %q uses the retired Anthropic Messages protocol; configure a Responses or Chat Completions endpoint with ccl set", p.Name)
+	default:
+		return fmt.Errorf("unsupported provider protocol %q", p.Type)
+	}
 }
 
-// OAuthRuntimeType returns the internal compatibility type ccl persists for an
-// OAuth backend. Zed is represented by openai_responses for local
-// dispatch, but its actual upstream protocol is selected per model. ok is
-// false when the backend is empty or unknown.
+// OAuthRuntimeType identifies the runtime backing a subscription.
 func OAuthRuntimeType(oauthProvider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(oauthProvider)) {
-	case "gpt", "grok", "zed":
+	case "gpt", "codex", "grok", "xai":
 		return "openai_responses", true
 	case "gemini", "kimi", "workbuddy", "workbuddycn":
 		return "openai", true
 	case "kiro", "qoder", "cursor":
-		return "anthropic", true
+		return "openai_responses", true
 	case "autoclaw":
 		return "autoclaw", true
 	default:
@@ -291,10 +258,7 @@ func IsOpenAICompatibleType(providerType string) bool {
 		IsOpenAIResponsesType(providerType)
 }
 
-// IsAnthropicType reports whether the provider speaks the Anthropic Messages
-// protocol directly. AutoClaw has its own compatibility type because it uses
-// the CCL Anthropic-to-OpenAI adapter; it must not be treated as a direct
-// Anthropic endpoint.
+// IsAnthropicType identifies saved providers that use the retired Messages protocol.
 func IsAnthropicType(providerType string) bool {
 	trimmed := strings.TrimSpace(providerType)
 	return strings.EqualFold(trimmed, "anthropic")
@@ -319,8 +283,6 @@ func IsAutoClawType(providerType string) bool {
 // be skipped by the caller.
 func ProtocolForAISdkNPM(npm string) (string, bool) {
 	switch strings.TrimSpace(npm) {
-	case "@ai-sdk/anthropic":
-		return "anthropic", true
 	case "@ai-sdk/openai":
 		return "openai_responses", true
 	case "@ai-sdk/openai-compatible":
@@ -371,27 +333,7 @@ func RuntimeModelSpec(p Provider) string {
 	return strings.Join(models, ",")
 }
 
-// ProtocolLabel returns a short, human-friendly protocol name for display purposes
-// (e.g. in the `set` TUI, `ccl ls`, and `ccl doctor` output). It intentionally does
-// NOT change the underlying stored provider.Type value, which remains a stable,
-// machine-readable string ("anthropic", "openai", "openai_responses", ...) relied on
-// throughout the codebase for dispatch logic (proxy, launcher, doctor, ...).
-//
-// OpenAI exposes two distinct generation protocols behind the same "openai" umbrella:
-//  1. Chat Completions — the old standard, broadest compatibility.
-//  2. Responses — the newer agent protocol.
-//
-// ProtocolLabel renders a provider type as the protocol name shown in `ccl set`,
-// `ccl ls`, and `ccl doctor`:
-//
-//  1. Chat Completions — the old standard, broadest compatibility: "openai-chat".
-//  2. Responses — the newer agent protocol: "openai-responses".
-//  3. Anthropic Messages — Claude Code's native protocol: "anthropic-messages".
-//
-// A backend whose real behavior is not implied by Type carries a " / " qualifier
-// instead of a second set of parentheses: AutoClaw's CCL Anthropic-to-Chat
-// adapter, Zed's per-model dispatch, and models.dev's per-model
-// protocols.
+// ProtocolLabel returns the display name of a configured protocol.
 func ProtocolLabel(providerType string) string {
 	trimmed := strings.TrimSpace(providerType)
 	switch {
@@ -404,7 +346,7 @@ func ProtocolLabel(providerType string) string {
 	case IsOpenAIResponsesType(trimmed):
 		return "openai-responses"
 	case IsAnthropicType(trimmed):
-		return "anthropic-messages"
+		return "anthropic / retired"
 	default:
 		return "openai-chat"
 	}
@@ -414,8 +356,8 @@ func ProtocolLabel(providerType string) string {
 // backends whose real behavior cannot be inferred from the internal Type field.
 func ProtocolLabelForProvider(p Provider) string {
 	switch strings.ToLower(strings.TrimSpace(p.OAuthProvider)) {
-	case "zed":
-		return "zed / auto"
+	case "claude", "zed":
+		return strings.ToLower(strings.TrimSpace(p.OAuthProvider)) + " / retired"
 	}
 	return ProtocolLabel(p.Type)
 }

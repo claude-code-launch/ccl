@@ -132,8 +132,8 @@ func TestQoderEnvelopeRecognizesNestedQueueResponse(t *testing.T) {
 	if streamErr.queue.ModelKey != "qmodel_38max" || streamErr.queue.QueueCount != 5266 || streamErr.queue.RetryAfterSeconds != 30 || !streamErr.queue.ServiceAvailable {
 		t.Fatalf("queue info = %#v", streamErr.queue)
 	}
-	if qoderAnthropicErrorType(err) != "rate_limit_error" || !strings.Contains(err.Error(), "5266 requests ahead") {
-		t.Fatalf("translated queue error = %q (%s)", err, qoderAnthropicErrorType(err))
+	if qoderStreamErrorType(err) != "rate_limit_error" || !strings.Contains(err.Error(), "5266 requests ahead") {
+		t.Fatalf("translated queue error = %q (%s)", err, qoderStreamErrorType(err))
 	}
 }
 
@@ -274,14 +274,14 @@ func TestQoderRuntimeRefreshesCredentialDiscoversModelsAndTranslatesMessages(t *
 	}
 
 	payload := map[string]any{
-		"model": "qmodel[1m]", "max_tokens": 100, "stream": false,
-		"thinking": map[string]any{"type": "enabled", "budget_tokens": 1000},
-		"system":   "follow the system",
-		"tools":    []any{map[string]any{"name": "shell", "description": "run command", "input_schema": map[string]any{"type": "object"}}},
-		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		"model": "qmodel[1m]", "max_output_tokens": 100, "stream": false,
+		"reasoning":    map[string]any{"effort": "high"},
+		"instructions": "follow the system",
+		"tools":        []any{map[string]any{"type": "function", "name": "shell", "description": "run command", "parameters": map[string]any{"type": "object"}}},
+		"input":        []any{map[string]any{"role": "user", "content": "hello"}},
 	}
 	payloadRaw, _ := json.Marshal(payload)
-	req, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", bytes.NewReader(payloadRaw))
+	req, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", bytes.NewReader(payloadRaw))
 	req.Header.Set("Authorization", "Bearer "+runtime.APIKey())
 	req.Header.Set("Content-Type", "application/json")
 	response, err := http.DefaultClient.Do(req)
@@ -291,34 +291,37 @@ func TestQoderRuntimeRefreshesCredentialDiscoversModelsAndTranslatesMessages(t *
 	defer response.Body.Close()
 	responseRaw, _ := io.ReadAll(response.Body)
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("messages status=%d body=%s", response.StatusCode, responseRaw)
+		t.Fatalf("responses status=%d body=%s", response.StatusCode, responseRaw)
 	}
 	var output struct {
-		StopReason string `json:"stop_reason"`
-		Content    []struct {
-			Type      string         `json:"type"`
-			Thinking  string         `json:"thinking"`
-			Signature string         `json:"signature"`
-			Text      string         `json:"text"`
-			ID        string         `json:"id"`
-			Name      string         `json:"name"`
-			Input     map[string]any `json:"input"`
-		} `json:"content"`
+		Status string `json:"status"`
+		Output []struct {
+			Type    string `json:"type"`
+			Summary []struct {
+				Text string `json:"text"`
+			} `json:"summary"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"output"`
 	}
 	if err := json.Unmarshal(responseRaw, &output); err != nil {
 		t.Fatal(err)
 	}
-	if output.StopReason != "tool_use" || len(output.Content) != 3 {
+	if output.Status != "completed" || len(output.Output) != 3 {
 		t.Fatalf("translated response = %+v", output)
 	}
-	if output.Content[0].Type != "thinking" || output.Content[0].Thinking != "think" || output.Content[0].Signature != "qoder" {
-		t.Fatalf("thinking block = %+v", output.Content[0])
+	if output.Output[0].Type != "reasoning" || len(output.Output[0].Summary) != 1 || output.Output[0].Summary[0].Text != "think" {
+		t.Fatalf("reasoning item = %+v", output.Output[0])
 	}
-	if output.Content[1].Type != "text" || output.Content[1].Text != "answer" {
-		t.Fatalf("text block = %+v", output.Content[1])
+	if output.Output[1].Type != "message" || len(output.Output[1].Content) != 1 || output.Output[1].Content[0].Text != "answer" {
+		t.Fatalf("message item = %+v", output.Output[1])
 	}
-	if output.Content[2].Type != "tool_use" || output.Content[2].Name != "shell" || output.Content[2].Input["command"] != "pwd" {
-		t.Fatalf("tool block = %+v", output.Content[2])
+	if output.Output[2].Type != "function_call" || output.Output[2].Name != "shell" || output.Output[2].Arguments != `{"command":"pwd"}` {
+		t.Fatalf("tool item = %+v", output.Output[2])
 	}
 
 	upstreamBody := <-requestBody
@@ -344,53 +347,47 @@ func TestQoderRuntimeRefreshesCredentialDiscoversModelsAndTranslatesMessages(t *
 	}
 }
 
-func TestQoderTransformMessagesAcceptsGatewaySystemRole(t *testing.T) {
-	messages := []anthropicMessage{
+func TestQoderTransformTurnsAcceptsDeveloperRole(t *testing.T) {
+	turns := []conversationTurn{
 		{
-			Role: "system",
-			Content: json.RawMessage(`[
-				{"type":"text","text":"first instruction"},
-				{"type":"text","text":"second instruction","cache_control":{"type":"ephemeral"}}
-			]`),
+			Role: "developer",
+			Parts: []conversationPart{
+				{Kind: partText, Text: "first instruction"},
+				{Kind: partText, Text: "second instruction"},
+			},
 		},
-		{Role: "user", Content: json.RawMessage(`"hello"`)},
+		{
+			Role:  "user",
+			Parts: []conversationPart{{Kind: partText, Text: "hello"}},
+		},
 	}
 
-	transformed, lastUser, err := qoderTransformMessages(messages)
-	if err != nil {
-		t.Fatal(err)
-	}
+	transformed, lastUser := qoderTransformTurns(turns)
 	if lastUser != "hello" {
 		t.Fatalf("last user = %q", lastUser)
 	}
 	if len(transformed) != 2 {
 		t.Fatalf("transformed messages = %+v", transformed)
 	}
-	system := transformed[0].(map[string]any)
-	if system["role"] != "system" || system["content"] != "first instruction\nsecond instruction" {
-		t.Fatalf("system message = %+v", system)
+	user0 := transformed[0].(map[string]any)
+	if user0["role"] != "user" || user0["content"] != "first instruction\nsecond instruction" {
+		t.Fatalf("developer message = %+v", user0)
 	}
-	user := transformed[1].(map[string]any)
-	if user["role"] != "user" || user["content"] != "hello" {
-		t.Fatalf("user message = %+v", user)
+	user1 := transformed[1].(map[string]any)
+	if user1["role"] != "user" || user1["content"] != "hello" {
+		t.Fatalf("user message = %+v", user1)
 	}
 }
 
-// Claude Code 2.1.296 sends this shape: system turns after the first user
-// message and after a tool result, as the last message. GLM behind Qoder
-// rejects a system message there with 1214 "messages 参数非法".
-func TestQoderTransformMessagesSendsSystemTurnsInsideTheConversationAsUser(t *testing.T) {
-	messages := []anthropicMessage{
-		{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"run echo hi"}]`)},
-		{Role: "system", Content: json.RawMessage(`"# Environment"`)},
-		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hi"}}]`)},
-		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"toolu_01","content":"hi"}]`)},
-		{Role: "system", Content: json.RawMessage(`[{"type":"text","text":"<total_tokens>1 tokens left</total_tokens>"}]`)},
+func TestQoderTransformTurnsSendsDeveloperTurnsInsideTheConversationAsUser(t *testing.T) {
+	turns := []conversationTurn{
+		{Role: "user", Parts: []conversationPart{{Kind: partText, Text: "run echo hi"}}},
+		{Role: "developer", Parts: []conversationPart{{Kind: partText, Text: "# Environment"}}},
+		{Role: "assistant", Parts: []conversationPart{{Kind: partToolCall, CallID: "toolu_01", Name: "Bash", Arguments: json.RawMessage(`{"command":"echo hi"}`)}}},
+		{Role: "user", Parts: []conversationPart{{Kind: partToolResult, CallID: "toolu_01", Output: []conversationPart{{Kind: partText, Text: "hi"}}}}},
+		{Role: "developer", Parts: []conversationPart{{Kind: partText, Text: "<total_tokens>1 tokens left</total_tokens>"}}},
 	}
-	transformed, lastUser, err := qoderTransformMessages(messages)
-	if err != nil {
-		t.Fatal(err)
-	}
+	transformed, lastUser := qoderTransformTurns(turns)
 	var roles []string
 	for _, message := range transformed {
 		roles = append(roles, message.(map[string]any)["role"].(string))

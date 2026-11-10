@@ -20,7 +20,7 @@ func TestRealCodexRemoteCatalogListsCCLModels(t *testing.T) {
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) { t.Error("model/list triggered inference") }, "anthropic", Options{Independent: true, CatalogMode: CatalogRemote})
+	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) { t.Error("model/list triggered inference") }, "openai", Options{Independent: true, CatalogMode: CatalogRemote})
 	overlay, err := Plan(context.Background(), g, filepath.Join(home, "proxy"))
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestRemoteCatalogRestoresLocalSourceAndRejectsShared(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
-	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "anthropic", Options{Independent: true, CatalogMode: CatalogRemote})
+	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "openai", Options{Independent: true, CatalogMode: CatalogRemote})
 	overlay, err := Plan(t.Context(), g, filepath.Join(home, "proxy"))
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestRemoteCatalogRestoresLocalSourceAndRejectsShared(t *testing.T) {
 	if err != nil || fields["model_catalog_json"] != filepath.ToSlash(catalog) {
 		t.Fatal("previous catalog source was lost")
 	}
-	if _, err := New(t.Context(), g.runtime, provider.Provider{Name: "chosen", Type: "anthropic"}, Options{Desktop: true, CatalogMode: CatalogRemote}); err == nil {
+	if _, err := New(t.Context(), g.runtime, provider.Provider{Name: "chosen", Type: "openai"}, Options{Desktop: true, CatalogMode: CatalogRemote}); err == nil {
 		t.Fatal("shared local URL accepted")
 	}
 }
@@ -103,7 +103,7 @@ func TestIndependentDefaultSelectionJournalRecoversBothWindows(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(home, "models_cache.json"), []byte(`{"models":[{"slug":"native-original"}]}`), 0600); err != nil {
 				t.Fatal(err)
 			}
-			g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "anthropic", Options{Independent: true})
+			g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "openai", Options{Independent: true})
 			overlay, err := Plan(t.Context(), g, filepath.Join(home, "proxy"))
 			if err != nil {
 				t.Fatal(err)

@@ -8,7 +8,6 @@ import (
 	"os"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -25,66 +24,8 @@ var (
 	kiroLegacyModelPattern = regexp.MustCompile(`(?i)^claude-([0-9]+)-([0-9]+)-(sonnet|opus|haiku|fable)(?:-[0-9]{8})?(?:-thinking|-latest)?$`)
 )
 
-type anthropicMessagesRequest struct {
-	Model        string                    `json:"model"`
-	MaxTokens    int                       `json:"max_tokens"`
-	Messages     []anthropicMessage        `json:"messages"`
-	Stream       bool                      `json:"stream"`
-	System       json.RawMessage           `json:"system"`
-	Tools        []anthropicTool           `json:"tools"`
-	ToolChoice   json.RawMessage           `json:"tool_choice"`
-	Thinking     *anthropicThinking        `json:"thinking"`
-	OutputConfig *anthropicOutput          `json:"output_config"`
-	Metadata     *anthropicRequestMetadata `json:"metadata"`
-	ServiceTier  string                    `json:"service_tier"`
-	Speed        string                    `json:"speed"`
-}
-
-type anthropicMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-}
-
-type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema"`
-}
-
-type anthropicThinking struct {
-	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens"`
-}
-
-type anthropicOutput struct {
-	Effort string          `json:"effort"`
-	Format json.RawMessage `json:"format"`
-}
-
-type anthropicRequestMetadata struct {
-	UserID string `json:"user_id"`
-}
-
-// anthropicAdapterRequest is the client-facing state shared by direct
-// Anthropic-compatible adapters. Upstream-specific converted requests embed it.
-type anthropicAdapterRequest struct {
-	upstreamModel   string
-	clientModel     string
-	stream          bool
-	thinkingEnabled bool
-	// thinkingSignature identifies synthetic reasoning signatures emitted by
-	// direct adapters when the upstream does not provide an Anthropic signature.
-	thinkingSignature string
-	maxTokens         int
-	inputTokens       int
-	toolNameMap       map[string]string
-	// Chat adapters bind returned names to the current declarations. nil is
-	// used by other protocols that enforce their own name mapping.
-	declaredToolNames map[string]struct{}
-}
-
 type kiroConvertedRequest struct {
-	anthropicAdapterRequest
+	adapterRequest
 	body            map[string]any
 	model           string
 	inlineMedia     int
@@ -127,33 +68,26 @@ type kiroContent struct {
 // reports the tooling as broken instead of continuing.
 const kiroEmptyToolResultText = "(no output)"
 
-func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
-	var request anthropicMessagesRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
-		return nil, fmt.Errorf("invalid Anthropic Messages request: %w", err)
+func convertResponsesToKiro(raw []byte) (*kiroConvertedRequest, error) {
+	request, err := parseResponsesRequest(raw)
+	if err != nil {
+		return nil, err
 	}
-	request.Model = strings.TrimSpace(request.Model)
-	if request.Model == "" {
-		return nil, fmt.Errorf("model is required")
-	}
-	if len(request.Messages) == 0 {
-		return nil, fmt.Errorf("messages must not be empty")
-	}
-	if request.MaxTokens <= 0 {
-		request.MaxTokens = 32_000
+	if request.MaxOutputTokens <= 0 {
+		request.MaxOutputTokens = 32_000
 	}
 
 	lastUser := -1
-	for index := len(request.Messages) - 1; index >= 0; index-- {
-		if strings.EqualFold(strings.TrimSpace(request.Messages[index].Role), "user") {
+	for index := len(request.Turns) - 1; index >= 0; index-- {
+		if request.Turns[index].Role == "user" {
 			lastUser = index
 			break
 		}
 	}
 	if lastUser < 0 {
-		return nil, fmt.Errorf("messages must contain a user message")
+		return nil, fmt.Errorf("input must contain a user message")
 	}
-	messages := request.Messages[:lastUser+1]
+	messages := request.Turns[:lastUser+1]
 	model := mapKiroModel(request.Model)
 	toolNameMap := make(map[string]string)
 	tools, declaredTools, err := convertKiroTools(request.Tools, toolNameMap)
@@ -161,12 +95,11 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 		return nil, err
 	}
 
-	thinkingEnabled := request.Thinking != nil &&
-		(strings.EqualFold(request.Thinking.Type, "enabled") || strings.EqualFold(request.Thinking.Type, "adaptive"))
+	thinkingEnabled := request.thinkingEnabled()
 	history := make([]any, 0, len(messages)+2)
-	systemText := extractKiroSystem(request.System)
+	systemText := strings.TrimSpace(request.System)
 	if thinkingEnabled {
-		prefix := kiroThinkingPrefix(request.Thinking, request.OutputConfig)
+		prefix := kiroThinkingPrefix(request.Effort)
 		systemText = strings.TrimSpace(prefix + "\n" + systemText)
 	}
 	if systemText != "" {
@@ -185,12 +118,9 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	historicalToolNames := make(map[string]bool)
 	emptyToolRuns := 0
 	for _, message := range messages[:len(messages)-1] {
-		content, err := parseKiroContent(message.Content, toolNameMap)
-		if err != nil {
-			return nil, err
-		}
+		content := parseKiroContent(message, toolNameMap)
 		emptyToolRuns += content.emptyResults
-		switch strings.ToLower(strings.TrimSpace(message.Role)) {
+		switch message.Role {
 		case "user":
 			userMessage := map[string]any{
 				"content": content.text,
@@ -227,10 +157,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	}
 	history = normalizeKiroHistory(history)
 
-	currentContent, err := parseKiroContent(messages[len(messages)-1].Content, toolNameMap)
-	if err != nil {
-		return nil, err
-	}
+	currentContent := parseKiroContent(messages[len(messages)-1], toolNameMap)
 	emptyToolRuns += currentContent.emptyResults
 	for name := range historicalToolNames {
 		if declaredTools[name] {
@@ -267,7 +194,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 		"agentContinuationId": uuid.NewString(),
 		"agentTaskType":       "vibe",
 		"chatTriggerType":     "MANUAL",
-		"conversationId":      kiroConversationID(request.Metadata),
+		"conversationId":      kiroConversationID(request.CacheKey),
 		"currentMessage":      map[string]any{"userInputMessage": currentMessage},
 	}
 	if len(history) > 0 {
@@ -279,7 +206,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	_, droppedMedia := limitKiroInlineMedia(conversationState, kiroMaxInlineMediaSegments)
 	resizedMedia, correctedMedia := processKiroInlineMedia(conversationState)
 	body := map[string]any{"conversationState": conversationState}
-	if additional := kiroReasoningFields(&request, model); additional != nil {
+	if additional := kiroReasoningFields(request, model); additional != nil {
 		body["additionalModelRequestFields"] = additional
 	}
 	protectedHistoryPrefix := 0
@@ -292,16 +219,7 @@ func convertAnthropicToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	}
 	inlineMedia := countKiroInlineMedia(conversationState)
 	return &kiroConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{
-			upstreamModel:     model,
-			clientModel:       request.Model,
-			stream:            request.Stream,
-			thinkingEnabled:   thinkingEnabled,
-			thinkingSignature: "kiro",
-			maxTokens:         request.MaxTokens,
-			inputTokens:       estimateApproxTokensBytes(raw),
-			toolNameMap:       toolNameMap,
-		},
+		adapterRequest:  kiroAdapter(request, model, toolNameMap),
 		body:            body,
 		model:           model,
 		inlineMedia:     inlineMedia,
@@ -391,86 +309,35 @@ func allKiroDigits(value string) bool {
 	return value != ""
 }
 
-func extractKiroSystem(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return strings.TrimSpace(text)
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &blocks) != nil {
-		return ""
-	}
-	parts := make([]string, 0, len(blocks))
-	for _, block := range blocks {
-		if block.Text != "" {
-			parts = append(parts, block.Text)
-		}
-	}
-	return strings.TrimSpace(strings.Join(parts, "\n"))
+func kiroAdapter(request *conversationRequest, model string, toolNameMap map[string]string) adapterRequest {
+	adapter := request.adapter(model)
+	adapter.toolNameMap = toolNameMap
+	return adapter
 }
 
-func kiroThinkingPrefix(thinking *anthropicThinking, output *anthropicOutput) string {
-	if thinking == nil {
-		return ""
-	}
-	if strings.EqualFold(thinking.Type, "adaptive") {
-		effort := "high"
-		if output != nil && strings.TrimSpace(output.Effort) != "" {
-			effort = normalizeKiroEffort(output.Effort)
-		}
-		return "<thinking_mode>adaptive</thinking_mode><thinking_effort>" + effort + "</thinking_effort>"
-	}
-	budget := thinking.BudgetTokens
-	if budget <= 0 {
-		budget = 20_000
-	}
-	if budget > 24_576 {
-		budget = 24_576
-	}
-	return "<thinking_mode>enabled</thinking_mode><max_thinking_length>" + strconv.Itoa(budget) + "</max_thinking_length>"
+// kiroThinkingPrefix asks for adaptive reasoning at the requested effort.
+func kiroThinkingPrefix(effort string) string {
+	return "<thinking_mode>adaptive</thinking_mode><thinking_effort>" + normalizeKiroEffort(effort) + "</thinking_effort>"
 }
 
-func kiroReasoningFields(request *anthropicMessagesRequest, model string) map[string]any {
-	if request.Thinking != nil && strings.EqualFold(request.Thinking.Type, "disabled") {
+func kiroReasoningFields(request *conversationRequest, model string) map[string]any {
+	if !request.thinkingEnabled() {
 		return nil
 	}
-	supported := model == "claude-opus-4.6" || model == "claude-sonnet-4.6"
-	if !supported {
+	if model != "claude-opus-4.6" && model != "claude-sonnet-4.6" {
 		return nil
 	}
-	if model == "claude-opus-4.6" &&
-		(request.Thinking == nil || !strings.EqualFold(request.Thinking.Type, "adaptive")) {
-		return nil
-	}
-	if request.Thinking == nil && (request.OutputConfig == nil || strings.TrimSpace(request.OutputConfig.Effort) == "") {
-		return nil
-	}
-	effort := "high"
-	if request.OutputConfig != nil && strings.TrimSpace(request.OutputConfig.Effort) != "" {
-		effort = normalizeKiroEffort(request.OutputConfig.Effort)
-	} else if request.Thinking != nil {
-		switch {
-		case request.Thinking.BudgetTokens <= 4_000:
-			effort = "low"
-		case request.Thinking.BudgetTokens <= 16_000:
-			effort = "medium"
-		default:
-			effort = "high"
-		}
-	}
-	return map[string]any{"output_config": map[string]any{"effort": effort}}
+	return map[string]any{"output_config": map[string]any{"effort": normalizeKiroEffort(request.Effort)}}
 }
 
 func normalizeKiroEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "low", "medium", "high", "max":
 		return strings.ToLower(strings.TrimSpace(effort))
+	case "minimal":
+		return "low"
+	case "ultra":
+		return "max"
 	case "xhigh", "x-high", "x_high":
 		return "high"
 	default:
@@ -478,7 +345,7 @@ func normalizeKiroEffort(effort string) string {
 	}
 }
 
-func convertKiroTools(input []anthropicTool, nameMap map[string]string) ([]any, map[string]bool, error) {
+func convertKiroTools(input []conversationTool, nameMap map[string]string) ([]any, map[string]bool, error) {
 	tools := make([]any, 0, len(input))
 	declared := make(map[string]bool, len(input))
 	for _, tool := range input {
@@ -494,7 +361,7 @@ func convertKiroTools(input []anthropicTool, nameMap map[string]string) ([]any, 
 			description = description[:10_000]
 		}
 		var schema any
-		if len(tool.InputSchema) == 0 || json.Unmarshal(tool.InputSchema, &schema) != nil {
+		if len(tool.Parameters) == 0 || json.Unmarshal(tool.Parameters, &schema) != nil {
 			schema = map[string]any{}
 		}
 		normalized := normalizeKiroSchema(schema, true)
@@ -596,69 +463,62 @@ func shortenKiroToolName(name string, nameMap map[string]string) string {
 	return short
 }
 
-func parseKiroContent(raw json.RawMessage, nameMap map[string]string) (kiroContent, error) {
-	var direct string
-	if json.Unmarshal(raw, &direct) == nil {
-		return kiroContent{text: direct}, nil
-	}
-	var blocks []map[string]any
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return kiroContent{}, fmt.Errorf("message content must be a string or content block array")
-	}
+func parseKiroContent(turn conversationTurn, nameMap map[string]string) kiroContent {
 	var result kiroContent
 	var textParts []string
 	var thinkingParts []string
-	for _, block := range blocks {
-		switch strings.ToLower(metadataString(block, "type")) {
-		case "text":
-			if text := metadataString(block, "text"); text != "" {
-				textParts = append(textParts, text)
+	for _, part := range turn.Parts {
+		switch part.Kind {
+		case partText:
+			if part.Text != "" {
+				textParts = append(textParts, part.Text)
 			}
-		case "thinking":
-			if thinking := metadataString(block, "thinking"); thinking != "" {
-				thinkingParts = append(thinkingParts, thinking)
+		case partReasoning:
+			if part.Text != "" {
+				thinkingParts = append(thinkingParts, part.Text)
 			}
-		case "image":
-			if image := kiroImageFromBlock(block); image != nil {
+		case partImage:
+			if image := kiroImageFromPart(part); image != nil {
 				result.images = append(result.images, image)
 			}
-		case "tool_result":
-			toolUseID := metadataString(block, "tool_use_id")
-			if toolUseID == "" {
+		case partToolResult:
+			if part.CallID == "" {
 				continue
 			}
-			resultText, resultImages := extractKiroToolResult(block["content"])
+			resultText := part.outputText()
+			var resultImages []any
+			for _, piece := range part.outputImages() {
+				if image := kiroImageFromPart(piece); image != nil {
+					resultImages = append(resultImages, image)
+				}
+			}
+			if resultText == "" && len(resultImages) > 0 {
+				resultText = "[image attached]"
+			}
 			if resultText == "" && len(resultImages) == 0 {
 				resultText = kiroEmptyToolResultText
 				result.emptyResults++
 			}
 			result.images = append(result.images, resultImages...)
-			isError, _ := block["is_error"].(bool)
-			status := "success"
-			if isError {
-				status = "error"
-			}
-			toolResult := map[string]any{
-				"toolUseId": toolUseID,
+			result.toolResults = append(result.toolResults, map[string]any{
+				"toolUseId": part.CallID,
 				"content":   []any{map[string]any{"text": resultText}},
-				"status":    status,
-			}
-			if isError {
-				toolResult["isError"] = true
-			}
-			result.toolResults = append(result.toolResults, toolResult)
-		case "tool_use":
-			id := metadataString(block, "id")
-			name := shortenKiroToolName(metadataString(block, "name"), nameMap)
-			if id == "" || name == "" {
+				"status":    "success",
+			})
+		case partToolCall:
+			name := shortenKiroToolName(part.Name, nameMap)
+			if part.CallID == "" || name == "" {
 				continue
 			}
-			input := block["input"]
-			if input == nil {
-				input = map[string]any{}
+			var input any = map[string]any{}
+			if len(part.Arguments) > 0 {
+				var decoded map[string]any
+				if json.Unmarshal(part.Arguments, &decoded) == nil && decoded != nil {
+					input = decoded
+				}
 			}
 			result.toolUses = append(result.toolUses, map[string]any{
-				"toolUseId": id,
+				"toolUseId": part.CallID,
 				"name":      name,
 				"input":     input,
 			})
@@ -667,75 +527,37 @@ func parseKiroContent(raw json.RawMessage, nameMap map[string]string) (kiroConte
 	}
 	result.text = strings.Join(textParts, "\n")
 	result.thinking = strings.Join(thinkingParts, "")
-	return result, nil
+	return result
 }
 
-func extractKiroToolResult(value any) (string, []any) {
-	switch typed := value.(type) {
-	case string:
-		return typed, nil
-	case []any:
-		parts := make([]string, 0, len(typed))
-		var images []any
-		for _, item := range typed {
-			block, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text := metadataString(block, "text"); text != "" {
-				parts = append(parts, text)
-			}
-			if strings.EqualFold(metadataString(block, "type"), "image") {
-				if image := kiroImageFromBlock(block); image != nil {
-					images = append(images, image)
-				}
-			}
-		}
-		text := strings.Join(parts, "\n")
-		if text == "" && len(images) > 0 {
-			text = "[image attached]"
-		}
-		return text, images
-	case nil:
-		return "", nil
-	default:
-		raw, _ := json.Marshal(typed)
-		return string(raw), nil
-	}
-}
-
-func kiroImageFromBlock(block map[string]any) any {
-	source, _ := block["source"].(map[string]any)
-	mediaType := metadataString(source, "media_type")
-	format := strings.TrimPrefix(mediaType, "image/")
+func kiroImageFromPart(part conversationPart) any {
+	format := strings.TrimPrefix(part.MediaType, "image/")
 	if format == "jpg" {
 		format = "jpeg"
 	}
-	data := metadataString(source, "data")
-	if data == "" || (format != "jpeg" && format != "png" && format != "gif" && format != "webp") {
+	if part.Data == "" || (format != "jpeg" && format != "png" && format != "gif" && format != "webp") {
 		return nil
 	}
 	return map[string]any{
 		"format": format,
-		"source": map[string]any{"bytes": data},
+		"source": map[string]any{"bytes": part.Data},
 	}
 }
 
-func kiroConversationID(metadata *anthropicRequestMetadata) string {
-	if metadata != nil {
-		if match := kiroSessionUUIDPattern.FindStringSubmatch(metadata.UserID); len(match) == 2 {
-			return match[1]
-		}
-		var value struct {
-			SessionID string `json:"session_id"`
-		}
-		if json.Unmarshal([]byte(metadata.UserID), &value) == nil {
-			if _, err := uuid.Parse(value.SessionID); err == nil {
-				return value.SessionID
-			}
-		}
+// kiroConversationID keeps one upstream conversation per client session. A
+// session key that is not itself a UUID is hashed into a stable one.
+func kiroConversationID(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return uuid.NewString()
 	}
-	return uuid.NewString()
+	if match := kiroSessionUUIDPattern.FindStringSubmatch(sessionKey); len(match) == 2 {
+		return match[1]
+	}
+	if parsed, err := uuid.Parse(sessionKey); err == nil {
+		return parsed.String()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("ccl-kiro-session:"+sessionKey)).String()
 }
 
 func kiroWorkingDirectory() string {

@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -50,75 +49,6 @@ func TestCodexCatalogDefaultsToGPTEffortWhenNoneAreAdvertised(t *testing.T) {
 	info := cased["model-a"]
 	if _, shadow := cased["Model-A"]; shadow || info.ContextWindow != 8192 || info.DisplayName != "A" || len(info.ReasoningLevels) != 6 || info.DefaultReasoningLevel != protocol.GPTDefaultReasoningLevel {
 		t.Fatalf("lowercase metadata was shadowed or dropped: %+v", cased)
-	}
-}
-
-func TestCodexBridgeSkipsHostedTools(t *testing.T) {
-	request := responseRequest{Model: "alias", Input: json.RawMessage(`"fixture"`), Tools: []map[string]any{
-		{"type": "web_search", "external_web_access": true},
-		{"type": "web_search_preview"},
-		{"type": "image_generation"},
-		{"type": "tool_search"},
-		{"type": "function", "name": "read_file", "description": "Read a file", "parameters": map[string]any{"type": "object"}},
-	}}
-	items, err := inputItems(request.Input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, registry, err := toMessages(request, items, Route{Model: "actual"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	if json.Unmarshal(raw, &body) != nil {
-		t.Fatal("invalid Messages JSON")
-	}
-	tools, _ := body["tools"].([]any)
-	if len(tools) != 1 || len(registry) != 1 {
-		t.Fatalf("hosted tools were forwarded: %s", raw)
-	}
-	tool, _ := tools[0].(map[string]any)
-	if tool["description"] != "Read a file" {
-		t.Fatalf("local tool was dropped: %s", raw)
-	}
-	request.Tools = []map[string]any{{"type": "mystery"}}
-	if _, _, err := toMessages(request, items, Route{Model: "actual"}); err == nil || !strings.Contains(err.Error(), `"mystery"`) {
-		t.Fatalf("unknown tool type was accepted: %v", err)
-	}
-}
-
-func TestCodexReasoningSurvivesChatAndStructuredOutputConversion(t *testing.T) {
-	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
-		request := responseRequest{Model: "alias", Input: json.RawMessage(`"fixture"`), Reasoning: map[string]any{"effort": effort}, Text: map[string]any{"format": map[string]any{"type": "json_schema", "schema": map[string]any{"type": "object"}}}}
-		items, _ := inputItems(request.Input)
-		raw, _, err := toMessages(request, items, Route{Model: "actual"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		var body map[string]any
-		if json.Unmarshal(raw, &body) != nil {
-			t.Fatal("invalid Messages JSON")
-		}
-		thinking, _ := body["thinking"].(map[string]any)
-		output, _ := body["output_config"].(map[string]any)
-		if thinking["type"] != "adaptive" || output["effort"] != effort || output["format"] == nil {
-			t.Fatalf("reasoning/format lost for %s: %s", effort, raw)
-		}
-	}
-}
-
-func TestCodexAnthropicReasoningUsesValidTokenBudget(t *testing.T) {
-	request := responseRequest{Input: json.RawMessage(`"fixture"`), MaxOutputTokens: 1024, Reasoning: map[string]any{"effort": "high"}}
-	items, _ := inputItems(request.Input)
-	raw, _, err := toMessages(request, items, Route{Model: "actual", ThinkingBudget: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	_ = json.Unmarshal(raw, &body)
-	thinking := body["thinking"].(map[string]any)
-	if thinking["type"] != "enabled" || number(body["max_tokens"]) <= number(thinking["budget_tokens"]) {
-		t.Fatalf("invalid Anthropic thinking budget: %s", raw)
 	}
 }
 

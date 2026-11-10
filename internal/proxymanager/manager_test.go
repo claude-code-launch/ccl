@@ -75,9 +75,9 @@ func TestCodexProxyRequiresCodexProfile(t *testing.T) {
 }
 
 func TestStandaloneCodexProxyLeavesClaudeSettingsAlone(t *testing.T) {
-	for _, auth := range []string{"", "bearer"} {
+	for _, protocol := range []string{"openai", "openai_responses"} {
 		for _, initial := range []string{"", "{broken Claude settings", `{"model":"original","env":{"KEEP":"original"}}`} {
-			t.Run(auth+"/"+initial, func(t *testing.T) {
+			t.Run(protocol+"/"+initial, func(t *testing.T) {
 				m, path := isolatedManager(t)
 				if initial != "" {
 					if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
@@ -85,18 +85,18 @@ func TestStandaloneCodexProxyLeavesClaudeSettingsAlone(t *testing.T) {
 					}
 				}
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					key := r.Header.Get("X-Api-Key")
-					if auth == "bearer" {
-						key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-					}
-					if key != "fake-upstream-key" || (auth == "bearer" && r.Header.Get("X-Api-Key") != "") || (auth == "" && r.Header.Get("Authorization") != "") {
+					if r.Header.Get("Authorization") != "Bearer fake-upstream-key" || r.Header.Get("X-Api-Key") != "" {
 						t.Error("incorrect provider credentials")
 					}
 					w.Header().Set("Content-Type", "application/json")
-					_, _ = io.WriteString(w, `{"id":"msg_fixture","type":"message","role":"assistant","content":[{"type":"text","text":"codex-ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+					if protocol == "openai_responses" {
+						_, _ = io.WriteString(w, `{"id":"resp_fixture","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"codex-ok"}]}]}`)
+						return
+					}
+					_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"codex-ok"},"finish_reason":"stop"}]}`)
 				}))
 				defer upstream.Close()
-				p := provider.Provider{Name: "chosen", Type: "anthropic", Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream-key", Model: "model-a", AnthropicAuth: auth}
+				p := provider.Provider{Name: "chosen", Type: protocol, Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream-key", Model: "model-a"}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				done := make(chan error, 1)

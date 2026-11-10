@@ -55,7 +55,7 @@ func TestBackendProviderAliases(t *testing.T) {
 }
 
 func TestValidateLoginProviderAcceptsPublicNames(t *testing.T) {
-	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed, ProviderCursor} {
+	for _, name := range []string{ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderCursor} {
 		if _, err := ValidateLoginProvider(name); err != nil {
 			t.Fatalf("ValidateLoginProvider(%q) error: %v", name, err)
 		}
@@ -379,8 +379,8 @@ func TestStartOpenAIChatAPIServesClaudeMessages(t *testing.T) {
 	defer proxyRuntime.Stop()
 
 	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test[1m]")
-	if !strings.Contains(responseBody, "chat ok") || !strings.Contains(responseBody, `"type":"message_stop"`) {
-		t.Fatalf("CCL Chat adapter did not return Claude SSE: %s", responseBody)
+	if !strings.Contains(responseBody, "chat ok") || !strings.Contains(responseBody, `"type":"response.completed"`) {
+		t.Fatalf("CCL Chat adapter did not return Responses SSE: %s", responseBody)
 	}
 	got := <-captured
 	if got.path != "/v1/chat/completions" {
@@ -429,11 +429,8 @@ func TestStartOpenAIResponsesAPIServesClaudeMessages(t *testing.T) {
 	}
 
 	responseBody := postClaudeMessage(t, ctx, proxyRuntime, "gpt-test[1m]")
-	if !strings.Contains(responseBody, "responses ok") || !strings.Contains(responseBody, `"type":"message_stop"`) {
-		t.Fatalf("CCL Chat adapter did not return Claude SSE: %s", responseBody)
-	}
-	if count := strings.Count(responseBody, "responses ok"); count != 1 {
-		t.Fatalf("CCL Responses adapter returned text %d times, want once: %s", count, responseBody)
+	if !strings.Contains(responseBody, "responses ok") || !strings.Contains(responseBody, `"type":"response.completed"`) {
+		t.Fatalf("CCL Responses runtime did not return Responses SSE: %s", responseBody)
 	}
 	got := <-captured
 	if got.path != "/v1/responses" {
@@ -477,24 +474,24 @@ func runtimeModelIDs(t *testing.T, ctx context.Context, proxyRuntime *Runtime) m
 
 func postClaudeMessage(t *testing.T, ctx context.Context, proxyRuntime *Runtime, model string) string {
 	t.Helper()
-	payload := []byte(fmt.Sprintf(`{"model":%q,"max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, model))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/messages", bytes.NewReader(payload))
+	payload := []byte(fmt.Sprintf(`{"model":%q,"max_output_tokens":32,"stream":true,"input":[{"role":"user","content":"hi"}]}`, model))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/responses", bytes.NewReader(payload))
 	if err != nil {
-		t.Fatalf("create Claude request: %v", err)
+		t.Fatalf("create Responses request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+proxyRuntime.APIKey())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("Claude request: %v", err)
+		t.Fatalf("Responses request: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read Claude response: %v", err)
+		t.Fatalf("read Responses response: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Claude response status = %d: %s", resp.StatusCode, body)
+		t.Fatalf("Responses response status = %d: %s", resp.StatusCode, body)
 	}
 	return string(body)
 }
@@ -671,8 +668,8 @@ func TestAPIKeyResponsesPreservesRetryAfterWithoutFastRetry(t *testing.T) {
 	}
 	defer proxyRuntime.Stop()
 
-	payload := []byte(`{"model":"gpt-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/messages", bytes.NewReader(payload))
+	payload := []byte(`{"model":"gpt-test","max_output_tokens":32,"input":[{"role":"user","content":"hi"}]}`)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/responses", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer "+proxyRuntime.APIKey())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -804,28 +801,28 @@ func postClaudeMessageWithTools(t *testing.T, ctx context.Context, proxyRuntime 
 	t.Helper()
 	payload := []byte(fmt.Sprintf(`{
 		"model":%q,
-		"max_tokens":64,
+		"max_output_tokens":64,
 		"stream":true,
-		"tools":[{"name":"lookup","description":"look something up","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],
-		"messages":[{"role":"user","content":"use lookup"}]
+		"tools":[{"type":"function","name":"lookup","description":"look something up","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],
+		"input":[{"role":"user","content":"use lookup"}]
 	}`, model))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/messages", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyRuntime.Endpoint()+"/responses", bytes.NewReader(payload))
 	if err != nil {
-		t.Fatalf("create Claude tool request: %v", err)
+		t.Fatalf("create Responses tool request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+proxyRuntime.APIKey())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("Claude tool request: %v", err)
+		t.Fatalf("Responses tool request: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read Claude tool response: %v", err)
+		t.Fatalf("read Responses tool response: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Claude tool response status = %d: %s", resp.StatusCode, body)
+		t.Fatalf("Responses tool response status = %d: %s", resp.StatusCode, body)
 	}
 	return string(body)
 }
@@ -837,7 +834,7 @@ func assertClaudeToolUse(t *testing.T, responseBody, toolName, argSnippet string
 		sawToolUseType bool
 		sawToolName    bool
 		sawArgSnippet  bool
-		stopReason     string
+		sawCompleted   bool
 	)
 
 	for line := range strings.SplitSeq(responseBody, "\n") {
@@ -856,58 +853,45 @@ func assertClaudeToolUse(t *testing.T, responseBody, toolName, argSnippet string
 		}
 		eventType, _ := event["type"].(string)
 		switch eventType {
-		case "content_block_start":
-			block, _ := event["content_block"].(map[string]any)
-			if block == nil {
+		case "response.output_item.added", "response.output_item.done":
+			item, _ := event["item"].(map[string]any)
+			if item == nil {
 				continue
 			}
-			if blockType, _ := block["type"].(string); blockType == "tool_use" {
+			if itemType, _ := item["type"].(string); itemType == "function_call" || itemType == "custom_tool_call" {
 				sawToolUseType = true
 			}
-			if name, _ := block["name"].(string); name == toolName {
+			if name, _ := item["name"].(string); name == toolName {
 				sawToolName = true
 			}
-		case "content_block_delta":
-			delta, _ := event["delta"].(map[string]any)
-			if delta == nil {
-				continue
-			}
-			if partial, _ := delta["partial_json"].(string); argSnippet != "" && strings.Contains(partial, argSnippet) {
+			if args, _ := item["arguments"].(string); argSnippet != "" && strings.Contains(args, argSnippet) {
 				sawArgSnippet = true
 			}
-		case "message_delta":
-			delta, _ := event["delta"].(map[string]any)
-			if delta == nil {
-				continue
+			if input, _ := item["input"].(string); argSnippet != "" && strings.Contains(input, argSnippet) {
+				sawArgSnippet = true
 			}
-			if reason, _ := delta["stop_reason"].(string); reason != "" {
-				stopReason = reason
+		case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+			if delta, _ := event["delta"].(string); argSnippet != "" && strings.Contains(delta, argSnippet) {
+				sawArgSnippet = true
 			}
-		case "message_start":
-			message, _ := event["message"].(map[string]any)
-			if message == nil {
-				continue
-			}
-			if reason, _ := message["stop_reason"].(string); reason != "" {
-				stopReason = reason
-			}
+		case "response.completed":
+			sawCompleted = true
 		}
 	}
 
 	if !sawToolUseType {
-		t.Fatalf("missing content_block_start tool_use: %s", responseBody)
+		t.Fatalf("missing function_call output item: %s", responseBody)
 	}
 	if !sawToolName {
-		t.Fatalf("missing tool name %q in content_block_start: %s", toolName, responseBody)
+		t.Fatalf("missing tool name %q in function_call item: %s", toolName, responseBody)
 	}
 	if argSnippet != "" && !sawArgSnippet {
-		// Some translators emit the full JSON only in content_block_start.input.
 		if !strings.Contains(responseBody, argSnippet) {
 			t.Fatalf("missing tool arg %q: %s", argSnippet, responseBody)
 		}
 	}
-	if stopReason != "tool_use" {
-		t.Fatalf("stop_reason = %q, want tool_use: %s", stopReason, responseBody)
+	if !sawCompleted {
+		t.Fatalf("missing response.completed event: %s", responseBody)
 	}
 }
 

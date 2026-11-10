@@ -1,6 +1,7 @@
 package oauthproxy
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -16,32 +17,40 @@ func TestBuildMixedRoutesBucketsByProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildMixedRoutes() error: %v", err)
 	}
-	if len(routes.anthropic) != 1 || routes.anthropic[0].Name != "qwen3.8-max" {
-		t.Fatalf("anthropic routes = %+v", routes.anthropic)
-	}
 	if len(routes.responses) != 1 || routes.responses[0].Name != "grok-4.5" {
 		t.Fatalf("responses routes = %+v", routes.responses)
 	}
 	if len(routes.chat) != 1 || routes.chat[0].Name != "glm-5.2" {
 		t.Fatalf("chat routes = %+v", routes.chat)
 	}
-	if len(routes.models) != 3 {
-		t.Fatalf("models = %v, want 3", routes.models)
+	if len(routes.models) != 2 || routes.models[0] != "grok-4.5" || routes.models[1] != "glm-5.2" {
+		t.Fatalf("models = %v, want [grok-4.5 glm-5.2]", routes.models)
 	}
 }
 
 func TestBuildMixedRoutesFallsBackToChat(t *testing.T) {
 	protocols := map[string]string{"qwen3.8-max": "anthropic"}
-	// glm-5.2 is not in the table: it must fall back to chat, not error.
+	// glm-5.2 is not in the table: it must fall back to chat, not error, while qwen3.8-max is excluded.
 	routes, err := buildMixedRoutes("qwen3.8-max,glm-5.2", protocols)
 	if err != nil {
 		t.Fatalf("buildMixedRoutes() error: %v", err)
 	}
-	if len(routes.anthropic) != 1 {
-		t.Fatalf("anthropic routes = %+v, want 1", routes.anthropic)
-	}
 	if len(routes.chat) != 1 || routes.chat[0].Name != "glm-5.2" {
 		t.Fatalf("chat routes = %+v, want glm-5.2 fallback", routes.chat)
+	}
+	if len(routes.models) != 1 || routes.models[0] != "glm-5.2" {
+		t.Fatalf("models = %v, want [glm-5.2]", routes.models)
+	}
+}
+
+func TestBuildMixedRoutesAnthropicOnlyErrors(t *testing.T) {
+	protocols := map[string]string{"qwen3.8-max": "anthropic"}
+	_, err := buildMixedRoutes("qwen3.8-max", protocols)
+	if err == nil {
+		t.Fatal("buildMixedRoutes(anthropic-only) = nil error, want error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "anthropic") || !strings.Contains(strings.ToLower(err.Error()), "no longer supports") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

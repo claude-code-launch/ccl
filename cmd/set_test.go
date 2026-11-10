@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,81 +71,6 @@ func newMockGatewayServer(t *testing.T, models []string, responsesSupported bool
 	return server
 }
 
-func TestDetectProtocolAndModelsDetectsAnthropic(t *testing.T) {
-	var messageCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/anthropic/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if r.Header.Get("Authorization") != "" {
-			t.Fatalf("non-version x-api-key probe should not send bearer")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"claude-3-5-sonnet","type":"model"}]}`))
-	})
-	mux.HandleFunc("/anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&messageCalls, 1)
-		http.Error(w, "messages should not be probed during setup", http.StatusInternalServerError)
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	proto, models, err := detectProtocolAndModels(server.URL+"/anthropic", "test-key")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if proto != "anthropic" {
-		t.Errorf("expected protocol 'anthropic', got %q", proto)
-	}
-	if models != "claude-3-5-sonnet" {
-		t.Errorf("expected models 'claude-3-5-sonnet', got %q", models)
-	}
-	if got := atomic.LoadInt32(&messageCalls); got != 0 {
-		t.Fatalf("expected no /messages probes during setup, got %d", got)
-	}
-}
-
-func TestDetectProtocolAndModelsClassifiesV1SuffixByShape(t *testing.T) {
-	var messageCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "" {
-			t.Fatalf("v1 suffix should not send x-api-key")
-		}
-		if r.Header.Get("Authorization") != "Bearer test-key" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"sensenova-6.7-flash-lite","type":"model"}]}`))
-	})
-	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&messageCalls, 1)
-		http.Error(w, "messages should not be probed during setup", http.StatusInternalServerError)
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	result := detectProtocolAndModelsDetailed(server.URL+"/v1", "test-key")
-	if result.err != nil {
-		t.Fatalf("unexpected error: %v", result.err)
-	}
-	if result.protocol != "anthropic" {
-		t.Errorf("expected protocol 'anthropic', got %q", result.protocol)
-	}
-	if result.anthropicAuth != anthropicAuthBearer {
-		t.Errorf("expected bearer Anthropic auth, got %q", result.anthropicAuth)
-	}
-	if result.models != "sensenova-6.7-flash-lite" {
-		t.Errorf("expected models 'sensenova-6.7-flash-lite', got %q", result.models)
-	}
-	if got := atomic.LoadInt32(&messageCalls); got != 0 {
-		t.Fatalf("expected no /messages probes during setup, got %d", got)
-	}
-}
-
 func TestDetectProtocolAndModelsTreatsOpenAIShapedBearerModelsAsOpenAIWithoutMessages(t *testing.T) {
 	var xAPIKeyCalls int32
 	var messageCalls int32
@@ -186,9 +112,6 @@ func TestDetectProtocolAndModelsTreatsOpenAIShapedBearerModelsAsOpenAIWithoutMes
 	if result.protocol != "openai" {
 		t.Fatalf("expected OpenAI protocol, got %q", result.protocol)
 	}
-	if result.anthropicAuth != "" {
-		t.Fatalf("expected empty Anthropic auth, got %q", result.anthropicAuth)
-	}
 	if result.baseURL != server.URL {
 		t.Fatalf("expected original base URL %q, got %q", server.URL, result.baseURL)
 	}
@@ -200,52 +123,6 @@ func TestDetectProtocolAndModelsTreatsOpenAIShapedBearerModelsAsOpenAIWithoutMes
 	}
 	if got := atomic.LoadInt32(&messageCalls); got != 0 {
 		t.Fatalf("expected no /messages probes during setup, got %d", got)
-	}
-}
-
-func TestFetchModelsForProviderUsesAnthropicBearerAuth(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "" {
-			http.Error(w, "Authorization Not Found", http.StatusUnauthorized)
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer test-key" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"sensenova-u1-fast"},{"id":"sensenova-6.7-flash-lite"}]}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	models := fetchModelsForProvider(provider.Provider{
-		Type:          "anthropic",
-		Endpoint:      server.URL,
-		APIKey:        "test-key",
-		AnthropicAuth: anthropicAuthBearer,
-	})
-
-	if got, want := strings.Join(models, ","), "sensenova-u1-fast,sensenova-6.7-flash-lite"; got != want {
-		t.Fatalf("expected models %q, got %q", want, got)
-	}
-}
-
-func TestApplyModelDetectionResultNormalizesAnthropicEndpoint(t *testing.T) {
-	p := provider.Provider{Endpoint: "https://token.sensenova.cn/v1"}
-	m := NewAdvancedConfigModel(&p)
-
-	m.applyModelDetectionResult("anthropic", "sensenova-u1-fast", anthropicAuthBearer, "", nil)
-
-	if p.Endpoint != "https://token.sensenova.cn" {
-		t.Fatalf("expected endpoint without /v1, got %q", p.Endpoint)
-	}
-	if p.AnthropicAuth != anthropicAuthBearer {
-		t.Fatalf("expected bearer auth, got %q", p.AnthropicAuth)
-	}
-	if p.Model != "sensenova-u1-fast" {
-		t.Fatalf("expected detected model pool to be saved, got %q", p.Model)
 	}
 }
 
@@ -324,7 +201,7 @@ func TestApplyModelDetectionResultFailsWhenDetectionFailsWithoutExistingType(t *
 	}
 	m := NewAdvancedConfigModel(&p)
 
-	m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
+	m.applyModelDetectionResult("", "", "", assertErr("models failed"))
 
 	if m.live().detectionError == nil {
 		t.Fatalf("expected detection error to be set")
@@ -347,7 +224,7 @@ func TestApplyModelDetectionResultDoesNotFallbackToExistingPoolOnFailure(t *test
 	}
 	m := NewAdvancedConfigModel(&p)
 
-	m.applyModelDetectionResult("", "", "", "", assertErr("models failed"))
+	m.applyModelDetectionResult("", "", "", assertErr("models failed"))
 
 	if m.live().detectionError == nil {
 		t.Fatalf("expected detection error instead of falling back to existing local models")
@@ -384,7 +261,7 @@ func TestConnectionEditRevertClearsDirty(t *testing.T) {
 	m.live().probeAPIKey = "test-key"
 	m.live().modelPool = []string{"gpt-test"}
 	m.live().modelPoolFromDiscovery = true
-	m.applyModelDetectionResult("openai", "gpt-test", "", "https://api.example.com/v1", nil)
+	m.applyModelDetectionResult("openai", "gpt-test", "https://api.example.com/v1", nil)
 	if m.live().detectionError != nil {
 		t.Fatalf("unexpected detection error: %v", m.live().detectionError)
 	}
@@ -539,9 +416,6 @@ func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
 		Type:          "openai_responses",
 		Endpoint:      "https://example.test/v1",
 		CustomModelID: "main-model",
-		Env: map[string]string{
-			"CLAUDE_CODE_SUBAGENT_MODEL": "legacy-env-model",
-		},
 	}
 	m := NewAdvancedMappingModel(&p, []string{"main-model", "cheap-subagent-model"}, nil)
 	m.cursor = m.mainRowIndex(rowSubagent)
@@ -556,9 +430,6 @@ func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
 	if p.SubagentModel != "cheap-subagent-model" {
 		t.Fatalf("subagent mapping = %q", p.SubagentModel)
 	}
-	if _, ok := p.Env["CLAUDE_CODE_SUBAGENT_MODEL"]; ok {
-		t.Fatal("managed subagent mapping should remove the legacy env override")
-	}
 }
 
 func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
@@ -569,27 +440,26 @@ func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
 	p := provider.Provider{
 		Type:          "openai_responses",
 		Endpoint:      "https://example.test/v1",
-		CustomModelID: "subagent-model",
+		SubagentModel: "subagent-model",
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "subagent-model")
 	m.cursor = m.mainRowIndex(rowSubagent)
 
 	view := renderView(t, m)
-	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "(auto: subagent-model)") {
+	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "subagent-model") {
 		t.Fatalf("single page does not show Subagent: %q", view)
 	}
 	if !strings.Contains(view, "Default  200K / 1M & 85%") {
 		t.Fatalf("single page missing compact summary: %q", view)
 	}
-	// Space on the Subagent row toggles the per-slot 1M marker and materializes the
-	// runtime subagent default.
+	// Space on the Subagent row toggles its catalog context marker.
 	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
 	if !m.live().oneMSlots["subagent"] {
 		t.Fatal("Subagent 1M option was not enabled")
 	}
 	if p.SubagentModel != "subagent-model" {
-		t.Fatalf("automatic subagent model was not materialized: %q", p.SubagentModel)
+		t.Fatalf("subagent mapping was lost: %q", p.SubagentModel)
 	}
 
 	applyCompactConfig(&p, m.live().oneMSlots, compactPresetDefault)
@@ -617,7 +487,7 @@ func TestManualReviewPageShowsRuntimeSettings(t *testing.T) {
 	for _, expected := range []string{
 		"Runtime",
 		"Subagent", "gpt-5.6-sol",
-		"Fast", "Status Line",
+		"Fast",
 		"Set as active provider",
 		"Save & Activate",
 	} {
@@ -667,7 +537,7 @@ func TestAutoReviewPageShowsRuntimeControls(t *testing.T) {
 
 	view := renderView(t, m)
 	// Runtime editors are always available on the single page.
-	if !strings.Contains(view, "Runtime") || !strings.Contains(view, "Status Line") {
+	if !strings.Contains(view, "Runtime") || !strings.Contains(view, "Fast") {
 		t.Fatalf("review should show runtime editors, got %q", view)
 	}
 }
@@ -683,7 +553,7 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 		t.Fatalf("protocol toggle stored %q, want openai_responses", p.Type)
 	}
 	view := renderView(t, m)
-	for _, want := range []string{"‹ Responses ›", "Status Line"} {
+	for _, want := range []string{"‹ Responses ›", "Fast"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("Responses review should contain %q, got %q", want, view)
 		}
@@ -878,7 +748,6 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 		server.URL+"/v1",
 		"test-key",
 		"openai_responses",
-		"",
 		nil,
 		lowCostProbeModel,
 		false,
@@ -939,7 +808,7 @@ func TestApplyModelDetectionResultUsesDiscoveredModelsOnly(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 
-	m.applyModelDetectionResult("openai", "new-a,new-b", "", "", nil)
+	m.applyModelDetectionResult("openai", "new-a,new-b", "", nil)
 
 	if m.live().detectionError != nil {
 		t.Fatalf("unexpected detection error: %v", m.live().detectionError)
@@ -1010,113 +879,17 @@ func TestDetectProtocolAndModelsPreservesCustomBasePath(t *testing.T) {
 	}
 }
 
-func TestModelProbeCandidatesUseConfiguredBaseAndPathHints(t *testing.T) {
-	tests := []struct {
-		name     string
-		endpoint string
-		wantURL  string
-		wantAuth modelProbeAuth
-	}{
-		{name: "anthropic suffix", endpoint: "https://example.test/anthropic", wantURL: "https://example.test/anthropic/v1/models", wantAuth: modelProbeAuthXAPIKey},
-		{name: "claude suffix", endpoint: "https://example.test/claude", wantURL: "https://example.test/claude/v1/models", wantAuth: modelProbeAuthXAPIKey},
-		{name: "version suffix", endpoint: "https://example.test/api/v4", wantURL: "https://example.test/api/v4/models", wantAuth: modelProbeAuthBearer},
-		{name: "custom path suffix", endpoint: "https://example.test/codex", wantURL: "https://example.test/codex/models", wantAuth: modelProbeAuthBearer},
-		{name: "generic OpenAI base", endpoint: "https://example.test/api", wantURL: "https://example.test/api/models", wantAuth: modelProbeAuthBearer},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			candidates := buildModelProbeCandidates(tt.endpoint)
-			if len(candidates) != 2 {
-				t.Fatalf("candidate count = %d, want 2", len(candidates))
-			}
-			if candidates[0].modelsURL != tt.wantURL {
-				t.Fatalf("first model URL = %q, want %q", candidates[0].modelsURL, tt.wantURL)
-			}
-			if candidates[0].auth != tt.wantAuth {
-				t.Fatalf("first auth = %q, want %q", candidates[0].auth, tt.wantAuth)
-			}
-		})
-	}
-}
-
 func TestApplyModelDetectionResultDoesNotInferProtocolFromPath(t *testing.T) {
 	p := provider.Provider{Endpoint: "https://example.test/codex", APIKey: "test-key"}
 	m := NewAdvancedConfigModel(&p)
 
-	m.applyModelDetectionResult("openai", "gpt-5.4-mini", "", p.Endpoint, nil)
+	m.applyModelDetectionResult("openai", "gpt-5.4-mini", p.Endpoint, nil)
 
 	if p.Type != "openai" {
 		t.Fatalf("detected protocol = %q, want openai", p.Type)
 	}
 	if !m.canSelectCustomProtocol() {
 		t.Fatal("manual OpenAI protocol must remain selectable on the review page")
-	}
-}
-
-func TestCustomProtocolCyclesChatResponsesAndAnthropic(t *testing.T) {
-	p := provider.Provider{
-		Type:     "openai",
-		Endpoint: "https://example.test/v1",
-		APIKey:   "test-key",
-	}
-	m := NewAdvancedConfigModel(&p)
-	enterDetectedReview(m, "model")
-	m.live().detectedInputEndpoint = p.Endpoint
-	m.cursor = m.mainRowIndex(rowProtocol)
-
-	if view := renderView(t, m); !strings.Contains(view, "‹ Chat ›") {
-		t.Fatalf("custom protocol row does not show Chat: %q", view)
-	}
-
-	steps := []struct {
-		wantType     string
-		wantLabel    string
-		wantEndpoint string
-	}{
-		{wantType: "openai_responses", wantLabel: "Responses", wantEndpoint: "https://example.test/v1"},
-		{wantType: "anthropic", wantLabel: "Anthropic", wantEndpoint: "https://example.test"},
-		{wantType: "openai", wantLabel: "Chat", wantEndpoint: "https://example.test/v1"},
-	}
-	for _, want := range steps {
-		m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
-		if p.Type != want.wantType || p.Endpoint != want.wantEndpoint {
-			t.Fatalf("protocol cycle = type %q endpoint %q, want %q %q", p.Type, p.Endpoint, want.wantType, want.wantEndpoint)
-		}
-		if view := renderView(t, m); !strings.Contains(view, "‹ "+want.wantLabel+" ›") {
-			t.Fatalf("custom protocol row does not show %s: %q", want.wantLabel, view)
-		}
-	}
-
-	// Reverse cycling from Chat reaches Anthropic directly.
-	m.handleKey(tui.KeyEvent{Key: tui.KeyLeft})
-	if p.Type != "anthropic" || p.Endpoint != "https://example.test" {
-		t.Fatalf("reverse protocol cycle = type %q endpoint %q", p.Type, p.Endpoint)
-	}
-	if m.live().connectionDirty {
-		t.Fatal("selecting a wire protocol must not invalidate the verified endpoint/key")
-	}
-}
-
-func TestCustomProtocolPreservesDetectedAnthropicBearerAuth(t *testing.T) {
-	p := provider.Provider{
-		Type:          "anthropic",
-		Endpoint:      "https://example.test",
-		APIKey:        "test-key",
-		AnthropicAuth: anthropicAuthBearer,
-	}
-	m := NewAdvancedConfigModel(&p)
-	enterDetectedReview(m, "model")
-	m.live().detectedInputEndpoint = "https://example.test/v1"
-	m.cursor = m.mainRowIndex(rowProtocol)
-
-	m.cycleCustomProtocol(1)
-	if p.Type != "openai" || p.AnthropicAuth != "" {
-		t.Fatalf("Chat selection retained Anthropic state: type=%q auth=%q", p.Type, p.AnthropicAuth)
-	}
-	m.cycleCustomProtocol(-1)
-	if p.Type != "anthropic" || p.AnthropicAuth != anthropicAuthBearer {
-		t.Fatalf("Anthropic selection did not restore bearer auth: type=%q auth=%q", p.Type, p.AnthropicAuth)
 	}
 }
 
@@ -1146,49 +919,6 @@ func TestDetectProtocolAndModelsAcceptsCodexV1AsOrdinaryBase(t *testing.T) {
 	result := detectProtocolAndModelsDetailed(server.URL+"/codex/v1", "test-key")
 	if result.err != nil || result.protocol != "openai" || result.models != "gpt-test" {
 		t.Fatalf("ordinary base path detection = protocol %q models %q err %v", result.protocol, result.models, result.err)
-	}
-}
-
-func TestDetectProtocolAndModelsNonVersionProbeFallsBackToXAPIKeyModels(t *testing.T) {
-	var bearerCalls int32
-	var xAPIKeyCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			atomic.AddInt32(&bearerCalls, 1)
-			http.Error(w, "bearer unsupported", http.StatusUnauthorized)
-			return
-		}
-		if r.Header.Get("x-api-key") != "test-key" {
-			http.Error(w, "missing x-api-key", http.StatusUnauthorized)
-			return
-		}
-		atomic.AddInt32(&xAPIKeyCalls, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"data": [{
-				"id": "claude-router",
-				"type": "model",
-				"created_at": "2026-07-09T00:00:00Z"
-			}],
-			"has_more": false
-		}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	proto, models, err := detectProtocolAndModels(server.URL+"/api", "test-key")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if proto != "anthropic" || models != "claude-router" {
-		t.Fatalf("expected Anthropic x-api-key detection, got proto=%q models=%q", proto, models)
-	}
-	if got := atomic.LoadInt32(&bearerCalls); got != 1 {
-		t.Fatalf("expected one bearer probe before x-api-key fallback, got %d", got)
-	}
-	if got := atomic.LoadInt32(&xAPIKeyCalls); got != 1 {
-		t.Fatalf("expected one x-api-key shape probe, got %d", got)
 	}
 }
 
@@ -1228,131 +958,6 @@ func TestDetectProtocolAndModelsUsesBearerOnUnversionedOpenAIPath(t *testing.T) 
 	}
 	if got := atomic.LoadInt32(&bearerCalls); got != 1 {
 		t.Fatalf("expected one bearer probe, got %d", got)
-	}
-}
-
-func TestDetectProtocolAndModelsTriesXAPIKeyForAnthropicBasePath(t *testing.T) {
-	var xAPIKeyCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/anthropic/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "test-key" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if r.Header.Get("Authorization") != "" {
-			t.Fatalf("non-version x-api-key probe should not send bearer")
-		}
-		atomic.AddInt32(&xAPIKeyCalls, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"data": [{
-				"id": "deepseek-v4-pro",
-				"type": "model",
-				"display_name": "DeepSeek V4 Pro",
-				"created_at": "2026-07-08T00:00:00Z"
-			}],
-			"has_more": false
-		}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	proto, models, err := detectProtocolAndModels(server.URL+"/anthropic", "test-key")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if proto != "anthropic" {
-		t.Fatalf("expected anthropic protocol, got %q", proto)
-	}
-	if models != "deepseek-v4-pro" {
-		t.Fatalf("unexpected models: %q", models)
-	}
-	if got := atomic.LoadInt32(&xAPIKeyCalls); got != 1 {
-		t.Fatalf("expected one x-api-key probe, got %d", got)
-	}
-}
-
-func TestDetectProtocolAndModelsFailsAnthropicSuffixWithoutModelList(t *testing.T) {
-	var xAPIKeyCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/anthropic/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "" {
-			atomic.AddInt32(&xAPIKeyCalls, 1)
-		}
-		http.Error(w, "not found", http.StatusNotFound)
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	proto, models, err := detectProtocolAndModels(server.URL+"/anthropic", "test-key")
-	if err == nil {
-		t.Fatalf("expected detection error when /anthropic/v1/models is unavailable")
-	}
-	if proto != "" || models != "" {
-		t.Fatalf("expected empty protocol/models on failure, got proto=%q models=%q", proto, models)
-	}
-	if got := atomic.LoadInt32(&xAPIKeyCalls); got != 1 {
-		t.Fatalf("expected one x-api-key probe, got %d", got)
-	}
-}
-
-func TestDetectProtocolAndModelsShapeProbeDetectsAnthropicShape(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			http.Error(w, "bearer unsupported", http.StatusUnauthorized)
-			return
-		}
-		if r.Header.Get("x-api-key") != "test-key" {
-			http.Error(w, "missing x-api-key", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"data": [{
-				"id": "claude-router",
-				"type": "model",
-				"created_at": "2026-07-09T00:00:00Z"
-			}],
-			"hasMore": false
-		}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	result := detectProtocolAndModelsDetailed(server.URL+"/api", "test-key")
-	if result.err != nil {
-		t.Fatalf("unexpected error: %v", result.err)
-	}
-	if result.protocol != "anthropic" {
-		t.Fatalf("expected Anthropic from response shape, got %q", result.protocol)
-	}
-	if result.anthropicAuth != anthropicAuthXAPIKey {
-		t.Fatalf("expected x-api-key auth, got %q", result.anthropicAuth)
-	}
-	if result.models != "claude-router" {
-		t.Fatalf("unexpected models: %q", result.models)
-	}
-}
-
-func TestDetectProtocolAndModelsRequiresAnthropicPathSuffix(t *testing.T) {
-	var xAPIKeyCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/anthropic/proxy/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "" {
-			atomic.AddInt32(&xAPIKeyCalls, 1)
-		}
-		http.Error(w, "not found", http.StatusNotFound)
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	_, _, err := detectProtocolAndModels(server.URL+"/anthropic/proxy", "test-key")
-	if err == nil {
-		t.Fatalf("expected detection error")
-	}
-	if got := atomic.LoadInt32(&xAPIKeyCalls); got != 1 {
-		t.Fatalf("expected one combined shape probe when anthropic is not the path suffix, got %d", got)
 	}
 }
 
@@ -1581,7 +1186,7 @@ func TestDetectProtocolAndModelsFallsBackToOpenAIChat(t *testing.T) {
 	}
 }
 
-func TestDetectProtocolAndModelsBothFail(t *testing.T) {
+func TestDetectProtocolAndModelsReportsAuthFailure(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -1591,7 +1196,7 @@ func TestDetectProtocolAndModelsBothFail(t *testing.T) {
 
 	proto, models, err := detectProtocolAndModels(server.URL+"/v1", "bad-key")
 	if err == nil {
-		t.Fatalf("expected error when both protocols fail")
+		t.Fatalf("expected an authentication error")
 	}
 	if models != "" {
 		t.Errorf("expected empty models on failure, got %q", models)
@@ -1599,8 +1204,8 @@ func TestDetectProtocolAndModelsBothFail(t *testing.T) {
 	if proto != "" {
 		t.Errorf("expected empty protocol on failure, got %q", proto)
 	}
-	if !strings.Contains(err.Error(), "unsupported protocol") && !strings.Contains(err.Error(), "暂不支持这个协议") {
-		t.Errorf("expected unsupported protocol error, got %q", err.Error())
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("expected authentication error, got %q", err.Error())
 	}
 }
 
@@ -1704,23 +1309,6 @@ func TestReviewRuntimeFieldsAreEditable(t *testing.T) {
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-test")
-	m.cursor = m.mainRowIndex(rowStatusline)
-
-	m.handleKey(tui.KeyEvent{Key: tui.KeyRight})
-	if !m.p.StatuslineDisabled {
-		t.Fatal("status line should be disabled after right")
-	}
-	view := renderView(t, m)
-	if !strings.Contains(view, "‹ ") || !strings.Contains(view, " ›") {
-		t.Fatalf("expected editable ‹ › markers, got %q", view)
-	}
-	if strings.Contains(view, "Max Output") || strings.Contains(view, "Tool Search") || !strings.Contains(view, "Status Line") {
-		t.Fatalf("expected only supported runtime editors, got %q", view)
-	}
-	// Effort row must be gone.
-	if strings.Contains(view, "Claude Code managed") || strings.Contains(view, "Effort") {
-		t.Fatalf("effort row should be removed from review, got %q", view)
-	}
 }
 
 func TestRandomProviderNameUniqueAndPrefixed(t *testing.T) {
@@ -1741,5 +1329,19 @@ func TestRandomProviderNameUniqueAndPrefixed(t *testing.T) {
 			t.Fatalf("name %q was generated twice", name)
 		}
 		seen[name] = true
+	}
+}
+
+func TestDetectProtocolRejectsRetiredModelList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer key" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"data":[{"id":"legacy","type":"model"}],"has_more":false}`)
+	}))
+	defer server.Close()
+	result := detectProtocolAndModelsDetailed(server.URL+"/v1", "key")
+	if result.err == nil || !strings.Contains(result.err.Error(), "retired Anthropic Messages") {
+		t.Fatalf("legacy endpoint accepted: %+v", result)
 	}
 }

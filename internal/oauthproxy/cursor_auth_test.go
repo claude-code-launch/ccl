@@ -285,20 +285,20 @@ func TestCursorEffectiveModelsKeepsConfiguredAliasesFirst(t *testing.T) {
 	}
 }
 
-func TestConvertAnthropicToCursorSplitsHistoryAndResume(t *testing.T) {
+func TestConvertResponsesToCursorSplitsHistoryAndResume(t *testing.T) {
 	raw := []byte(`{
 		"model":"composer-2[1m]",
-		"max_tokens":1024,
+		"max_output_tokens":1024,
 		"stream":true,
-		"thinking":{"type":"enabled","budget_tokens":2048},
-		"tools":[{"name":"Read","description":"read","input_schema":{"type":"object","properties":{}}}],
-		"messages":[
+		"reasoning":{"effort":"medium"},
+		"tools":[{"type":"function","name":"Read","description":"read","parameters":{"type":"object","properties":{}}}],
+		"input":[
 			{"role":"user","content":"hello"},
-			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"path":"/tmp/a"}}]},
-			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"contents"}]}]}
+			{"type":"function_call","call_id":"call_1","name":"Read","arguments":"{\"path\":\"/tmp/a\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"contents"}
 		]
 	}`)
-	converted, err := convertAnthropicToCursor(raw)
+	converted, err := convertResponsesToCursor(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,10 +322,10 @@ func TestConvertAnthropicToCursorSplitsHistoryAndResume(t *testing.T) {
 	}
 }
 
-func TestConvertAnthropicToCursorThinkingDisabled(t *testing.T) {
-	raw := []byte(`{"model":"composer-2","max_tokens":16,"thinking":{"type":"disabled"},` +
-		`"messages":[{"role":"user","content":"hi"}]}`)
-	converted, err := convertAnthropicToCursor(raw)
+func TestConvertResponsesToCursorThinkingDisabled(t *testing.T) {
+	raw := []byte(`{"model":"composer-2","max_output_tokens":16,"reasoning":{"effort":"none"},` +
+		`"input":[{"role":"user","content":"hi"}]}`)
+	converted, err := convertResponsesToCursor(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

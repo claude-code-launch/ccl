@@ -22,6 +22,7 @@ func TestNativeHistoryPreservesNativeStateAndReplaysCCLSummaries(t *testing.T) {
 	}
 	body, _ := json.Marshal(map[string]any{"model": "native", "store": false, "include": []string{"reasoning.encrypted_content"}, "input": []any{
 		map[string]any{"type": "reasoning", "id": "rs_legacy_ccl", "summary": []any{}},
+		map[string]any{"type": "reasoning", "id": "rs_ccl_local", "encrypted_content": "adapter-opaque", "summary": []any{}},
 		map[string]any{"type": "reasoning", "id": "rs_native", "encrypted_content": "native-encrypted", "summary": []any{}},
 		map[string]any{"type": "compaction", "id": "cmp_ccl", "status": "completed", "encrypted_content": encodeCompactionSummary("keep-this-goal")},
 		map[string]any{"type": "message", "role": "user", "content": "continue"},
@@ -66,15 +67,15 @@ func TestCodexSwitchesBetweenConvertedAndNativeHistory(t *testing.T) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if convertedCalls.Add(1) == 1 {
-			writeMessage(w, []map[string]any{{"type": "thinking", "thinking": "fixture thinking"}, {"type": "tool_use", "id": "call_local", "name": findTool(t, body, "lookup"), "input": map[string]any{}}})
+			writeChatFixture(w, r, map[string]any{"reasoning_content": "fixture thinking", "tool_calls": []any{chatFixtureTool("call_local", findTool(t, body, "lookup"), map[string]any{})}}, "tool_calls", 3)
 			return
 		}
 		raw := textValue(body["messages"])
 		if !strings.Contains(raw, "native-continued") || !strings.Contains(raw, "tool-result") || strings.Contains(raw, "native-encrypted") {
 			t.Errorf("converted replay lost context or leaked opaque state: %s", raw)
 		}
-		writeMessage(w, []map[string]any{{"type": "text", "text": "converted-continued"}})
-	}, "anthropic", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
+		writeChatText(w, r, "converted-continued")
+	}, "openai", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
 	tools := []any{map[string]any{"type": "function", "name": "lookup"}}
 	first := responseObject(t, postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "keep-this-goal", "tools": tools}))
 	history := []any{map[string]any{"role": "user", "content": "keep-this-goal"}}

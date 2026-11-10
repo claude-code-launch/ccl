@@ -42,11 +42,11 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 				t.Error("native credential or account changed across reload")
 			}
 			_, _ = io.WriteString(w, `{"route":"native-ok"}`)
-		case "/v1/messages":
-			if r.Header.Get("X-Api-Key") != "fake-provider-key" || r.Header.Get("Authorization") != "" || r.Header.Get("Chatgpt-Account-Id") != "" {
+		case "/v1/chat/completions":
+			if r.Header.Get("X-Api-Key") != "" || r.Header.Get("Authorization") != "Bearer fake-provider-key" || r.Header.Get("Chatgpt-Account-Id") != "" {
 				t.Error("native credentials crossed the provider boundary")
 			}
-			_, _ = io.WriteString(w, `{"id":"msg_fixture","type":"message","role":"assistant","content":[{"type":"text","text":"converted-ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"converted-ok"},"finish_reason":"stop"}]}`)
 		default:
 			http.Error(w, "unexpected upstream path", 404)
 		}
@@ -61,7 +61,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(`{"models":[{"slug":"native-fixture"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p := provider.Provider{Name: "first", Type: "anthropic", Endpoint: upstream.URL + "/v1", APIKey: "fake-provider-key", Model: "model-a", CustomModelID: "model-a"}
+	p := provider.Provider{Name: "first", Type: "openai", Endpoint: upstream.URL + "/v1", APIKey: "fake-provider-key", Model: "model-a", CustomModelID: "model-a"}
 	other := p
 	other.Name = "second"
 	if err := config.Save(&provider.Config{ActiveProvider: p.Name, Providers: map[string]provider.Provider{p.Name: p, other.Name: other}}); err != nil {

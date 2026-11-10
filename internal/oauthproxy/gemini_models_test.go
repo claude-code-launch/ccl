@@ -57,7 +57,7 @@ func TestGeminiCatalogUsesActualWireVariants(t *testing.T) {
 			t.Fatalf("invented route for %+v", test)
 		}
 	}
-	converted, err := convertAnthropicToAntigravityWithCatalog([]byte(`{"model":"Gemini 4 Argon","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"echo","input_schema":{"type":"object"}}]}`), c)
+	converted, err := convertResponsesToAntigravityWithCatalog([]byte(`{"model":"Gemini 4 Argon","input":[{"role":"user","content":"hi"}],"tools":[{"type":"function","name":"echo","parameters":{"type":"object"}}]}`), c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestGeminiRuntimeDiscoversAndRoutesFamily(t *testing.T) {
 	if runtime.ModelCatalogIsFallback() || !strings.Contains(strings.Join(runtime.Models(), ","), "gemini-4-argon") || strings.Contains(strings.Join(runtime.Models(), ","), "stale-model") {
 		t.Fatalf("models = %v", runtime.Models())
 	}
-	req, _ := http.NewRequest(http.MethodPost, runtime.ClaudeBaseURL()+"/v1/messages", strings.NewReader(`{"model":"gemini-4-argon","max_tokens":100,"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hello"}]}`))
+	req, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", strings.NewReader(`{"model":"gemini-4-argon","max_output_tokens":100,"reasoning":{"effort":"low"},"input":[{"role":"user","content":"hello"}]}`))
 	req.Header.Set("X-Api-Key", runtime.APIKey())
 	response, err := server.Client().Do(req)
 	if err != nil {
@@ -250,7 +250,7 @@ func TestGeminiRuntimeDiscoversAndRoutesFamily(t *testing.T) {
 	if response.StatusCode != 200 || !strings.Contains(string(raw), "live catalog") {
 		t.Fatalf("response = %d %s", response.StatusCode, raw)
 	}
-	displayReq, _ := http.NewRequest(http.MethodPost, runtime.ClaudeBaseURL()+"/v1/messages", strings.NewReader(`{"model":"Gemini 4 Argon","max_tokens":100,"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hello"}]}`))
+	displayReq, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", strings.NewReader(`{"model":"Gemini 4 Argon","max_output_tokens":100,"reasoning":{"effort":"low"},"input":[{"role":"user","content":"hello"}]}`))
 	displayReq.Header.Set("X-Api-Key", runtime.APIKey())
 	displayResp, err := server.Client().Do(displayReq)
 	if err != nil {
@@ -380,7 +380,7 @@ func TestGeminiConfiguredFallbackResolvesKnownFamily(t *testing.T) {
 	if got := runtime.modelNames["gemini-4-argon-low"]; got != "Gemini 4 Argon (Low)" {
 		t.Fatalf("explicit variant display name = %q", got)
 	}
-	req, _ := http.NewRequest(http.MethodPost, runtime.ClaudeBaseURL()+"/v1/messages", strings.NewReader(`{"model":"Gemini 3.8 Flash","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`))
+	req, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", strings.NewReader(`{"model":"Gemini 3.8 Flash","max_output_tokens":100,"input":[{"role":"user","content":"hello"}]}`))
 	req.Header.Set("X-Api-Key", runtime.APIKey())
 	response, err := server.Client().Do(req)
 	if err != nil {

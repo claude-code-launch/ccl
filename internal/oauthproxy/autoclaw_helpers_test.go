@@ -25,9 +25,9 @@ func normalizeAutoClawBodyForTest(raw []byte) ([]byte, error) {
 	}
 	route, _ := initial["model"].(string)
 	converted := &chatCompletionsConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{upstreamModel: route},
-		body:                    raw,
-		model:                   route,
+		adapterRequest: adapterRequest{upstreamModel: route},
+		body:           raw,
+		model:          route,
 	}
 	if err := normalizeAutoClawRequest(converted, contract); err != nil {
 		return nil, err

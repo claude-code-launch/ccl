@@ -14,9 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/claude-code-launch/ccl/internal/config"
-	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
 func TestUpdateRejectsInvalidDownload(t *testing.T) {
@@ -86,22 +83,6 @@ func TestUpdatePreservesPreviousExecutable(t *testing.T) {
 	}
 	if err := validateReleaseBinary(target); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestPreviewReturnsSetupError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Providers["broken"] = provider.Provider{Name: "broken", Type: "openai", Endpoint: "://invalid", Model: ""}
-	cfg.ActiveProvider = "broken"
-	if err := config.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-	if err := runPreview(providerTarget{}); err == nil {
-		t.Fatal("preview reported success after setup failure")
 	}
 }
 

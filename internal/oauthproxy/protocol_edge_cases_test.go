@@ -10,17 +10,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Claude Code sends system turns in the message list as a string or as text
-// blocks, including a reminder after a tool result as the last message.
+// Developer/system items in Responses input are collected into systemInstruction
+// while preserving user/model turn alternation.
 func TestGeminiForwardsSystemTurnsInsideTheConversationAsUserText(t *testing.T) {
-	request := `{"model":"gemini","messages":[
+	request := `{"model":"gemini","input":[
 		{"role":"user","content":"run echo hi"},
-		{"role":"system","content":"# Environment"},
-		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hi"}}]},
-		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"hi"}]},
-		{"role":"system","content":[{"type":"text","text":"<total_tokens>1 tokens left</total_tokens>"},{"type":"text","text":"  "}]}
-	],"tools":[{"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]}`
-	c, err := convertAnthropicToGemini([]byte(request))
+		{"role":"developer","content":"# Environment"},
+		{"type":"function_call","call_id":"toolu_01","name":"Bash","arguments":"{\"command\":\"echo hi\"}"},
+		{"type":"function_call_output","call_id":"toolu_01","output":"hi"},
+		{"role":"developer","content":[{"type":"input_text","text":"<total_tokens>1 tokens left</total_tokens>"},{"type":"input_text","text":"  "}]}
+	],"tools":[{"type":"function","name":"Bash","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]}`
+	c, err := convertResponsesToGemini([]byte(request))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,15 +29,12 @@ func TestGeminiForwardsSystemTurnsInsideTheConversationAsUserText(t *testing.T) 
 	for _, content := range contents {
 		roles = append(roles, content.Get("role").String())
 	}
-	if got := strings.Join(roles, ","); got != "user,user,model,user,user" {
+	if got := strings.Join(roles, ","); got != "user,model,user" {
 		t.Fatalf("roles = %s\n%s", got, c.geminiBody)
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "# Environment" {
-		t.Fatalf("string system turn = %q", got)
-	}
-	last := contents[len(contents)-1].Get("parts").Array()
-	if len(last) != 1 || last[0].Get("text").String() != "<total_tokens>1 tokens left</total_tokens>" {
-		t.Fatalf("text-block system turn = %s", contents[len(contents)-1].Raw)
+	sys := gjson.GetBytes(c.geminiBody, "systemInstruction.parts.0.text").String()
+	if !strings.Contains(sys, "# Environment") || !strings.Contains(sys, "<total_tokens>1 tokens left</total_tokens>") {
+		t.Fatalf("systemInstruction = %q", sys)
 	}
 }
 
@@ -46,8 +43,8 @@ func TestGeminiThinkingLevelClampsGPTRungs(t *testing.T) {
 		{"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"minimal", "minimal"},
 		{"xhigh", "high"}, {"max", "high"}, {"ultra", "high"}, {"XHIGH", "high"},
 	} {
-		raw := []byte(fmt.Sprintf(`{"model":"gemini","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":%q}}`, tc.effort))
-		converted, err := convertAnthropicToGemini(raw)
+		raw := []byte(fmt.Sprintf(`{"model":"gemini","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":%q}}`, tc.effort))
+		converted, err := convertResponsesToGemini(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,20 +56,14 @@ func TestGeminiThinkingLevelClampsGPTRungs(t *testing.T) {
 
 func TestGeminiGenerationLimitsPreserved(t *testing.T) {
 	for _, maxTokens := range []int{17, 32000} {
-		request := fmt.Sprintf(`{"model":"gemini","max_tokens":%d,"stop_sequences":["END","STOP"],"messages":[{"role":"user","content":"hi"}]}`, maxTokens)
-		c, err := convertAnthropicToGemini([]byte(request))
+		request := fmt.Sprintf(`{"model":"gemini","max_output_tokens":%d,"input":[{"role":"user","content":"hi"}]}`, maxTokens)
+		c, err := convertResponsesToGemini([]byte(request))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := gjson.GetBytes(c.geminiBody, "generationConfig.maxOutputTokens").Int(); got != int64(maxTokens) {
 			t.Fatalf("maxOutputTokens=%d", got)
 		}
-		if got := gjson.GetBytes(c.geminiBody, "generationConfig.stopSequences").Raw; got != `["END","STOP"]` {
-			t.Fatalf("stopSequences=%s", got)
-		}
-	}
-	if _, err := convertAnthropicToGemini([]byte(`{"model":"gemini","stop_sequences":[123],"messages":[{"role":"user","content":"hi"}]}`)); err == nil {
-		t.Fatal("invalid stops accepted")
 	}
 }
 
@@ -85,19 +76,24 @@ func TestGeminiToolNamesAreUniqueAndOrderIndependent(t *testing.T) {
 			if reverse {
 				index = len(names) - 1 - index
 			}
-			tools = append(tools, map[string]any{"name": names[index], "input_schema": map[string]any{"type": "object"}})
+			tools = append(tools, map[string]any{"type": "function", "name": names[index], "parameters": map[string]any{"type": "object"}})
 		}
-		raw, _ := json.Marshal(map[string]any{"tools": tools})
-		mapping, err := buildGeminiToolNames(raw)
+		raw, _ := json.Marshal(map[string]any{"model": "gemini", "input": []any{map[string]any{"role": "user", "content": "hi"}}, "tools": tools})
+		parsed, err := parseResponsesRequest(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mapping, err := buildGeminiToolNames(parsed)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, name := range names {
-			wire := mapping.byOriginal[name]
-			if wire == "" || wire != sanitizeFunctionName(wire) || mapping.byWire[wire] != name {
+			flat := toolWireName("", name)
+			wire := mapping.byOriginal[flat]
+			if wire == "" || wire != sanitizeFunctionName(wire) || mapping.byWire[wire] != flat || parsed.registry[flat].Name != name {
 				t.Fatalf("broken bijection for %q: %+v", name, mapping)
 			}
-			if first != nil && first[name] != wire {
+			if first != nil && first[flat] != wire {
 				t.Fatalf("mapping changed with order for %q", name)
 			}
 		}
@@ -107,12 +103,12 @@ func TestGeminiToolNamesAreUniqueAndOrderIndependent(t *testing.T) {
 
 func TestGeminiCollidingToolsSignedRoundTrip(t *testing.T) {
 	tools := []any{
-		map[string]any{"name": "1tool", "input_schema": map[string]any{"type": "object"}},
-		map[string]any{"name": "_1tool", "input_schema": map[string]any{"type": "object"}},
+		map[string]any{"type": "function", "name": "1tool", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "function", "name": "_1tool", "parameters": map[string]any{"type": "object"}},
 	}
 	user := map[string]any{"role": "user", "content": "use the tools"}
-	raw, _ := json.Marshal(map[string]any{"model": "gemini", "tools": tools, "messages": []any{user}})
-	initial, err := convertAnthropicToGemini(raw)
+	raw, _ := json.Marshal(map[string]any{"model": "gemini", "tools": tools, "input": []any{user}})
+	initial, err := convertResponsesToGemini(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,25 +117,26 @@ func TestGeminiCollidingToolsSignedRoundTrip(t *testing.T) {
 		nativeParts = append(nativeParts, map[string]any{"functionCall": map[string]any{"name": declaration.Get("name").String(), "args": json.RawMessage(`{"id":9007199254740993}`)}, "thoughtSignature": "opaque-" + declaration.Get("name").String()})
 	}
 	response, _ := json.Marshal(map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"parts": nativeParts}, "finishReason": "STOP"}}})
-	a := newAnthropicResponseAssembler(&initial.anthropicAdapterRequest, nil)
+	a := newResponseAssembler(&initial.adapterRequest, nil)
 	if err := processGeminiNonStream(response, a); err != nil {
 		t.Fatal(err)
 	}
-	messages := []any{user}
+	input := []any{user}
 	var results []any
+	for _, item := range a.outputItems() {
+		input = append(input, item)
+	}
 	for _, block := range a.contentBlocks() {
-		// Exercise signature and tool_use companions split across messages.
-		messages = append(messages, map[string]any{"role": "assistant", "content": []any{block}})
 		if block.Type == "tool_use" {
-			results = append(results, map[string]any{"type": "tool_result", "tool_use_id": block.ID, "content": "ok"})
+			results = append(results, map[string]any{"type": "function_call_output", "call_id": block.ID, "output": "ok"})
 		}
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": results})
+	input = append(input, results...)
 	// Introduce a new tool whose native name collides with a signed alias.
 	wire0 := gjson.GetBytes(initial.geminiBody, "tools.0.functionDeclarations.0.name").String()
-	tools = append(tools, map[string]any{"name": wire0, "input_schema": map[string]any{"type": "object"}})
-	raw, _ = json.Marshal(map[string]any{"model": "gemini", "tools": tools, "messages": messages, "tool_choice": map[string]any{"type": "tool", "name": "1tool"}})
-	replay, err := convertAnthropicToGemini(raw)
+	tools = append(tools, map[string]any{"type": "function", "name": wire0, "parameters": map[string]any{"type": "object"}})
+	raw, _ = json.Marshal(map[string]any{"model": "gemini", "tools": tools, "input": input, "tool_choice": map[string]any{"type": "function", "name": "1tool"}})
+	replay, err := convertResponsesToGemini(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +168,7 @@ func TestGeminiCollidingToolsSignedRoundTrip(t *testing.T) {
 		}
 		seen[name] = true
 	}
-	if got := gjson.GetBytes(replay.geminiBody, "toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != wire0 || replay.toolNameMap[got] != "1tool" {
+	if got := gjson.GetBytes(replay.geminiBody, "toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != wire0 || replay.tools[replay.toolNameMap[got]].Name != "1tool" {
 		t.Fatalf("tool choice or reverse mapping changed: %s", got)
 	}
 }
@@ -184,7 +181,7 @@ func TestGeminiBlockedResponsesAreRefusals(t *testing.T) {
 	} {
 		for _, stream := range []bool{false, true} {
 			w := httptest.NewRecorder()
-			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 777}, nil)
+			a := newResponseAssembler(&adapterRequest{inputTokens: 777}, nil)
 			var err error
 			if stream {
 				a.writer = w
@@ -201,13 +198,13 @@ func TestGeminiBlockedResponsesAreRefusals(t *testing.T) {
 			if in, out := a.tokenTotals(); in != 10 || out != 0 {
 				t.Fatalf("usage=%d/%d", in, out)
 			}
-			if stream && !strings.Contains(w.Body.String(), `"stop_reason":"refusal"`) {
+			if stream && !strings.Contains(w.Body.String(), "blocked") {
 				t.Fatal("SSE refusal missing")
 			}
 		}
 	}
 	for _, body := range []string{`{}`, `{"candidates":[]}`, `{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL"}]}`} {
-		a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+		a := newResponseAssembler(&adapterRequest{}, nil)
 		if err := processGeminiNonStream([]byte(body), a); err == nil || a.finished {
 			t.Fatalf("invalid response accepted: %s", body)
 		}
@@ -234,7 +231,7 @@ func TestResponsesReasoningTracksEverySummaryPart(t *testing.T) {
 				emit(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
 			}
 			emit(map[string]any{"type": "response.completed", "response": map[string]any{"output": []any{item, map[string]any{"type": "reasoning", "id": "r2", "summary": []any{map[string]any{"type": "summary_text", "text": "third"}}}}}})
-			a := newAnthropicResponseAssembler(&anthropicAdapterRequest{}, nil)
+			a := newResponseAssembler(&adapterRequest{}, nil)
 			if err := processCodexResponsesStream(strings.NewReader(stream.String()), a); err != nil {
 				t.Fatal(err)
 			}

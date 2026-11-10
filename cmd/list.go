@@ -22,9 +22,7 @@ func newProviderListCommand(use string) *cobra.Command {
 		Use:   use,
 		Short: "List registered providers",
 		Long: `List providers from ~/.ccl/config.yaml. The USED BY column shows which
-entry is selected by normal mode, ACP mode and Codex model integration. The first
-row, default, shows the default Claude account (ccl use default). Before a
-Claude account is configured it uses Claude Code's original configuration.
+entry is selected for Grok Build or Codex. The default row uses Grok Build's own login.
 
 -a/--all switches the table to a detailed view with full model pools and slot
 details.
@@ -66,9 +64,6 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 		fmt.Fprintln(out, provider.DefaultProvider)
 		fmt.Fprintf(out, "    Used By  : %s\n", providerUsageSummary(cfg, provider.DefaultProvider, proxyName))
 		description := defaultProviderDescription()
-		if cfg.DefaultClaudeProvider != "" {
-			description = "Claude account: " + cfg.DefaultClaudeProvider
-		}
 		fmt.Fprintf(out, "    Type     : %s\n", description)
 		if len(names) > 0 {
 			fmt.Fprintln(out)
@@ -78,10 +73,7 @@ func printProviders(out io.Writer, cfg *provider.Config, showAll bool, emptyMess
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tUSED BY\tTYPE/AUTH\tMODELS")
-	defaultType := "claude-code/own-config"
-	if cfg.DefaultClaudeProvider != "" {
-		defaultType = "claude/" + cfg.DefaultClaudeProvider
-	}
+	defaultType := "grok-build/own-config"
 	fmt.Fprintf(tw, "%s\t%s\t%s\t-\n", provider.DefaultProvider,
 		providerUsageSummary(cfg, provider.DefaultProvider, proxyName), defaultType)
 	for _, name := range names {
@@ -130,10 +122,7 @@ func printProviderDetails(out io.Writer, cfg *provider.Config, names []string, p
 func providerUsageSummary(cfg *provider.Config, name, proxyName string) string {
 	usedBy := make([]string, 0, 3)
 	if name == cfg.ActiveProvider {
-		usedBy = append(usedBy, "normal")
-	}
-	if name == cfg.EffectiveACPProvider() {
-		usedBy = append(usedBy, "ACP")
+		usedBy = append(usedBy, "Grok Build")
 	}
 	if name == proxyName {
 		usedBy = append(usedBy, "Codex")
@@ -198,7 +187,7 @@ func init() {
 
 func defaultProviderDescription() string {
 	return locale.T(
-		"Claude Code 自身配置（claude.ai 登录与 ~/.claude 设置）",
-		"Claude Code's own configuration (claude.ai login and ~/.claude settings)",
+		"Grok Build 自身登录和设置",
+		"Grok Build's own login and settings",
 	)
 }

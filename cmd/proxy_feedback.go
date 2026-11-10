@@ -26,7 +26,7 @@ func codexModelUpdateMessage(state *proxymanager.State, name string) string {
 	return locale.T("模型配置已保存。CCL 将自动更新路由与目录；Codex 可能需要重启才能刷新模型列表。", "Model configuration saved. CCL will update routes and catalog automatically; Codex may need a restart to refresh the model list.")
 }
 
-// Report only for a running, bound Codex provider. Saving ordinary Claude
+// Report only for a running, bound Codex provider. Saving ordinary Grok
 // configuration does not add an unrelated Desktop message to the user flow.
 func printCodexModelUpdateNotice(out io.Writer, name string) {
 	manager, err := proxymanager.Default()

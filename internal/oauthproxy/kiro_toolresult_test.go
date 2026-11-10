@@ -11,41 +11,38 @@ import (
 func kiroToolRoundTripRequest(t *testing.T, resultContent any) *kiroConvertedRequest {
 	t.Helper()
 	request := map[string]any{
-		"model":      "claude-sonnet-4-6",
-		"max_tokens": 1024,
+		"model":             "claude-sonnet-4-6",
+		"max_output_tokens": 1024,
 		"tools": []any{
 			map[string]any{
-				"name":         "Bash",
-				"description":  "Run a shell command",
-				"input_schema": map[string]any{"type": "object", "properties": map[string]any{}},
+				"type":        "function",
+				"name":        "Bash",
+				"description": "Run a shell command",
+				"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
 			},
 		},
-		"messages": []any{
+		"input": []any{
 			map[string]any{"role": "user", "content": "run echo alive"},
-			map[string]any{"role": "assistant", "content": []any{
-				map[string]any{
-					"type":  "tool_use",
-					"id":    "toolu_01",
-					"name":  "Bash",
-					"input": map[string]any{"command": "echo alive"},
-				},
-			}},
-			map[string]any{"role": "user", "content": []any{
-				map[string]any{
-					"type":        "tool_result",
-					"tool_use_id": "toolu_01",
-					"content":     resultContent,
-				},
-			}},
+			map[string]any{
+				"type":      "function_call",
+				"call_id":   "toolu_01",
+				"name":      "Bash",
+				"arguments": `{"command":"echo alive"}`,
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "toolu_01",
+				"output":  resultContent,
+			},
 		},
 	}
 	raw, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	converted, err := convertAnthropicToKiro(raw)
+	converted, err := convertResponsesToKiro(raw)
 	if err != nil {
-		t.Fatalf("convertAnthropicToKiro: %v", err)
+		t.Fatalf("convertResponsesToKiro: %v", err)
 	}
 	return converted
 }

@@ -27,33 +27,29 @@ import (
 )
 
 func TestConvertAnthropicMessagesToKiro(t *testing.T) {
-	longToolName := "mcp__example__" + strings.Repeat("very_long_tool_name_", 4)
+	longToolName := "mcp__example__" + strings.Repeat("a", 50)
 	payload := []byte(`{
 		"model":"claude-sonnet-4-6[1m]",
-		"max_tokens":4096,
+		"max_output_tokens":4096,
 		"stream":true,
-		"system":[{"type":"text","text":"Be concise."}],
-		"thinking":{"type":"adaptive","budget_tokens":20000},
-		"output_config":{"effort":"max"},
-		"metadata":{"user_id":"user_account__session_0b4445e1-f5be-49e1-87ce-62bbc28ad705"},
+		"instructions":"Be concise.",
+		"reasoning":{"effort":"max"},
+		"prompt_cache_key":"user_account__session_0b4445e1-f5be-49e1-87ce-62bbc28ad705",
 		"tools":[{
+			"type":"function",
 			"name":"` + longToolName + `",
 			"description":"Read a file",
-			"input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
+			"parameters":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
 		}],
-		"messages":[
+		"input":[
 			{"role":"user","content":"Read the file"},
-			{"role":"assistant","content":[
-				{"type":"thinking","thinking":"I should inspect it."},
-				{"type":"tool_use","id":"toolu_1","name":"` + longToolName + `","input":{"path":"/tmp/a"}}
-			]},
-			{"role":"user","content":[
-				{"type":"tool_result","tool_use_id":"toolu_1","content":"contents"},
-				{"type":"text","text":"Continue"}
-			]}
+			{"id":"rs_ccl_1","type":"reasoning","summary":[{"type":"summary_text","text":"I should inspect it."}]},
+			{"type":"function_call","call_id":"toolu_1","name":"` + longToolName + `","arguments":"{\"path\":\"/tmp/a\"}"},
+			{"type":"function_call_output","call_id":"toolu_1","output":"contents"},
+			{"role":"user","content":"Continue"}
 		]
 	}`)
-	converted, err := convertAnthropicToKiro(payload)
+	converted, err := convertResponsesToKiro(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,19 +267,15 @@ func TestConvertAnthropicRequestDoesNotChargeMediaAgainstTextBudget(t *testing.T
 		rawImage := make([]byte, 300_000)
 		rawImage[0] = byte(index + 1)
 		imageBlocks[index] = map[string]any{
-			"type": "image",
-			"source": map[string]any{
-				"type":       "base64",
-				"media_type": "image/jpeg",
-				"data":       base64.StdEncoding.EncodeToString(rawImage),
-			},
+			"type":      "input_image",
+			"image_url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(rawImage),
 		}
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model":      "claude-sonnet-5",
-		"max_tokens": 1024,
-		"system":     strings.Repeat("s", 200_000),
-		"messages": []any{
+		"model":             "claude-sonnet-5",
+		"max_output_tokens": 1024,
+		"instructions":      strings.Repeat("s", 200_000),
+		"input": []any{
 			map[string]any{"role": "user", "content": imageBlocks},
 			map[string]any{"role": "assistant", "content": strings.Repeat("a", 200_000)},
 			map[string]any{"role": "user", "content": strings.Repeat("c", 100_000)},
@@ -293,7 +285,7 @@ func TestConvertAnthropicRequestDoesNotChargeMediaAgainstTextBudget(t *testing.T
 		t.Fatal(err)
 	}
 
-	converted, err := convertAnthropicToKiro(payload)
+	converted, err := convertResponsesToKiro(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,16 +316,16 @@ func TestConvertAnthropicRequestTrimsTextHistoryBelowKiroContextBudget(t *testin
 	}
 	messages = append(messages, map[string]any{"role": "user", "content": "CURRENT-" + strings.Repeat("c", 10_000)})
 	payload, err := json.Marshal(map[string]any{
-		"model":      "claude-sonnet-5",
-		"max_tokens": 1024,
-		"system":     "SYSTEM-" + strings.Repeat("s", 100_000),
-		"messages":   messages,
+		"model":             "claude-sonnet-5",
+		"max_output_tokens": 1024,
+		"instructions":      "SYSTEM-" + strings.Repeat("s", 100_000),
+		"input":             messages,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	converted, err := convertAnthropicToKiro(payload)
+	converted, err := convertResponsesToKiro(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,31 +350,24 @@ func TestConvertAnthropicToolResultImagesHonorsKiroMediaLimit(t *testing.T) {
 	toolResultImages := make([]any, kiroMaxInlineMediaSegments+5)
 	for index := range toolResultImages {
 		toolResultImages[index] = map[string]any{
-			"type": "image",
-			"source": map[string]any{
-				"type":       "base64",
-				"media_type": "image/png",
-				"data":       base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("image-%03d", index))),
-			},
+			"type":      "input_image",
+			"image_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("image-%03d", index))),
 		}
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model":      "claude-sonnet-5",
-		"max_tokens": 1024,
-		"messages": []any{map[string]any{
-			"role": "user",
-			"content": []any{map[string]any{
-				"type":        "tool_result",
-				"tool_use_id": "toolu_images",
-				"content":     toolResultImages,
-			}},
+		"model":             "claude-sonnet-5",
+		"max_output_tokens": 1024,
+		"input": []any{map[string]any{
+			"type":    "function_call_output",
+			"call_id": "toolu_images",
+			"output":  toolResultImages,
 		}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	converted, err := convertAnthropicToKiro(payload)
+	converted, err := convertResponsesToKiro(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,15 +392,24 @@ func TestConvertAnthropicToolResultImagesHonorsKiroMediaLimit(t *testing.T) {
 }
 
 func TestKiroImageOnlyToolResultUsesNonEmptyPlaceholder(t *testing.T) {
-	text, images := extractKiroToolResult([]any{map[string]any{
-		"type": "image",
-		"source": map[string]any{
-			"media_type": "image/png",
-			"data":       "aW1hZ2U=",
-		},
-	}})
-	if text != "[image attached]" || len(images) != 1 {
-		t.Fatalf("tool result text=%q images=%d", text, len(images))
+	parsed := parseKiroContent(conversationTurn{
+		Role: "user",
+		Parts: []conversationPart{{
+			Kind:   partToolResult,
+			CallID: "call_1",
+			Output: []conversationPart{{
+				Kind:      partImage,
+				MediaType: "image/png",
+				Data:      "aW1hZ2U=",
+			}},
+		}},
+	}, map[string]string{})
+	if len(parsed.toolResults) != 1 || len(parsed.images) != 1 {
+		t.Fatalf("tool results=%d images=%d", len(parsed.toolResults), len(parsed.images))
+	}
+	text := parsed.toolResults[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+	if text != "[image attached]" {
+		t.Fatalf("tool result text=%#v", text)
 	}
 }
 
@@ -472,7 +466,7 @@ func TestNormalizeKiroToolPairingDropsOrphansAndDuplicates(t *testing.T) {
 }
 
 func TestLimitKiroTextFieldsKeepsHeadAndTail(t *testing.T) {
-	longCurrent := "CURRENT-BEGIN-" + strings.Repeat("中", 160_000) + "-CURRENT-END"
+	longCurrent := "CURRENT-BEGIN-" + strings.Repeat("\u4e2d", 160_000) + "-CURRENT-END"
 	longAssistant := "ASSISTANT-BEGIN-" + strings.Repeat("a", kiroMaxTextFieldBytes) + "-ASSISTANT-END"
 	longToolResult := "RESULT-BEGIN-" + strings.Repeat("r", kiroMaxTextFieldBytes) + "-RESULT-END"
 	toolResultContent := map[string]any{"text": longToolResult}
@@ -526,17 +520,13 @@ func TestConvertAnthropicImageCorrectsMIMEAndResizesLongSide(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model":      "claude-sonnet-5",
-		"max_tokens": 1024,
-		"messages": []any{map[string]any{
+		"model":             "claude-sonnet-5",
+		"max_output_tokens": 1024,
+		"input": []any{map[string]any{
 			"role": "user",
 			"content": []any{map[string]any{
-				"type": "image",
-				"source": map[string]any{
-					"type":       "base64",
-					"media_type": "image/jpeg",
-					"data":       base64.StdEncoding.EncodeToString(pngData.Bytes()),
-				},
+				"type":      "input_image",
+				"image_url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(pngData.Bytes()),
 			}},
 		}},
 	})
@@ -544,7 +534,7 @@ func TestConvertAnthropicImageCorrectsMIMEAndResizesLongSide(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	converted, err := convertAnthropicToKiro(payload)
+	converted, err := convertResponsesToKiro(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +586,7 @@ func TestKiroEventStreamFrameDecoder(t *testing.T) {
 
 func TestKiroInlineThinkingIsConvertedToAnthropicBlock(t *testing.T) {
 	request := &kiroConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{
+		adapterRequest: adapterRequest{
 			upstreamModel:   "claude-haiku-4.5",
 			clientModel:     "claude-haiku-4-5",
 			thinkingEnabled: true,
@@ -604,7 +594,7 @@ func TestKiroInlineThinkingIsConvertedToAnthropicBlock(t *testing.T) {
 		},
 		model: "claude-haiku-4.5",
 	}
-	assembler := newAnthropicResponseAssembler(&request.anthropicAdapterRequest, nil)
+	assembler := newResponseAssembler(&request.adapterRequest, nil)
 	for _, content := range []string{"<think", "ing>plan", "</thinking>answer"} {
 		payload, _ := json.Marshal(map[string]any{"content": content})
 		if err := assembler.processEvent("assistantResponseEvent", payload); err != nil {
@@ -618,7 +608,7 @@ func TestKiroInlineThinkingIsConvertedToAnthropicBlock(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("blocks = %#v", blocks)
 	}
-	if blocks[0].Type != "thinking" || blocks[0].Thinking != "plan" || blocks[0].Signature == "" {
+	if blocks[0].Type != "thinking" || blocks[0].Thinking != "plan" {
 		t.Fatalf("thinking block = %#v", blocks[0])
 	}
 	if blocks[1].Type != "text" || blocks[1].Text != "answer" {
@@ -651,7 +641,7 @@ func TestKiroContextWindowMatchesAdvertisedPortalModels(t *testing.T) {
 
 func TestKiroNonStreamingToolResponseKeepsEmptyInput(t *testing.T) {
 	request := &kiroConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{
+		adapterRequest: adapterRequest{
 			upstreamModel: "claude-sonnet-4.6",
 			clientModel:   "claude-sonnet-4-6",
 			inputTokens:   1,
@@ -659,7 +649,7 @@ func TestKiroNonStreamingToolResponseKeepsEmptyInput(t *testing.T) {
 		},
 		model: "claude-sonnet-4.6",
 	}
-	assembler := newAnthropicResponseAssembler(&request.anthropicAdapterRequest, nil)
+	assembler := newResponseAssembler(&request.adapterRequest, nil)
 	payload, _ := json.Marshal(map[string]any{
 		"name":      "NoArgs",
 		"toolUseId": "toolu_empty",
@@ -676,7 +666,7 @@ func TestKiroNonStreamingToolResponseKeepsEmptyInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(raw, []byte(`"input":{}`)) || !bytes.Contains(raw, []byte(`"stop_reason":"tool_use"`)) {
+	if !bytes.Contains(raw, []byte(`"arguments":"{}"`)) || !bytes.Contains(raw, []byte(`"type":"function_call"`)) {
 		t.Fatalf("response = %s", raw)
 	}
 }
@@ -747,13 +737,13 @@ func TestKiroMessagesStreamingConversion(t *testing.T) {
 
 	payload := `{
 		"model":"claude-sonnet-4-6",
-		"max_tokens":1024,
+		"max_output_tokens":1024,
 		"stream":true,
-		"thinking":{"type":"adaptive","budget_tokens":10000},
-		"tools":[{"name":"Read","description":"Read","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}],
-		"messages":[{"role":"user","content":"read"}]
+		"reasoning":{"effort":"high"},
+		"tools":[{"type":"function","name":"Read","description":"Read","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}],
+		"input":[{"role":"user","content":"read"}]
 	}`
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/messages", strings.NewReader(payload))
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/responses", strings.NewReader(payload))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -772,22 +762,23 @@ func TestKiroMessagesStreamingConversion(t *testing.T) {
 	}
 	stream := string(body)
 	for _, want := range []string{
-		"event: message_start",
-		`"type":"thinking_delta","thinking":"think"`,
-		`"type":"signature_delta","signature":"sig"`,
-		`"type":"text_delta","text":"hello"`,
-		`"type":"tool_use"`,
-		`"partial_json":"{\"path\":\"/tmp/a\"}"`,
-		`"stop_reason":"tool_use"`,
+		"event: response.created",
+		`"type":"response.reasoning_summary_text.delta"`,
+		`"delta":"think"`,
+		`"encrypted_content":"sig"`,
+		`"type":"response.output_text.delta"`,
+		`"delta":"hello"`,
+		`"type":"function_call"`,
+		`"delta":"{\"path\":\"/tmp/a\"}"`,
 		`"credit_usage":0.25`,
-		"event: message_stop",
+		"event: response.completed",
 	} {
 		if !strings.Contains(stream, want) {
 			t.Fatalf("stream missing %q:\n%s", want, stream)
 		}
 	}
-	if strings.Index(stream, "event: message_start") > strings.Index(stream, "event: content_block_start") {
-		t.Fatalf("message_start emitted after content block:\n%s", stream)
+	if strings.Index(stream, "event: response.created") > strings.Index(stream, "event: response.output_item.added") {
+		t.Fatalf("response.created emitted after output item:\n%s", stream)
 	}
 }
 
@@ -975,14 +966,14 @@ func TestReadKiroInboundBodyRejectsOversizeWithoutSilentJSONTruncation(t *testin
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(strings.Repeat("x", 65)))
 	request.ContentLength = -1 // Exercise streaming/chunked bodies through MaxBytesReader.
-	_, err := readAnthropicInboundBody(httptest.NewRecorder(), request, 64)
+	_, err := readInboundBody(httptest.NewRecorder(), request, 64)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 64 bytes limit") {
 		t.Fatalf("oversize error = %v", err)
 	}
 
 	valid := []byte(`{"model":"claude-sonnet-5","messages":[]}`)
 	request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(valid))
-	got, err := readAnthropicInboundBody(httptest.NewRecorder(), request, int64(len(valid)))
+	got, err := readInboundBody(httptest.NewRecorder(), request, int64(len(valid)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1590,7 +1581,7 @@ func encodeKiroTestHeader(name, value string) []byte {
 }
 
 func TestKiroAssemblerTokenTotalsUsesContextOverride(t *testing.T) {
-	assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 50}, nil)
+	assembler := newResponseAssembler(&adapterRequest{inputTokens: 50}, nil)
 	assembler.outputTokens = 30
 	if input, output := assembler.tokenTotals(); input != 50 || output != 30 {
 		t.Fatalf("tokenTotals() = (%d, %d), want (50, 30)", input, output)
@@ -1605,25 +1596,25 @@ func TestKiroAssemblerTokenTotalsUsesContextOverride(t *testing.T) {
 }
 
 func TestKiroAssemblerUsageMatchesTokenTotals(t *testing.T) {
-	assembler := newAnthropicResponseAssembler(&anthropicAdapterRequest{inputTokens: 12}, nil)
+	assembler := newResponseAssembler(&adapterRequest{inputTokens: 12}, nil)
 	assembler.outputTokens = 7
 	usage := assembler.usage()
-	if usage["input_tokens"] != 12 || usage["output_tokens"] != 7 {
-		t.Fatalf("usage() = %+v, want input_tokens=12 output_tokens=7", usage)
+	if usage["input_tokens"] != 12 || usage["output_tokens"] != 7 || usage["total_tokens"] != 19 {
+		t.Fatalf("usage() = %+v, want input_tokens=12 output_tokens=7 total_tokens=19", usage)
 	}
 }
 
 func TestKiroServiceRecordKiroUsageKeyedByClientModel(t *testing.T) {
 	service := &kiroService{usage: NewUsageTracker()}
 	converted := &kiroConvertedRequest{
-		anthropicAdapterRequest: anthropicAdapterRequest{
+		adapterRequest: adapterRequest{
 			upstreamModel: "claude-sonnet-4-6",
 			clientModel:   "claude-sonnet-4-6[1m]",
 			inputTokens:   100,
 		},
 		model: "claude-sonnet-4-6",
 	}
-	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
+	assembler := newResponseAssembler(&converted.adapterRequest, nil)
 	assembler.outputTokens = 40
 
 	service.recordKiroUsage(converted, assembler)
@@ -1643,8 +1634,8 @@ func TestKiroServiceRecordKiroUsageKeyedByClientModel(t *testing.T) {
 
 func TestKiroServiceRecordKiroUsageNilTrackerIsNoop(t *testing.T) {
 	service := &kiroService{}
-	converted := &kiroConvertedRequest{anthropicAdapterRequest: anthropicAdapterRequest{clientModel: "claude-sonnet-4-6", inputTokens: 10}}
-	assembler := newAnthropicResponseAssembler(&converted.anthropicAdapterRequest, nil)
+	converted := &kiroConvertedRequest{adapterRequest: adapterRequest{clientModel: "claude-sonnet-4-6", inputTokens: 10}}
+	assembler := newResponseAssembler(&converted.adapterRequest, nil)
 	// Must not panic when the service has no usage tracker.
 	service.recordKiroUsage(converted, assembler)
 }

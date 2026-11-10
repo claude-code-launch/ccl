@@ -6,8 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/claude-code-launch/ccl/internal/claude"
-	"github.com/claude-code-launch/ccl/internal/claudeaccount"
 	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/protocol"
@@ -36,8 +34,8 @@ func newMapCommand(use string) *cobra.Command {
 	opts := &mapOptions{}
 	cmd := &cobra.Command{
 		Use:   use,
-		Short: "Quickly set Claude slot-to-model mappings",
-		Long: `Set which provider model each Claude slot uses.
+		Short: "Map model slots for a provider",
+		Long: `Set model mappings used for defaults and catalog metadata.
 
 Modes:
   ccl map                        Interactive TUI - enter slot mapping page directly
@@ -75,7 +73,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.haiku, "haiku", "", "Model ID for Haiku slot")
 	cmd.Flags().StringVar(&opts.fable, "fable", "", "Model ID for Fable slot")
 	cmd.Flags().StringVar(&opts.custom, "custom", "", "Model ID for Custom slot")
-	cmd.Flags().StringVar(&opts.subagent, "subagent", "", "Model ID for Claude Code subagents (empty uses automatic selection)")
+	cmd.Flags().StringVar(&opts.subagent, "subagent", "", "Model ID for the subagent slot")
 	cmd.Flags().BoolVar(&opts.probe, "probe", false, "With auto: test each model with a 1-token request first (billed)")
 	return cmd
 }
@@ -98,8 +96,8 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 	}
 
 	if err := updateProvider(providerName, func(latest *provider.Provider) error {
-		if provider.IsClaudeAccount(*latest) && (opts.opus != "" || opts.sonnet != "" || opts.haiku != "" || opts.fable != "" || opts.custom != "" || opts.subagent != "") {
-			return claudeaccount.OptionsError(providerName)
+		if err := provider.ValidateRuntime(*latest); err != nil {
+			return err
 		}
 		if cmd.Flags().Changed("opus") {
 			latest.OpusModel = opts.opus
@@ -118,9 +116,6 @@ func runMapDirect(cmd *cobra.Command, args []string, opts *mapOptions) error {
 		}
 		if cmd.Flags().Changed("subagent") {
 			latest.SubagentModel = opts.subagent
-			if latest.Env != nil {
-				delete(latest.Env, claude.SubagentModelEnv)
-			}
 		}
 
 		applyOneMSuffixes(latest, oneMSlotsFromProvider(*latest))
@@ -172,8 +167,8 @@ func runMapAuto(ctx context.Context, args []string, probe bool) error {
 		return fmt.Errorf("provider %q not found", providerName)
 	}
 
-	if provider.IsClaudeAccount(p) {
-		return claudeaccount.OptionsError(providerName)
+	if err := provider.ValidateRuntime(p); err != nil {
+		return err
 	}
 	fmt.Printf("Fetching the model catalog for %q...\n", providerName)
 
@@ -189,7 +184,7 @@ func runMapAuto(ctx context.Context, args []string, probe bool) error {
 	pool := models
 	if probe {
 		fmt.Printf("Probing %d model(s) with a 1-token request each...\n", len(models))
-		availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, probeWireType(runtimeProvider), runtimeProvider.AnthropicAuth, runtimeProvider.ModelProtocols)
+		availableSet := testModelsConcurrently(ctx, models, runtimeProvider.Endpoint, runtimeProvider.APIKey, probeWireType(runtimeProvider), runtimeProvider.ModelProtocols)
 		available, unavailable := classifyModels(models, availableSet)
 		if len(available) == 0 {
 			return fmt.Errorf("no available models found - check endpoint and API key")
@@ -332,9 +327,6 @@ func persistMappingModel(providerName string, m *AdvancedConfigModel) (bool, err
 		p.Model = m.p.Model
 		p.OpusModel, p.SonnetModel, p.HaikuModel = m.p.OpusModel, m.p.SonnetModel, m.p.HaikuModel
 		p.FableModel, p.CustomModelID, p.SubagentModel = m.p.FableModel, m.p.CustomModelID, m.p.SubagentModel
-		if p.Env != nil {
-			delete(p.Env, claude.SubagentModelEnv)
-		}
 		applyCompactConfig(p, m.live().oneMSlots, m.live().compactPreset)
 		return nil
 	})

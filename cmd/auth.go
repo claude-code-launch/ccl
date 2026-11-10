@@ -34,24 +34,22 @@ var authCmd = newAuthCommand()
 func newAuthCommand() *cobra.Command {
 	opts := authOptions{}
 	cmd := &cobra.Command{
-		Use:   "oauth <claude|gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed|cursor> [alias]",
+		Use:   "oauth <gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|cursor> [alias]",
 		Short: "Authenticate a subscription-backed provider",
 		Long: `Authenticate subscription-backed providers.
 
 Login:
 
-  ccl oauth claude work         # Claude subscription; ccl oauth claude --help for account management
   ccl oauth gpt                 # ChatGPT / Codex subscription
   ccl oauth gpt work            # same backend, provider name "work"
-  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|zed|cursor
+  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|cursor
 
 Notes:
-  - Claude Code manages its own credentials in separate local profiles;
-    other subscription logins create providers and use ~/.ccl/auth
+  - Subscription logins create providers and use ~/.ccl/auth
   - gemini signs in to Google Antigravity; it does not use Gemini CLI credentials
   - WorkBuddy has two deployments with separate accounts and credentials:
     workbuddy is www.workbuddy.ai, workbuddycn is www.workbuddy.cn
-  - Fast mode (gpt): Claude /fast or ccl set Review & Apply
+  - Fast mode (gpt): ccl set Review & Apply
   - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
   - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
   - AutoClaw opens a CCL-owned browser login, including the provider's human
@@ -60,10 +58,6 @@ Notes:
     ccl oauth autoclaw --from-desktop
     (auth.json is read through the Chromium Safe Storage Keychain item on
     macOS; desktop files are never modified)
-  - Zed signs in through zed.dev's native-app flow and uses the models included
-    in your Zed plan (Anthropic, OpenAI, Google, xAI); the Zed editor is not
-    needed. Models Zed only offers with upstream data retention stay hidden
-    unless CCL_ZED_ALLOW_DATA_RETENTION=1
   - Cursor signs in through cursor.com's deep-control PKCE flow; ccl speaks
     Cursor's agent stream directly, so the Cursor CLI is not needed
   - Flags: --no-browser, --callback-port, --kiro-auth, --from-desktop
@@ -75,15 +69,15 @@ Notes:
 		},
 	}
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
-	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw/Zed)")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw)")
 	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
 	cmd.Flags().BoolVar(&opts.fromDesktop, "from-desktop", false, "AutoClaw only: reuse the desktop app's login instead of a browser flow")
-	cmd.AddCommand(newOAuthPruneCommand(), newClaudeAccountCommand())
+	cmd.AddCommand(newOAuthPruneCommand())
 	return cmd
 }
 
 // supportsFastMode reports whether the GPT subscription backend honours the
-// Claude Code fastMode toggle.
+// configured fast mode.
 func supportsFastMode(providerName string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
 	case oauthproxy.ProviderChatGPT:
@@ -139,13 +133,9 @@ func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions
 
 	fmt.Fprintf(out, "Authenticated %s as provider %q and switched active provider.\n", target, providerName)
 	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
-	if target == oauthproxy.ProviderZed {
-		fmt.Fprintln(out, "Protocol: automatic (Anthropic Messages / Responses / Chat Completions / Gemini per model)")
-	} else {
-		fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
-	}
+	fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
 	if supportsFastMode(target) {
-		fmt.Fprintf(out, "Fast: %s (toggle with /fast or ccl set Review & Apply)\n", providerFastSummary(p))
+		fmt.Fprintf(out, "Fast: %s (toggle with ccl set Review & Apply)\n", providerFastSummary(p))
 	}
 	_ = refreshModelsDevMetadata(ctx, out)
 	return nil
@@ -219,7 +209,7 @@ func configureOAuthProvider(p provider.Provider, name, oauthProvider, credential
 }
 
 // oauthRuntimeType is the internal compatibility type persisted for each
-// subscription backend. Zed's real upstream protocol remains per-model.
+// subscription backend.
 func oauthRuntimeType(providerName string) string {
 	if runtimeType, ok := provider.OAuthRuntimeType(providerName); ok {
 		return runtimeType
@@ -241,7 +231,7 @@ func isReservedProviderName(name string) bool {
 		oauthproxy.ProviderWorkBuddy,
 		oauthproxy.ProviderWorkBuddyCN,
 		oauthproxy.ProviderAutoClaw,
-		oauthproxy.ProviderZed,
+		"zed", // reserved legacy backend name
 		oauthproxy.ProviderCursor:
 		return true
 	default:

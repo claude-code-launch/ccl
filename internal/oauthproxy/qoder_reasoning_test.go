@@ -172,39 +172,35 @@ func TestQoderRequestCarriesMatchedEffort(t *testing.T) {
 		ID: "auto", Name: "Auto", Source: "system", Config: map[string]any{},
 	}}
 	parameters := qoderParameters(t, `{
-		"model":"qmodel_38max","max_tokens":100,
-		"thinking":{"type":"adaptive"},
-		"output_config":{"effort":"high"},
-		"messages":[{"role":"user","content":"hi"}]
+		"model":"qmodel_38max","max_output_tokens":100,
+		"reasoning":{"effort":"high"},
+		"input":[{"role":"user","content":"hi"}]
 	}`, catalog)
 	if parameters["enable_thinking"] != true || parameters["reasoning_effort"] != "xhigh" || parameters["max_tokens"] != 100 {
 		t.Fatalf("matched effort parameters = %+v", parameters)
 	}
 
 	parameters = qoderParameters(t, `{
-		"model":"qmodel_38max","max_tokens":100,
-		"thinking":{"type":"disabled"},
-		"output_config":{"effort":"low"},
-		"messages":[{"role":"user","content":"hi"}]
+		"model":"qmodel_38max","max_output_tokens":100,
+		"input":[{"role":"user","content":"hi"}]
 	}`, catalog)
 	if _, ok := parameters["enable_thinking"]; ok || parameters["reasoning_effort"] != nil {
 		t.Fatalf("disabled thinking still set effort: %+v", parameters)
 	}
 
 	parameters = qoderParameters(t, `{
-		"model":"qmodel_38max","max_tokens":100,
-		"thinking":{"type":"adaptive"},
-		"output_config":{"effort":"ultra"},
-		"messages":[{"role":"user","content":"hi"}]
+		"model":"qmodel_38max","max_output_tokens":100,
+		"reasoning":{"effort":"ultra"},
+		"input":[{"role":"user","content":"hi"}]
 	}`, catalog)
 	if _, ok := parameters["enable_thinking"]; ok || parameters["reasoning_effort"] != nil {
 		t.Fatalf("unlisted effort was sent: %+v", parameters)
 	}
 
 	parameters = qoderParameters(t, `{
-		"model":"auto","max_tokens":100,
-		"output_config":{"effort":"high"},
-		"messages":[{"role":"user","content":"hi"}]
+		"model":"auto","max_output_tokens":100,
+		"reasoning":{"effort":"high"},
+		"input":[{"role":"user","content":"hi"}]
 	}`, catalog)
 	if _, ok := parameters["enable_thinking"]; ok || parameters["reasoning_effort"] != nil || parameters["max_tokens"] != 100 {
 		t.Fatalf("model without rungs gained effort parameters: %+v", parameters)
@@ -213,7 +209,7 @@ func TestQoderRequestCarriesMatchedEffort(t *testing.T) {
 
 func qoderParameters(t *testing.T, raw string, catalog []qoderModel) map[string]any {
 	t.Helper()
-	converted, err := convertAnthropicToQoder([]byte(raw), catalog)
+	converted, err := convertResponsesToQoder([]byte(raw), catalog)
 	if err != nil {
 		t.Fatal(err)
 	}

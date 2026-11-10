@@ -34,10 +34,9 @@ func TestUseWithExplicitNameSwitchesActiveProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Providers["alpha"] = provider.Provider{Name: "alpha"}
-	cfg.Providers["beta"] = provider.Provider{Name: "beta"}
+	cfg.Providers["alpha"] = provider.Provider{Name: "alpha", Type: "openai"}
+	cfg.Providers["beta"] = provider.Provider{Name: "beta", Type: "openai_responses"}
 	cfg.ActiveProvider = "alpha"
-	cfg.ACPProvider = "alpha"
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -55,65 +54,6 @@ func TestUseWithExplicitNameSwitchesActiveProvider(t *testing.T) {
 	}
 	if reloaded.ActiveProvider != "beta" {
 		t.Fatalf("persisted active provider = %q, want beta", reloaded.ActiveProvider)
-	}
-	if reloaded.ACPProvider != "alpha" {
-		t.Fatalf("persisted ACP provider = %q, want alpha", reloaded.ACPProvider)
-	}
-}
-
-func TestUseACPSelectsSharedProviderConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	cfg := &provider.Config{
-		ActiveProvider: "alpha",
-		ACPProvider:    "alpha",
-		Providers: map[string]provider.Provider{
-			"alpha": {Name: "alpha", Type: "anthropic", Endpoint: "https://alpha.example"},
-			"cc":    {Name: "cc", Type: "openai", Endpoint: "https://cc.example/v1"},
-		},
-	}
-	if err := config.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := executeCommand(RootCmd(), "use", "--acp", "cc")
-	if err != nil {
-		t.Fatalf("ccl use --acp cc: %v (output: %q)", err, out)
-	}
-
-	got, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ActiveProvider != "alpha" || got.ACPProvider != "cc" {
-		t.Fatalf("provider selections = normal:%q ACP:%q", got.ActiveProvider, got.ACPProvider)
-	}
-	if len(got.Providers) != 2 || got.Providers[got.ACPProvider].Endpoint != "https://cc.example/v1" {
-		t.Fatalf("ACP did not reference the shared cc config: %+v", got)
-	}
-}
-
-func TestUseRejectsNonstandardSingleDashACP(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	out, err := executeCommand(RootCmd(), "use", "-acp", "cc")
-	if err == nil {
-		t.Fatalf("expected -acp to be rejected, output: %q", out)
-	}
-	if !strings.Contains(err.Error(), "unknown flag: -acp") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestUseHelpDocumentsACPSelection(t *testing.T) {
-	out, err := executeCommand(RootCmd(), "use", "--help")
-	if err != nil {
-		t.Fatalf("ccl use --help: %v", err)
-	}
-	for _, want := range []string{"use [--acp] [provider]", "ccl use --acp cc", "--acp"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("use help missing %q:\n%s", want, out)
-		}
 	}
 }
 

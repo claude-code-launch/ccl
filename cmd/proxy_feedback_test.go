@@ -19,7 +19,7 @@ func TestCatalogFeedbackSeparatesRouteUpdatesFromPickerReload(t *testing.T) {
 			t.Fatalf("source %q misrepresented picker freshness: %s", mode, text)
 		}
 	}
-	state := &proxymanager.State{ProxyVersion: 16, Provider: "one", AdditionalProviders: []string{"two"}}
+	state := &proxymanager.State{ProxyVersion: 17, Provider: "one", AdditionalProviders: []string{"two"}}
 	if codexModelUpdateMessage(state, "unrelated") != "" || codexModelUpdateMessage(nil, "one") != "" {
 		t.Fatal("unrelated provider save gained a Codex notice")
 	}

@@ -24,15 +24,11 @@ const (
 	ProviderWorkBuddyCN = "workbuddycn"
 	// ProviderAutoClaw is the AutoClaw Code (ZCode coding plan) backend. CCL
 	// performs browser OAuth, refreshes the resulting session locally, and owns
-	// the Anthropic-to-OpenAI Chat adapter used to reach the managed proxy.
+	// the Responses-to-OpenAI Chat adapter used to reach the managed proxy.
 	ProviderAutoClaw = "autoclaw"
-	// ProviderZed is the Zed hosted-model plan (Zed Pro and friends). CCL owns the
-	// native-app browser sign-in, the LLM-token exchange, and a per-model router
-	// over Zed's Anthropic / OpenAI / Google / xAI models.
-	ProviderZed = "zed"
 	// ProviderCursor is the Cursor subscription backend. CCL owns the PKCE
 	// browser sign-in, its poll loop, token refresh, and the Connect-RPC
-	// AgentService adapter that speaks Anthropic Messages to Claude Code.
+	// AgentService adapter that speaks OpenAI Responses to the client.
 	ProviderCursor = "cursor"
 	// backendXAI is the internal backend key for xAI/Grok credentials.
 	backendXAI = "xai"
@@ -99,8 +95,6 @@ func Login(ctx context.Context, providerName string, opts LoginOptions) (LoginRe
 		return loginKimi(ctx, authDir, opts)
 	case ProviderAutoClaw:
 		return loginAutoClaw(ctx, authDir, opts)
-	case ProviderZed:
-		return loginZed(ctx, authDir, opts)
 	case ProviderCursor:
 		return loginCursor(ctx, authDir, opts)
 	default:
@@ -133,10 +127,12 @@ func ImportCredential(ctx context.Context, providerName string) (LoginResult, er
 func ValidateLoginProvider(providerName string) (string, error) {
 	target := strings.ToLower(strings.TrimSpace(providerName))
 	switch target {
-	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderZed, ProviderCursor:
+	case "claude", "zed":
+		return "", fmt.Errorf("OAuth provider %q has been retired", target)
+	case ProviderChatGPT, ProviderGemini, ProviderGrok, ProviderQoder, ProviderKimi, ProviderKiro, ProviderWorkBuddy, ProviderWorkBuddyCN, ProviderAutoClaw, ProviderCursor:
 		return target, nil
 	default:
-		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, qoder, kimi, kiro, workbuddy, workbuddycn, autoclaw, zed, or cursor)", providerName)
+		return "", fmt.Errorf("unsupported auth provider %q (use gpt, gemini, grok, qoder, kimi, kiro, workbuddy, workbuddycn, autoclaw, or cursor)", providerName)
 	}
 }
 
@@ -160,8 +156,6 @@ func BackendProvider(providerName string) (string, error) {
 		return ProviderWorkBuddyCN, nil
 	case ProviderAutoClaw:
 		return ProviderAutoClaw, nil
-	case ProviderZed:
-		return ProviderZed, nil
 	case ProviderCursor:
 		return ProviderCursor, nil
 	default:

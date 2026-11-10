@@ -105,7 +105,7 @@ func runModels(ctx context.Context, showAll, probe bool, target providerTarget) 
 	}
 	fmt.Printf("Probing %d model(s) with a 1-token request each...\n\n", len(modelList))
 
-	availableSet := testModelsConcurrently(ctx, modelList, probeTarget.Endpoint, probeTarget.APIKey, probeWireType(probeTarget), probeTarget.AnthropicAuth, probeTarget.ModelProtocols)
+	availableSet := testModelsConcurrently(ctx, modelList, probeTarget.Endpoint, probeTarget.APIKey, probeWireType(probeTarget), probeTarget.ModelProtocols)
 	available, unavailable := classifyModels(modelList, availableSet)
 	fmt.Println()
 	printModelReportWithMetadata(available, unavailable, metadata)

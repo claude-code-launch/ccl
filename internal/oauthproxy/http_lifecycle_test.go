@@ -40,7 +40,7 @@ func TestStoppedChatRuntimesCloseUpstreamIdleConnections(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/messages", strings.NewReader(`{"model":"gpt-test","max_tokens":16,"messages":[{"role":"user","content":"fake"}]}`))
+		r, _ := http.NewRequest(http.MethodPost, runtime.Endpoint()+"/responses", strings.NewReader(`{"model":"gpt-test","max_output_tokens":16,"input":[{"role":"user","content":"fake"}]}`))
 		r.Header.Set("x-api-key", runtime.APIKey())
 		response, err := client.Do(r)
 		if err != nil {

@@ -68,8 +68,8 @@ func TestProtocolLabel(t *testing.T) {
 		providerType string
 		want         string
 	}{
-		{"anthropic", "anthropic", "anthropic-messages"},
-		{"anthropic mixed case", "Anthropic", "anthropic-messages"},
+		{"anthropic", "anthropic", "anthropic / retired"},
+		{"anthropic mixed case", "Anthropic", "anthropic / retired"},
 		{"openai chat", "openai", "openai-chat"},
 		{"openai chat display label", "openai(chat)", "openai-chat"},
 		{"openai chat hyphenated", "openai-chat", "openai-chat"},
@@ -91,9 +91,9 @@ func TestProtocolLabel(t *testing.T) {
 	}
 }
 
-func TestProtocolLabelForZedShowsAutomaticRouting(t *testing.T) {
+func TestProtocolLabelMarksZedRetired(t *testing.T) {
 	p := provider.Provider{Type: "openai_responses", OAuthProvider: "Zed"}
-	if got := provider.ProtocolLabelForProvider(p); got != "zed / auto" {
+	if got := provider.ProtocolLabelForProvider(p); got != "zed / retired" {
 		t.Fatalf("ProtocolLabelForProvider() = %q", got)
 	}
 }
@@ -104,7 +104,7 @@ func TestProtocolForAISdkNPM(t *testing.T) {
 		want   string
 		wantOK bool
 	}{
-		{"@ai-sdk/anthropic", "anthropic", true},
+		{"@ai-sdk/anthropic", "", false},
 		{"@ai-sdk/openai", "openai_responses", true},
 		{"@ai-sdk/openai-compatible", "openai", true},
 		{"@ai-sdk/google", "", false},
@@ -190,21 +190,22 @@ func TestIsAnthropicType(t *testing.T) {
 }
 
 func TestOAuthRuntimeType(t *testing.T) {
-	if got, ok := provider.OAuthRuntimeType("zed"); !ok || got != "openai_responses" {
+	if got, ok := provider.OAuthRuntimeType("zed"); ok || got != "" {
 		t.Fatalf("zed = %q %v", got, ok)
 	}
-	got, ok := provider.OAuthRuntimeType("gpt")
-	if !ok || got != "openai_responses" {
-		t.Fatalf("gpt = %q %v", got, ok)
+	for _, backend := range []string{"gpt", "codex", "grok", "xai"} {
+		if got, ok := provider.OAuthRuntimeType(backend); !ok || got != "openai_responses" {
+			t.Fatalf("%s = %q %v", backend, got, ok)
+		}
 	}
 	if _, ok := provider.OAuthRuntimeType("chatgpt"); ok {
 		t.Fatal("the retired chatgpt name is still accepted")
 	}
-	got, ok = provider.OAuthRuntimeType("qoder")
-	if !ok || got != "anthropic" {
+	got, ok := provider.OAuthRuntimeType("qoder")
+	if !ok || got != "openai_responses" {
 		t.Fatalf("qoder = %q %v", got, ok)
 	}
-	if got, ok := provider.OAuthRuntimeType("cursor"); !ok || got != "anthropic" {
+	if got, ok := provider.OAuthRuntimeType("cursor"); !ok || got != "openai_responses" {
 		t.Fatalf("cursor = %q %v", got, ok)
 	}
 	got, ok = provider.OAuthRuntimeType("gemini")
@@ -220,7 +221,7 @@ func TestOAuthRuntimeType(t *testing.T) {
 		t.Fatalf("kimi = %q %v", got, ok)
 	}
 	got, ok = provider.OAuthRuntimeType("kiro")
-	if !ok || got != "anthropic" {
+	if !ok || got != "openai_responses" {
 		t.Fatalf("kiro = %q %v", got, ok)
 	}
 	got, ok = provider.OAuthRuntimeType("workbuddy")
@@ -253,7 +254,7 @@ func TestAutoClawProviderType(t *testing.T) {
 	if got := provider.ProtocolLabel("autoclaw"); got != "openai-chat / autoclaw" {
 		t.Fatalf("ProtocolLabel(autoclaw) = %q", got)
 	}
-	if got := provider.ProtocolLabel("anthropic"); got != "anthropic-messages" {
+	if got := provider.ProtocolLabel("anthropic"); got != "anthropic / retired" {
 		t.Fatalf("ProtocolLabel(anthropic) = %q", got)
 	}
 	runtimeType, ok := provider.OAuthRuntimeType("autoclaw")

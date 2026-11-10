@@ -84,19 +84,19 @@ func TestProxyProcessLifecycle(t *testing.T) {
 				return
 			}
 			_, _ = io.WriteString(w, `{"id":"chat-fake","object":"chat.completion","model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"chat-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)
-		case "/native/v1/messages":
+		case "/native/v1/responses":
 			if r.Header.Get("Authorization") != "Bearer fake-native-key" || r.Header.Get("X-Api-Key") != "" {
 				http.Error(w, "wrong native auth", 401)
 				return
 			}
-			_, _ = io.WriteString(w, `{"id":"message-fake","type":"message","role":"assistant","model":"model-a","content":[{"type":"text","text":"native-ok"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}`)
+			_, _ = io.WriteString(w, `{"id":"resp_fixture","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"native-ok"}]}]}`)
 		default:
 			http.Error(w, "unexpected route", 404)
 		}
 	}))
 	t.Cleanup(upstream.Close)
 	chat := provider.Provider{Name: "chat-fixture", Type: "openai", Endpoint: upstream.URL + "/chat/v1", APIKey: "fake-chat-key", Model: "model-a,model-b", SonnetModel: "model-a", CustomModelID: "model-a"}
-	native := provider.Provider{Name: "native-fixture", Type: "anthropic", Endpoint: upstream.URL + "/native/v1", APIKey: "fake-native-key", Model: chat.Model, CustomModelID: "model-a", AnthropicAuth: "bearer"}
+	native := provider.Provider{Name: "native-fixture", Type: "openai_responses", Endpoint: upstream.URL + "/native/v1", APIKey: "fake-native-key", Model: chat.Model, CustomModelID: "model-a"}
 	if err := config.Save(&provider.Config{ActiveProvider: chat.Name, Providers: map[string]provider.Provider{chat.Name: chat, native.Name: native}}); err != nil {
 		t.Fatal(err)
 	}

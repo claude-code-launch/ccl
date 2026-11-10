@@ -45,10 +45,10 @@ func qoderCapacityService(t *testing.T, body string) (*qoderService, *qoderCapac
 }
 
 func callQoderCapacityFixture(service *qoderService, stream bool) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(fmt.Sprintf(`{"model":"qfmodel","stream":%t,"messages":[{"role":"user","content":"fixture"}]}`, stream)))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":"qfmodel","stream":%t,"input":[{"role":"user","content":"fixture"}]}`, stream)))
 	request.Header.Set("X-Api-Key", service.apiKey)
 	writer := httptest.NewRecorder()
-	service.handleMessages(writer, request)
+	service.handleResponses(writer, request)
 	return writer
 }
 
@@ -79,7 +79,7 @@ func TestQoderCapacityAfterOutputDoesNotReplayPartialAnswer(t *testing.T) {
 	service, transport := qoderCapacityService(t, content+qoderCapacityEnvelope(false))
 	writer := callQoderCapacityFixture(service, true)
 	body := writer.Body.String()
-	if writer.Code != 200 || !strings.Contains(body, "partial-answer") || !strings.Contains(body, "rate_limit_error") || !strings.Contains(body, `"retry_after_seconds":2`) || strings.Contains(body, "message_stop") || strings.Contains(body, "RESOURCE_LIMIT") {
+	if writer.Code != 200 || !strings.Contains(body, "partial-answer") || !strings.Contains(body, "rate_limit_error") || !strings.Contains(body, "retry after 2s") || strings.Contains(body, "response.completed") || strings.Contains(body, "RESOURCE_LIMIT") {
 		t.Fatalf("partial stream was reported incorrectly: %d %s", writer.Code, body)
 	}
 	if transport.calls.Load() != 1 {

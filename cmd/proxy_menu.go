@@ -38,7 +38,7 @@ func proxyMenuConfig(cmd *cobra.Command, _ []string) error {
 	}
 	names := make([]string, 0, len(cfg.Providers))
 	for name, p := range cfg.Providers {
-		if provider.IsDefaultProvider(name) || provider.IsClaudeAccount(p) {
+		if provider.IsDefaultProvider(name) || provider.ValidateRuntime(p) != nil {
 			continue
 		}
 		names = append(names, name)
@@ -80,7 +80,7 @@ func proxyMenuSwitch(cmd *cobra.Command, _ []string) (switchErr error) {
 		return err
 	}
 	target, ok := cfg.Providers[name]
-	if !ok || provider.IsDefaultProvider(name) || provider.IsClaudeAccount(target) {
+	if !ok || provider.IsDefaultProvider(name) || provider.ValidateRuntime(target) != nil {
 		return fmt.Errorf("select a provider supported by the standalone proxy")
 	}
 	previous, err := m.Read()

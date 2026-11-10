@@ -35,10 +35,8 @@ func fixtureProviderGateway(t *testing.T, handler http.HandlerFunc, configured p
 	var err error
 	if configured.Type == "openai_responses" {
 		runtime, err = oauthproxy.StartOpenAIResponsesAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a")
-	} else if configured.Type == "openai" {
-		runtime, err = oauthproxy.StartOpenAIChatAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a")
 	} else {
-		runtime, err = oauthproxy.StartAnthropicAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a", "")
+		runtime, err = oauthproxy.StartOpenAIChatAPI(context.Background(), upstream.URL+"/v1", "fake-provider-key", "model-a")
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -92,13 +90,46 @@ func responseObject(t *testing.T, response *http.Response) map[string]any {
 	}
 	return result
 }
-func writeMessage(w http.ResponseWriter, content []map[string]any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg_fixture", "type": "message", "role": "assistant", "content": content, "stop_reason": "end_turn", "usage": map[string]any{"input_tokens": 3, "output_tokens": 2}})
+func writeChatText(w http.ResponseWriter, r *http.Request, text string) {
+	writeChatFixture(w, r, map[string]any{"content": text}, "stop", 3)
+}
+
+func writeChatTool(w http.ResponseWriter, r *http.Request, id, name string, args map[string]any) {
+	writeChatFixture(w, r, map[string]any{"tool_calls": []any{chatFixtureTool(id, name, args)}}, "tool_calls", 3)
+}
+
+func chatFixtureTool(id, name string, args map[string]any) map[string]any {
+	return map[string]any{"index": 0, "id": id, "type": "function",
+		"function": map[string]any{"name": name, "arguments": textValue(args)}}
+}
+
+func writeChatFixture(w http.ResponseWriter, r *http.Request, message map[string]any, reason string, inputTokens int) {
+	message["role"] = "assistant"
+	choice := map[string]any{"index": 0, "finish_reason": reason}
+	usage := map[string]any{"prompt_tokens": inputTokens, "completion_tokens": 2, "total_tokens": inputTokens + 2}
+	response := map[string]any{"id": "chat_fixture", "choices": []any{choice}, "usage": usage}
+	if r.Header.Get("Accept") == "text/event-stream" {
+		choice["delta"] = message
+		w.Header().Set("Content-Type", "text/event-stream")
+		raw, _ := json.Marshal(response)
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw)
+		return
+	}
+	choice["message"] = message
+	writeJSON(w, 200, response)
+}
+
+func writeChatDelta(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"finish_reason\":null}]}\n\n", text)
+}
+
+func finishChatFixture(w http.ResponseWriter) {
+	_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 }
 
 func TestCodexReplacementListenerKeepsEndpoint(t *testing.T) {
-	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "anthropic", Options{Desktop: true})
+	g := fixtureGateway(t, func(http.ResponseWriter, *http.Request) {}, "openai", Options{Desktop: true})
 	base := g.BaseURL()
 	u, _ := url.Parse(base)
 	options := Options{Desktop: true, ListenAddress: u.Host}
@@ -106,7 +137,7 @@ func TestCodexReplacementListenerKeepsEndpoint(t *testing.T) {
 		t.Fatal("occupied endpoint silently moved to another port")
 	}
 	g.Close()
-	replacement, err := New(context.Background(), g.runtime, provider.Provider{Name: "chosen", Type: "anthropic"}, options)
+	replacement, err := New(context.Background(), g.runtime, provider.Provider{Name: "chosen", Type: "openai"}, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +173,7 @@ func TestCodexBridgeRelaysRateLimitBeforeResponseStarts(t *testing.T) {
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "2")
 		writeJSON(w, 429, map[string]any{"type": "error", "error": map[string]any{"type": "rate_limit_error", "message": "model temporarily resource limited (retry after 2s)"}})
-	}, "anthropic", Options{})
+	}, "openai", Options{})
 	response := postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "fixture", "stream": true})
 	raw, _ := io.ReadAll(response.Body)
 	if response.StatusCode != 429 || response.Header.Get("Retry-After") != "2" || !strings.Contains(string(raw), "rate_limit_error") || strings.Contains(string(raw), "response.created") {
@@ -173,14 +204,14 @@ func TestCodexBridgeCompactionTriggerReturnsReplayableSummary(t *testing.T) {
 			if !strings.Contains(string(raw), "keep-this-goal") {
 				t.Errorf("summary request dropped the conversation: %s", raw)
 			}
-			writeMessage(w, []map[string]any{{"type": "text", "text": "kept-goal"}})
+			writeChatText(w, r, "kept-goal")
 		default:
 			if !strings.Contains(string(raw), "Conversation summary:") || !strings.Contains(string(raw), "kept-goal") || strings.Contains(string(raw), "keep-this-goal") {
 				t.Errorf("compaction was not replayed: %s", raw)
 			}
-			writeMessage(w, []map[string]any{{"type": "text", "text": "continued"}})
+			writeChatText(w, r, "continued")
 		}
-	}, "anthropic", Options{})
+	}, "openai", Options{})
 	first := responseObject(t, postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": []any{
 		map[string]any{"type": "message", "role": "user", "content": "keep-this-goal"},
 		map[string]any{"type": "compaction_trigger"},
@@ -212,7 +243,7 @@ func TestCodexCompactionSummarizesToolHistoryWithoutLiveCalls(t *testing.T) {
 				t.Errorf("summary lost %q: %s", want, raw)
 			}
 		}
-		if body["tools"] != nil || strings.Contains(string(raw), `"type":"tool_use"`) || strings.Contains(string(raw), `"type":"tool_result"`) {
+		if body["tools"] != nil || strings.Contains(string(raw), `"tool_calls"`) || strings.Contains(string(raw), `"role":"tool"`) {
 			t.Errorf("summary requires live tool definitions: %s", raw)
 		}
 		messages, _ := body["messages"].([]any)
@@ -220,8 +251,8 @@ func TestCodexCompactionSummarizesToolHistoryWithoutLiveCalls(t *testing.T) {
 		if last["role"] != "user" || !strings.Contains(textValue(last["content"]), "Return only the summary") {
 			t.Error("summary request is not the final user instruction")
 		}
-		writeMessage(w, []map[string]any{{"type": "text", "text": "summarized tools"}})
-	}, "anthropic", Options{})
+		writeChatText(w, r, "summarized tools")
+	}, "openai", Options{})
 	result := responseObject(t, postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": []any{
 		map[string]any{"role": "user", "content": "inspect and patch"},
 		map[string]any{"type": "tool_search_call", "call_id": "call_search", "execution": "client", "arguments": map[string]any{"query": "shipping_eta"}},
@@ -237,23 +268,11 @@ func TestCodexCompactionSummarizesToolHistoryWithoutLiveCalls(t *testing.T) {
 	}
 }
 
-func TestCodexStreamErrorKeepsProviderMessage(t *testing.T) {
-	stream := newResponseStream(httptest.NewRecorder(), "model", false, nil)
-	err := stream.event([]byte(`{"type":"error","error":{"type":"api_error","message":"Qoder stream returned status 400: unsupported reasoning_effort"}}`))
-	if err == nil || !strings.Contains(err.Error(), "unsupported reasoning_effort") {
-		t.Fatal(err)
-	}
-	err = stream.event([]byte(`{"type":"error"}`))
-	if err == nil || err.Error() != "provider reported a stream error" {
-		t.Fatal(err)
-	}
-}
-
 func TestCodexBridgeToolsContinueWithoutNativeCredentialLeak(t *testing.T) {
 	var attempts atomic.Int32
 	var seenToolResult atomic.Bool
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Chatgpt-Account-Id") != "" || r.Header.Get("X-Api-Key") != "fake-provider-key" {
+		if r.Header.Get("Authorization") != "Bearer fake-provider-key" || r.Header.Get("Cookie") != "" || r.Header.Get("Chatgpt-Account-Id") != "" || r.Header.Get("X-Api-Key") != "" {
 			t.Error("native credentials crossed the CCL route")
 		}
 		var body map[string]any
@@ -262,15 +281,15 @@ func TestCodexBridgeToolsContinueWithoutNativeCredentialLeak(t *testing.T) {
 			t.Error("client alias reached provider")
 		}
 		if attempts.Add(1) == 1 {
-			writeMessage(w, []map[string]any{{"type": "tool_use", "id": "call_1", "name": toolWireName("", "read_file"), "input": map[string]any{"path": "local.txt"}}})
+			writeChatTool(w, r, "call_1", "read_file", map[string]any{"path": "local.txt"})
 			return
 		}
 		serialized, _ := json.Marshal(body["messages"])
 		if strings.Contains(string(serialized), "tool-result-fixture") && strings.Contains(string(serialized), "call_1") {
 			seenToolResult.Store(true)
 		}
-		writeMessage(w, []map[string]any{{"type": "text", "text": "continued"}})
-	}, "anthropic", Options{Desktop: true})
+		writeChatText(w, r, "continued")
+	}, "openai", Options{Desktop: true})
 	tools := []any{map[string]any{"type": "function", "name": "read_file", "parameters": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}}}}
 	first := responseObject(t, postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "read the fixture", "tools": tools}))
 	output := first["output"].([]any)
@@ -289,15 +308,15 @@ func TestCodexBridgeFlushesBeforeProviderCompletes(t *testing.T) {
 	defer close(release)
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"first-delta\"}}\n\n")
+		writeChatDelta(w, "first-delta")
 		_ = http.NewResponseController(w).Flush()
 		select {
 		case <-release:
 		case <-r.Context().Done():
 			return
 		}
-		_, _ = io.WriteString(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-	}, "anthropic", Options{Desktop: true})
+		finishChatFixture(w)
+	}, "openai", Options{Desktop: true})
 	response := postResponses(t, g, map[string]any{"model": "ccl/chosen/model-a", "input": "fixture", "stream": true, "tools": largeToolCatalog()})
 	delta := make(chan string, 1)
 	go func() {
@@ -332,8 +351,8 @@ func TestCodexNativeRoutesAndUnknownCCLAlias(t *testing.T) {
 	defer native.Close()
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		customRequests.Add(1)
-		writeMessage(w, []map[string]any{{"type": "text", "text": "custom"}})
-	}, "anthropic", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
+		writeChatText(w, r, "custom")
+	}, "openai", Options{Desktop: true, OpenAIURL: native.URL, ChatGPTURL: native.URL})
 	responseObject(t, postResponses(t, g, map[string]any{"model": "native-model", "input": "fixture"}))
 	response := postResponses(t, g, map[string]any{"model": "ccl/missing/model", "input": "fixture"})
 	if response.StatusCode != http.StatusNotFound || nativeRequests.Load() != 1 || customRequests.Load() != 0 {
@@ -355,8 +374,8 @@ func TestCodexNativeRoutesAndUnknownCCLAlias(t *testing.T) {
 func TestCodexCompressedRequestsAndInterruptedStreams(t *testing.T) {
 	g := fixtureGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"message_start\",\"message\":{}}\n\n")
-	}, "anthropic", Options{Desktop: true})
+		writeChatDelta(w, "partial")
+	}, "openai", Options{Desktop: true})
 	encoder, err := zstd.NewWriter(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -402,4 +421,22 @@ func TestCodexNativeResponsesKeepStreamingAndCompaction(t *testing.T) {
 	if result := responseObject(t, response); result["object"] != "response.compaction" {
 		t.Fatal("native compaction not routed")
 	}
+}
+
+func fixtureResponseUsage(input int) map[string]any {
+	return map[string]any{"input_tokens": input, "output_tokens": 2, "total_tokens": input + 2,
+		"input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens_details": map[string]any{"reasoning_tokens": 0}}
+}
+
+func writeNativeFixture(w http.ResponseWriter, output []any, inputTokens int) {
+	events := bridgeEvents{writer: w}
+	response := map[string]any{"id": randomID("resp_"), "object": "response", "created_at": time.Now().Unix(),
+		"model": "native-fixture", "status": "in_progress", "output": []any{}}
+	_ = events.emit("response.created", map[string]any{"response": response})
+	for i, item := range output {
+		_ = events.emit("response.output_item.added", map[string]any{"output_index": i, "item": item})
+		_ = events.emit("response.output_item.done", map[string]any{"output_index": i, "item": item})
+	}
+	response["status"], response["output"], response["usage"] = "completed", output, fixtureResponseUsage(inputTokens)
+	_ = events.emit("response.completed", map[string]any{"response": response})
 }
