@@ -82,6 +82,7 @@ type codexResponsesService struct {
 	apiKey         string
 	endpoint       string
 	models         []string
+	modelDetails   map[string]protocol.ModelInfo
 	modelRoute     map[string]string
 	authorizer     codexResponsesAuthorizer
 	client         *http.Client
@@ -164,20 +165,22 @@ func startCodexOAuth(parent context.Context, modelSpec, credentialFile string) (
 	// Preserve configured routes, but publish the live account catalog so stale
 	// mappings do not limit the choices shown by ccl map and ccl set.
 	effectiveModelSpec := strings.Join(append([]string{modelSpec}, models...), ",")
+	details := make(map[string]protocol.ModelInfo, len(modelInfos))
+	for _, info := range modelInfos {
+		details[strings.ToLower(info.ID)] = info
+	}
 	runtime, err := startCodexResponsesRuntimeWithService(parent, codexOAuthBaseURL, effectiveModelSpec, authorizer,
 		func(apiKey, endpoint string, routes []runtimeModelRoute, auth codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService {
 			service := newCodexResponsesService(apiKey, endpoint, routes, auth, usage)
 			service.models = append([]string(nil), models...)
+			service.modelDetails = details
 			return service
 		})
 	if err != nil {
 		return nil, err
 	}
 	runtime.listAuths = authorizer.listAuths
-	runtime.modelDetails = make(map[string]protocol.ModelInfo, len(modelInfos))
-	for _, info := range modelInfos {
-		runtime.modelDetails[strings.ToLower(info.ID)] = info
-	}
+	runtime.modelDetails = details
 	runtime.catalogFallback = catalogFallback
 	LogInfof("runtime start oauth provider=gpt backend=codex protocol=codex_responses port=%s credential_file=%s model_count=%d",
 		strings.TrimPrefix(strings.TrimSuffix(runtime.endpoint, "/v1"), "http://"), filepath.Base(path), len(runtime.models))
@@ -285,7 +288,7 @@ func (s *codexResponsesService) authorized(request *http.Request) bool {
 }
 
 func (s *codexResponsesService) handleModels(writer http.ResponseWriter, request *http.Request) {
-	serveModelList(writer, request, s.apiKey, s.models)
+	serveModelListWithRoutes(writer, request, s.apiKey, s.models, s.modelDetails, s.modelRoute)
 }
 
 // handleResponses serves one Responses request. The upstream speaks Responses
@@ -335,6 +338,9 @@ func (s *codexResponsesService) serveConverted(writer http.ResponseWriter, reque
 	var body map[string]any
 	if decodeProtocolJSON(converted.body, &body) == nil {
 		body["model"] = route
+		if s.xai {
+			converted.thinkingEnabled = s.normalizeXaiReasoning(route, body)
+		}
 		converted.body, _ = json.Marshal(body)
 	}
 	LogDebugEvent("request_converted", "component", "codex_responses", "request_id", requestID,
@@ -543,6 +549,92 @@ func codexResponsesModel(body []byte) string {
 	return strings.TrimSpace(payload.Model)
 }
 
+func codexEffortRank(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none":
+		return 0
+	case "minimal":
+		return 1
+	case "low":
+		return 2
+	case "medium":
+		return 3
+	case "high":
+		return 4
+	case "xhigh":
+		return 5
+	case "max":
+		return 6
+	default:
+		return -1
+	}
+}
+
+func clampEffortToLevels(desired string, levels []protocol.ReasoningLevel) string {
+	want := strings.ToLower(strings.TrimSpace(desired))
+	if want == "ultra" {
+		want = "max"
+	}
+	for _, level := range levels {
+		if strings.EqualFold(level.Effort, want) {
+			return strings.ToLower(strings.TrimSpace(level.Effort))
+		}
+	}
+	wantRank := codexEffortRank(want)
+	bestLower := ""
+	bestLowerRank := -1
+	lowest := ""
+	lowestRank := 999
+	for _, level := range levels {
+		eff := strings.ToLower(strings.TrimSpace(level.Effort))
+		rank := codexEffortRank(eff)
+		if rank < 0 {
+			continue
+		}
+		if rank < lowestRank {
+			lowestRank = rank
+			lowest = eff
+		}
+		if wantRank >= 0 && rank <= wantRank && rank > bestLowerRank {
+			bestLowerRank = rank
+			bestLower = eff
+		}
+	}
+	if bestLower != "" {
+		return bestLower
+	}
+	if lowest != "" {
+		return lowest
+	}
+	return strings.ToLower(strings.TrimSpace(levels[0].Effort))
+}
+
+func (s *codexResponsesService) normalizeXaiReasoning(model string, payload map[string]any) bool {
+	if !s.xai || payload == nil {
+		return true
+	}
+	reasoning, ok := payload["reasoning"].(map[string]any)
+	if !ok {
+		return false
+	}
+	effort := strings.ToLower(strings.TrimSpace(stringValue(reasoning["effort"])))
+	if effort == "" {
+		return true
+	}
+	if effort == "ultra" {
+		effort = "max"
+	}
+	if info, hasInfo := lookupModelDetail(s.modelDetails, model); hasInfo && info.ReasoningKnown {
+		if len(info.ReasoningLevels) == 0 {
+			delete(payload, "reasoning")
+			return false
+		}
+		effort = clampEffortToLevels(effort, info.ReasoningLevels)
+	}
+	reasoning["effort"] = effort
+	return effort != "none"
+}
+
 func (s *codexResponsesService) addClientMetadata(body []byte, sessionID string) ([]byte, error) {
 	var payload map[string]any
 	if err := decodeProtocolJSON(body, &payload); err != nil {
@@ -611,6 +703,10 @@ func (s *codexResponsesService) servePassthrough(writer http.ResponseWriter, req
 		if payload["include"] == nil {
 			payload["include"] = []string{"reasoning.encrypted_content"}
 		}
+		if s.xai {
+			s.normalizeXaiReasoning(resolved, payload)
+		}
+		sanitizePassthroughResponsesInput(payload)
 	}
 	sessionID := s.requestSessionID(request)
 	if !compact && payload["prompt_cache_key"] == nil {
@@ -696,6 +792,41 @@ func (s *codexResponsesService) recordObservedUsage(clientModel string, observer
 		return
 	}
 	s.usage.Add(clientModel, int64(max(0, observer.input-observer.cached)), int64(observer.output), int64(observer.cached), 0)
+}
+
+// sanitizePassthroughResponsesInput filters input reasoning items before
+// forwarding with store=false. Stateless Responses upstreams reject reasoning
+// items that lack provider-encrypted content or carry CCL synthetic IDs.
+func sanitizePassthroughResponsesInput(payload map[string]any) {
+	items, ok := payload["input"].([]any)
+	if !ok || len(items) == 0 {
+		return
+	}
+	filtered := make([]any, 0, len(items))
+	for _, raw := range items {
+		item, isMap := raw.(map[string]any)
+		if !isMap || stringValue(item["type"]) != "reasoning" {
+			filtered = append(filtered, raw)
+			continue
+		}
+		id := stringValue(item["id"])
+		enc := strings.TrimSpace(stringValue(item["encrypted_content"]))
+		if strings.HasPrefix(id, cclReasoningIDPrefix) {
+			if strings.HasPrefix(enc, codexReasoningSignaturePrefix) {
+				if unwrapped, err := codexReasoningFromSignature(enc); err == nil {
+					if unwrappedMap, isObj := unwrapped.(map[string]any); isObj && strings.TrimSpace(stringValue(unwrappedMap["encrypted_content"])) != "" {
+						filtered = append(filtered, unwrappedMap)
+					}
+				}
+			}
+			continue
+		}
+		if enc == "" {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	payload["input"] = filtered
 }
 
 // responsesUsageObserver reads token usage off a relayed Responses stream (or

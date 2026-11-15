@@ -35,17 +35,15 @@ func TestModelVerificationSummary(t *testing.T) {
 	}
 }
 
-func TestSmallestMappedWindowCountsUnknownModels(t *testing.T) {
+func TestSmallestPoolWindowCountsUnknownModels(t *testing.T) {
 	p := provider.Provider{
-		OpusModel:   "gpt-5.6-sol[1m]",
-		SonnetModel: "gpt-5.6-terra",
-		HaikuModel:  "not-in-catalog",
+		Model: "gpt-5.6-sol[1m],gpt-5.6-terra,not-in-catalog",
 	}
 	windows := map[string]int{
 		"gpt-5.6-sol":   272_000,
 		"gpt-5.6-terra": 128_000,
 	}
-	smallest, model, unknown := smallestMappedWindow(p, windows)
+	smallest, model, unknown := smallestPoolWindow(p, windows)
 	if smallest != 128_000 || model != "gpt-5.6-terra" {
 		t.Fatalf("smallest = %d (%q)", smallest, model)
 	}
@@ -69,15 +67,13 @@ func TestFormatTokenCountIsReadableAndExact(t *testing.T) {
 
 func TestPrintDoctorOneMConsistencyFlagsOversigrokMarkers(t *testing.T) {
 	// The check is output-only; assert the decision inputs it depends on, so a
-	// [1m] slot whose backend window is small is recognizable.
+	// [1m] model whose backend window is small is recognizable.
 	p := provider.Provider{
-		OpusModel:   "gpt-5.6-sol[1m]",
-		SonnetModel: "claude-sonnet-4-6[1m]",
-		HaikuModel:  "gpt-5.6-luna",
+		Model: "gpt-5.6-sol[1m],claude-sonnet-4-6[1m],gpt-5.6-luna",
 	}
-	slots := oneMSlotsFromProvider(p)
-	if !slots["opus"] || !slots["sonnet"] || slots["haiku"] {
-		t.Fatalf("one-M slots = %#v", slots)
+	models := oneMModelsFromProvider(p)
+	if len(models) != 2 || models[0] != "gpt-5.6-sol" || models[1] != "claude-sonnet-4-6" {
+		t.Fatalf("one-M models = %#v", models)
 	}
 	windows := map[string]int{
 		"gpt-5.6-sol":       272_000,

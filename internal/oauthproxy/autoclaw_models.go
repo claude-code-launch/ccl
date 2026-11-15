@@ -235,6 +235,7 @@ func AutoClawModelCatalog() []protocol.ModelInfo {
 			DisplayName:     model.name,
 			ContextWindow:   model.context,
 			MaxOutputTokens: model.maxOutput,
+			InputModalities: normalizeModelModalities(model.input),
 		})
 	}
 	return infos

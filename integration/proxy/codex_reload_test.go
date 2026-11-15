@@ -61,7 +61,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(`{"models":[{"slug":"native-fixture"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p := provider.Provider{Name: "first", Type: "openai", Endpoint: upstream.URL + "/v1", APIKey: "fake-provider-key", Model: "model-a", CustomModelID: "model-a"}
+	p := provider.Provider{Name: "first", Type: "openai", Endpoint: upstream.URL + "/v1", APIKey: "fake-provider-key", Model: "model-a"}
 	other := p
 	other.Name = "second"
 	if err := config.Save(&provider.Config{ActiveProvider: p.Name, Providers: map[string]provider.Provider{p.Name: p, other.Name: other}}); err != nil {
@@ -261,7 +261,7 @@ func TestProxyReloadKeepsCodexEndpoint(t *testing.T) {
 	beforeReload := state().ID
 	if err := config.Update(func(cfg *provider.Config) error {
 		updated := cfg.Providers[p.Name]
-		updated.SonnetModel = "model-a"
+		updated.EffortLevel = "high"
 		cfg.Providers[p.Name] = updated
 		return nil
 	}); err != nil {

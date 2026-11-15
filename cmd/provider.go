@@ -24,24 +24,21 @@ Subcommands:
   ls             List providers
   use [name]     Switch the active provider
   cp/mv/rm       Copy, rename, delete
-  map            Slot → model mapping (Opus/Sonnet/Haiku/Fable/Custom)
   models         Availability check for the model pool
-  env            Provider-scoped environment variables
-  preview        Show the Grok Build model overlay
-  effort         Set the default reasoning effort for Grok Build
+  preview [name] Show the Grok Build model overlay
 
-Root shortcuts: ccl set / ccl ls / ccl use / ccl map.
+Root shortcuts: ccl set / ccl ls / ccl use / ccl preview.
 `,
 }
 
 func newProviderSetCommand(use string) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   use,
 		Short: "Add or update an LLM provider configuration",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunProviderSet(args)
-		},
+		RunE:  runProviderSetCommand,
 	}
+	registerProviderSetFlags(cmd)
+	return cmd
 }
 
 func newProviderUseCommand(use string) *cobra.Command {
@@ -59,8 +56,6 @@ func newProviderUseCommand(use string) *cobra.Command {
 }
 
 func newProviderCopyCommand(use string) *cobra.Command {
-	// Declared per command because each constructor is called twice: once for
-	// the root shortcut and once under `ccl provider`.
 	yes := false
 	cmd := &cobra.Command{
 		Use:   use,
@@ -396,6 +391,8 @@ func runProviderMove(sourceName, targetName string, force bool) error {
 	return nil
 }
 
+var useCmd = newProviderUseCommand("use [provider]")
+
 func init() {
 	providerCmd.AddCommand(
 		newProviderSetCommand("set [name]"),
@@ -404,11 +401,9 @@ func init() {
 		newProviderCopyCommand("cp <source> <target>"),
 		newProviderMoveCommand("mv <source> <target>"),
 		newProviderRemoveCommand("rm <name>"),
-		newProviderPreviewCommand("preview"),
-		newMapCommand("map [provider-name]"),
+		newProviderPreviewCommand("preview [provider]"),
 		newModelsCommand("models"),
-		newEnvCommand("env [KEY VALUE | ls | rm KEY | mv OLD NEW]"),
-		newProviderEffortCommand(),
 	)
 	rootCmd.AddCommand(providerCmd)
+	rootCmd.AddCommand(useCmd)
 }

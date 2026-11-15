@@ -29,7 +29,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const maxBodyBytes = 32 << 20
+const maxBodyBytes = 64 << 20
 
 type Options struct {
 	// DeferredStart lets the daemon finish its catalog/configuration plan before
@@ -52,11 +52,12 @@ type Options struct {
 }
 
 type Route struct {
-	Provider        string
-	Alias           string
-	Model           string
-	NativeResponses bool
-	MaxOutputTokens int
+	Provider         string
+	Alias            string
+	Model            string
+	NativeResponses  bool
+	CodexNativeTools bool
+	MaxOutputTokens  int
 }
 
 type Gateway struct {
@@ -145,32 +146,28 @@ func (g *Gateway) buildModels(runtime *oauthproxy.Runtime, configured provider.P
 	p := configured
 	p.Type = provider.EffectiveType(p)
 	oauth := strings.ToLower(strings.TrimSpace(p.OAuthProvider))
+	codexOAuth := oauth == "gpt" || oauth == "codex"
 	mixed := oauth == "" && len(p.ModelProtocols) > 0
-	native := oauth == "gpt" || oauth == "codex" || oauth == "grok" || oauth == "xai" ||
+	native := codexOAuth ||
 		oauth == "" && !mixed && provider.IsOpenAIResponsesType(p.Type)
 	details, names := runtime.ModelDetails(), runtime.ModelDisplayNames()
 	models := runtime.Models()
-	if !native {
-		details, err = withModelsDevReasoning(models, details, names, p)
-		if err != nil {
-			return err
-		}
-	}
 	details = withGPTReasoningDefaults(models, details)
+	details, err = withModelsDevMetadata(models, details, names, p, !native)
+	if err != nil {
+		return err
+	}
 	for _, model := range models {
 		alias := "ccl/" + url.PathEscape(p.Name) + "/" + model
-		info, ok := details[model]
-		if !ok {
-			info = details[strings.ToLower(model)]
-		}
+		_, info, _ := lookupModelInfo(details, model)
 		modelProtocol := p.ModelProtocols[strings.ToLower(model)]
 		if modelProtocol == "" {
 			modelProtocol = p.ModelProtocols[strings.TrimSuffix(strings.ToLower(model), "[1m]")]
 		}
 		modelNative := native || mixed && provider.IsOpenAIResponsesType(modelProtocol)
-		g.routes[alias] = Route{Provider: p.Name, Alias: alias, Model: model, NativeResponses: modelNative, MaxOutputTokens: info.MaxOutputTokens}
+		g.routes[alias] = Route{Provider: p.Name, Alias: alias, Model: model, NativeResponses: modelNative, CodexNativeTools: codexOAuth, MaxOutputTokens: info.MaxOutputTokens}
 		entry := newModel(alias, model, details, names)
-		if modelNative {
+		if modelNative && !codexOAuth {
 			entry["supports_search_tool"] = false
 		}
 		applyProviderContext(entry, model, p)
@@ -183,7 +180,25 @@ func (g *Gateway) buildModels(runtime *oauthproxy.Runtime, configured provider.P
 	if len(g.models) == 0 {
 		return fmt.Errorf("provider %q has no models for Codex", p.Name)
 	}
+	if def := provider.StripContextSuffix(provider.NormalizeModelID(p.DefaultModel)); def != "" {
+		promoteDefaultCatalogModel(g.models, g.routes, names, def)
+	}
 	return nil
+}
+
+func promoteDefaultCatalogModel(models []Model, routes map[string]Route, names map[string]string, def string) {
+	for i := range models {
+		slug, _ := models[i]["slug"].(string)
+		modelID := routes[slug].Model
+		if strings.EqualFold(provider.StripContextSuffix(modelID), def) || strings.EqualFold(strings.TrimSpace(names[modelID]), def) {
+			if i > 0 {
+				chosen := models[i]
+				copy(models[1:i+1], models[:i])
+				models[0] = chosen
+			}
+			return
+		}
+	}
 }
 
 func (g *Gateway) BaseURL() string { return "http://" + g.listener.Addr().String() + "/v1" }

@@ -25,6 +25,7 @@ Common commands:
   ccl use [name]              Switch providers; default uses Grok Build's own login
   ccl set [name]              Add or update a provider
   ccl ls                      List providers
+  ccl preview [name]          Preview the Grok Build settings JSON
   ccl oauth <backend>         Log in with a subscription account
   ccl codex -p <name>         Connect provider models to Codex
   ccl serve -p <name>         Use Grok Build in a local browser
@@ -45,13 +46,6 @@ Grok arguments pass through. Use ccl grok to bypass ccl command names
 }
 
 func Execute() {
-	if len(os.Args) > 1 {
-		if err := retiredCommand(os.Args[1]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-	}
-
 	configureLogging()
 	// ccl codex start/stop recover under their own lifecycle lock.
 	if len(os.Args) < 2 || os.Args[1] != "codex" {
@@ -59,14 +53,10 @@ func Execute() {
 	}
 
 	if len(os.Args) > 1 {
-		name, args, handled, err := parseLaunchOptions(os.Args[1:])
-		first := os.Args[1]
-		if handled || !isCclCommand(first) {
-			if first == "grok" {
-				args = args[1:]
-			}
+		name, args, dispatch, err := resolveRootGrokArgs(os.Args[1:])
+		if dispatch {
 			if err == nil {
-				err = runGrok(args, name)
+				err = runGrokWithOverride(args, name)
 			}
 			if err != nil {
 				var exitErr *exec.ExitError
@@ -123,27 +113,38 @@ func isCclCommand(arg string) bool {
 	return false
 }
 
-// Retired launcher commands must fail before falling through to a Grok prompt.
-func retiredCommand(command string) error {
-	switch command {
-	case "proxy":
-		return errors.New(locale.T("ccl proxy 已移除，请使用 ccl codex start/status/stop", "ccl proxy has been removed; use ccl codex start/status/stop"))
-	case "claude", "acp", "sign", "statusline":
-		return fmt.Errorf(locale.T("ccl %s 已退役。普通启动现使用 Grok Build", "ccl %s has been retired. Normal launches now use Grok Build"), command)
-	default:
-		return nil
+func resolveRootGrokArgs(rawArgs []string) (name string, rest []string, dispatch bool, err error) {
+	if len(rawArgs) == 0 {
+		return "", nil, false, nil
 	}
+	name, rest, handled, delimited, err := parseLaunchOptionsWithDelim(rawArgs)
+	first := rawArgs[0]
+	if !handled && isCclCommand(first) {
+		return "", nil, false, nil
+	}
+	if err != nil {
+		return name, nil, true, err
+	}
+	if !delimited && len(rest) > 0 && rest[0] == "grok" {
+		rest = rest[1:]
+	}
+	return name, rest, true, nil
 }
 
 // Only a leading --provider selects a CCL provider. Grok flags such as
 // --agent are passed through. -- separates CCL's option from Grok arguments.
 func parseLaunchOptions(args []string) (name string, rest []string, handled bool, err error) {
+	name, rest, handled, _, err = parseLaunchOptionsWithDelim(args)
+	return name, rest, handled, err
+}
+
+func parseLaunchOptionsWithDelim(args []string) (name string, rest []string, handled bool, delimited bool, err error) {
 	if len(args) == 0 {
-		return "", args, false, nil
+		return "", args, false, false, nil
 	}
 	key, value, inline := strings.Cut(args[0], "=")
 	if key != "--provider" {
-		return "", args, false, nil
+		return "", args, false, false, nil
 	}
 	rest = args[1:]
 	if !inline && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
@@ -151,29 +152,36 @@ func parseLaunchOptions(args []string) (name string, rest []string, handled bool
 	}
 	name = strings.TrimSpace(value)
 	if name == "" {
-		return "", nil, true, fmt.Errorf("--provider requires a name")
+		return "", nil, true, false, fmt.Errorf("--provider requires a name")
 	}
 	if len(rest) > 0 {
 		key, _, _ := strings.Cut(rest[0], "=")
 		switch key {
 		case "--provider":
-			return "", nil, true, fmt.Errorf("--provider may be specified only once")
+			return "", nil, true, false, fmt.Errorf("--provider may be specified only once")
 		case "--":
+			delimited = true
 			rest = rest[1:]
 		}
 	}
-	return name, rest, true, nil
+	return name, rest, true, delimited, nil
 }
 
 func runGrok(args []string, name string) error {
+	return runGrokWithOverride(args, name)
+}
+
+func runGrokWithOverride(args []string, override string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load ccl config: %w", err)
 	}
-	if name == "" {
+	explicitProvider := strings.TrimSpace(override) != ""
+	name := override
+	if !explicitProvider {
 		name = cfg.ActiveProvider
 	}
-	return runGrokAgent(cfg, name, args)
+	return runGrokAgentWithOptions(cfg, name, explicitProvider, args)
 }
 
 // resolveProvider returns the active configured provider.

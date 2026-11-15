@@ -3,8 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/groklaunch"
@@ -17,16 +15,7 @@ import (
 const grokAlwaysApproveFlag = "--always-approve"
 
 func lookGrokBinary() (string, error) {
-	path, err := exec.LookPath("grok")
-	if err == nil {
-		return path, nil
-	}
-	if home, homeErr := os.UserHomeDir(); homeErr == nil {
-		if local, localErr := exec.LookPath(filepath.Join(home, ".grok", "bin", "grok")); localErr == nil {
-			return local, nil
-		}
-	}
-	return "", err
+	return groklaunch.LookPath()
 }
 
 var grokSubcommands = []string{
@@ -34,6 +23,29 @@ var grokSubcommands = []string{
 	"export", "help", "inspect", "leader", "login", "logout", "mcp", "memory",
 	"models", "plugin", "sessions", "setup", "ssh", "trace", "update", "usage",
 	"v", "version", "worker", "worktree", "wrap",
+}
+
+var grokLocalSubcommands = map[string]struct{}{
+	"clone": {}, "completions": {}, "disk-usage": {}, "doctor": {}, "du": {},
+	"export": {}, "help": {}, "login": {}, "logout": {}, "mcp": {}, "memory": {},
+	"plugin": {}, "sessions": {}, "setup": {}, "trace": {}, "update": {}, "usage": {},
+	"v": {}, "version": {}, "worktree": {},
+}
+
+var grokValueFlags = map[string]struct{}{
+	"--add-dir": {}, "--agent": {}, "--agents": {}, "--allow": {}, "--allowed-tools": {}, "--allowedTools": {},
+	"--append-system-prompt": {}, "--betas": {}, "--cwd": {}, "--debug-file": {},
+	"--deny": {}, "--disallowed-tools": {}, "--disallowedTools": {},
+	"--effort": {}, "--reasoning-effort": {}, "--fallback-model": {},
+	"--file": {}, "--from-pr": {}, "--input-format": {}, "--json-schema": {},
+	"--leader-socket": {}, "--log-level": {}, "--max-budget-usd": {}, "--max-turns": {},
+	"--mcp-config": {}, "--model": {}, "--name": {}, "--output-format": {},
+	"--permission-mode": {}, "--permission-prompt-tool": {}, "--plugin-dir": {},
+	"--prompt": {}, "--prompt-file": {}, "--prompt-json": {}, "--single": {},
+	"--ref": {}, "--worktree-ref": {}, "--rules": {},
+	"--sandbox": {}, "--session-id": {}, "--setting-sources": {}, "--settings": {},
+	"--system-prompt": {}, "--system-prompt-override": {}, "--teleport": {}, "--tools": {},
+	"-C": {}, "-m": {}, "-n": {}, "-p": {}, "-s": {},
 }
 
 func isGrokSubcommand(arg string) bool {
@@ -45,24 +57,96 @@ func isGrokSubcommand(arg string) bool {
 	return false
 }
 
+func isGrokSessionFlag(flag string) bool {
+	switch flag {
+	case "-p", "--prompt", "--prompt-file", "--prompt-json", "--single",
+		"-c", "--continue", "-r", "--resume", "-s", "--session-id",
+		"-w", "--worktree", "--worktree-ref", "--ref",
+		"--agent", "--agents", "--from-pr", "--teleport":
+		return true
+	default:
+		return false
+	}
+}
+
+func inspectGrokInvocation(args []string) (subcmd string, infoOnly bool) {
+	sessionMode := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "-h" || arg == "--help" || arg == "-v" || arg == "--version" {
+			infoOnly = true
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			name, _, hasInlineValue := strings.Cut(arg, "=")
+			if isGrokSessionFlag(name) {
+				sessionMode = true
+			}
+			if _, needsValue := grokValueFlags[name]; needsValue && !hasInlineValue {
+				i++
+				continue
+			}
+			// Handle attached short value flags such as -p"hi" or -mgrok-4.
+			if len(arg) > 2 && !strings.HasPrefix(arg, "--") {
+				short := arg[:2]
+				if isGrokSessionFlag(short) {
+					sessionMode = true
+				}
+			}
+			continue
+		}
+		if !sessionMode && subcmd == "" {
+			if isGrokSubcommand(arg) {
+				subcmd = arg
+			} else {
+				sessionMode = true
+			}
+		}
+	}
+	return subcmd, infoOnly
+}
+
+func isLocalGrokInvocation(args []string) bool {
+	subcmd, infoOnly := inspectGrokInvocation(args)
+	if infoOnly {
+		return true
+	}
+	if subcmd == "" {
+		return false
+	}
+	_, ok := grokLocalSubcommands[subcmd]
+	return ok
+}
+
 func applyGrokBypassMode(args []string, enabled bool) []string {
 	out := append([]string(nil), args...)
 	if !enabled {
 		return out
 	}
 	for _, arg := range out {
+		if arg == "--" {
+			break
+		}
 		if arg == grokAlwaysApproveFlag || arg == "--yolo" ||
 			arg == "--permission-mode" || strings.HasPrefix(arg, "--permission-mode=") {
 			return out
 		}
 	}
-	if len(out) > 0 && isGrokSubcommand(out[0]) {
+	subcmd, infoOnly := inspectGrokInvocation(out)
+	if infoOnly || subcmd != "" {
 		return out
 	}
 	return append([]string{grokAlwaysApproveFlag}, out...)
 }
 
 func runGrokAgent(cfg *provider.Config, name string, args []string) error {
+	return runGrokAgentWithOptions(cfg, name, false, args)
+}
+
+func runGrokAgentWithOptions(cfg *provider.Config, name string, explicitProvider bool, args []string) error {
 	var p provider.Provider
 	native := provider.IsDefaultProvider(name)
 	if native && strings.TrimSpace(cfg.LegacyClaudeDefault) != "" {
@@ -71,7 +155,8 @@ func runGrokAgent(cfg *provider.Config, name string, args []string) error {
 			"the default Claude account has been retired. Run ccl use default to select Grok Build's own login, or choose another provider",
 		))
 	}
-	if !native {
+	localOnly := isLocalGrokInvocation(args)
+	if !native && (!localOnly || explicitProvider) {
 		var err error
 		p, err = resolveProviderFromConfig(cfg, name)
 		if err != nil {
@@ -89,7 +174,7 @@ func runGrokAgent(cfg *provider.Config, name string, args []string) error {
 		))
 	}
 	args = applyGrokBypassMode(args, cfg.BypassMode)
-	if native {
+	if native || localOnly {
 		cmd := process.Command(grokPath, args...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout

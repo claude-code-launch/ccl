@@ -128,7 +128,7 @@ func TestRealCodexUsesStandaloneProxyAndLocalToolLoop(t *testing.T) {
 				}
 			}))
 			t.Cleanup(upstream.Close)
-			p := provider.Provider{Name: "chosen", Type: protocol, Endpoint: upstream.URL + "/v1", APIKey: "fake-provider-key", Model: "model-a", CustomModelID: "model-a", SonnetModel: "model-a"}
+			p := provider.Provider{Name: "chosen", Type: protocol, Endpoint: upstream.URL + "/v1", APIKey: "fake-provider-key", Model: "model-a"}
 			if err := config.Save(&provider.Config{ActiveProvider: p.Name, Providers: map[string]provider.Provider{p.Name: p}}); err != nil {
 				t.Fatal(err)
 			}
@@ -215,7 +215,7 @@ func TestRealCodexRejectsGeminiRouteAfterWorkBuddySwitch(t *testing.T) {
 		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"gemini-sandbox-done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	t.Cleanup(gemini.Close)
-	geminiProvider := provider.Provider{Name: "gemini-fixture", Type: "openai", Endpoint: gemini.URL + "/v1", APIKey: "fake-gemini-key", Model: "model-a", CustomModelID: "model-a"}
+	geminiProvider := provider.Provider{Name: "gemini-fixture", Type: "openai", Endpoint: gemini.URL + "/v1", APIKey: "fake-gemini-key", Model: "model-a"}
 	if err := config.Save(&provider.Config{ActiveProvider: geminiProvider.Name, Providers: map[string]provider.Provider{geminiProvider.Name: geminiProvider}}); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestRealCodexRejectsGeminiRouteAfterWorkBuddySwitch(t *testing.T) {
 		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw)
 	}))
 	t.Cleanup(workBuddy.Close)
-	workBuddyProvider := provider.Provider{Name: "workbuddy-fixture", Type: "openai", Endpoint: workBuddy.URL + "/v1", APIKey: "fake-workbuddy-key", Model: "model-b", CustomModelID: "model-b"}
+	workBuddyProvider := provider.Provider{Name: "workbuddy-fixture", Type: "openai", Endpoint: workBuddy.URL + "/v1", APIKey: "fake-workbuddy-key", Model: "model-b"}
 	if err := config.Update(func(cfg *provider.Config) error {
 		cfg.ActiveProvider = workBuddyProvider.Name
 		cfg.Providers[workBuddyProvider.Name] = workBuddyProvider

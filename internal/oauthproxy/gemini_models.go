@@ -26,15 +26,16 @@ const geminiCatalogLimit = 4 << 20
 // GeminiModelCatalog is a compatibility fallback, never an account entitlement.
 // Keep real wire IDs; public family aliases are derived only from these rows.
 func GeminiModelCatalog() []protocol.ModelInfo {
+	vision := []string{"text", "image"}
 	return []protocol.ModelInfo{
-		{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 Thinking"},
-		{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6"},
-		{ID: "gemini-3.8-flash-low", DisplayName: "Gemini 3.8 Flash (Low)"},
-		{ID: "gemini-3.8-flash-medium", DisplayName: "Gemini 3.8 Flash (Medium)"},
-		{ID: "gemini-3.8-flash-high", DisplayName: "Gemini 3.8 Flash (High)"},
-		{ID: "gemini-4-argon-low", DisplayName: "Gemini 4 Argon (Low)"},
-		{ID: "gemini-4-argon-medium", DisplayName: "Gemini 4 Argon (Medium)"},
-		{ID: "gemini-4-argon-high", DisplayName: "Gemini 4 Argon (High)"},
+		{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 Thinking", InputModalities: append([]string(nil), vision...)},
+		{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", InputModalities: append([]string(nil), vision...)},
+		{ID: "gemini-3.8-flash-low", DisplayName: "Gemini 3.8 Flash (Low)", InputModalities: append([]string(nil), vision...)},
+		{ID: "gemini-3.8-flash-medium", DisplayName: "Gemini 3.8 Flash (Medium)", InputModalities: append([]string(nil), vision...)},
+		{ID: "gemini-3.8-flash-high", DisplayName: "Gemini 3.8 Flash (High)", InputModalities: append([]string(nil), vision...)},
+		{ID: "gemini-4-argon-low", DisplayName: "Gemini 4 Argon (Low)", InputModalities: append([]string(nil), vision...)},
+		{ID: "gemini-4-argon-medium", DisplayName: "Gemini 4 Argon (Medium)", InputModalities: append([]string(nil), vision...)},
+		{ID: "gemini-4-argon-high", DisplayName: "Gemini 4 Argon (High)", InputModalities: append([]string(nil), vision...)},
 	}
 }
 
@@ -97,6 +98,40 @@ func (a *antigravityOAuthAuthorizer) discoverModels(ctx context.Context, credent
 		}
 	}
 	return nil, true
+}
+
+// loadCachedGeminiCatalog reads a previously persisted Gemini account catalog
+// without making network requests. Returns nil if the credential or cache is absent.
+func loadCachedGeminiCatalog(credentialFile string) *geminiCatalog {
+	if strings.TrimSpace(credentialFile) == "" {
+		return nil
+	}
+	authDir, err := AuthDir()
+	if err != nil {
+		return nil
+	}
+	credPath := filepath.Join(authDir, filepath.Base(credentialFile))
+	authorizer := &antigravityOAuthAuthorizer{path: credPath}
+	credential, err := authorizer.load()
+	if err != nil {
+		return nil
+	}
+	identity := geminiCatalogIdentity(credPath, credential)
+	cachePath := filepath.Join(filepath.Dir(authDir), "cache", "gemini", identity+".json")
+	file, err := os.Open(cachePath)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, geminiCatalogLimit+1))
+	if err != nil || len(raw) > geminiCatalogLimit {
+		return nil
+	}
+	var cached geminiCatalogCache
+	if json.Unmarshal(raw, &cached) != nil || cached.Identity != identity || !validGeminiCatalog(&cached.Catalog) {
+		return nil
+	}
+	return &cached.Catalog
 }
 
 func (a *antigravityOAuthAuthorizer) fetchModels(ctx context.Context, credential *antigravityOAuthCredential) (*geminiCatalog, error) {
@@ -201,8 +236,8 @@ func parseGeminiCatalog(raw []byte) (*geminiCatalog, error) {
 		}
 		for _, field := range []string{"inputModalities", "supportedInputModalities"} {
 			for _, modality := range value.Get(field).Array() {
-				m := strings.ToLower(modality.String())
-				if m == "text" || m == "image" {
+				m := strings.ToLower(strings.TrimSpace(modality.String()))
+				if (m == "text" || m == "image") && !slices.Contains(info.InputModalities, m) {
 					info.InputModalities = append(info.InputModalities, m)
 				}
 			}

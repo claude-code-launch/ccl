@@ -45,9 +45,41 @@ type Model struct {
 	Status           string            `json:"status"`
 	Provider         *ModelProvider    `json:"provider"`
 	Limit            ModelLimit        `json:"limit"`
+	Modalities       ModelModalities   `json:"modalities"`
 	CanonicalID      string            `json:"canonical_model_id"`
 	Reasoning        bool              `json:"reasoning"`
 	ReasoningOptions []ReasoningOption `json:"reasoning_options"`
+}
+
+// ModelModalities carries advertised input/output modalities from models.dev.
+type ModelModalities struct {
+	Input  []string `json:"input"`
+	Output []string `json:"output"`
+}
+
+// InputModalities normalizes models.dev input modalities to ["text"] or
+// ["text", "image"] when advertised, or nil when absent.
+func (m Model) InputModalities() []string {
+	if len(m.Modalities.Input) == 0 {
+		return nil
+	}
+	var hasText, hasImage bool
+	for _, item := range m.Modalities.Input {
+		switch strings.ToLower(strings.TrimSpace(item)) {
+		case "text":
+			hasText = true
+		case "image":
+			hasImage = true
+		}
+	}
+	if !hasText && !hasImage {
+		return nil
+	}
+	out := []string{"text"}
+	if hasImage {
+		out = append(out, "image")
+	}
+	return out
 }
 
 // ReasoningOption distinguishes selectable effort tiers from thinking switches

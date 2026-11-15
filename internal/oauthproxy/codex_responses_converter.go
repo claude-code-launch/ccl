@@ -28,11 +28,16 @@ func responsesNeedFlattening(payload map[string]any) bool {
 	tools, _ := payload["tools"].([]any)
 	for _, raw := range tools {
 		tool, _ := raw.(map[string]any)
-		switch tool["type"] {
-		case "custom", "namespace":
+		kind, _ := tool["type"].(string)
+		switch kind {
+		case "custom", "namespace", "computer", "computer_use_preview", "shell", "local_shell", "apply_patch":
 			return true
 		case "tool_search":
 			if tool["execution"] == "client" {
+				return true
+			}
+		default:
+			if strings.HasPrefix(kind, "computer_use") {
 				return true
 			}
 		}
@@ -41,7 +46,13 @@ func responsesNeedFlattening(payload map[string]any) bool {
 	for _, raw := range items {
 		item, _ := raw.(map[string]any)
 		switch item["type"] {
-		case "custom_tool_call", "custom_tool_call_output", "tool_search_call", "tool_search_output", "compaction":
+		case "custom_tool_call", "custom_tool_call_output",
+			"tool_search_call", "tool_search_output", "compaction",
+			"computer_call", "computer_call_output",
+			"shell_call", "shell_call_output",
+			"local_shell_call", "local_shell_call_output",
+			"apply_patch_call", "apply_patch_call_output",
+			"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response":
 			return true
 		}
 		if namespace, _ := item["namespace"].(string); namespace != "" {
@@ -90,6 +101,15 @@ func convertResponsesForUpstream(raw []byte, sessionID string) (*codexResponsesC
 	}
 	if request.MaxOutputTokens > 0 {
 		body["max_output_tokens"] = request.MaxOutputTokens
+	}
+	if request.Temperature != nil {
+		body["temperature"] = *request.Temperature
+	}
+	if request.TopP != nil {
+		body["top_p"] = *request.TopP
+	}
+	if request.User != "" {
+		body["user"] = request.User
 	}
 	if format := structuredOutputSchema(request.Format); format != nil {
 		format["type"] = "json_schema"

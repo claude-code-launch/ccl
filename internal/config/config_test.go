@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/claude-code-launch/ccl/internal/provider"
@@ -20,9 +21,9 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 				Type:          "openai",
 				Endpoint:      "https://example.test/v1",
 				APIKey:        "secret",
-				Model:         "model-a",
+				Model:         "model-a,model-b",
 				OAuthProvider: "gpt",
-				SubagentModel: "model-subagent",
+				EffortLevel:   "high",
 			},
 		},
 	}
@@ -49,8 +50,55 @@ func TestSaveAndLoadUsesPrivateAtomicConfigFile(t *testing.T) {
 	if got.ActiveProvider != want.ActiveProvider ||
 		got.Providers["gateway"].APIKey != "secret" ||
 		got.Providers["gateway"].OAuthProvider != "gpt" ||
-		got.Providers["gateway"].SubagentModel != "model-subagent" {
+		got.Providers["gateway"].EffortLevel != "high" ||
+		got.Providers["gateway"].Model != "model-a,model-b" {
 		t.Fatalf("loaded config = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadMergesLegacySlotMappingsIntoModelPoolAndSaveDropsLegacyFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".ccl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyYAML := `active_provider: wb
+providers:
+  wb:
+    name: wb
+    type: openai
+    endpoint: https://example.test/v1
+    apikey: secret
+    model: glm-5.3-flash,deepseek-v4.1-flash
+    opusModel: deepseek-v4.1-flash[1m]
+    sonnetModel: glm-5.3-flash
+    haikuModel: space-bunny
+    customModelId: deepseek-v4.1-flash
+`
+	configFile := filepath.Join(home, ".ccl", "config.yaml")
+	if err := os.WriteFile(configFile, []byte(legacyYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got := cfg.Providers["wb"].Model; got != "glm-5.3-flash,deepseek-v4.1-flash[1m],space-bunny" {
+		t.Fatalf("merged legacy Model = %q", got)
+	}
+
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	saved, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, retiredKey := range []string{"opusModel", "sonnetModel", "haikuModel", "customModelId", "fableModel", "subagentModel", "modelOverrides"} {
+		if strings.Contains(string(saved), retiredKey) {
+			t.Fatalf("saved config still contains retired key %q:\n%s", retiredKey, saved)
+		}
 	}
 }
 

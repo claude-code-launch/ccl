@@ -18,7 +18,7 @@ type providerTarget struct {
 
 func addProviderTargetFlags(cmd *cobra.Command, target *providerTarget) {
 	flags := cmd.PersistentFlags()
-	flags.StringVar(&target.name, "provider", "", "Act on this provider instead of the active one")
+	flags.StringVarP(&target.name, "provider", "p", "", "Act on this provider instead of the active one")
 }
 
 // resolve returns the provider name the command should act on.

@@ -16,6 +16,7 @@ import (
 var refreshedCatalogFields = []string{
 	"context_window", "max_context_window", "auto_compact_token_limit",
 	"supported_reasoning_levels", "default_reasoning_level",
+	"input_modalities", "supports_image_detail_original",
 }
 
 func (g *Gateway) Models() []Model {
@@ -50,6 +51,27 @@ func cloneCatalogModels(models []Model) []Model {
 // Persist the new catalog before publishing it to concurrent HTTP readers.
 func (g *Gateway) RefreshMetadata(configured provider.Provider, persist func([]Model) error) error {
 	return g.RefreshProvidersMetadata([]provider.Provider{configured}, persist)
+}
+
+// RefreshNativeCatalog re-reads the client's native catalog capabilities (such
+// as code_mode_only and shell_type) without inspecting CCL's temporary overlay.
+func (g *Gateway) RefreshNativeCatalog(ctx context.Context, overlay *Overlay) {
+	home, err := Home()
+	if err != nil {
+		return
+	}
+	fields := map[string]any{}
+	if overlay != nil {
+		for _, change := range overlay.Changes {
+			if len(change.Scope) == 0 && change.Key == "model_catalog_json" && change.Before != nil && *change.Before != "" {
+				fields["model_catalog_json"] = *change.Before
+				break
+			}
+		}
+	}
+	if native, err := nativeCatalog(ctx, home, fields); err == nil && hasNativeModels(native) {
+		g.inheritClientToolMode(native)
+	}
 }
 
 // RefreshCatalog updates only CCL-owned metadata in the existing file. It never

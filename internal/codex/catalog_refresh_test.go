@@ -123,3 +123,60 @@ func TestCatalogRefreshUpdatesEffortWithoutRacingReaders(t *testing.T) {
 		t.Fatal("cache corruption withdrew good metadata or blocked a context edit")
 	}
 }
+
+func TestCatalogRefreshPersistsVisionModalitiesAndRetainsOnCorruptCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	path, err := modelsdev.CachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := provider.Provider{Name: "chosen", Type: "openai", Model: "model-a", ModelsDevProvider: "fixture"}
+	g := fixtureProviderGateway(t, func(http.ResponseWriter, *http.Request) {}, p, Options{})
+	catalogFile := filepath.Join(t.TempDir(), "catalog.json")
+	raw, _ := json.Marshal(Catalog{Models: g.Models()})
+	if err := os.WriteFile(catalogFile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := &Overlay{CatalogPath: catalogFile}
+
+	if g.Models()[0]["supports_image_detail_original"] != false {
+		t.Fatalf("expected initial unknown model to start without vision: %+v", g.Models()[0])
+	}
+	if err := fsutil.WriteFileAtomic(path, []byte(`{"fixture":{"models":{"model-a":{"modalities":{"input":["text","image"],"output":["text"]},"limit":{"output":64000}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RefreshMetadata(p, overlay.RefreshCatalog); err != nil {
+		t.Fatal(err)
+	}
+	if g.Models()[0]["supports_image_detail_original"] != true {
+		t.Fatalf("gateway snapshot did not publish vision support: %+v", g.Models()[0])
+	}
+	persistedRaw, err := os.ReadFile(catalogFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := ParseCatalog(persistedRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modalitiesRaw, _ := json.Marshal(persisted.Models[0]["input_modalities"])
+	if string(modalitiesRaw) != `["text","image"]` || persisted.Models[0]["supports_image_detail_original"] != true {
+		t.Fatalf("persisted catalog missed vision refresh: %+v", persisted.Models[0])
+	}
+
+	// Corrupting the optional cache must not withdraw previously discovered vision support.
+	if err := fsutil.WriteFileAtomic(path, []byte(`{corrupt`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RefreshMetadata(p, overlay.RefreshCatalog); err != nil {
+		t.Fatal(err)
+	}
+	if g.Models()[0]["supports_image_detail_original"] != true {
+		t.Fatalf("corrupt cache withdrew vision metadata: %+v", g.Models()[0])
+	}
+}

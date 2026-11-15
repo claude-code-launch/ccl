@@ -95,8 +95,8 @@ func TestProxyProcessLifecycle(t *testing.T) {
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	chat := provider.Provider{Name: "chat-fixture", Type: "openai", Endpoint: upstream.URL + "/chat/v1", APIKey: "fake-chat-key", Model: "model-a,model-b", SonnetModel: "model-a", CustomModelID: "model-a"}
-	native := provider.Provider{Name: "native-fixture", Type: "openai_responses", Endpoint: upstream.URL + "/native/v1", APIKey: "fake-native-key", Model: chat.Model, CustomModelID: "model-a"}
+	chat := provider.Provider{Name: "chat-fixture", Type: "openai", Endpoint: upstream.URL + "/chat/v1", APIKey: "fake-chat-key", Model: "model-a,model-b"}
+	native := provider.Provider{Name: "native-fixture", Type: "openai_responses", Endpoint: upstream.URL + "/native/v1", APIKey: "fake-native-key", Model: chat.Model}
 	if err := config.Save(&provider.Config{ActiveProvider: chat.Name, Providers: map[string]provider.Provider{chat.Name: chat, native.Name: native}}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestProxyProcessLifecycle(t *testing.T) {
 
 	if err := config.Update(func(cfg *provider.Config) error {
 		p := cfg.Providers[chat.Name]
-		p.SonnetModel = "model-b"
+		p.EffortLevel = "high"
 		cfg.Providers[chat.Name] = p
 		return nil
 	}); err != nil {

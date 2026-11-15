@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/claude-code-launch/ccl/internal/modelrouting"
+	"gopkg.in/yaml.v3"
 )
 
 // Claude Code env vars that ccl manages through Provider.Env. They live here so
@@ -117,8 +118,11 @@ type Provider struct {
 	Endpoint string `yaml:"endpoint"`
 	APIKey   string `yaml:"apikey"`
 	// Model supplies the local model pool, routes, and aliases.
-	Model string            `yaml:"model"`
-	Env   map[string]string `yaml:"env,omitempty"`
+	Model string `yaml:"model"`
+	// DefaultModel pins the preferred initial model ID within (or in addition to)
+	// the configured model pool. Empty means the first model in the pool.
+	DefaultModel string            `yaml:"defaultModel,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
 	// AnthropicAuth is retained when editing saved legacy providers.
 	AnthropicAuth string `yaml:"anthropicAuth,omitempty"`
 	// OAuthProvider selects an embedded subscription runtime. Supported
@@ -131,15 +135,7 @@ type Provider struct {
 	// this binding and load only that account.
 	OAuthAccountCredential string `yaml:"oauthAccountCredential,omitempty"`
 
-	// Model slots supply defaults and contribute to the runtime catalog.
-	CustomModelID  string            `yaml:"customModelId,omitempty"`
-	OpusModel      string            `yaml:"opusModel,omitempty"`
-	SonnetModel    string            `yaml:"sonnetModel,omitempty"`
-	HaikuModel     string            `yaml:"haikuModel,omitempty"`
-	FableModel     string            `yaml:"fableModel,omitempty"`
-	SubagentModel  string            `yaml:"subagentModel,omitempty"`
-	ModelOverrides map[string]string `yaml:"modelOverrides,omitempty"`
-	EffortLevel    string            `yaml:"effortLevel,omitempty"`
+	EffortLevel string `yaml:"effortLevel,omitempty"`
 	// FastMode requests priority service from GPT's Codex Responses backend.
 	FastMode bool `yaml:"fastMode,omitempty"`
 	// StatuslineDisabled is a retained legacy setting.
@@ -147,6 +143,10 @@ type Provider struct {
 	// ModelProtocols maps model IDs to the upstream protocol on a mixed gateway.
 	// Legacy Messages entries are kept in configuration and excluded from routing.
 	ModelProtocols map[string]string `yaml:"modelProtocols,omitempty"`
+	// ModelLabels maps model IDs to the display names the upstream catalog
+	// reported (probe or a live session). It is presentation metadata only:
+	// requests always use the ID.
+	ModelLabels map[string]string `yaml:"modelLabels,omitempty"`
 	// ModelsDevProvider is the models.dev catalog ID a "modelsdev" provider was
 	// created from. It is separate from Name so the user can call the provider
 	// whatever they like; empty (configs saved before this field) falls back to
@@ -292,43 +292,160 @@ func ProtocolForAISdkNPM(npm string) (string, bool) {
 	}
 }
 
-// RuntimeModelSpec returns every model ID that Claude Code may send for this
-// provider. Embedded runtimes use the list to register model routes and aliases.
+// UnmarshalYAML loads a Provider while folding any legacy slot mappings into
+// Model so upgrading an older config.yaml preserves model IDs and [1m] markers.
+func (p *Provider) UnmarshalYAML(value *yaml.Node) error {
+	type rawProvider Provider
+	var raw rawProvider
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	var legacy struct {
+		CustomModelID  string            `yaml:"customModelId"`
+		OpusModel      string            `yaml:"opusModel"`
+		SonnetModel    string            `yaml:"sonnetModel"`
+		HaikuModel     string            `yaml:"haikuModel"`
+		FableModel     string            `yaml:"fableModel"`
+		SubagentModel  string            `yaml:"subagentModel"`
+		ModelOverrides map[string]string `yaml:"modelOverrides"`
+	}
+	if err := value.Decode(&legacy); err != nil {
+		return err
+	}
+	*p = Provider(raw)
+	p.Model = mergeLegacySlotModels(p.Model, []string{
+		legacy.CustomModelID,
+		legacy.SonnetModel,
+		legacy.OpusModel,
+		legacy.HaikuModel,
+		legacy.FableModel,
+		legacy.SubagentModel,
+	}, legacy.ModelOverrides)
+	return nil
+}
+
+func mergeLegacySlotModels(pool string, slots []string, overrides map[string]string) string {
+	extras := make([]string, 0, len(slots)+len(overrides))
+	for _, slot := range slots {
+		if trimmed := strings.TrimSpace(slot); trimmed != "" {
+			extras = append(extras, trimmed)
+		}
+	}
+	if len(overrides) > 0 {
+		keys := make([]string, 0, len(overrides))
+		for key := range overrides {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if trimmed := strings.TrimSpace(overrides[key]); trimmed != "" {
+				extras = append(extras, trimmed)
+			}
+		}
+	}
+	if len(extras) == 0 {
+		return pool
+	}
+
+	merged := make([]string, 0, len(extras)+4)
+	indexByBase := make(map[string]int)
+	add := func(entry string) {
+		entry = strings.TrimSpace(entry)
+		base := stripContextSuffix(entry)
+		if base == "" {
+			return
+		}
+		key := strings.ToLower(base)
+		has1M := strings.HasSuffix(entry, "[1m]")
+		if idx, exists := indexByBase[key]; exists {
+			if has1M && !strings.HasSuffix(merged[idx], "[1m]") {
+				merged[idx] = stripContextSuffix(merged[idx]) + "[1m]"
+			}
+			return
+		}
+		indexByBase[key] = len(merged)
+		if has1M {
+			merged = append(merged, base+"[1m]")
+		} else {
+			merged = append(merged, base)
+		}
+	}
+	for _, entry := range modelrouting.SplitCSV(pool) {
+		add(entry)
+	}
+	for _, entry := range extras {
+		add(entry)
+	}
+	return strings.Join(merged, ",")
+}
+
+// EffectiveDefaultModel returns the provider's preferred default model ID (without
+// any [1m] context marker), falling back to the first entry of RuntimeModelSpec.
+func EffectiveDefaultModel(p Provider) string {
+	if def := stripContextSuffix(NormalizeModelID(p.DefaultModel)); def != "" {
+		return def
+	}
+	for _, entry := range modelrouting.SplitCSV(RuntimeModelSpec(p)) {
+		if def := stripContextSuffix(entry); def != "" {
+			return def
+		}
+	}
+	return ""
+}
+
+// RuntimeModelSpec returns every model ID configured for this provider.
+// Embedded runtimes use the list to register model routes and aliases, with
+// DefaultModel promoted to the front when set.
 func RuntimeModelSpec(p Provider) string {
+	pool := strings.TrimSpace(p.Model)
+	if pool == "" {
+		pool = OAuthDefaultModels(p.OAuthProvider)
+	}
+	rawDef := NormalizeModelID(p.DefaultModel)
+	bareDef := stripContextSuffix(rawDef)
+	if pool == "" {
+		if strings.TrimSpace(p.OAuthProvider) != "" {
+			// OAuth providers without static defaults rely on live /models discovery.
+			return ""
+		}
+		return rawDef
+	}
 	models := make([]string, 0)
 	seen := make(map[string]bool)
-	add := func(model string) {
+	for _, model := range modelrouting.SplitCSV(pool) {
 		model = strings.TrimSpace(model)
 		if model == "" {
-			return
+			continue
 		}
 		key := strings.ToLower(model)
 		if seen[key] {
-			return
+			continue
 		}
 		seen[key] = true
 		models = append(models, model)
 	}
-	for _, model := range modelrouting.SplitCSV(p.Model) {
-		add(model)
+	if bareDef == "" || len(models) == 0 {
+		return strings.Join(models, ",")
 	}
-	for _, model := range []string{
-		p.CustomModelID,
-		p.OpusModel,
-		p.SonnetModel,
-		p.HaikuModel,
-		p.FableModel,
-		p.SubagentModel,
-	} {
-		add(model)
+	for i, model := range models {
+		if strings.EqualFold(stripContextSuffix(model), bareDef) {
+			promoted := model
+			if HasOneMSuffix(rawDef) && !HasOneMSuffix(promoted) {
+				promoted = stripContextSuffix(promoted) + "[1m]"
+			}
+			reordered := make([]string, 0, len(models))
+			reordered = append(reordered, promoted)
+			for j, other := range models {
+				if j == i || strings.EqualFold(stripContextSuffix(other), bareDef) {
+					continue
+				}
+				reordered = append(reordered, other)
+			}
+			return strings.Join(reordered, ",")
+		}
 	}
-	overrideKeys := make([]string, 0, len(p.ModelOverrides))
-	for key := range p.ModelOverrides {
-		overrideKeys = append(overrideKeys, key)
-	}
-	sort.Strings(overrideKeys)
-	for _, key := range overrideKeys {
-		add(p.ModelOverrides[key])
+	if strings.TrimSpace(p.OAuthProvider) == "" {
+		return strings.Join(append([]string{rawDef}, models...), ",")
 	}
 	return strings.Join(models, ",")
 }

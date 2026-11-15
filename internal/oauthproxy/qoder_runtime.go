@@ -209,6 +209,7 @@ func (service *qoderService) handleModels(writer http.ResponseWriter, request *h
 		item["display_name"] = model.Name
 		if model.ContextWindow > 0 {
 			item["max_input_tokens"] = model.ContextWindow
+			item["context_window"] = model.ContextWindow
 		}
 		if model.MaxTokens > 0 {
 			item["max_output_tokens"] = model.MaxTokens
@@ -220,9 +221,13 @@ func (service *qoderService) handleModels(writer http.ResponseWriter, request *h
 		item["is_new"] = model.IsNew
 		item["promotion_available"] = model.PromotionAvailable
 		item["reasoning"] = model.Reasoning
+		levels, defaultLevel := qoderReasoningLevels(model.Config)
+		applyModelEntryReasoning(item, levels, defaultLevel, true)
 		item["supported_input_types"] = []string{"text"}
+		item["input_modalities"] = []string{"text"}
 		if model.Vision {
 			item["supported_input_types"] = []string{"text", "image"}
+			item["input_modalities"] = []string{"text", "image"}
 		}
 		data = append(data, item)
 	}
@@ -607,7 +612,7 @@ func qoderModelDetail(model qoderModel) (protocol.ModelInfo, bool) {
 	}
 	info := protocol.ModelInfo{
 		ID: model.ID, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxTokens,
-		ReasoningLevels: levels, DefaultReasoningLevel: defaultLevel,
+		ReasoningLevels: levels, DefaultReasoningLevel: defaultLevel, ReasoningKnown: true,
 	}
 	if model.Vision {
 		info.InputModalities = []string{"text", "image"}
@@ -912,7 +917,15 @@ func processQoderEventStream(ctx context.Context, reader io.Reader, assembler *r
 					state.id = toolCall.ID
 				}
 				if toolCall.Function.Name != "" {
-					state.name = toolCall.Function.Name
+					var declared map[string]struct{}
+					if assembler.request != nil {
+						declared = assembler.request.declaredToolNames
+					}
+					merged, err := chatToolNameDelta(state.name, toolCall.Function.Name, declared)
+					if err != nil {
+						return usage, err
+					}
+					state.name = merged
 				}
 				if args := toolCall.Function.Arguments; args != "" {
 					if retainedArgs+len(args) > assemblerMaxRetainedBytes {

@@ -88,6 +88,81 @@ func TestReasoningRejectsBrokenSnapshot(t *testing.T) {
 	}
 }
 
+func TestIndexInputModalitiesAndMaxOutputTokens(t *testing.T) {
+	catalog := `{
+		"anthropic": {
+			"id": "anthropic",
+			"models": {
+				"claude-sonnet-4-6": {
+					"id": "claude-sonnet-4-6",
+					"name": "Claude Sonnet 4.6",
+					"modalities": {"input": ["TEXT", "IMAGE"], "output": ["text"]},
+					"limit": {"context": 200000, "output": 64000}
+				}
+			}
+		},
+		"textonly": {
+			"id": "textonly",
+			"models": {
+				"plain-coder": {
+					"id": "plain-coder",
+					"name": "Plain Coder",
+					"modalities": {"input": ["text"], "output": ["text"]},
+					"limit": {"context": 128000, "output": 16384}
+				}
+			}
+		},
+		"other": {
+			"id": "other",
+			"models": {
+				"shared-name-a": {
+					"id": "shared-name",
+					"modalities": {"input": ["text", "image"]},
+					"limit": {"output": 8192}
+				},
+				"shared-name-b": {
+					"id": "shared-name",
+					"modalities": {"input": ["text"]},
+					"limit": {"output": 32768}
+				}
+			}
+		}
+	}`
+	index, err := newIndex([]byte(catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mod, ok := index.InputModalities("anthropic", "claude-sonnet-4-6", "")
+	if !ok || !slices.Equal(mod, []string{"text", "image"}) {
+		t.Fatalf("claude modalities = %v ok=%t", mod, ok)
+	}
+	mod[0] = "mutated"
+	fresh, _ := index.InputModalities("anthropic", "claude-sonnet-4-6", "")
+	if !slices.Equal(fresh, []string{"text", "image"}) {
+		t.Fatalf("caller mutated index modalities: %v", fresh)
+	}
+	maxOut, ok := index.MaxOutputTokens("anthropic", "claude-sonnet-4-6", "")
+	if !ok || maxOut != 64000 {
+		t.Fatalf("claude maxOutput = %d ok=%t", maxOut, ok)
+	}
+	plainMod, ok := index.InputModalities("textonly", "plain-coder", "")
+	if !ok || !slices.Equal(plainMod, []string{"text"}) {
+		t.Fatalf("plain-coder modalities = %v ok=%t", plainMod, ok)
+	}
+	if _, ok := index.InputModalities("anthropic", "completely-unknown-model", ""); ok {
+		t.Fatal("invented modalities for unknown model")
+	}
+	if _, ok := index.MaxOutputTokens("anthropic", "completely-unknown-model", ""); ok {
+		t.Fatal("invented max output tokens for unknown model")
+	}
+	if _, ok := index.InputModalities("other", "shared-name", ""); ok {
+		t.Fatal("ambiguous modality alias should not guess")
+	}
+	if _, ok := index.MaxOutputTokens("other", "shared-name", ""); ok {
+		t.Fatal("ambiguous maxOutput alias should not guess")
+	}
+}
+
 func BenchmarkReasoningIndex(b *testing.B) {
 	data := snapshotBytes(b)
 	b.ReportAllocs()

@@ -246,15 +246,16 @@ func (a *antigravityOAuthAuthorizer) refresh(ctx context.Context, credential *an
 // converts OpenAI Responses requests to the Antigravity generateContent
 // envelope and streams the Gemini response back as OpenAI Responses SSE.
 type geminiService struct {
-	apiKey     string
-	authorizer chatAuthorizer
-	models     []string
-	client     *http.Client
-	usage      *UsageTracker
-	projectID  string
-	catalog    *geminiCatalog
-	baseMu     sync.Mutex
-	baseURL    string
+	apiKey       string
+	authorizer   chatAuthorizer
+	models       []string
+	modelDetails map[string]protocol.ModelInfo
+	client       *http.Client
+	usage        *UsageTracker
+	projectID    string
+	catalog      *geminiCatalog
+	baseMu       sync.Mutex
+	baseURL      string
 }
 
 func (s *geminiService) preferredBaseURL() string {
@@ -281,7 +282,7 @@ func (s *geminiService) authorized(request *http.Request) bool {
 }
 
 func (s *geminiService) handleModels(writer http.ResponseWriter, request *http.Request) {
-	serveModelList(writer, request, s.apiKey, s.models)
+	serveModelListWithDetails(writer, request, s.apiKey, s.models, s.modelDetails)
 }
 
 func (s *geminiService) handleResponses(writer http.ResponseWriter, request *http.Request) {
@@ -793,7 +794,7 @@ func startAntigravityOAuth(parent context.Context, modelSpec, credentialFile str
 	}
 	usage := NewUsageTracker()
 	service := &geminiService{
-		apiKey: apiKey, authorizer: authorizer, models: models, usage: usage,
+		apiKey: apiKey, authorizer: authorizer, models: models, modelDetails: details, usage: usage,
 		client: &http.Client{Transport: antigravityHTTPTransport()}, projectID: credential.projectID,
 		catalog: catalog, baseURL: baseURL,
 	}

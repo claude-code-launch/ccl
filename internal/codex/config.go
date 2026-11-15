@@ -226,32 +226,114 @@ func configFields(data []byte) (map[string]any, error) {
 	return fields, nil
 }
 
+var bundledExecutable = FindExecutable
+
 func FindExecutable() (string, error) {
 	if found, err := exec.LookPath("codex"); err == nil {
 		return found, nil
 	}
 	home, _ := os.UserHomeDir()
-	var candidates []string
-	if runtime.GOOS == "darwin" {
-		for _, root := range []string{"/Applications", filepath.Join(home, "Applications")} {
-			for _, app := range []string{"Codex.app", "ChatGPT.app"} {
-				candidates = append(candidates, filepath.Join(root, app, "Contents", "Resources", "codex"))
-			}
-		}
-	}
-	if runtime.GOOS == "windows" {
-		for _, app := range []string{"Codex", "ChatGPT"} {
-			candidates = append(candidates, filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", app, "resources", "codex.exe"))
-		}
-		matches, _ := filepath.Glob(filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "WindowsApps", "OpenAI.Codex_*", "codex.exe"))
-		candidates = append(candidates, matches...)
-	}
-	for _, candidate := range candidates {
+	for _, candidate := range desktopExecutableCandidates(runtime.GOOS, home, os.Getenv("LOCALAPPDATA")) {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate, nil
 		}
 	}
 	return "", fmt.Errorf("Codex executable not found; install Codex CLI or open the desktop app once to create its model cache")
+}
+
+func desktopExecutableCandidates(goos, home, localAppData string) []string {
+	var candidates []string
+	switch goos {
+	case "darwin":
+		roots := []string{"/Applications"}
+		if strings.TrimSpace(home) != "" {
+			roots = append(roots, filepath.Join(home, "Applications"))
+		}
+		for _, root := range roots {
+			for _, app := range []string{"Codex.app", "ChatGPT.app"} {
+				resources := filepath.Join(root, app, "Contents", "Resources")
+				cliDir := filepath.Join(resources, "codex-cli")
+				if entry := cliPackageEntrypoint(cliDir); entry != "" {
+					candidates = append(candidates, entry)
+				}
+				candidates = append(candidates,
+					filepath.Join(cliDir, "bin", "codex"),
+					filepath.Join(cliDir, "CodexCLI.app", "Contents", "MacOS", "codex"),
+					filepath.Join(resources, "codex"),
+				)
+			}
+		}
+	case "windows":
+		if strings.TrimSpace(localAppData) != "" {
+			for _, app := range []string{"Codex", "ChatGPT"} {
+				resources := filepath.Join(localAppData, "Programs", app, "resources")
+				cliDir := filepath.Join(resources, "codex-cli")
+				if entry := cliPackageEntrypoint(cliDir); entry != "" {
+					candidates = append(candidates, entry)
+				}
+				candidates = append(candidates,
+					filepath.Join(cliDir, "bin", "codex.exe"),
+					filepath.Join(resources, "codex.exe"),
+				)
+			}
+			matches, _ := filepath.Glob(filepath.Join(localAppData, "Microsoft", "WindowsApps", "OpenAI.Codex_*", "codex.exe"))
+			candidates = append(candidates, matches...)
+		}
+	}
+	return candidates
+}
+
+func cliPackageEntrypoint(cliDir string) string {
+	raw, err := os.ReadFile(filepath.Join(cliDir, "codex-package.json"))
+	if err != nil || len(raw) > 64<<10 {
+		return ""
+	}
+	var pkg struct {
+		Entrypoint string `json:"entrypoint"`
+	}
+	if json.Unmarshal(raw, &pkg) != nil {
+		return ""
+	}
+	rel := strings.TrimSpace(pkg.Entrypoint)
+	if rel == "" || filepath.IsAbs(rel) {
+		return ""
+	}
+	candidate := filepath.Join(cliDir, filepath.FromSlash(rel))
+	cleanDir := filepath.Clean(cliDir) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(candidate), cleanDir) {
+		return ""
+	}
+	return candidate
+}
+
+func hasNativeModels(catalog Catalog) bool {
+	for _, model := range catalog.Models {
+		id, _ := model["slug"].(string)
+		if strings.TrimSpace(id) != "" && !strings.HasPrefix(strings.ToLower(id), "ccl/") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCodeModeModel(catalog Catalog) bool {
+	for _, model := range catalog.Models {
+		id, _ := model["slug"].(string)
+		if !strings.HasPrefix(strings.ToLower(id), "ccl/") && model["tool_mode"] == "code_mode_only" {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheClientVersion(data []byte) string {
+	var envelope struct {
+		ClientVersion string `json:"client_version"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return ""
+	}
+	return strings.TrimSpace(envelope.ClientVersion)
 }
 
 func nativeCatalog(ctx context.Context, home string, fields map[string]any) (Catalog, error) {
@@ -267,14 +349,59 @@ func nativeCatalog(ctx context.Context, home string, fields map[string]any) (Cat
 		if err != nil {
 			return Catalog{}, err
 		}
-		return catalog, nil
-	}
-	if data, err := os.ReadFile(filepath.Join(home, "models_cache.json")); err == nil {
-		if catalog, err := ParseCatalog(data); err == nil {
+		if hasNativeModels(catalog) {
 			return catalog, nil
 		}
+		if fallback, ok := fallbackNativeCatalog(ctx, home); ok {
+			return fallback, nil
+		}
+		return catalog, nil
 	}
-	executable, err := FindExecutable()
+	if fallback, ok := cachedNativeCatalog(ctx, home); ok {
+		return fallback, nil
+	}
+	return bundledNativeCatalog(ctx)
+}
+
+func fallbackNativeCatalog(ctx context.Context, home string) (Catalog, bool) {
+	if cached, ok := cachedNativeCatalog(ctx, home); ok && hasNativeModels(cached) {
+		return cached, true
+	}
+	if bundled, err := bundledNativeCatalog(ctx); err == nil && hasNativeModels(bundled) {
+		return bundled, true
+	}
+	return Catalog{}, false
+}
+
+func cachedNativeCatalog(ctx context.Context, home string) (Catalog, bool) {
+	data, err := os.ReadFile(filepath.Join(home, "models_cache.json"))
+	if err != nil {
+		return Catalog{}, false
+	}
+	catalog, err := ParseCatalog(data)
+	if err != nil {
+		return Catalog{}, false
+	}
+	if hasNativeModels(catalog) {
+		// Synthetic test fixtures omit client_version and must remain strictly
+		// isolated from any host-installed Codex app. A real Codex cache that
+		// predates code_mode_only refreshes from the bundled catalog when
+		// available and falls back to the cache otherwise.
+		if cacheClientVersion(data) != "" && !hasCodeModeModel(catalog) {
+			if bundled, err := bundledNativeCatalog(ctx); err == nil && hasNativeModels(bundled) {
+				return bundled, true
+			}
+		}
+		return catalog, true
+	}
+	if bundled, err := bundledNativeCatalog(ctx); err == nil && hasNativeModels(bundled) {
+		return bundled, true
+	}
+	return catalog, true
+}
+
+func bundledNativeCatalog(ctx context.Context) (Catalog, error) {
+	executable, err := bundledExecutable()
 	if err != nil {
 		return Catalog{}, err
 	}

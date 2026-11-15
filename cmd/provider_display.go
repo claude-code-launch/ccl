@@ -27,6 +27,16 @@ func providerEffortSummary(p provider.Provider) string {
 	return summary
 }
 
+func providerDefaultModelSummary(p provider.Provider) string {
+	if def := strings.TrimSpace(p.DefaultModel); def != "" {
+		return def
+	}
+	if def := provider.EffectiveDefaultModel(p); def != "" {
+		return "auto (" + def + ")"
+	}
+	return "auto"
+}
+
 // providerFastSummary reports the Codex fastMode state for display. Only Codex
 // Responses OAuth backends (gpt) honour it; other providers show
 // "off" regardless of the stored flag.
@@ -35,17 +45,6 @@ func providerFastSummary(p provider.Provider) string {
 		return "on"
 	}
 	return "off"
-}
-
-func subagentMappingDisplay(p provider.Provider) string {
-	return subagentMappingDisplayWithNames(p, nil)
-}
-
-func subagentMappingDisplayWithNames(p provider.Provider, names map[string]string) string {
-	if model := strings.TrimSpace(p.SubagentModel); model != "" {
-		return providerCatalogModelLabel(model, names)
-	}
-	return "(auto)"
 }
 
 func providerCatalogModelLabel(model string, names map[string]string) string {
@@ -72,7 +71,11 @@ func providerCatalogModelLabel(model string, names map[string]string) string {
 }
 
 func providerOneMSummary(p provider.Provider) string {
-	contextPart := reviewOneMSummary(oneMSlotsFromProvider(p))
+	oneM := oneMModelsFromProvider(p)
+	contextPart := "off"
+	if len(oneM) > 0 {
+		contextPart = strings.Join(oneM, ",")
+	}
 	switch provider.ProviderContextPreset(p) {
 	case provider.ContextPresetBalanced500K:
 		return "500K/425K · " + contextPart
@@ -89,7 +92,7 @@ func setProviderAuthHeaders(req *http.Request, p provider.Provider) {
 
 func printProviderExperienceWarnings(p provider.Provider) {
 	if level := strings.TrimSpace(p.EffortLevel); level != "" {
-		doctorInfo(fmt.Sprintf("Effort starts at %s each session (ccl provider effort default leaves it to Grok Build).", level))
+		doctorInfo(fmt.Sprintf("Effort starts at %s each session (change or clear it in ccl set).", level))
 	}
 	if p.FastMode {
 		doctorInfo("Fast is on: ccl asks the Codex upstream for priority service (faster, higher usage); turn it off in ccl set Review & Apply.")

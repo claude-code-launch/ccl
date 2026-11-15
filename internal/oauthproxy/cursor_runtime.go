@@ -16,6 +16,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 // Cursor's agent API is a bidirectional Connect stream: CCL sends one Run
@@ -328,12 +331,19 @@ func (s *cursorSession) takePending(callID string) (cursorPendingCall, bool) {
 func (s *cursorSession) matches(callIDs []string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.pending) == 0 {
+		return false
+	}
+	answered := make(map[string]struct{}, len(callIDs))
 	for _, id := range callIDs {
-		if _, ok := s.pending[id]; ok {
-			return true
+		answered[id] = struct{}{}
+	}
+	for id := range s.pending {
+		if _, ok := answered[id]; !ok {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // startHeartbeat keeps the parked stream warm while the client runs the tool.
@@ -407,13 +417,14 @@ func (s *cursorSession) close() {
 }
 
 type cursorService struct {
-	apiKey     string
-	models     []string
-	modelRoute map[string]string
-	authorizer *cursorOAuthAuthorizer
-	client     *http.Client
-	usage      *UsageTracker
-	ctx        context.Context
+	apiKey       string
+	models       []string
+	modelDetails map[string]protocol.ModelInfo
+	modelRoute   map[string]string
+	authorizer   *cursorOAuthAuthorizer
+	client       *http.Client
+	usage        *UsageTracker
+	ctx          context.Context
 
 	mu        sync.Mutex
 	parked    *cursorSession
@@ -430,7 +441,7 @@ func (s *cursorService) authorized(request *http.Request) bool {
 }
 
 func (s *cursorService) handleModels(writer http.ResponseWriter, request *http.Request) {
-	serveModelList(writer, request, s.apiKey, s.models)
+	serveModelListWithRoutes(writer, request, s.apiKey, s.models, s.modelDetails, s.modelRoute)
 }
 
 func (s *cursorService) handleResponses(writer http.ResponseWriter, request *http.Request) {
@@ -530,7 +541,13 @@ func cursorClientError(err error) (int, string) {
 // serve runs one Responses turn: resume the parked Cursor stream when the
 // client is answering a tool call it owns, otherwise start a fresh Run.
 func (s *cursorService) serve(ctx context.Context, converted *cursorConvertedRequest, assembler *responseAssembler, gate *cursorGateWriter) error {
-	if session := s.takeParked(converted.resumeToolUseIDs()); session != nil {
+	// Cursor's ExecMcpResult protobuf frame carries text only. When a tool
+	// result (or follow-up user turn) attaches screenshots, close any parked
+	// stream and start a fresh Run so SelectedImages reach Cursor alongside
+	// the full conversation history and TOOL_RESULT blocks.
+	if len(converted.images) > 0 {
+		s.closeParked()
+	} else if session := s.takeParked(converted.resumeToolUseIDs()); session != nil {
 		defer session.close()
 		LogDebugEvent("cursor_resume", "call_count", len(converted.resume))
 		return s.continueTurn(ctx, session, converted, assembler, gate, true)
@@ -761,6 +778,7 @@ func (s *cursorService) continueTurn(ctx context.Context, session *cursorSession
 			}
 			break
 		}
+		sawExecMCP := false
 		for _, event := range decodeCursorASM(payload) {
 			switch event.Kind {
 			case "text":
@@ -795,14 +813,7 @@ func (s *cursorService) continueTurn(ctx context.Context, session *cursorSession
 				if err := assembler.addToolUse(callID, event.MCPName, cursorMCPArgsJSON(event.MCPArgs)); err != nil {
 					return err
 				}
-				if err := assembler.finish(); err != nil {
-					return err
-				}
-				// The stream stays open: Claude Code's next request carries the
-				// tool result and continues it instead of replaying the turn.
-				session.startHeartbeat()
-				s.park(session)
-				return nil
+				sawExecMCP = true
 			case "exec_context":
 				if err := session.send(cursorFrameConnect(encodeCursorRequestContext(event.ExecMsgID, event.ExecID, converted.tools), 0)); err != nil {
 					return err
@@ -815,8 +826,21 @@ func (s *cursorService) continueTurn(ctx context.Context, session *cursorSession
 					return err
 				}
 			case "turn_end":
+				if sawExecMCP {
+					break
+				}
 				return assembler.finish()
 			}
+		}
+		if sawExecMCP {
+			if err := assembler.finish(); err != nil {
+				return err
+			}
+			// The stream stays open: the next request carries the tool result(s)
+			// and continues it instead of replaying the turn.
+			session.startHeartbeat()
+			s.park(session)
+			return nil
 		}
 	}
 	return assembler.finish()
@@ -1057,6 +1081,66 @@ func cursorModelRoutes(modelSpec string, models []string) map[string]string {
 	return routes
 }
 
+func cursorModelDetails(models []string, routes map[string]string) map[string]protocol.ModelInfo {
+	index, _ := modelsdev.CachedIndex()
+	details := make(map[string]protocol.ModelInfo, len(models))
+	for _, alias := range models {
+		trimmed := strings.TrimSpace(alias)
+		if trimmed == "" {
+			continue
+		}
+		target := routes[strings.ToLower(trimmed)]
+		if target == "" {
+			target = trimmed
+		}
+		var info protocol.ModelInfo
+		matched := false
+		if index != nil {
+			if mod, ok := index.InputModalities("", target, trimmed); ok {
+				info.InputModalities = mod
+				matched = true
+			}
+			if maxOut, ok := index.MaxOutputTokens("", target, trimmed); ok {
+				info.MaxOutputTokens = maxOut
+				matched = true
+			}
+			if efforts, ok := index.Efforts("", target, trimmed); ok {
+				info.ReasoningLevels, info.DefaultReasoningLevel = reasoningLevelsFromEfforts(efforts, "")
+				info.ReasoningKnown = true
+				matched = true
+			}
+		}
+		if len(info.InputModalities) == 0 && cursorKnownVisionModel(target) {
+			info.InputModalities = []string{"text", "image"}
+			matched = true
+		}
+		if matched {
+			info.ID = trimmed
+			details[strings.ToLower(trimmed)] = info
+		}
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return details
+}
+
+func cursorKnownVisionModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(stripContextModelSuffix(model)))
+	for _, prefix := range []string{
+		"claude-3-5-sonnet", "claude-3.5-sonnet", "claude-3-7-sonnet", "claude-3.7-sonnet",
+		"claude-4", "claude-sonnet-4", "claude-opus-4", "claude-haiku-4",
+		"gpt-4o", "gpt-4.1", "gpt-5",
+		"gemini-2", "gemini-3", "gemini-4",
+		"grok-4", "composer-2",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func startCursorOAuth(parent context.Context, modelSpec, credentialFile string) (*Runtime, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -1105,16 +1189,18 @@ func startCursorOAuth(parent context.Context, modelSpec, credentialFile string) 
 	if err != nil {
 		return nil, fmt.Errorf("listen for Cursor runtime: %w", err)
 	}
+	details := cursorModelDetails(models, routes)
 	runCtx, cancel := context.WithCancel(parent)
 	usage := NewUsageTracker()
 	service := &cursorService{
-		apiKey:     apiKey,
-		models:     models,
-		modelRoute: routes,
-		authorizer: authorizer,
-		client:     &http.Client{Transport: newUpstreamTransport(60 * time.Second), CheckRedirect: checkCredentialRedirect},
-		usage:      usage,
-		ctx:        runCtx,
+		apiKey:       apiKey,
+		models:       models,
+		modelDetails: details,
+		modelRoute:   routes,
+		authorizer:   authorizer,
+		client:       &http.Client{Transport: newUpstreamTransport(60 * time.Second), CheckRedirect: checkCredentialRedirect},
+		usage:        usage,
+		ctx:          runCtx,
 	}
 	server := &http.Server{
 		Handler:           service.handler(),
@@ -1129,6 +1215,7 @@ func startCursorOAuth(parent context.Context, modelSpec, credentialFile string) 
 		httpServer:      server,
 		listAuths:       authorizer.listAuths,
 		models:          models,
+		modelDetails:    details,
 		catalogFallback: catalogFallback,
 		cancel:          cancel,
 		done:            make(chan struct{}),
@@ -1204,14 +1291,16 @@ func convertResponsesToCursor(raw []byte) (*cursorConvertedRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	tools, err := cursorToolsFromResponses(request.Tools)
-	if err != nil {
-		return nil, err
+	var tools []cursorMCPTool
+	if request.ToolChoice.Mode != toolChoiceNone {
+		tools, err = cursorToolsFromResponses(request.Tools)
+		if err != nil {
+			return nil, err
+		}
 	}
 	model := stripContextModelSuffix(request.Model)
 	adapter := request.adapter(model)
 	adapter.maxTokens = maxTokens
-	adapter.toolNameMap = map[string]string{}
 	converted := &cursorConvertedRequest{
 		adapterRequest: adapter,
 		model:          model,

@@ -2,351 +2,663 @@ package webui
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/url"
+	"net/http/httptest"
 	"os"
-	"path/filepath"
+	"os/exec"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
-
-	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
-func TestMain(m *testing.M) {
-	if os.Getenv("CCL_WEBUI_FIXTURE") == "1" && len(os.Args) > 1 && os.Args[1] == "agent" {
-		os.Exit(fakeGrok())
-	}
-	os.Exit(m.Run())
+var testHandlers sync.Map
+
+func init() {
+	base := http.DefaultTransport
+	fallback := &sandboxFallbackTransport{base: base}
+	http.DefaultTransport = fallback
+	noRedirect.Transport = fallback
 }
 
-func TestBrowserSessionLifecycle(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("CCL_WEBUI_FIXTURE", "1")
-	t.Setenv("GORACE", "atexit_sleep_ms=0")
-	grok, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace := t.TempDir()
-	workspace, err = resolveWorkspace(workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts := Options{
-		GrokPath: grok, StateDir: filepath.Join(home, "state"), Workspaces: []string{workspace},
-		Provider: provider.Provider{
-			Name: "fixture", Type: "openai_responses", Model: "fixture",
-			Endpoint: "http://127.0.0.1:9/v1", APIKey: "fake-upstream-key",
-		},
-	}
-	first, stop := testServer(t, opts)
-	first.check("GET", "sessions", nil, "", "", "", http.StatusUnauthorized)
-	first.check("GET", "sessions", nil, first.Fragment, "", "rebind.example", http.StatusForbidden)
-	first.check("POST", "sessions", map[string]string{"workspace": workspace}, first.Fragment,
-		"http://127.0.0.1:9", "", http.StatusForbidden)
-	first.check("POST", "sessions", map[string]string{"workspace": home}, first.Fragment, "", "", http.StatusBadRequest)
-	created := first.request("POST", "sessions", map[string]string{"workspace": workspace}, http.StatusCreated)
-	var chat summary
-	if err := json.Unmarshal(created, &chat); err != nil || chat.ID == "" {
-		t.Fatalf("could not decode session: %v", err)
-	}
-	base := "sessions/" + chat.ID
-	stream := first.events(base)
-	stream.find("state", "idle")
-
-	first.request("POST", base+"/prompt", map[string]string{"text": "first turn"}, http.StatusAccepted)
-	stream.find("assistant", "reply: first turn")
-	stream.find("state", "idle")
-
-	first.request("POST", base+"/prompt", map[string]string{"text": "permission"}, http.StatusAccepted)
-	permit := stream.find("permission", "Fixture command")
-	if !permit.CanAllow || !strings.Contains(permit.Detail, "fixture-command") {
-		t.Fatalf("incomplete permission event: %+v", permit)
-	}
-	first.request("POST", base+"/prompt", map[string]string{"text": "overlap"}, http.StatusConflict)
-	decision := base + "/permissions/" + permit.ID
-	first.request("POST", decision, map[string]string{"decision": "deny"}, http.StatusNoContent)
-	first.request("POST", decision, map[string]string{"decision": "allow"}, http.StatusConflict)
-	stream.find("assistant", "decision: reject-one")
-	stream.find("state", "idle")
-
-	first.request("POST", base+"/prompt", map[string]string{"text": "permission"}, http.StatusAccepted)
-	permit = stream.find("permission", "Fixture command")
-	first.request("POST", base+"/permissions/"+permit.ID, map[string]string{"decision": "allow"}, http.StatusNoContent)
-	stream.find("assistant", "decision: allow-one")
-	stream.find("state", "idle")
-
-	first.request("POST", base+"/prompt", map[string]string{"text": "permission"}, http.StatusAccepted)
-	permit = stream.find("permission", "Fixture command")
-	first.request("POST", base+"/cancel", map[string]string{}, http.StatusNoContent)
-	stream.find("permission_closed", "")
-	stream.find("state", "idle")
-	first.request("POST", base+"/permissions/"+permit.ID, map[string]string{"decision": "allow"}, http.StatusConflict)
-
-	first.request("POST", base+"/prompt", map[string]string{"text": "wait for cancel"}, http.StatusAccepted)
-	stream.find("assistant", "ready to cancel")
-	first.request("POST", base+"/cancel", map[string]string{}, http.StatusNoContent)
-	stream.find("assistant", "ACP cancellation received")
-	stream.find("state", "idle")
-	stream.close()
-	stop()
-
-	second, _ := testServer(t, opts)
-	second.check("GET", "sessions", nil, first.Fragment, "", "", http.StatusUnauthorized)
-	stream = second.events(base)
-	stream.find("user", "first turn")
-	stream.find("assistant", "reply: first turn")
-	stream.find("state", "idle")
-	second.request("POST", base+"/prompt", map[string]string{"text": "continued"}, http.StatusAccepted)
-	stream.find("assistant", "reply: continued")
-	stream.find("state", "idle")
-	stream.close()
-
-	data := second.request("GET", "sessions", nil, http.StatusOK)
-	if bytes.Contains(data, []byte("fixture-agent-id")) || bytes.Contains(data, []byte("fake-upstream-key")) {
-		t.Fatalf("session list exposed private worker data")
-	}
+// sandboxFallbackTransport uses real loopback TCP sockets whenever permitted
+// (e.g. CI and normal dev machines), and falls back to invoking registered
+// httptest handlers in-process when a restricted sandbox blocks connect().
+type sandboxFallbackTransport struct {
+	base http.RoundTripper
 }
 
-type browserTest struct {
-	*url.URL
-	t *testing.T
+func (t *sandboxFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err == nil || !strings.Contains(err.Error(), "operation not permitted") || req.URL == nil {
+		return resp, err
+	}
+	origin := req.URL.Scheme + "://" + req.URL.Host
+	raw, ok := testHandlers.Load(origin)
+	if !ok {
+		return nil, err
+	}
+	return serveInMemory(raw.(http.Handler), req), nil
 }
 
-func testServer(t *testing.T, opts Options) (browserTest, func()) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(t.Context())
-	ready := make(chan string, 1)
-	done := make(chan struct{})
+type pipeResponseWriter struct {
+	mu          sync.Mutex
+	header      http.Header
+	snapHeader  http.Header
+	code        int
+	wroteHeader bool
+	ready       chan struct{}
+	pw          *io.PipeWriter
+}
+
+func (w *pipeResponseWriter) Header() http.Header { return w.header }
+
+func (w *pipeResponseWriter) WriteHeader(statusCode int) {
+	w.mu.Lock()
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.code = statusCode
+		w.snapHeader = w.header.Clone()
+		close(w.ready)
+	}
+	w.mu.Unlock()
+}
+
+func (w *pipeResponseWriter) Write(p []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	return w.pw.Write(p)
+}
+
+func (w *pipeResponseWriter) Flush() {
+	w.WriteHeader(http.StatusOK)
+}
+
+func (w *pipeResponseWriter) finish() {
+	w.WriteHeader(http.StatusOK)
+	_ = w.pw.Close()
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelReadCloser) Close() error {
+	c.cancel()
+	return c.ReadCloser.Close()
+}
+
+func serveInMemory(handler http.Handler, req *http.Request) *http.Response {
+	ctx, cancel := context.WithCancel(req.Context())
+	serverReq := req.Clone(ctx)
+	serverReq.RequestURI = req.URL.RequestURI()
+	if serverReq.Host == "" {
+		serverReq.Host = req.URL.Host
+	}
+	if serverReq.RemoteAddr == "" {
+		serverReq.RemoteAddr = "127.0.0.1:54321"
+	}
+	if serverReq.Body == nil {
+		serverReq.Body = http.NoBody
+	}
+	pr, pw := io.Pipe()
+	rw := &pipeResponseWriter{
+		header: make(http.Header),
+		ready:  make(chan struct{}),
+		pw:     pw,
+	}
 	go func() {
-		defer close(done)
-		if err := Serve(ctx, opts, func(address string) { ready <- address }); err != nil {
-			t.Error(err)
-		}
+		defer rw.finish()
+		handler.ServeHTTP(rw, serverReq)
 	}()
-	stop := func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("server did not shut down")
+	<-rw.ready
+	return &http.Response{
+		StatusCode: rw.code,
+		Status:     http.StatusText(rw.code),
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     rw.snapHeader,
+		Body:       &cancelReadCloser{ReadCloser: pr, cancel: cancel},
+		Request:    req,
+	}
+}
+
+func registerHTTPTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	httpServer := httptest.NewServer(handler)
+	testHandlers.Store(httpServer.URL, handler)
+	t.Cleanup(func() {
+		testHandlers.Delete(httpServer.URL)
+		httpServer.Close()
+	})
+	return httpServer
+}
+
+func testServer(t *testing.T, cfg Config) *httptest.Server {
+	t.Helper()
+	if cfg.Workspace == "" && len(cfg.Workspaces) == 0 && len(cfg.WorkspaceRoots) == 0 {
+		cfg.Workspace = t.TempDir()
+	}
+	if cfg.StoreRoot == "" {
+		cfg.StoreRoot = t.TempDir()
+	}
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return registerHTTPTestServer(t, server.Handler())
+}
+
+func TestNewRequiresTokenBeyondLoopback(t *testing.T) {
+	if _, err := New(Config{Token: "", RequireToken: true, Workspace: t.TempDir(), StoreRoot: t.TempDir()}); err == nil {
+		t.Fatal("New accepted an exposed listener without a token")
+	}
+	server, err := New(Config{Workspace: t.TempDir(), StoreRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New in loopback mode: %v", err)
+	}
+	health := httptest.NewRecorder()
+	request := httptest.NewRequest("GET", "/health", nil)
+	request.Host = "127.0.0.1:8099"
+	server.Handler().ServeHTTP(health, request)
+	if !strings.Contains(health.Body.String(), `"authRequired":false`) {
+		t.Fatalf("/health = %s", health.Body)
+	}
+}
+
+func TestLoopbackModeNeedsNoToken(t *testing.T) {
+	httpServer := testServer(t, Config{})
+	for _, path := range []string{"/api/config", "/api/providers", "/api/sessions"} {
+		status, body := doJSON(t, "GET", httpServer.URL+path, "", "")
+		if status != http.StatusOK {
+			t.Fatalf("GET %s = %d: %s", path, status, body)
 		}
 	}
-	t.Cleanup(stop)
-	select {
-	case address := <-ready:
-		base, err := url.Parse(address)
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "", `{"title":"t"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /api/sessions = %d: %s", status, body)
+	}
+}
+
+func TestHealthIsPublicAndReportsAuth(t *testing.T) {
+	httpServer := testServer(t, Config{Token: "secret", Version: "1.2.3"})
+	status, body := doJSON(t, "GET", httpServer.URL+"/health", "", "")
+	if status != http.StatusOK {
+		t.Fatalf("/health = %d: %s", status, body)
+	}
+	var health struct {
+		OK           bool   `json:"ok"`
+		Version      string `json:"version"`
+		AuthRequired bool   `json:"authRequired"`
+		Workspace    string `json:"workspace"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		t.Fatal(err)
+	}
+	if !health.OK || !health.AuthRequired || health.Version != "1.2.3" || health.Workspace == "" {
+		t.Fatalf("health = %+v", health)
+	}
+}
+
+// builtAssets returns the page and the hashed assets it references.
+func builtAssets(t *testing.T, base string) []string {
+	t.Helper()
+	response, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer response.Body.Close()
+	page, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{"/"}
+	// The build references its assets relative to the page's <base>.
+	for _, match := range regexp.MustCompile(`(?:src|href)="\./(assets/[^"]+)"`).FindAllStringSubmatch(string(page), -1) {
+		paths = append(paths, "/"+match[1])
+	}
+	if len(paths) < 3 {
+		t.Fatalf("index.html references no built script and stylesheet (run npm run build in internal/webui/frontend):\n%s", page)
+	}
+	return paths
+}
+
+func TestStaticAssetsAreServed(t *testing.T) {
+	httpServer := testServer(t, Config{})
+	for _, path := range builtAssets(t, httpServer.URL) {
+		response, err := http.Get(httpServer.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d", path, response.StatusCode)
+		}
+		cache := response.Header.Get("Cache-Control")
+		if strings.HasPrefix(path, "/assets/") != strings.Contains(cache, "immutable") {
+			t.Fatalf("GET %s Cache-Control = %q", path, cache)
+		}
+	}
+}
+
+func TestStaticAssetsRevalidateByETag(t *testing.T) {
+	httpServer := testServer(t, Config{})
+	for _, path := range builtAssets(t, httpServer.URL) {
+		response, err := http.Get(httpServer.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		response.Body.Close()
+		tag := response.Header.Get("ETag")
+		if !strings.HasPrefix(tag, `W/"`) || len(tag) != len(`W/""`)+16 {
+			t.Fatalf("GET %s ETag = %q", path, tag)
+		}
+
+		request, _ := http.NewRequest("GET", httpServer.URL+path, nil)
+		request.Header.Set("If-None-Match", tag)
+		response, err = http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return browserTest{base, t}, stop
-	case <-done:
-		t.Fatal("server exited before readiness")
-	case <-time.After(5 * time.Second):
-		t.Fatal("server did not start")
-	}
-	return browserTest{}, stop
-}
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotModified {
+			t.Fatalf("GET %s with a matching ETag = %d, want 304", path, response.StatusCode)
+		}
 
-func (b browserTest) send(method, path string, body any, token, origin, host string) (*http.Response, context.CancelFunc) {
-	b.t.Helper()
-	ctx, cancel := context.WithTimeout(b.t.Context(), 20*time.Second)
-	b.t.Cleanup(cancel)
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
+		request.Header.Set("If-None-Match", `W/"stale"`)
+		response, err = http.DefaultClient.Do(request)
 		if err != nil {
-			b.t.Fatal(err)
+			t.Fatal(err)
 		}
-		reader = bytes.NewReader(data)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s with a stale ETag = %d, want 200", path, response.StatusCode)
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://"+b.Host+"/api/"+path, reader)
-	if err != nil {
-		b.t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if origin != "" {
-		req.Header.Set("Origin", origin)
-	}
-	if host != "" {
-		req.Host = host
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		b.t.Fatal(err)
-	}
-	return resp, cancel
 }
 
-func (b browserTest) request(method, path string, body any, code int) []byte {
-	b.t.Helper()
-	return b.check(method, path, body, b.Fragment, "", "", code)
+func TestSessionRoutesRequireToken(t *testing.T) {
+	httpServer := testServer(t, Config{Token: "secret"})
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "", `{"title":"t"}`)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("POST without a token = %d: %s", status, body)
+	}
+	// The read-only endpoints accept ?token= because EventSource cannot send a
+	// header; a wrong token is still refused.
+	response, err := http.Get(httpServer.URL + "/api/sessions/nope/events?token=wrong")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("events with a wrong token = %d", response.StatusCode)
+	}
 }
 
-func (b browserTest) check(method, path string, body any, token, origin, host string, code int) []byte {
-	b.t.Helper()
-	resp, cancel := b.send(method, path, body, token, origin, host)
+func TestSessionCRUD(t *testing.T) {
+	httpServer := testServer(t, Config{Token: "secret"})
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "secret", `{"title":"first"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", status, body)
+	}
+	var meta Meta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.ID == "" || meta.Title != "first" || meta.Workspace == "" {
+		t.Fatalf("created meta = %+v", meta)
+	}
+
+	status, body = doJSON(t, "GET", httpServer.URL+"/api/sessions", "secret", "")
+	if status != http.StatusOK || !strings.Contains(string(body), meta.ID) {
+		t.Fatalf("GET list = %d: %s", status, body)
+	}
+
+	status, body = doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret",
+		`{"title":"renamed","provider":"default","effort":"xhigh"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH = %d: %s", status, body)
+	}
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Title != "renamed" || meta.Effort != "xhigh" {
+		t.Fatalf("patched meta = %+v", meta)
+	}
+
+	// An unknown effort is rejected.
+	if status, _ := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"effort":"invalid"}`); status != http.StatusBadRequest {
+		t.Fatalf("PATCH bad effort = %d, want 400", status)
+	}
+
+	if status, body := doJSON(t, "DELETE", httpServer.URL+"/api/sessions/"+meta.ID, "secret", ""); status != http.StatusNoContent {
+		t.Fatalf("DELETE = %d: %s", status, body)
+	}
+	if status, _ := doJSON(t, "GET", httpServer.URL+"/api/sessions/"+meta.ID, "secret", ""); status != http.StatusNotFound {
+		t.Fatalf("GET after delete = %d, want 404", status)
+	}
+}
+
+func TestSessionStreamFrames(t *testing.T) {
+	httpServer := testServer(t, Config{Token: "secret", Launch: helperPrepare(t, "hi", false)})
+
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "secret", `{"title":"s"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", status, body)
+	}
+	var meta Meta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil || resp.StatusCode != code {
-		b.t.Fatalf("%s %s = %d, wanted %d: %q (%v)", method, path, resp.StatusCode, code, data, err)
+	streamURL := httpServer.URL + "/api/sessions/" + meta.ID + "/stream?token=secret"
+	request, err := http.NewRequestWithContext(ctx, "GET", streamURL, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return data
-}
-
-type testStream struct {
-	t       *testing.T
-	scanner *bufio.Scanner
-	batch   []event
-	close   func()
-}
-
-func (b browserTest) events(path string) *testStream {
-	b.t.Helper()
-	resp, cancel := b.send("GET", path+"/events", nil, b.Fragment, "", "")
-	closeStream := func() { cancel(); resp.Body.Close() }
-	b.t.Cleanup(closeStream)
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
-		b.t.Fatalf("stream rejected: %s", resp.Status)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
 	}
-	return &testStream{t: b.t, scanner: bufio.NewScanner(resp.Body), close: closeStream}
-}
+	defer response.Body.Close()
+	if contentType := response.Header.Get("Content-Type"); contentType != "text/event-stream" {
+		t.Fatalf("Content-Type = %q", contentType)
+	}
 
-func (s *testStream) find(kind, text string) event {
-	s.t.Helper()
-	for {
-		for len(s.batch) > 0 {
-			e := s.batch[0]
-			s.batch = s.batch[1:]
-			if e.Kind == kind && (text == "" || e.Text == text) {
-				return e
+	// Send a message; the stream must deliver its events.
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"hello"}`); status != http.StatusAccepted {
+		t.Fatalf("POST message = %d: %s", status, body)
+	}
+
+	reader := bufio.NewReader(response.Body)
+	var frame strings.Builder
+	seen := map[string]bool{}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if line == "\n" {
+			text := frame.String()
+			frame.Reset()
+			if strings.Contains(text, "event: user") {
+				seen["user"] = true
 			}
-		}
-		if !s.scanner.Scan() {
-			s.t.Fatalf("no event %s %q: %v", kind, text, s.scanner.Err())
-		}
-		if raw, ok := strings.CutPrefix(s.scanner.Text(), "data: "); ok {
-			if err := json.Unmarshal([]byte(raw), &s.batch); err != nil {
-				s.t.Fatal(err)
-			}
-		}
-	}
-}
-
-func fakeGrok() int {
-	const id = "fixture-agent-id"
-	profile := os.Getenv("GROK_HOME")
-	if profile == "" || os.Getenv("XAI_API_KEY") == "fake-upstream-key" ||
-		!strings.HasPrefix(os.Getenv("GROK_MODELS_BASE_URL"), "http://127.0.0.1:") {
-		return 2
-	}
-	history := filepath.Join(profile, "turns")
-	decoder := json.NewDecoder(os.Stdin)
-	encoder := json.NewEncoder(os.Stdout)
-	send := func(fields map[string]any) {
-		fields["jsonrpc"] = "2.0"
-		_ = encoder.Encode(fields)
-	}
-	chunk := func(role, text string) {
-		send(map[string]any{
-			"method": "session/update", "params": map[string]any{
-				"sessionId": id, "update": map[string]any{
-					"sessionUpdate": role + "_message_chunk", "content": map[string]string{"type": "text", "text": text},
-				},
-			},
-		})
-	}
-	for {
-		var msg struct {
-			ID     any    `json:"id"`
-			Method string `json:"method"`
-			Params struct {
-				Prompt []struct{ Text string }
-			}
-		}
-		if decoder.Decode(&msg) != nil {
-			return 0
-		}
-		result := make(map[string]any)
-		switch msg.Method {
-		case "initialize":
-			result["protocolVersion"] = 1
-			result["agentCapabilities"] = map[string]bool{"loadSession": true}
-		case "session/new":
-			result["sessionId"] = id
-		case "session/load":
-			if data, err := os.ReadFile(history); err == nil {
-				for _, text := range strings.FieldsFunc(string(data), func(r rune) bool { return r == '\n' }) {
-					chunk("user", text)
-					chunk("agent", "reply: "+text)
+			for _, kind := range []string{EventInit, EventToken, EventResult} {
+				if strings.Contains(text, "event: "+kind) {
+					seen[kind] = true
+					// Every frame carries its seq so ?since= can resume.
+					if !strings.Contains(text, "id: ") {
+						t.Fatalf("frame without an id: %q", text)
+					}
 				}
 			}
-		case "session/prompt":
-			text := msg.Params.Prompt[0].Text
-			result["stopReason"] = "end_turn"
-			switch text {
-			case "permission":
-				send(map[string]any{
-					"id": 9000, "method": "session/request_permission", "params": map[string]any{
-						"sessionId": id, "toolCall": map[string]any{
-							"toolCallId": "tool-id", "title": "Fixture command", "rawInput": map[string]string{"command": "fixture-command"},
-						},
-						"options": []map[string]string{
-							{"optionId": "allow-all", "kind": "allow_always", "name": "Always allow"},
-							{"optionId": "allow-one", "kind": "allow_once", "name": "Allow once"},
-							{"optionId": "reject-one", "kind": "reject_once", "name": "Deny once"},
-						},
-					},
-				})
-				for {
-					var reply struct {
-						ID     int
-						Result struct {
-							Outcome struct{ Outcome, OptionID string }
-						}
-					}
-					if decoder.Decode(&reply) != nil {
-						return 3
-					}
-					if reply.ID == 9000 {
-						chunk("agent", "decision: "+reply.Result.Outcome.OptionID)
-						break
-					}
-				}
-			case "wait for cancel":
-				chunk("agent", "ready to cancel")
-				for {
-					var notification struct{ Method string }
-					if decoder.Decode(&notification) != nil {
-						return 3
-					}
-					if notification.Method == "session/cancel" {
-						chunk("agent", "ACP cancellation received")
-						break
-					}
-				}
-				result["stopReason"] = "cancelled"
-			default:
-				old, _ := os.ReadFile(history)
-				if os.WriteFile(history, append(old, []byte(text+"\n")...), 0o600) != nil {
-					return 4
-				}
-				chunk("agent", "reply: "+text)
+			if len(seen) >= 3 {
+				waitIdle(t, httpServer.URL, meta.ID)
+				return
 			}
-		default:
 			continue
 		}
-		send(map[string]any{"id": msg.ID, "result": result})
+		frame.WriteString(line)
 	}
+	t.Fatalf("stream delivered %v", seen)
+}
+
+// waitIdle waits until a conversation's turn has finished and been stored.
+func waitIdle(t *testing.T, base, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		status, body := doJSON(t, "GET", base+"/api/sessions/"+id, "secret", "")
+		var view struct {
+			Running bool `json:"running"`
+		}
+		if status == http.StatusOK && json.Unmarshal(body, &view) == nil && !view.Running {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("session %s still running", id)
+}
+
+func TestMessageWhileRunningConflicts(t *testing.T) {
+	httpServer := testServer(t, Config{Token: "secret", Launch: helperPrepare(t, "", true)})
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "secret", `{"title":"s"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", status, body)
+	}
+	var meta Meta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"one"}`); status != http.StatusAccepted {
+		t.Fatalf("first message = %d: %s", status, body)
+	}
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"two"}`); status != http.StatusConflict {
+		t.Fatalf("second message = %d: %s", status, body)
+	}
+	// ACP v1 executes one prompt per turn, so steer while running also conflicts.
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"two","steer":true}`); status != http.StatusConflict {
+		t.Fatalf("steered message while running = %d: %s", status, body)
+	}
+	// A page loaded mid-turn learns the turn is running from the session itself.
+	if running := sessionRunning(t, httpServer.URL, meta.ID); !running {
+		t.Fatal("GET session reports running=false during a turn")
+	}
+	// What the next turn launches with cannot change under a running one;
+	// its title and where it is listed can.
+	if status, body := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"model":"x"}`); status != http.StatusConflict {
+		t.Fatalf("PATCH model while running = %d: %s", status, body)
+	}
+	if status, body := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"title":"x","pinned":true}`); status != http.StatusOK {
+		t.Fatalf("PATCH title while running = %d: %s", status, body)
+	}
+	if status, body := doJSON(t, "DELETE", httpServer.URL+"/api/sessions/"+meta.ID, "secret", ""); status != http.StatusConflict {
+		t.Fatalf("DELETE while running = %d: %s", status, body)
+	}
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/cancel", "secret", ""); status != http.StatusAccepted {
+		t.Fatalf("cancel = %d: %s", status, body)
+	}
+
+	// The turn finishes once cancelled; the session is usable again.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, _ := doJSON(t, "PATCH", httpServer.URL+"/api/sessions/"+meta.ID, "secret", `{"effort":""}`)
+		if status == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session stayed busy after cancel")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if sessionRunning(t, httpServer.URL, meta.ID) {
+		t.Fatal("GET session reports running=true after the turn ended")
+	}
+	// With no turn running, a new message starts one.
+	status, body = doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"three"}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("message after cancel = %d: %s", status, body)
+	}
+	doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/cancel", "secret", "")
+	waitIdle(t, httpServer.URL, meta.ID)
+}
+
+func sessionRunning(t *testing.T, base, id string) bool {
+	t.Helper()
+	status, body := doJSON(t, "GET", base+"/api/sessions/"+id, "secret", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET session = %d: %s", status, body)
+	}
+	var view struct {
+		ID      string `json:"id"`
+		Running *bool  `json:"running"`
+	}
+	if err := json.Unmarshal(body, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.ID != id || view.Running == nil {
+		t.Fatalf("GET session = %s", body)
+	}
+	return *view.Running
+}
+
+func TestEventsSince(t *testing.T) {
+	httpServer := testServer(t, Config{Token: "secret", Launch: helperPrepare(t, "ok", false)})
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "secret", `{"title":"s"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", status, body)
+	}
+	var meta Meta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"q"}`); status != http.StatusAccepted {
+		t.Fatalf("message = %d: %s", status, body)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, body := doJSON(t, "GET", httpServer.URL+"/api/sessions/"+meta.ID+"/events?token=secret", "", "")
+		var events []Event
+		_ = json.Unmarshal(body, &events)
+		if len(events) >= 2 && events[len(events)-1].Type == EventResult {
+			last := events[len(events)-1].Seq
+			_, tail := doJSON(t, "GET", httpServer.URL+"/api/sessions/"+meta.ID+"/events?token=secret&since="+itoa(last-1), "", "")
+			var resumed []Event
+			if err := json.Unmarshal(tail, &resumed); err != nil {
+				t.Fatal(err)
+			}
+			if len(resumed) != 1 || resumed[0].Seq != last {
+				t.Fatalf("since=%d returned %+v", last-1, resumed)
+			}
+			waitIdle(t, httpServer.URL, meta.ID)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("turn stored %d events", len(events))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestWorkspaceIsServerChosen(t *testing.T) {
+	workspace := t.TempDir()
+	httpServer := testServer(t, Config{Workspace: workspace, StoreRoot: t.TempDir()})
+	if status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "", `{"title":"s","workspace":"/etc"}`); status != http.StatusBadRequest {
+		t.Fatalf("POST with a path = %d: %s", status, body)
+	}
+	status, body := doJSON(t, "POST", httpServer.URL+"/api/sessions", "", `{"title":"s"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", status, body)
+	}
+	var meta Meta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Workspace != workspace {
+		t.Fatalf("workspace = %q, want %q", meta.Workspace, workspace)
+	}
+}
+
+func itoa(value int64) string {
+	if value == 0 {
+		return "0"
+	}
+	var digits []byte
+	for value > 0 {
+		digits = append([]byte{byte('0' + value%10)}, digits...)
+		value /= 10
+	}
+	return string(digits)
+}
+
+func newHTTPTestServer(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	return registerHTTPTestServer(t, handler).URL
+}
+
+func TestCloseCancelsTurnsAndRefusesNewOnes(t *testing.T) {
+	server, err := New(Config{Token: "secret", Workspace: t.TempDir(), StoreRoot: t.TempDir(), Launch: helperPrepare(t, "", true)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	baseURL := newHTTPTestServer(t, server.Handler())
+	status, body := doJSON(t, "POST", baseURL+"/api/sessions", "secret", `{"title":"s"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", status, body)
+	}
+	var meta Meta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := doJSON(t, "POST", baseURL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"one"}`); status != http.StatusAccepted {
+		t.Fatalf("message = %d: %s", status, body)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if sessionRunning(t, baseURL, meta.ID) {
+		t.Fatal("a turn is still running after Close")
+	}
+	session, err := server.Store().Open(meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := session.Events(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := events[len(events)-1]; last.Type != EventResult {
+		t.Fatalf("last event = %s, want a result", last.Type)
+	}
+	if status, body := doJSON(t, "POST", baseURL+"/api/sessions/"+meta.ID+"/messages", "secret", `{"text":"two"}`); status != http.StatusServiceUnavailable {
+		t.Fatalf("message after Close = %d: %s", status, body)
+	}
+}
+
+// TestMessageRightAfterResultWaitsForTheExit covers a reply sent as soon as the
+// result arrives, while the process is still exiting: it must start, not 409.
+func TestMessageRightAfterResultWaitsForTheExit(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch := func(ctx context.Context, spec LaunchSpec) (*exec.Cmd, func(), error) {
+		cmd := exec.Command(executable, "-test.run=TestHelperProcess")
+		cmd.Env = append(os.Environ(), "CCL_WEBUI_HELPER=1", "CCL_WEBUI_HELPER_LINGER=1", "CCL_WEBUI_HELPER_TEXT=done")
+		return cmd, func() {}, nil
+	}
+	base := testServer(t, Config{Token: "secret", Launch: launch}).URL
+	_, body := doJSON(t, "POST", base+"/api/sessions", "secret", `{}`)
+	var session SessionView
+	_ = json.Unmarshal(body, &session)
+	if status, body := doJSON(t, "POST", base+"/api/sessions/"+session.ID+"/messages", "secret", `{"text":"one"}`); status >= 300 {
+		t.Fatalf("first = %d %s", status, body)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, body = doJSON(t, "GET", base+"/api/sessions/"+session.ID+"/events?since=0", "secret", "")
+		if strings.Contains(string(body), `"type":"result"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no result")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if status, body := doJSON(t, "POST", base+"/api/sessions/"+session.ID+"/messages", "secret", `{"text":"two"}`); status >= 300 {
+		t.Fatalf("second, right after the result = %d %s", status, body)
+	}
+	waitIdle(t, base, session.ID)
 }

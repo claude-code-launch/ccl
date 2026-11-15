@@ -30,10 +30,9 @@ func TestCodexCatalogUsesProviderContextAndCompactionPolicy(t *testing.T) {
 		{"default", "model-a", provider.Provider{}, 200_000},
 		{"marked catalog ID", "model-a[1m]", provider.Provider{}, 1_000_000},
 		{"marked pool", "model-a", provider.Provider{Model: "other,Model-A[1m]"}, 1_000_000},
-		{"marked slot", "model-a", provider.Provider{SonnetModel: "model-a[1m]"}, 1_000_000},
-		{"other slot", "model-a", provider.Provider{OpusModel: "other[1m]"}, 200_000},
+		{"other pool", "model-a", provider.Provider{Model: "other[1m],model-a"}, 200_000},
 		{"balanced 500K", "model-a", provider.Provider{ContextPreset: provider.ContextPresetNameBalanced500K}, 500_000},
-		{"balanced caps marked slot", "model-a", provider.Provider{ContextPreset: provider.ContextPresetNameBalanced800K, SonnetModel: "model-a[1m]"}, 800_000},
+		{"balanced caps marked pool", "model-a", provider.Provider{ContextPreset: provider.ContextPresetNameBalanced800K, Model: "model-a[1m]"}, 800_000},
 		{"legacy balanced env", "model-a", provider.Provider{Env: provider.ContextPresetEnv(provider.Provider{ContextPreset: provider.ContextPresetNameBalanced500K})}, 500_000},
 		{"retired env follows default", "model-a", provider.Provider{Env: map[string]string{provider.EnvMaxContextTokens: "invalid"}}, 200_000},
 	} {

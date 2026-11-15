@@ -2,9 +2,12 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -139,5 +142,96 @@ func TestCodexPlanKeepsNativeProviderProfileAndEndpoint(t *testing.T) {
 	data, _ = os.ReadFile(path)
 	if !strings.Contains(string(data), "# native") || !strings.Contains(string(data), "https://native-gateway.invalid/v1") {
 		t.Fatal("native configuration was not restored")
+	}
+}
+
+func TestDesktopExecutableCandidatesSupportCodexCLIPackageLayout(t *testing.T) {
+	home := t.TempDir()
+	cliDir := filepath.Join(home, "Applications", "ChatGPT.app", "Contents", "Resources", "codex-cli")
+	if err := os.MkdirAll(filepath.Join(cliDir, "custom-bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entryPath := filepath.Join(cliDir, "custom-bin", "codex")
+	if err := os.WriteFile(entryPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cliDir, "codex-package.json"), []byte(`{"layoutVersion":1,"entrypoint":"custom-bin/codex"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	darwinCandidates := desktopExecutableCandidates("darwin", home, "")
+	if !slices.Contains(darwinCandidates, entryPath) || !slices.Contains(darwinCandidates, filepath.Join(cliDir, "bin", "codex")) || !slices.Contains(darwinCandidates, filepath.Join(cliDir, "CodexCLI.app", "Contents", "MacOS", "codex")) {
+		t.Fatalf("missing darwin codex-cli candidates: %v", darwinCandidates)
+	}
+
+	// Reject path traversal in codex-package.json.
+	traversalDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(traversalDir, "codex-package.json"), []byte(`{"entrypoint":"../outside/codex"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := cliPackageEntrypoint(traversalDir); got != "" {
+		t.Fatalf("expected traversal entrypoint to be rejected, got %q", got)
+	}
+
+	localAppData := t.TempDir()
+	winCandidates := desktopExecutableCandidates("windows", "", localAppData)
+	wantWin := filepath.Join(localAppData, "Programs", "ChatGPT", "resources", "codex-cli", "bin", "codex.exe")
+	if !slices.Contains(winCandidates, wantWin) {
+		t.Fatalf("missing windows codex-cli candidate %q in %v", wantWin, winCandidates)
+	}
+}
+
+func TestNativeCatalogStrictFixtureIsolationAndStaleCacheUpgrade(t *testing.T) {
+	originalBundled := bundledExecutable
+	t.Cleanup(func() { bundledExecutable = originalBundled })
+
+	// 1. Synthetic unit-test fixtures (no client_version) must NEVER invoke bundledExecutable.
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "models_cache.json"), []byte(`{"models":[{"slug":"synthetic-native"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundledCalls := 0
+	bundledExecutable = func() (string, error) {
+		bundledCalls++
+		return "", errors.New("unexpected bundled lookup")
+	}
+	catalog, err := nativeCatalog(context.Background(), home, map[string]any{})
+	if err != nil || bundledCalls != 0 || len(catalog.Models) != 1 || catalog.Models[0]["slug"] != "synthetic-native" {
+		t.Fatalf("synthetic cache leaked to host binary: calls=%d err=%v catalog=%+v", bundledCalls, err, catalog)
+	}
+
+	// 2. Real stale cache (client_version set, missing code_mode_only) falls back gracefully if bundled fails.
+	staleHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(staleHome, "models_cache.json"), []byte(`{"client_version":"0.90.0","models":[{"slug":"gpt-5-old"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err = nativeCatalog(context.Background(), staleHome, map[string]any{})
+	if err != nil || bundledCalls == 0 || catalog.Models[0]["slug"] != "gpt-5-old" {
+		t.Fatalf("stale cache did not consult or fall back cleanly: calls=%d err=%v catalog=%+v", bundledCalls, err, catalog)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+
+	// 3. When bundled CLI is available, stale real cache and CCL-only leftover catalogs upgrade to code_mode_only.
+	fakeCodex := filepath.Join(t.TempDir(), "fake-codex")
+	script := "#!/bin/sh\necho '{\"models\":[{\"slug\":\"gpt-5.4\",\"tool_mode\":\"code_mode_only\",\"shell_type\":\"unified_exec\",\"node_repl_auto_review_required\":true}]}'\n"
+	if err := os.WriteFile(fakeCodex, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bundledExecutable = func() (string, error) { return fakeCodex, nil }
+
+	upgraded, err := nativeCatalog(context.Background(), staleHome, map[string]any{})
+	if err != nil || upgraded.Models[0]["tool_mode"] != "code_mode_only" || upgraded.Models[0]["shell_type"] != "unified_exec" {
+		t.Fatalf("stale cache was not upgraded from bundled catalog: err=%v catalog=%+v", err, upgraded)
+	}
+
+	cclOnlyPath := filepath.Join(t.TempDir(), "independent-leftover.json")
+	if err := os.WriteFile(cclOnlyPath, []byte(`{"models":[{"slug":"ccl/prev/model-a"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := nativeCatalog(context.Background(), t.TempDir(), map[string]any{"model_catalog_json": cclOnlyPath})
+	if err != nil || recovered.Models[0]["slug"] != "gpt-5.4" || recovered.Models[0]["tool_mode"] != "code_mode_only" {
+		t.Fatalf("CCL-only leftover catalog did not recover native catalog: err=%v catalog=%+v", err, recovered)
 	}
 }

@@ -89,9 +89,7 @@ func runtimeProvidersHash(providers []provider.Provider) string {
 		for _, key := range provider.ManagedContextEnvKeys() {
 			delete(p.Env, key)
 		}
-		for _, slot := range []*string{&p.Model, &p.CustomModelID, &p.OpusModel, &p.SonnetModel, &p.HaikuModel, &p.FableModel, &p.SubagentModel} {
-			*slot = strings.ReplaceAll(*slot, "[1m]", "")
-		}
+		p.Model = strings.ReplaceAll(p.Model, "[1m]", "")
 		if len(p.Env) == 0 {
 			p.Env = nil
 		}
@@ -201,6 +199,9 @@ func (r *catalogRefresh) update(ctx context.Context, m *Manager, gateway *codex.
 		return nil
 	}
 	nextRuntimeHash := runtimeProvidersHash(latest)
+	if force {
+		gateway.RefreshNativeCatalog(ctx, state.Codex)
+	}
 	if force || discoveryDue || nextRuntimeHash != r.runtimeHash {
 		bindings, done, cleanup, err := prepareBindings(ctx, latest)
 		if err != nil {

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 // startAutoClawOAuth runs a CCL-owned Responses-to-OpenAI Chat adapter. The
@@ -24,12 +26,14 @@ func startAutoClawOAuth(parent context.Context, _ string, modelSpec, credentialF
 	if contract.baseURL != "" {
 		managedEndpoint = contract.baseURL
 	}
+	details := autoClawModelDetailsWithCatalog(routes, contract.models)
 	proxyRuntime, err := startOpenAIChatRuntimeService(parent, managedEndpoint, routes, authorizer,
 		func(service *chatCompletionsService) {
 			// The generated contract is the advertised catalog. Configured stale
 			// routes remain accepted as aliases long enough for the user to remap
 			// them, but they must not masquerade as currently available models.
 			service.models = autoClawCatalogIDs(contract.models)
+			service.modelDetails = details
 			addAutoClawDisplayAliasesWithCatalog(service, routes, contract.models)
 			service.normalizeRequest = func(converted *chatCompletionsConvertedRequest) error {
 				return normalizeAutoClawRequest(converted, contract)
@@ -52,6 +56,7 @@ func startAutoClawOAuth(parent context.Context, _ string, modelSpec, credentialF
 	}
 	proxyRuntime.listAuths = authorizer.listAuths
 	proxyRuntime.modelNames = autoClawModelDisplayNamesWithCatalog(routes, contract.models)
+	proxyRuntime.modelDetails = details
 	proxyRuntime.catalogFallback = !contractFromRuntime
 	LogInfof("runtime start autoclaw auth=oauth protocol=openai_chat endpoint=%q local_endpoint=%q model_count=%d",
 		SafeLogEndpoint(managedEndpoint), SafeLogEndpoint(proxyRuntime.Endpoint()), len(contract.models))
@@ -137,6 +142,43 @@ func autoClawModelDisplayNamesWithCatalog(routes []runtimeModelRoute, catalog []
 		}
 	}
 	return result
+}
+
+func autoClawModelDetailsWithCatalog(routes []runtimeModelRoute, catalog []autoclawModelDefinition) map[string]protocol.ModelInfo {
+	details := make(map[string]protocol.ModelInfo, len(routes)+len(catalog))
+	build := func(alias string, entry autoclawModelDefinition) protocol.ModelInfo {
+		info := protocol.ModelInfo{
+			ID:              alias,
+			DisplayName:     entry.name,
+			ContextWindow:   entry.context,
+			MaxOutputTokens: entry.maxOutput,
+			InputModalities: normalizeModelModalities(entry.input),
+			ReasoningKnown:  true,
+		}
+		if entry.reasoning {
+			info.ReasoningLevels = protocol.ChatReasoningLevels()
+			info.DefaultReasoningLevel = "medium"
+		}
+		return info
+	}
+	for _, entry := range catalog {
+		if id := strings.TrimSpace(entry.id); id != "" {
+			details[strings.ToLower(id)] = build(id, entry)
+		}
+	}
+	for _, route := range routes {
+		alias := strings.TrimSpace(route.Alias)
+		if alias == "" {
+			continue
+		}
+		for _, entry := range catalog {
+			if strings.EqualFold(entry.id, route.Name) {
+				details[strings.ToLower(alias)] = build(alias, entry)
+				break
+			}
+		}
+	}
+	return details
 }
 
 // normalizeAutoClawRequest applies the compatibility metadata emitted by

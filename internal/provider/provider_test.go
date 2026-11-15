@@ -156,21 +156,11 @@ func TestIsOpenAICompatibleType(t *testing.T) {
 	}
 }
 
-func TestRuntimeModelSpecIncludesSlotsSubagentAndOverrides(t *testing.T) {
+func TestRuntimeModelSpecDeduplicatesPool(t *testing.T) {
 	p := provider.Provider{
-		Model:         "gpt-5.4-mini,gpt-5.6-sol",
-		CustomModelID: "gpt-5.4-mini",
-		OpusModel:     "gpt-5.6-sol[1m]",
-		SonnetModel:   "gpt-5.6-terra",
-		HaikuModel:    "gpt-5.6-luna",
-		FableModel:    "gpt-5.6-sol[1m]",
-		SubagentModel: "gpt-5.6-terra[1m]",
-		ModelOverrides: map[string]string{
-			"claude-haiku": "gpt-5.4-mini",
-			"claude-opus":  "gpt-5.5",
-		},
+		Model: "gpt-5.4-mini, gpt-5.6-sol[1m], GPT-5.4-MINI, gpt-5.6-terra",
 	}
-	want := "gpt-5.4-mini,gpt-5.6-sol,gpt-5.6-sol[1m],gpt-5.6-terra,gpt-5.6-luna,gpt-5.6-terra[1m],gpt-5.5"
+	want := "gpt-5.4-mini,gpt-5.6-sol[1m],gpt-5.6-terra"
 	if got := provider.RuntimeModelSpec(p); got != want {
 		t.Fatalf("RuntimeModelSpec() = %q, want %q", got, want)
 	}
@@ -263,24 +253,6 @@ func TestAutoClawProviderType(t *testing.T) {
 	}
 }
 
-func TestPreferredAutoClawSlotDefaults(t *testing.T) {
-	custom, opus, sonnet, haiku, fable, ok := provider.PreferredOAuthSlotDefaults("autoclaw")
-	if !ok {
-		t.Fatal("AutoClaw must ship preferred slot defaults")
-	}
-	if custom != "zai_auto" || opus != "zai_auto" || sonnet != "zaicoding_glm-5.3" || haiku != "zai_glm-5.3-flash" {
-		t.Fatalf("defaults = %q/%q/%q/%q", custom, opus, sonnet, haiku)
-	}
-	if fable != opus {
-		t.Fatalf("fable = %q, want the opus default %q", fable, opus)
-	}
-	p := provider.Provider{OAuthProvider: "autoclaw"}
-	provider.ApplyOAuthSlotDefaults(&p)
-	if p.CustomModelID != "zai_auto" || p.OpusModel != "zai_auto" || p.SonnetModel != "zaicoding_glm-5.3" || p.HaikuModel != "zai_glm-5.3-flash" || p.FableModel != "zai_auto" {
-		t.Fatalf("applied defaults = %+v", p)
-	}
-}
-
 func TestModelsDevCatalogIDFallsBackToTheName(t *testing.T) {
 	if got := provider.ModelsDevCatalogID(provider.Provider{Name: "oc", ModelsDevProvider: "opencode-go"}); got != "opencode-go" {
 		t.Fatalf("ModelsDevCatalogID() = %q, want the recorded catalog ID", got)
@@ -297,17 +269,50 @@ func TestModelsDevCatalogIDFallsBackToTheName(t *testing.T) {
 func TestCloneDoesNotShareMaps(t *testing.T) {
 	original := provider.Provider{
 		Env:            map[string]string{"A": "1"},
-		ModelOverrides: map[string]string{"x": "y"},
 		ModelProtocols: map[string]string{"m": "openai"},
 	}
 	cloned := original.Clone()
 	cloned.Env["A"] = "2"
-	cloned.ModelOverrides["x"] = "z"
 	cloned.ModelProtocols["m"] = "anthropic"
-	if original.Env["A"] != "1" || original.ModelOverrides["x"] != "y" || original.ModelProtocols["m"] != "openai" {
+	if original.Env["A"] != "1" || original.ModelProtocols["m"] != "openai" {
 		t.Fatalf("clone shares maps with the original: %+v", original)
 	}
 	if (provider.Provider{}).Clone().Env != nil {
 		t.Fatal("cloning nil maps allocated them")
+	}
+}
+
+func TestDefaultModelResolutionAndRuntimePromotion(t *testing.T) {
+	p := provider.Provider{
+		Name:         "gw",
+		Type:         "openai",
+		Endpoint:     "https://example.test/v1",
+		Model:        "model-a,model-b[1m],model-c",
+		DefaultModel: " model-b[1m] ",
+	}
+	if got := provider.EffectiveDefaultModel(p); got != "model-b" {
+		t.Fatalf("EffectiveDefaultModel() = %q, want model-b", got)
+	}
+	if got := provider.RuntimeModelSpec(p); got != "model-b[1m],model-a,model-c" {
+		t.Fatalf("RuntimeModelSpec() = %q, want promoted model-b[1m]", got)
+	}
+	cloned := p.Clone()
+	if cloned.DefaultModel != " model-b[1m] " {
+		t.Fatalf("Clone().DefaultModel = %q, want preserved", cloned.DefaultModel)
+	}
+
+	pExtra := provider.Provider{
+		Name:         "gw",
+		Type:         "openai",
+		Model:        "model-a,model-c",
+		DefaultModel: "model-x",
+	}
+	if got := provider.RuntimeModelSpec(pExtra); got != "model-x,model-a,model-c" {
+		t.Fatalf("RuntimeModelSpec(extra) = %q, want prepended model-x", got)
+	}
+
+	pFallback := provider.Provider{Model: "first[1m],second"}
+	if got := provider.EffectiveDefaultModel(pFallback); got != "first" {
+		t.Fatalf("EffectiveDefaultModel(fallback) = %q, want first", got)
 	}
 }

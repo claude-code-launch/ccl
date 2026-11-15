@@ -36,18 +36,18 @@ func newDoctorCommand() *cobra.Command {
 		Short: "Show provider status and check connectivity",
 		Long: `Show environment prerequisites, active provider status, and connectivity.
 
-For API-key providers it prints the Review & Apply essentials (endpoint,
-masked key, protocol, runtime, slot mappings). For subscription providers it
-also summarizes credential health, including invalid and quota markers.
+For API-key providers it prints the configured essentials (endpoint, masked
+key, protocol, model pool, context). For subscription providers it also
+summarizes credential health, including invalid and quota markers.
 
-Model pool (provider.Model) is an optional candidate list used by ccl set/map
-for discovery and bulk checks. Grok Build uses mapped default and helper models. An empty pool with filled slots is normal.
+Model pool (provider.Model) lists the models exposed by the provider runtime
+for Grok Build, Codex, and the Web UI.
 
 Doctor only reads: it lists models and checks the endpoint with a catalog
 request, and never changes ~/.ccl/config.yaml. --probe additionally sends a
 1-token request to every model in the pool, which counts against your plan.
 
-Note: root "ccl status" is cloud sync status (see "ccl cloud status"), not this command.
+For cloud sync status, see "ccl cloud status".
 For live request failures enable "ccl log on" and check the session log file
 when the Grok Build session ends (default ~/.ccl/logs/ccl-debug-grok_<id>.log).
 `,
@@ -163,7 +163,6 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 	configuredProvider := p
 	p, runtime, cleanup, err := prepareProviderRuntime(context.Background(), p)
 	if err != nil {
-		printProviderModelMappings(configuredProvider, nil)
 		if configuredProvider.OAuthProvider != "" {
 			printDoctorOAuthHealth(configuredProvider, nil)
 		}
@@ -176,7 +175,6 @@ func runDoctor(ctx context.Context, probe bool, target providerTarget) error {
 		printDoctorOAuthHealth(configuredProvider, runtime)
 	}
 	modelNames := runtime.ModelDisplayNames()
-	printProviderModelMappings(configuredProvider, modelNames)
 	printDoctorContextBudget(p, configuredProvider, modelNames)
 
 	// 4. Test Endpoint reachability and API Authentication key
@@ -236,13 +234,17 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 		!provider.IsAnthropicType(runtimeProvider.Type) {
 		windows, source = advertisedContextWindows(endpoint, runtimeProvider.APIKey)
 	}
-	smallest, smallestModel, unknown := smallestMappedWindow(configured, windows)
+	smallest, smallestModel, unknown := smallestPoolWindow(configured, windows)
 
 	oauthproxy.LogDebugf("doctor context budget provider=%q max_context=%d compact_window=%d compact_pct=%q balanced=%t catalog=%q models=%d smallest=%d smallest_model=%q",
 		configured.Name, maxContext, compactWindow, compactPct,
 		provider.ProviderContextPreset(configured) != provider.ContextPresetDefault, source, len(windows), smallest, smallestModel)
 
-	oneMSlots := oneMSlotsFromProvider(configured)
+	oneMModels := oneMModelsFromProvider(configured)
+	oneMSet := make(map[string]bool, len(oneMModels))
+	for _, m := range oneMModels {
+		oneMSet[strings.ToLower(m)] = true
+	}
 	preset := provider.ProviderContextPreset(configured)
 	balanced := preset != provider.ContextPresetDefault
 	unsupported := overridden && !balanced
@@ -263,44 +265,42 @@ func printDoctorContextBudget(runtimeProvider, configured provider.Provider, mod
 		doctorKV("Auto-compact pct", fmt.Sprintf("85%% (~%s)", balancedCompactAt))
 	} else if unsupported {
 		doctorKV("Sizing", "Default (unsupported context override is ignored)")
-		doctorKV("Auto-compact at", "Codex default for the slot's window")
+		doctorKV("Auto-compact at", "Codex default for the model's window")
 		overridden = false
 	} else {
 		doctorKV("Sizing", "Default (Codex 200K / 1M)")
-		doctorKV("Auto-compact at", "Codex default for the slot's window")
+		doctorKV("Auto-compact at", "Codex default for the model's window")
 	}
 
-	// Default sizes per slot; either Balanced tier intentionally applies one
-	// provider-wide cap.
-	for _, slot := range provider.SlotModels(configured) {
-		sizing := balancedWindow + " Balanced"
-		if !balanced {
-			sizing = "200K default"
+	if len(oneMModels) > 0 {
+		for _, model := range oneMModels {
+			sizing := balancedWindow + " Balanced"
+			if !balanced {
+				sizing = "1M ([1m])"
+			}
+			advertised := "backend window unknown"
+			if window, ok := windows[strings.ToLower(model)]; ok && window > 0 {
+				advertised = "backend " + formatTokenCount(window) + ", " + contextClassLabel(window)
+			}
+			doctorKV("[1m] model", fmt.Sprintf("%s · %s · %s", providerCatalogModelLabel(model, modelNames), sizing, advertised))
 		}
-		if !balanced && oneMSlots[slot.Slot] {
-			sizing = "1M ([1m])"
-		}
-		advertised := "backend window unknown"
-		if window, ok := windows[strings.ToLower(slot.Model)]; ok && window > 0 {
-			advertised = "backend " + formatTokenCount(window) + ", " + contextClassLabel(window)
-		}
-		doctorKV(slot.Slot, fmt.Sprintf("%s · %s · %s", providerCatalogModelLabel(slot.Model, modelNames), sizing, advertised))
 	}
+	_ = oneMSet
 	if len(windows) == 0 {
 		doctorInfo("Backend does not advertise context windows, so [1m] markers cannot be verified here")
 		return
 	}
 	doctorKV("Window source", source)
 	if unknown > 0 {
-		doctorInfo(fmt.Sprintf("%d mapped model(s) are absent from the catalog; their window is unknown", unknown))
+		doctorInfo(fmt.Sprintf("%d pooled model(s) are absent from the catalog; their window is unknown", unknown))
 	}
 
 	printDoctorOneMConsistency(configured, windows)
-	if mappedContextClassesDiffer(configured, windows) {
+	if poolContextClassesDiffer(configured, windows) {
 		if balanced {
-			doctorInfo(fmt.Sprintf("Mapped models span both context classes; Default sizes them per slot, while Balanced applies one %s cap", balancedWindow))
+			doctorInfo(fmt.Sprintf("Pooled models span both context classes; Default sizes them per model, while Balanced applies one %s cap", balancedWindow))
 		} else {
-			doctorInfo("Mapped models span both context classes; Default sizes them independently per slot")
+			doctorInfo("Pooled models span both context classes; Default sizes them independently per model")
 		}
 	}
 	printDoctorIgnoredContextEnv()
@@ -324,37 +324,34 @@ func printDoctorOneMConsistency(p provider.Provider, windows map[string]int) {
 	if len(windows) == 0 || provider.ProviderContextPreset(p) != provider.ContextPresetDefault {
 		return
 	}
-	oneMSlots := oneMSlotsFromProvider(p)
-	if len(oneMSlots) == 0 {
+	oneMModels := oneMModelsFromProvider(p)
+	if len(oneMModels) == 0 {
 		return
 	}
-	for _, slot := range provider.SlotModels(p) {
-		if !oneMSlots[slot.Slot] {
-			continue
-		}
-		window, ok := windows[strings.ToLower(slot.Model)]
+	for _, model := range oneMModels {
+		window, ok := windows[strings.ToLower(model)]
 		if !ok || window <= 0 || protocol.ContextWindowSuggests1M(window) {
 			continue
 		}
-		doctorWarn(fmt.Sprintf("%s is marked [1m] but %s advertises only %s",
-			slot.Slot, slot.Model, formatTokenCount(window)))
+		doctorWarn(fmt.Sprintf("%s is marked [1m] but advertises only %s",
+			model, formatTokenCount(window)))
 		doctorHint("Codex sizes the session (and its compact buffer) for 1M, so it compacts after the backend already refuses the request")
-		doctorHint("Clear the Extended Context checkbox for that slot in `ccl set`, or confirm the backend really accepts 1M")
+		doctorHint("Remove the [1m] suffix for that model, or confirm the backend really accepts 1M")
 	}
 }
 
-// smallestMappedWindow returns the smallest advertised context window across the
-// provider's mapped slots, the model it belongs to, and how many mapped models
+// smallestPoolWindow returns the smallest advertised context window across the
+// provider's model pool, the model it belongs to, and how many pooled models
 // the catalog did not report a window for.
-func smallestMappedWindow(p provider.Provider, windows map[string]int) (smallest int, model string, unknown int) {
-	for _, slot := range provider.SlotModels(p) {
-		window, ok := windows[strings.ToLower(slot.Model)]
+func smallestPoolWindow(p provider.Provider, windows map[string]int) (smallest int, model string, unknown int) {
+	for _, m := range configuredPoolModels(p) {
+		window, ok := windows[strings.ToLower(m)]
 		if !ok || window <= 0 {
 			unknown++
 			continue
 		}
 		if smallest == 0 || window < smallest {
-			smallest, model = window, slot.Model
+			smallest, model = window, m
 		}
 	}
 	return smallest, model, unknown
@@ -966,33 +963,20 @@ func printDoctorProviderDetails(p provider.Provider) {
 		doctorKV("Credential", cred)
 	}
 	pool := parseModelList(p.Model)
-	slotsConfigured := doctorConfiguredSlotCount(p)
 	if len(pool) == 0 {
-		// Model pool (provider.Model) is optional once Opus/Sonnet/... slots are set.
-		// It only feeds map/set discovery, defaults, and bulk availability checks.
-		if slotsConfigured > 0 {
-			doctorKV("Model pool", "0 (optional)")
-			doctorHint("Mapped models can be used even when the pool is empty")
+		if p.OAuthProvider != "" {
+			doctorKV("Model pool", "0 (live runtime catalog)")
 		} else {
-			doctorWarn("Model pool: 0 configured and no slot mappings")
-			doctorHint("Run `ccl set` or `ccl map` to detect models and fill the model slots")
+			doctorWarn("Model pool: 0 configured")
+			doctorHint("Run `ccl set` to detect models for this provider")
 		}
 	} else {
 		doctorKV("Model pool", fmt.Sprintf("%d configured", len(pool)))
 	}
+	doctorKV("Default model", providerDefaultModelSummary(p))
 	doctorKV("Effort", providerEffortSummary(p))
 	doctorKV("Fast", providerFastSummary(p))
 	doctorKV("Context/Compact", providerOneMSummary(p))
-}
-
-func doctorConfiguredSlotCount(p provider.Provider) int {
-	n := 0
-	for _, model := range []string{p.OpusModel, p.SonnetModel, p.HaikuModel, p.FableModel, p.CustomModelID, p.SubagentModel} {
-		if strings.TrimSpace(model) != "" {
-			n++
-		}
-	}
-	return n
 }
 
 func doctorEndpointDisplay(p provider.Provider) string {
@@ -1018,29 +1002,6 @@ func maskAPIKey(key string) string {
 		mid = 12
 	}
 	return string(runes[:4]) + strings.Repeat("*", mid) + string(runes[n-4:])
-}
-
-func printProviderModelMappings(p provider.Provider, modelNames map[string]string) {
-	mappings := []struct {
-		label string
-		model string
-	}{
-		{"Opus", providerCatalogModelLabel(p.OpusModel, modelNames)},
-		{"Sonnet", providerCatalogModelLabel(p.SonnetModel, modelNames)},
-		{"Haiku", providerCatalogModelLabel(p.HaikuModel, modelNames)},
-		{"Fable", providerCatalogModelLabel(p.FableModel, modelNames)},
-		{"Custom", providerCatalogModelLabel(p.CustomModelID, modelNames)},
-		{"Subagent", subagentMappingDisplayWithNames(p, modelNames)},
-	}
-
-	fmt.Println(ansiDim + "  Slot mappings" + ansiReset)
-	for _, mapping := range mappings {
-		model := mapping.model
-		if model == "" {
-			model = "(unset)"
-		}
-		doctorKV(mapping.label, model)
-	}
 }
 
 func printModelReportWithMetadata(available, unavailable []string, metadata map[string]protocol.ModelInfo) {

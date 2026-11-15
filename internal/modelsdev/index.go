@@ -7,17 +7,21 @@ import (
 	"strings"
 )
 
-// Index retains only reasoning metadata and exact aliases from a catalog.
-// It is immutable after construction and safe for concurrent lookups.
+// Index retains reasoning, modality, and output-limit metadata and exact aliases
+// from a catalog. It is immutable after construction and safe for concurrent lookups.
 type Index struct {
 	providers map[string]map[string]reasoningEntry
 	aliases   map[string]reasoningEntry
 }
 
 type reasoningEntry struct {
-	efforts   []string
-	priority  int
-	ambiguous bool
+	efforts             []string
+	modalities          []string
+	maxOutput           int
+	priority            int
+	ambiguous           bool
+	modalitiesAmbiguous bool
+	outputAmbiguous     bool
 }
 
 func newIndex(data []byte) (*Index, error) {
@@ -37,6 +41,8 @@ func newIndex(data []byte) (*Index, error) {
 			// Metadata also serves existing routes/history. Deprecation in one
 			// catalog does not withdraw a model from another provider's catalog.
 			efforts := model.Efforts()
+			modalities := model.InputModalities()
+			maxOutput := model.Limit.Output
 			// Prefer the canonical model owner's entry. OpenCode's two
 			// catalogs are references when the owner has no matching row.
 			priority := 3
@@ -53,15 +59,15 @@ func newIndex(data []byte) (*Index, error) {
 				if strings.TrimSpace(alias) == "" {
 					continue
 				}
-				addReasoningAlias(local, alias, efforts, 0)
-				addReasoningAlias(index.aliases, alias, efforts, priority*2)
-				addReasoningAlias(index.aliases, providerID+"/"+alias, efforts, priority*2)
+				addModelAlias(local, alias, efforts, modalities, maxOutput, 0)
+				addModelAlias(index.aliases, alias, efforts, modalities, maxOutput, priority*2)
+				addModelAlias(index.aliases, providerID+"/"+alias, efforts, modalities, maxOutput, priority*2)
 			}
 			if _, bare, ok := strings.Cut(model.CanonicalID, "/"); ok {
-				addReasoningAlias(index.aliases, bare, efforts, priority*2)
+				addModelAlias(index.aliases, bare, efforts, modalities, maxOutput, priority*2)
 			}
-			addReasoningAlias(local, model.Name, efforts, 1)
-			addReasoningAlias(index.aliases, model.Name, efforts, priority*2+1)
+			addModelAlias(local, model.Name, efforts, modalities, maxOutput, 1)
+			addModelAlias(index.aliases, model.Name, efforts, modalities, maxOutput, priority*2+1)
 		}
 	}
 	if len(index.aliases) == 0 {
@@ -70,16 +76,39 @@ func newIndex(data []byte) (*Index, error) {
 	return index, nil
 }
 
-func addReasoningAlias(index map[string]reasoningEntry, alias string, efforts []string, priority int) {
+func addModelAlias(index map[string]reasoningEntry, alias string, efforts, modalities []string, maxOutput, priority int) {
 	alias = normalizeAlias(alias)
 	if alias == "" {
 		return
 	}
 	previous, exists := index[alias]
 	if !exists || priority < previous.priority {
-		index[alias] = reasoningEntry{efforts: efforts, priority: priority}
-	} else if priority == previous.priority && !slices.Equal(previous.efforts, efforts) {
-		previous.ambiguous = true
+		index[alias] = reasoningEntry{
+			efforts:    efforts,
+			modalities: modalities,
+			maxOutput:  maxOutput,
+			priority:   priority,
+		}
+		return
+	}
+	if priority == previous.priority {
+		if !slices.Equal(previous.efforts, efforts) {
+			previous.ambiguous = true
+		}
+		if len(modalities) > 0 {
+			if len(previous.modalities) == 0 {
+				previous.modalities = modalities
+			} else if !slices.Equal(previous.modalities, modalities) {
+				previous.modalitiesAmbiguous = true
+			}
+		}
+		if maxOutput > 0 {
+			if previous.maxOutput == 0 {
+				previous.maxOutput = maxOutput
+			} else if previous.maxOutput != maxOutput {
+				previous.outputAmbiguous = true
+			}
+		}
 		index[alias] = previous
 	}
 }
@@ -89,20 +118,57 @@ func addReasoningAlias(index map[string]reasoningEntry, alias string, efforts []
 // with an empty slice means the model has no selectable reasoning tiers.
 // The returned slice is a copy so callers cannot mutate the shared index.
 func (index *Index) Efforts(providerID, modelID, displayName string) ([]string, bool) {
+	if entry, ok := index.lookup(providerID, modelID, displayName, func(e reasoningEntry) bool { return !e.ambiguous }); ok {
+		return slices.Clone(entry.efforts), true
+	}
+	return nil, false
+}
+
+// InputModalities resolves advertised input modalities (["text"] or ["text", "image"])
+// for a model when models.dev unambiguously declares them. Unknown models return (nil, false).
+func (index *Index) InputModalities(providerID, modelID, displayName string) ([]string, bool) {
+	if entry, ok := index.lookup(providerID, modelID, displayName, func(e reasoningEntry) bool {
+		return !e.modalitiesAmbiguous && len(e.modalities) > 0
+	}); ok {
+		return slices.Clone(entry.modalities), true
+	}
+	return nil, false
+}
+
+// MaxOutputTokens resolves the advertised maximum output token budget when known.
+func (index *Index) MaxOutputTokens(providerID, modelID, displayName string) (int, bool) {
+	if entry, ok := index.lookup(providerID, modelID, displayName, func(e reasoningEntry) bool {
+		return !e.outputAmbiguous && e.maxOutput > 0
+	}); ok {
+		return entry.maxOutput, true
+	}
+	return 0, false
+}
+
+func (index *Index) lookup(providerID, modelID, displayName string, accept func(reasoningEntry) bool) (reasoningEntry, bool) {
+	if index == nil {
+		return reasoningEntry{}, false
+	}
 	aliases := []string{normalizeAlias(modelID), normalizeAlias(displayName)}
 	if local := index.providers[normalizeAlias(providerID)]; local != nil {
 		for _, alias := range aliases {
-			if entry, ok := local[alias]; ok && !entry.ambiguous {
-				return slices.Clone(entry.efforts), true
+			if alias == "" {
+				continue
+			}
+			if entry, ok := local[alias]; ok && accept(entry) {
+				return entry, true
 			}
 		}
 	}
 	for _, alias := range aliases {
-		if entry, ok := index.aliases[alias]; ok && !entry.ambiguous {
-			return slices.Clone(entry.efforts), true
+		if alias == "" {
+			continue
+		}
+		if entry, ok := index.aliases[alias]; ok && accept(entry) {
+			return entry, true
 		}
 	}
-	return nil, false
+	return reasoningEntry{}, false
 }
 
 func normalizeAlias(alias string) string {

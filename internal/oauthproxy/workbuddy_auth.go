@@ -32,7 +32,7 @@ const (
 	// workbuddyClientVersion is the desktop WorkBuddy app version. It drives the
 	// login URL `version` parameter, X-IDE-Version, and the first two
 	// User-Agent tokens. Pinned to a real desktop 5.8.x release.
-	workbuddyClientVersion = "5.8.3"
+	workbuddyClientVersion = "5.8.4"
 	// workbuddyChatChannel is the chat wire channel advertised in
 	// X-IDE-Type/X-IDE-Name. The chat gateway rejects unrecognized channels with
 	// code 11128 ("unapproved channel"); the real desktop client reports

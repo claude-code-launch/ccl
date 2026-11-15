@@ -19,16 +19,51 @@ type Catalog struct {
 	Models []Model `json:"models"`
 }
 
+func lookupModelInfo(details map[string]protocol.ModelInfo, id string) (string, protocol.ModelInfo, bool) {
+	if details == nil {
+		return id, protocol.ModelInfo{}, false
+	}
+	if info, ok := details[id]; ok {
+		return id, info, true
+	}
+	if lower := strings.ToLower(id); lower != id {
+		if info, ok := details[lower]; ok {
+			return lower, info, true
+		}
+	}
+	if stripped := provider.StripContextSuffix(id); stripped != id {
+		if info, ok := details[stripped]; ok {
+			return id, info, true
+		}
+		if lower := strings.ToLower(stripped); lower != stripped {
+			if info, ok := details[lower]; ok {
+				return id, info, true
+			}
+		}
+	}
+	return id, protocol.ModelInfo{}, false
+}
+
+func lookupModelDisplayName(names map[string]string, id string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	if name := names[id]; name != "" {
+		return name
+	}
+	if stripped := provider.StripContextSuffix(id); stripped != id {
+		return names[stripped]
+	}
+	return ""
+}
+
 func newModel(alias, id string, details map[string]protocol.ModelInfo, names map[string]string) Model {
 	contextWindow := 200_000
-	info, ok := details[id]
-	if !ok {
-		info, ok = details[strings.ToLower(id)]
-	}
+	_, info, ok := lookupModelInfo(details, id)
 	if ok && info.ContextWindow > 0 {
 		contextWindow = info.ContextWindow
 	}
-	name := names[id]
+	name := lookupModelDisplayName(names, id)
 	if name == "" {
 		name = strings.TrimSpace(info.DisplayName)
 	}
@@ -36,19 +71,12 @@ func newModel(alias, id string, details map[string]protocol.ModelInfo, names map
 		name = id
 	}
 	levels, defaultLevel := reasoningLevels(info)
-	modalities := []string{"text"}
-	for _, modality := range info.InputModalities {
-		if modality == "image" {
-			modalities = append(modalities, "image")
-			break
-		}
-	}
-	return Model{
+	entry := Model{
 		"slug": alias, "display_name": name, "description": "Model " + id + " through CCL",
 		"context_window": contextWindow, "max_context_window": contextWindow,
 		"shell_type": "default", "visibility": "list", "supported_in_api": true, "priority": 0,
 		"truncation_policy": map[string]any{"mode": "tokens", "limit": 10000},
-		"input_modalities":  modalities, "base_instructions": "You are a coding assistant. Use the available tools to inspect the workspace, implement the user's request, and verify the result. Follow the user's instructions and the workspace instructions. Ask for clarification when necessary.",
+		"base_instructions": "You are a coding assistant. Use the available tools to inspect the workspace, implement the user's request, and verify the result. Follow the user's instructions and the workspace instructions. Ask for clarification when necessary.",
 		"support_verbosity": false, "default_verbosity": nil, "supports_parallel_tool_calls": false,
 		"supports_reasoning_summaries": false, "supports_reasoning_summary_parameter": false,
 		"supported_reasoning_levels": levels, "default_reasoning_level": defaultLevel,
@@ -59,6 +87,22 @@ func newModel(alias, id string, details map[string]protocol.ModelInfo, names map
 		// stays on the client.
 		"node_repl_disabled": false, "use_responses_lite": false,
 	}
+	applyModelModalities(entry, info)
+	return entry
+}
+
+func applyModelModalities(model Model, info protocol.ModelInfo) {
+	modalities := []string{"text"}
+	hasImage := false
+	for _, modality := range info.InputModalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			modalities = append(modalities, "image")
+			hasImage = true
+			break
+		}
+	}
+	model["input_modalities"] = modalities
+	model["supports_image_detail_original"] = hasImage
 }
 
 // inheritClientToolMode uses the installed client's native catalog as the
@@ -99,10 +143,13 @@ func applyClientToolMode(native Catalog, models []Model, routes map[string]Route
 	}
 	for _, model := range models {
 		id, _ := model["slug"].(string)
-		if route, ok := routes[id]; !ok || route.NativeResponses {
+		if route, ok := routes[id]; !ok || (route.NativeResponses && !route.CodexNativeTools) {
 			continue
 		}
 		model["tool_mode"] = "code_mode_only"
+		if shellType, ok := template["shell_type"].(string); ok && strings.TrimSpace(shellType) != "" {
+			model["shell_type"] = shellType
+		}
 		if review, ok := template["node_repl_auto_review_required"].(bool); ok {
 			model["node_repl_auto_review_required"] = review
 		}
@@ -119,7 +166,7 @@ func applyProviderContext(model Model, id string, p provider.Provider) {
 		percent, _ = strconv.Atoi(env[provider.EnvAutoCompactPct])
 	} else {
 		// OAuth catalogs usually publish the bare ID, so also check the saved
-		// pool and slots for the marker rather than only the runtime's ID.
+		// model pool for the marker rather than only the runtime's ID.
 		base := provider.StripContextSuffix(strings.ToLower(strings.TrimSpace(id)))
 		for _, configured := range strings.Split(provider.RuntimeModelSpec(p)+","+id, ",") {
 			configured = strings.ToLower(strings.TrimSpace(configured))
@@ -149,13 +196,7 @@ func withGPTReasoningDefaults(models []string, details map[string]protocol.Model
 		details = make(map[string]protocol.ModelInfo, len(models))
 	}
 	for _, id := range models {
-		key := id
-		if _, ok := details[key]; !ok {
-			if _, ok := details[strings.ToLower(id)]; ok {
-				key = strings.ToLower(id)
-			}
-		}
-		info := details[key]
+		key, info, _ := lookupModelInfo(details, id)
 		if info.ReasoningKnown {
 			continue
 		}

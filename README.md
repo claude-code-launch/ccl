@@ -46,11 +46,10 @@ ccl --provider deepseek -p "你好"   # 仅本次使用 deepseek，不改变默�
 | 命令 | 作用 |
 |---|---|
 | `ccl set [name]` | 新增 / 修改 provider（TUI） |
-| `ccl ls [-a]` / `ccl use <name>` | 列出 / 切换 provider；`ccl use default` 使用 Grok Build 自身登录 |
+| `ccl ls [-a]` / `ccl use <name>` / `ccl preview [name]` | 列出 / 切换 / 预览 Grok 配置；`ccl use default` 使用 Grok Build 自身登录 |
 | `ccl --provider <name> [Grok 参数]` | 本次启动指定 provider，不改变默认选择 |
-| `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | 映射模型槽位；`ccl map auto` 自动填充 |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | 订阅登录 / 清理未使用凭据 |
-| `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort` | provider 管理；`preview` 查看 Grok 模型配置 |
+| `ccl provider cp\|mv\|rm\|models\|preview` | provider 管理与模型池探测 |
 | `ccl codex start` / `-p <name>` / `status` / `stop` | Codex 模型接入：向模型选择器加入当前配置的模型 |
 | `ccl serve [-p <name>] [--workspace <dir>]` | 在本地浏览器中使用 Grok Build 会话 |
 | `ccl cloud login\|push\|pull\|status\|remote` | 加密云同步（iCloud / Google Drive） |
@@ -120,7 +119,7 @@ CCL 在 `127.0.0.1` 提供 Responses 和 Chat Completions。每个代理使用�
 - `~/.ccl/config.yaml` 保存 provider、当前选择、语言、权限绕过和日志设置。**含明文 API Key，勿提交或外传。**
 - `~/.ccl/auth/*.json` 保存 OAuth 凭据，权限为 0600。
 - API-key provider 的 `type` 可选 `openai`（Chat Completions）或 `openai_responses`。OAuth provider 由其后端决定。
-- `ccl provider preview` 显示传给 Grok Build 的默认模型、辅助模型和 reasoning effort。
+- `ccl preview`（或 `ccl provider preview`）显示传给 Grok Build 的默认模型、辅助模型和 reasoning effort。
 - Codex 上下文预设为 Default、Balanced 500K 和 Balanced 800K。
 
 
@@ -189,11 +188,10 @@ Extra arguments reach Grok Build and can start a billed session. Put `--provider
 | Command | Purpose |
 |---|---|
 | `ccl set [name]` | Add / edit a provider (TUI) |
-| `ccl ls [-a]` / `ccl use <name>` | List / switch providers; `ccl use default` uses Grok Build's own login |
+| `ccl ls [-a]` / `ccl use <name>` / `ccl preview [name]` | List / switch / preview Grok overlay; `ccl use default` uses Grok Build's own login |
 | `ccl --provider <name> [Grok args]` | Use a provider for one launch without changing the selection |
-| `ccl map [--opus/--sonnet/--haiku/--fable/--custom/--subagent <model>]` | Map model slots; `ccl map auto` fills them |
 | `ccl oauth <name> [alias]` / `ccl oauth prune` | Subscription login / remove unused credentials |
-| `ccl provider cp\|mv\|rm\|models\|preview\|env\|effort` | Provider management; `preview` shows the Grok model overlay |
+| `ccl provider cp\|mv\|rm\|models\|preview` | Provider management and model pool probing |
 | `ccl codex start` / `-p <name>` / `status` / `stop` | Connect the selected provider's models to Codex |
 | `ccl serve [-p <name>] [--workspace <dir>]` | Use Grok Build conversations in a local browser |
 | `ccl cloud login\|push\|pull\|status\|remote` | Encrypted sync (iCloud / Google Drive) |
@@ -263,7 +261,7 @@ Claude Code launches, the `ccl acp` command, and Zed OAuth have been retired. A 
 - `~/.ccl/config.yaml` stores provider settings, the active selection, language, bypass mode, and log level. **It contains plaintext API keys.**
 - `~/.ccl/auth/*.json` stores OAuth credentials with 0600 permissions.
 - Use `openai` for Chat Completions or `openai_responses` for a Responses API-key provider. An OAuth backend determines its own protocol.
-- `ccl provider preview` displays the default and helper models and reasoning effort sent to Grok Build.
+- `ccl preview` (or `ccl provider preview`) displays the default and helper models and reasoning effort sent to Grok Build.
 - Codex context presets are Default, Balanced 500K, and Balanced 800K.
 
 

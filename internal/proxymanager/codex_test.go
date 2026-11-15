@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/claude-code-launch/ccl/internal/codex"
+	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/fsutil"
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/provider"
 )
 
@@ -37,7 +40,7 @@ func TestStandaloneProxyAddsCodexModelsAndRestoresUserEdits(t *testing.T) {
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"codex-fixture"},"finish_reason":"stop"}]}`)
 	}))
 	defer upstream.Close()
-	p := provider.Provider{Name: "chosen", Type: "openai", Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream", Model: "model-a", CustomModelID: "model-a"}
+	p := provider.Provider{Name: "chosen", Type: "openai", Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream", Model: "model-a"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -125,5 +128,76 @@ func TestStaleProxyRecoveryRestoresBothClients(t *testing.T) {
 	fields, err := readSettings(claudePath)
 	if err != nil || len(fields) != 0 {
 		t.Fatalf("stale Claude overlay remains: %v %v", fields, err)
+	}
+}
+
+func TestStandaloneProxyReloadInheritsUpdatedCodeModeAndVisionMetadata(t *testing.T) {
+	m, _ := isolatedManager(t)
+	m.CodexMode = "independent"
+	home := os.Getenv("CODEX_HOME")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("# independent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "models_cache.json"), []byte(`{"models":[{"slug":"native-old"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	p := provider.Provider{Name: "chosen", Type: "openai", Endpoint: upstream.URL + "/v1", APIKey: "fake-upstream", Model: "model-a", ModelsDevProvider: "fixture"}
+	if err := config.Save(&provider.Config{ActiveProvider: p.Name, Providers: map[string]provider.Provider{p.Name: p}}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- m.Run(ctx, p, "codex-cu-reload") }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("proxy did not exit")
+		}
+	})
+	s := awaitRunning(t, m)
+
+	// Simulate Codex updating its native cache to code_mode_only and models.dev publishing vision support.
+	if err := fsutil.WriteFileAtomic(filepath.Join(home, "models_cache.json"), []byte(`{"models":[{"slug":"gpt-5.4","tool_mode":"code_mode_only","shell_type":"unified_exec","node_repl_auto_review_required":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cachePath, err := modelsdev.CachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteFileAtomic(cachePath, []byte(`{"fixture":{"models":{"model-a":{"modalities":{"input":["text","image"],"output":["text"]},"limit":{"output":64000}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reloadControl(context.Background(), s, p.Name, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(s.Codex.CatalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := codex.ParseCatalog(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := catalog.Models[0]
+	modalitiesRaw, _ := json.Marshal(entry["input_modalities"])
+	if entry["tool_mode"] != "code_mode_only" || entry["shell_type"] != "unified_exec" || entry["supports_image_detail_original"] != true || string(modalitiesRaw) != `["text","image"]` {
+		t.Fatalf("live reload missed code_mode_only or vision metadata: %+v", entry)
 	}
 }

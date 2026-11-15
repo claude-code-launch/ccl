@@ -91,32 +91,30 @@ func NormalizeProvider(p *Provider) bool {
 	if len(p.Env) == 0 && p.Env != nil {
 		p.Env = nil
 	}
+	if def := NormalizeModelID(p.DefaultModel); def != p.DefaultModel {
+		p.DefaultModel = def
+		changed = true
+	}
 	if migrateRetiredGeminiModels(p) {
 		changed = true
 	}
 	return changed
 }
 
-// migrateRetiredGeminiModels rewrites the retired generated Gemini haiku ID.
+// migrateRetiredGeminiModels rewrites the retired generated Gemini model ID.
 // The live catalog does not contain it, so leaving the old default in place
 // makes that one model 404. Any other value is a user choice and stays.
 func migrateRetiredGeminiModels(p *Provider) bool {
 	if p == nil || !strings.EqualFold(strings.TrimSpace(p.OAuthProvider), "gemini") {
 		return false
 	}
-	_, _, _, haiku, _, ok := PreferredOAuthSlotDefaults("gemini")
-	if !ok || strings.EqualFold(haiku, retiredGeminiHaikuModel) {
-		return false
-	}
 	changed := false
-	for _, slot := range []*string{&p.CustomModelID, &p.OpusModel, &p.SonnetModel, &p.HaikuModel, &p.FableModel, &p.SubagentModel} {
-		if slot != nil && strings.EqualFold(stripContextSuffix(*slot), retiredGeminiHaikuModel) {
-			*slot = replaceModelKeepingContext(*slot, haiku)
-			changed = true
-		}
-	}
-	if updated, ok := replaceCSVModel(p.Model, retiredGeminiHaikuModel, haiku); ok {
+	if updated, ok := replaceCSVModel(p.Model, retiredGeminiHaikuModel, geminiFlashReplacement); ok {
 		p.Model = updated
+		changed = true
+	}
+	if strings.EqualFold(stripContextSuffix(p.DefaultModel), retiredGeminiHaikuModel) {
+		p.DefaultModel = replaceModelKeepingContext(p.DefaultModel, geminiFlashReplacement)
 		changed = true
 	}
 	return changed
@@ -151,7 +149,6 @@ func replaceModelKeepingContext(model, replacement string) string {
 func (p Provider) Clone() Provider {
 	cloned := p
 	cloned.Env = cloneStringMap(p.Env)
-	cloned.ModelOverrides = cloneStringMap(p.ModelOverrides)
 	cloned.ModelProtocols = cloneStringMap(p.ModelProtocols)
 	return cloned
 }

@@ -44,7 +44,7 @@ function buildPackages(options) {
   ['ccl.exe', 'wrapper.js', 'install.js'].forEach(file => fs.chmodSync(path.join(main, 'bin', file), 0o755));
   ['README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'].forEach(file => fs.copyFileSync(path.join(root, file), path.join(main, file)));
   fs.writeFileSync(path.join(main, 'package.json'), JSON.stringify({
-    ...sourcePackage, version, description: 'Multi-provider launcher for Claude Code', optionalDependencies,
+    ...sourcePackage, version, description: 'Multi-provider launcher for Grok Build and Codex', optionalDependencies,
     scripts: { postinstall: 'node bin/install.js' },
     files: [...launcherFiles.map(file => 'bin/' + file), 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'],
   }, null, 2) + '\n');

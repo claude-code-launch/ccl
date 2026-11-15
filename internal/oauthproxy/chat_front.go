@@ -17,7 +17,7 @@ import (
 // rendered back as Chat Completions. Backends therefore implement one inbound
 // protocol, and every subscription is reachable over Chat.
 
-const chatFrontMaxBodyBytes = int64(64 << 20)
+const chatFrontMaxBodyBytes = int64(128 << 20)
 
 type chatFrontRequest struct {
 	Model               string           `json:"model"`
@@ -386,7 +386,7 @@ func (w *chatFrontWriter) streamEvent(raw []byte) error {
 		return w.chunk(map[string]any{"reasoning_content": event["delta"]}, nil, nil)
 	case "response.output_item.added":
 		item, _ := event["item"].(map[string]any)
-		if item["type"] != "function_call" {
+		if item["type"] != "function_call" && item["type"] != "custom_tool_call" {
 			return nil
 		}
 		if err := w.ensureRole(); err != nil {
@@ -406,6 +406,15 @@ func (w *chatFrontWriter) streamEvent(raw []byte) error {
 		}
 		return w.chunk(map[string]any{"tool_calls": []any{map[string]any{
 			"index": index, "function": map[string]any{"arguments": event["delta"]},
+		}}}, nil, nil)
+	case "response.custom_tool_call_input.done":
+		index, ok := w.toolIndexes[chatFrontInt(event["output_index"])]
+		if !ok {
+			return nil
+		}
+		encoded, _ := json.Marshal(map[string]any{"input": stringValue(event["input"])})
+		return w.chunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": index, "function": map[string]any{"arguments": string(encoded)},
 		}}}, nil, nil)
 	case "response.completed", "response.incomplete":
 		response, _ := event["response"].(map[string]any)
@@ -550,6 +559,12 @@ func chatFrontCompletion(response map[string]any, id string, created int64, mode
 			calls = append(calls, map[string]any{
 				"id": item["call_id"], "type": "function",
 				"function": map[string]any{"name": item["name"], "arguments": item["arguments"]},
+			})
+		case "custom_tool_call":
+			encoded, _ := json.Marshal(map[string]any{"input": stringValue(item["input"])})
+			calls = append(calls, map[string]any{
+				"id": item["call_id"], "type": "function",
+				"function": map[string]any{"name": item["name"], "arguments": string(encoded)},
 			})
 		}
 	}

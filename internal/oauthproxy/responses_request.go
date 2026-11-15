@@ -226,10 +226,21 @@ type adapterRequest struct {
 func hostedResponsesTool(kind string) bool {
 	switch kind {
 	case "web_search", "web_search_preview", "image_generation", "code_interpreter", "file_search",
-		"computer", "computer_use_preview", "tool_search", "mcp", "local_shell", "x_search", "code_execution":
+		"tool_search", "mcp", "x_search", "code_execution", "xai_grok_tools":
 		return true
 	default:
-		return strings.HasPrefix(kind, "web_search") || strings.HasPrefix(kind, "computer_use")
+		return strings.HasPrefix(kind, "web_search")
+	}
+}
+
+func hostedResponsesItem(kind string) bool {
+	switch kind {
+	case "mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response",
+		"web_search_call", "file_search_call", "code_interpreter_call", "image_generation_call",
+		"x_search_call", "code_execution_call":
+		return true
+	default:
+		return hostedResponsesTool(strings.TrimSuffix(kind, "_call"))
 	}
 }
 
@@ -322,8 +333,89 @@ func flattenResponsesTools(tools []map[string]any, discovered []map[string]any) 
 			schema = function["parameters"]
 		}
 		specKind := kind
-		if kind == "tool_search" && tool["execution"] == "client" {
+		switch {
+		case kind == "tool_search" && tool["execution"] == "client":
 			kind, name = "function", "tool_search"
+			if description == "" {
+				description = "Search deferred client tools by keyword or name to load their schemas before calling them."
+			}
+			if schema == nil {
+				schema = map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{"type": "string", "description": "Keyword or tool name query."},
+					},
+					"required": []string{"query"},
+				}
+			}
+		case kind == "computer" || kind == "computer_use_preview" || strings.HasPrefix(kind, "computer_use"):
+			specKind, kind = "computer", "function"
+			if name == "" {
+				name = "computer"
+			}
+			if description == "" {
+				description = computerToolDescription(tool)
+			}
+			if schema == nil {
+				schema = computerToolSchema()
+			}
+		case kind == "shell":
+			specKind, kind = "shell", "function"
+			if name == "" {
+				name = "shell"
+			}
+			if description == "" {
+				description = "Run shell commands in the local environment."
+			}
+			if schema == nil {
+				schema = map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"commands":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"timeout_ms":        map[string]any{"type": "integer"},
+						"max_output_length": map[string]any{"type": "integer"},
+					},
+					"required": []string{"commands"},
+				}
+			}
+		case kind == "local_shell":
+			specKind, kind = "local_shell", "function"
+			if name == "" {
+				name = "local_shell"
+			}
+			if description == "" {
+				description = "Execute a command in a local shell."
+			}
+			if schema == nil {
+				schema = map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"command":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"working_directory": map[string]any{"type": "string"},
+						"timeout_ms":        map[string]any{"type": "integer"},
+					},
+					"required": []string{"command"},
+				}
+			}
+		case kind == "apply_patch":
+			specKind, kind = "apply_patch", "function"
+			if name == "" {
+				name = "apply_patch"
+			}
+			if description == "" {
+				description = "Create, update, or delete a file using a structured diff operation."
+			}
+			if schema == nil {
+				schema = map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"type": map[string]any{"type": "string", "enum": []string{"create_file", "update_file", "delete_file"}},
+						"path": map[string]any{"type": "string"},
+						"diff": map[string]any{"type": "string"},
+					},
+					"required": []string{"type", "path"},
+				}
+			}
 		}
 		if kind != "function" && kind != "custom" {
 			// A translated provider cannot execute OpenAI-hosted tools. Client
@@ -537,12 +629,8 @@ func responsesContentParts(value any) ([]conversationPart, error) {
 			if text := responsesTextValue(p["refusal"]); text != "" {
 				result = append(result, conversationPart{Kind: partText, Text: text})
 			}
-		case "input_image", "image_url":
-			source, _ := p["image_url"].(string)
-			if nested, ok := p["image_url"].(map[string]any); ok {
-				source, _ = nested["url"].(string)
-			}
-			image, err := conversationImage(source)
+		case "input_image", "image_url", "computer_screenshot", "image":
+			image, err := responsesImagePart(p)
 			if err != nil {
 				return nil, err
 			}
@@ -554,6 +642,81 @@ func responsesContentParts(value any) ([]conversationPart, error) {
 	return result, nil
 }
 
+func computerToolDescription(tool map[string]any) string {
+	desc := "Interact with a computer display using screenshots, mouse clicks, cursor movement, scrolling, and keyboard input."
+	var details []string
+	if env, _ := tool["environment"].(string); env != "" {
+		details = append(details, "environment="+env)
+	}
+	width := responsesTextValue(tool["display_width"])
+	height := responsesTextValue(tool["display_height"])
+	if width != "" && height != "" {
+		details = append(details, "display="+width+"x"+height)
+	}
+	if len(details) > 0 {
+		desc += " (" + strings.Join(details, ", ") + ")"
+	}
+	return desc
+}
+
+func computerToolSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"type": map[string]any{
+				"type": "string",
+				"enum": []string{"screenshot", "click", "double_click", "move", "type", "keypress", "scroll", "wait", "drag"},
+			},
+			"x":        map[string]any{"type": "integer"},
+			"y":        map[string]any{"type": "integer"},
+			"button":   map[string]any{"type": "string", "enum": []string{"left", "right", "wheel", "back", "forward"}},
+			"text":     map[string]any{"type": "string"},
+			"keys":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"scroll_x": map[string]any{"type": "integer"},
+			"scroll_y": map[string]any{"type": "integer"},
+			"path": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"x": map[string]any{"type": "integer"}, "y": map[string]any{"type": "integer"}},
+					"required":   []string{"x", "y"},
+				},
+			},
+		},
+		"required": []string{"type"},
+	}
+}
+
+func responsesImagePart(p map[string]any) (conversationPart, error) {
+	source, _ := p["image_url"].(string)
+	if nested, ok := p["image_url"].(map[string]any); ok {
+		source, _ = nested["url"].(string)
+		if source == "" {
+			source, _ = nested["image_url"].(string)
+		}
+	}
+	if source == "" {
+		source, _ = p["url"].(string)
+	}
+	if source == "" {
+		if data, _ := p["data"].(string); strings.TrimSpace(data) != "" {
+			mime, _ := p["mimeType"].(string)
+			if mime == "" {
+				mime, _ = p["media_type"].(string)
+			}
+			source = "data:" + strings.TrimSpace(mime) + ";base64," + strings.TrimSpace(data)
+		} else if srcMap, ok := p["source"].(map[string]any); ok {
+			if urlVal, _ := srcMap["url"].(string); strings.TrimSpace(urlVal) != "" {
+				source = urlVal
+			} else if dataVal, _ := srcMap["data"].(string); strings.TrimSpace(dataVal) != "" {
+				mime, _ := srcMap["media_type"].(string)
+				source = "data:" + strings.TrimSpace(mime) + ";base64," + strings.TrimSpace(dataVal)
+			}
+		}
+	}
+	return conversationImage(source)
+}
+
 func conversationImage(source string) (conversationPart, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
@@ -563,10 +726,57 @@ func conversationImage(source string) (conversationPart, error) {
 		return conversationPart{Kind: partImage, URL: source}, nil
 	}
 	meta, data, found := strings.Cut(strings.TrimPrefix(source, "data:"), ",")
-	if !found || !strings.HasSuffix(meta, ";base64") {
+	if !found {
 		return conversationPart{}, fmt.Errorf("image input must use a base64 data URL")
 	}
-	return conversationPart{Kind: partImage, MediaType: strings.TrimSuffix(meta, ";base64"), Data: data}, nil
+	segments := strings.Split(meta, ";")
+	hasBase64 := false
+	for _, seg := range segments[1:] {
+		if strings.EqualFold(strings.TrimSpace(seg), "base64") {
+			hasBase64 = true
+			break
+		}
+	}
+	if !hasBase64 {
+		return conversationPart{}, fmt.Errorf("image input must use a base64 data URL")
+	}
+	data = strings.TrimSpace(data)
+	mediaType := strings.ToLower(strings.TrimSpace(segments[0]))
+	if mediaType == "image/jpg" {
+		mediaType = "image/jpeg"
+	}
+	if mediaType == "" || mediaType == "application/octet-stream" || !strings.HasPrefix(mediaType, "image/") {
+		if sniffed := sniffBase64ImageMediaType(data); sniffed != "" {
+			mediaType = sniffed
+		}
+	}
+	return conversationPart{Kind: partImage, MediaType: mediaType, Data: data}, nil
+}
+
+func sniffBase64ImageMediaType(encoded string) string {
+	sample := encoded
+	if len(sample) > 64 {
+		sample = sample[:64]
+	}
+	raw, err := decodeBase64Flexible(sample)
+	if err != nil && len(encoded) > len(sample) {
+		raw, err = decodeBase64Flexible(encoded)
+	}
+	if err != nil {
+		return ""
+	}
+	switch {
+	case len(raw) >= 8 && string(raw[:8]) == "\x89PNG\r\n\x1a\n":
+		return "image/png"
+	case len(raw) >= 3 && raw[0] == 0xff && raw[1] == 0xd8 && raw[2] == 0xff:
+		return "image/jpeg"
+	case len(raw) >= 6 && (string(raw[:6]) == "GIF87a" || string(raw[:6]) == "GIF89a"):
+		return "image/gif"
+	case len(raw) >= 12 && string(raw[:4]) == "RIFF" && string(raw[8:12]) == "WEBP":
+		return "image/webp"
+	default:
+		return ""
+	}
 }
 
 // parseResponsesRequest decodes a Responses request into the conversation view.
@@ -719,15 +929,23 @@ func (r *conversationRequest) readItems(items []map[string]any) error {
 	// longer declares. Their contents stay as history, not callable examples.
 	unavailable := make(map[string]bool)
 	for _, item := range items {
-		switch item["type"] {
+		kind, _ := item["type"].(string)
+		switch kind {
 		case "function_call", "custom_tool_call", "tool_search_call":
 			name, _ := item["name"].(string)
 			namespace, _ := item["namespace"].(string)
-			if item["type"] == "tool_search_call" {
+			if kind == "tool_search_call" {
 				name, namespace = "tool_search", ""
 			}
 			id, _ := item["call_id"].(string)
 			if _, ok := r.registry[toolWireName(namespace, name)]; !ok && id != "" {
+				unavailable[id] = true
+			}
+		case "computer_call", "shell_call", "local_shell_call", "apply_patch_call":
+			wantKind := strings.TrimSuffix(kind, "_call")
+			id := builtinCallID(item)
+			spec, ok := r.registry[toolWireName("", wantKind)]
+			if (!ok || spec.Kind != wantKind) && id != "" {
 				unavailable[id] = true
 			}
 		}
@@ -792,6 +1010,18 @@ func (r *conversationRequest) readItems(items []map[string]any) error {
 				continue
 			}
 			r.appendParts("assistant", conversationPart{Kind: partToolCall, CallID: id, Name: toolWireName(namespace, name), Arguments: arguments})
+		case "computer_call", "shell_call", "local_shell_call", "apply_patch_call":
+			name := strings.TrimSuffix(kind, "_call")
+			id := builtinCallID(item)
+			if id == "" {
+				return fmt.Errorf("%s requires call_id", kind)
+			}
+			arguments := builtinCallArguments(kind, item)
+			if unavailable[id] {
+				r.appendParts("assistant", textPart(fmt.Sprintf("Historical tool call %s (%s), unavailable in the current tool list:\n%s", name, id, arguments)))
+				continue
+			}
+			r.appendParts("assistant", conversationPart{Kind: partToolCall, CallID: id, Name: toolWireName("", name), Arguments: arguments})
 		case "tool_search_output":
 			id, _ := item["call_id"].(string)
 			if id == "" {
@@ -815,17 +1045,12 @@ func (r *conversationRequest) readItems(items []map[string]any) error {
 			} else {
 				r.appendParts("user", conversationPart{Kind: partToolResult, CallID: id, Output: []conversationPart{textPart(text)}})
 			}
-		case "function_call_output", "custom_tool_call_output":
+		case "function_call_output", "custom_tool_call_output",
+			"computer_call_output", "shell_call_output", "local_shell_call_output", "apply_patch_call_output":
 			id, _ := item["call_id"].(string)
-			var output []conversationPart
-			if parts, ok := item["output"].([]any); ok {
-				converted, err := responsesContentParts(parts)
-				if err != nil {
-					return err
-				}
-				output = converted
-			} else if text := responsesTextValue(item["output"]); text != "" {
-				output = []conversationPart{textPart(text)}
+			output, err := responsesToolOutputParts(kind, item["output"])
+			if err != nil {
+				return err
 			}
 			if id == "" || unavailable[id] {
 				label := fmt.Sprintf("Historical tool result (%s):", id)
@@ -875,7 +1100,7 @@ func (r *conversationRequest) readItems(items []map[string]any) error {
 		case "item_reference":
 			return fmt.Errorf("item_reference input requires stored responses, which this CCL provider does not keep")
 		default:
-			if hostedResponsesTool(strings.TrimSuffix(kind, "_call")) {
+			if hostedResponsesItem(kind) {
 				// A hosted tool's own record has no meaning to another backend.
 				continue
 			}
@@ -883,6 +1108,87 @@ func (r *conversationRequest) readItems(items []map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func builtinCallID(item map[string]any) string {
+	if id, _ := item["call_id"].(string); strings.TrimSpace(id) != "" {
+		return strings.TrimSpace(id)
+	}
+	id, _ := item["id"].(string)
+	return strings.TrimSpace(id)
+}
+
+func builtinCallArguments(kind string, item map[string]any) json.RawMessage {
+	payload := map[string]any{}
+	switch kind {
+	case "computer_call":
+		if action, ok := item["action"].(map[string]any); ok {
+			payload = action
+		} else if actions, ok := item["actions"].([]any); ok {
+			payload = map[string]any{"actions": actions}
+		}
+	case "shell_call", "local_shell_call":
+		if action, ok := item["action"].(map[string]any); ok {
+			payload = action
+		}
+	case "apply_patch_call":
+		if op, ok := item["operation"].(map[string]any); ok {
+			payload = op
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil || len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+func responsesToolOutputParts(kind string, raw any) ([]conversationPart, error) {
+	switch value := raw.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if value == "" {
+			return nil, nil
+		}
+		return []conversationPart{textPart(value)}, nil
+	case map[string]any:
+		if partType, _ := value["type"].(string); isResponsesContentPartType(partType) {
+			return responsesContentParts([]any{value})
+		}
+		if text := responsesTextValue(value); text != "" {
+			return []conversationPart{textPart(text)}, nil
+		}
+		return nil, nil
+	case []any:
+		if len(value) == 0 {
+			return nil, nil
+		}
+		if first, ok := value[0].(map[string]any); ok {
+			if partType, _ := first["type"].(string); !isResponsesContentPartType(partType) && kind != "function_call_output" && kind != "custom_tool_call_output" {
+				if text := responsesTextValue(value); text != "" {
+					return []conversationPart{textPart(text)}, nil
+				}
+				return nil, nil
+			}
+		}
+		return responsesContentParts(value)
+	default:
+		if text := responsesTextValue(raw); text != "" {
+			return []conversationPart{textPart(text)}, nil
+		}
+		return nil, nil
+	}
+}
+
+func isResponsesContentPartType(partType string) bool {
+	switch partType {
+	case "input_text", "output_text", "text", "summary_text", "refusal",
+		"input_image", "image_url", "computer_screenshot", "image":
+		return true
+	default:
+		return false
+	}
 }
 
 // effortBudget maps a reasoning effort to a thinking-token budget for upstreams

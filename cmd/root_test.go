@@ -35,7 +35,7 @@ func TestShortVerboseFlagStaysWithGrokBuild(t *testing.T) {
 func TestRegisteredCommandsAreNotForwarded(t *testing.T) {
 	// A command that ccl owns but isCclCommand misses would launch a billed
 	// session on a plain typo-free invocation.
-	for _, name := range []string{"doctor", "set", "ls", "use", "map", "lang", "version", "provider", "codex"} {
+	for _, name := range []string{"doctor", "set", "ls", "use", "preview", "lang", "version", "provider", "codex", "serve", "oauth", "cloud", "bypass", "log", "update"} {
 		if !isCclCommand(name) {
 			t.Fatalf("%q is a ccl command but would be forwarded to Grok Build", name)
 		}

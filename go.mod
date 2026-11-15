@@ -8,6 +8,7 @@ require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/coder/acp-go-sdk v0.13.5
+	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	github.com/grindlemire/go-tui v0.19.0
 	github.com/klauspost/compress v1.18.0

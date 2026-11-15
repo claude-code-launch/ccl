@@ -25,9 +25,9 @@ Release binary (matches CI): `scripts/build-release.sh` with `GOOS`/`GOARCH`/`OU
 
 ### Do not run the `ccl` binary as a test harness
 
-Unknown first args are **not** errors: `cmd/root.go` forwards them to Grok Build and can start a billed session (`ccl --resume`, `ccl -p "..."`, a quoted typo like `./ccl "provider --help"`). Prefer `go test` and `--help` with unquoted subcommand args. Retired commands fail before dispatch.
+Unknown first args are **not** errors: `cmd/root.go` forwards them to Grok Build and can start a billed session (`ccl --resume`, `ccl -p "..."`, a quoted typo like `./ccl "provider --help"`). Prefer `go test` and `--help` with unquoted subcommand args.
 
-Bare `ccl lang` is interactive; use `ccl lang zh` / `ccl lang en`. Do not run `set` / `map` / `use` / `oauth` / `cloud` / `provider` (mutating subcommands) against the developer's real `~/.ccl/` unless asked.
+Bare `ccl lang` is interactive; use `ccl lang zh` / `ccl lang en`. Do not run `set` / `use` / `oauth` / `cloud` / `provider` (mutating subcommands) against the developer's real `~/.ccl/` unless asked.
 
 `~/.ccl/config.yaml` stores plaintext API keys — do not dump it.
 
@@ -49,6 +49,6 @@ Keep these invariants across changes:
 - Test proxy lifecycle and inference with isolated profiles, local fake upstreams and fake credentials.
 - Codex CCL models follow the provider context setting: Default 200K / marked `[1m]` 1M, Balanced 500K / 800K, with an 85% compact threshold. Native Responses routes pass through. Converted models adapt native client `tool_search` to function calls and load definitions from `tool_search_output`; Codex owns search, execution and permissions.
 - User-facing Chinese belongs in `cmd/` through `locale.T`; `internal/` has no Chinese literals except `internal/locale`.
-- Provider management lives under `ccl provider`, cloud sync under `ccl cloud`; preserve the existing public command layout. Unknown root arguments launch Grok Build, so use isolated tests rather than ad hoc binary invocations.
+- Provider management lives under `ccl provider` (with root shortcuts `ccl set`, `ccl ls`, `ccl use`, and `ccl preview`), cloud sync under `ccl cloud`; preserve the existing public command layout. Unknown root arguments launch Grok Build, so use isolated tests rather than ad hoc binary invocations.
 
 When a subsystem contract changes, update the matching reference section. Keep implementation detail in the reference instead of growing these startup instructions.

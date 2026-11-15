@@ -266,10 +266,12 @@ func startXaiOAuth(parent context.Context, modelSpec, credentialFile string) (*R
 		models = xaiFallbackModels()
 		catalogFallback = true
 	}
+	details := xaiModelDetails(modelSpec, models)
 	effectiveModelSpec := xaiModelSpec(modelSpec, models)
 	runtime, err := startCodexResponsesRuntimeWithService(parent, xaiChatProxyBaseURL, effectiveModelSpec, authorizer, func(apiKey, endpoint string, routes []runtimeModelRoute, auth codexResponsesAuthorizer, usage *UsageTracker) *codexResponsesService {
 		service := newXaiResponsesService(apiKey, endpoint, routes, auth, usage)
 		service.models = xaiModelIDs(models)
+		service.modelDetails = details
 		addXaiDisplayAliases(service, models)
 		return service
 	})
@@ -278,6 +280,7 @@ func startXaiOAuth(parent context.Context, modelSpec, credentialFile string) (*R
 	}
 	runtime.listAuths = authorizer.listAuths
 	runtime.modelNames = xaiModelDisplayNames(models)
+	runtime.modelDetails = details
 	runtime.catalogFallback = catalogFallback
 	LogInfof("runtime start oauth provider=grok backend=xai protocol=openai_responses port=%s credential_file=%s model_count=%d",
 		strings.TrimPrefix(strings.TrimSuffix(runtime.endpoint, "/v1"), "http://"), filepath.Base(path), len(runtime.models))

@@ -32,6 +32,7 @@ test('release packages contain one binary each and a small launcher', t => {
   const built = buildPackages({ version: 'v2.0.1', binaries, output: path.join(dir, 'packages') });
   const main = JSON.parse(fs.readFileSync(path.join(built.main, 'package.json')));
   assert.equal(main.version, '2.0.1');
+  assert.equal(main.description, 'Multi-provider launcher for Grok Build and Codex');
   assert.equal(Object.keys(main.optionalDependencies).length, 6);
   assert.deepEqual(fs.readdirSync(path.join(built.main, 'bin')).sort(), [...launcherFiles].sort());
   // npm rewrites a "./"-prefixed bin target and warns on every publish, so the

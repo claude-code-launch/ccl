@@ -174,7 +174,7 @@ func convertResponsesToKiro(raw []byte) (*kiroConvertedRequest, error) {
 	contextValue := map[string]any{
 		"envState": kiroEnvironmentState(),
 	}
-	if len(tools) > 0 {
+	if len(tools) > 0 && request.ToolChoice.Mode != toolChoiceNone {
 		contextValue["tools"] = tools
 	}
 	if len(currentContent.toolResults) > 0 {
@@ -446,7 +446,23 @@ func normalizeKiroSchema(value any, root bool) any {
 		}
 	}
 	if items, ok := object["items"]; ok {
-		object["items"] = normalizeKiroSchema(items, false)
+		if list, isSlice := items.([]any); isSlice {
+			for i, elem := range list {
+				list[i] = normalizeKiroSchema(elem, false)
+			}
+		} else {
+			object["items"] = normalizeKiroSchema(items, false)
+		}
+	}
+	if additional, ok := object["additionalProperties"].(map[string]any); ok {
+		object["additionalProperties"] = normalizeKiroSchema(additional, false)
+	}
+	for _, combinator := range []string{"anyOf", "oneOf", "allOf"} {
+		if variants, ok := object[combinator].([]any); ok {
+			for i, variant := range variants {
+				variants[i] = normalizeKiroSchema(variant, false)
+			}
+		}
 	}
 	return object
 }
@@ -492,8 +508,12 @@ func parseKiroContent(turn conversationTurn, nameMap map[string]string) kiroCont
 					resultImages = append(resultImages, image)
 				}
 			}
-			if resultText == "" && len(resultImages) > 0 {
-				resultText = "[image attached]"
+			if len(resultImages) > 0 {
+				if resultText == "" {
+					resultText = "[image attached]"
+				} else if !strings.Contains(resultText, "[image attached]") {
+					resultText += "\n[image attached]"
+				}
 			}
 			if resultText == "" && len(resultImages) == 0 {
 				resultText = kiroEmptyToolResultText
@@ -531,11 +551,21 @@ func parseKiroContent(turn conversationTurn, nameMap map[string]string) kiroCont
 }
 
 func kiroImageFromPart(part conversationPart) any {
-	format := strings.TrimPrefix(part.MediaType, "image/")
+	if part.Data == "" {
+		return nil
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(part.MediaType))
+	if semi := strings.IndexByte(mediaType, ';'); semi >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:semi])
+	}
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		mediaType = sniffBase64ImageMediaType(part.Data)
+	}
+	format := strings.TrimPrefix(mediaType, "image/")
 	if format == "jpg" {
 		format = "jpeg"
 	}
-	if part.Data == "" || (format != "jpeg" && format != "png" && format != "gif" && format != "webp") {
+	if format != "jpeg" && format != "png" && format != "gif" && format != "webp" {
 		return nil
 	}
 	return map[string]any{

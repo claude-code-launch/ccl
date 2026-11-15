@@ -225,35 +225,63 @@ func visibleMigrationRecord(item map[string]any) string {
 		if text := visibleMigrationText(item["content"]); text != "" {
 			return role + ": " + text
 		}
-	case "function_call", "custom_tool_call":
-		name, _ := item["name"].(string)
-		args := item["arguments"]
-		if kind == "custom_tool_call" {
-			args = item["input"]
-		}
+	case "function_call", "custom_tool_call", "tool_search_call", "computer_call", "shell_call", "local_shell_call", "apply_patch_call":
+		name, args := compactionToolCallSummary(kind, item)
 		return "Historical tool call " + name + ": " + visibleMigrationText(args)
-	case "function_call_output", "custom_tool_call_output":
-		return "Historical tool result: " + visibleMigrationText(item["output"])
+	case "function_call_output", "custom_tool_call_output", "tool_search_output", "computer_call_output", "shell_call_output", "local_shell_call_output", "apply_patch_call_output":
+		output := item["output"]
+		if kind == "tool_search_output" {
+			output = item["tools"]
+		}
+		return "Historical tool result: " + visibleMigrationText(output)
 	}
 	return ""
 }
 
 func visibleMigrationText(value any) string {
 	switch value := value.(type) {
+	case nil:
+		return ""
 	case string:
+		if isInlineImageData(value) {
+			return "[image omitted]"
+		}
 		return value
 	case []any:
 		var parts []string
 		for _, raw := range value {
 			if item, ok := raw.(map[string]any); ok {
+				if isImageContentItem(item) {
+					parts = append(parts, "[image omitted]")
+					continue
+				}
 				if kind, _ := item["type"].(string); kind == "input_text" || kind == "output_text" || kind == "text" {
 					if text, ok := item["text"].(string); ok {
-						parts = append(parts, text)
+						if isInlineImageData(text) {
+							parts = append(parts, "[image omitted]")
+						} else {
+							parts = append(parts, text)
+						}
+						continue
 					}
 				}
 			}
+			if text := compactionTextValue(raw); text != "" && text != "null" {
+				parts = append(parts, text)
+			}
 		}
 		return strings.Join(parts, "\n")
+	case map[string]any:
+		if isImageContentItem(value) {
+			return "[image omitted]"
+		}
+		if text, ok := value["text"].(string); ok && text != "" {
+			if isInlineImageData(text) {
+				return "[image omitted]"
+			}
+			return text
+		}
+		return compactionTextValue(value)
 	}
 	return ""
 }

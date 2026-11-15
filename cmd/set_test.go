@@ -163,12 +163,8 @@ func TestOAuthAdvancedConfigUsesRuntimeCredentialsWithoutPersistingThem(t *testi
 	if p.Endpoint != "oauth://codex" || p.APIKey != "" || p.Type != "openai_responses" {
 		t.Fatalf("temporary OAuth runtime values leaked into provider: %+v", p)
 	}
-	if p.Model != "gpt-5.6-sol,gpt-5.6-codex" {
+	if p.Model != "gpt-5.6-codex,gpt-5.6-sol" {
 		t.Fatalf("OAuth models = %q", p.Model)
-	}
-	// The catalog auto-maps the empty slots, exactly as the probe used to.
-	if got := strings.TrimSpace(p.OpusModel); !strings.Contains(p.Model, got) || got == "" {
-		t.Fatalf("OAuth catalog did not auto-map slots: Opus=%q", got)
 	}
 }
 
@@ -288,29 +284,22 @@ func TestConnectionEditRevertClearsDirty(t *testing.T) {
 }
 
 func TestReviewPageShowsModelMapping(t *testing.T) {
+	original := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(original) })
+	locale.SetLanguage("en")
+
 	p := provider.Provider{
-		Type:          "openai",
-		Endpoint:      "https://example.test/v1",
-		OpusModel:     "model-opus",
-		SonnetModel:   "model-sonnet",
-		HaikuModel:    "model-haiku",
-		CustomModelID: "model-custom",
-		SubagentModel: "model-subagent",
+		Type:     "openai",
+		Endpoint: "https://example.test/v1",
 	}
 	m := NewAdvancedConfigModel(&p)
-	enterDetectedReview(m, "model-opus", "model-sonnet", "model-haiku")
-	m.live().oneMSlots["sonnet"] = true
+	enterDetectedReview(m, "model-a", "model-b", "model-c")
 
 	view := renderView(t, m)
-	// The [1M] badge next to the slot is the whole story now: sizing is per slot
-	// and there is no session-wide compact value to review.
-	for _, expected := range []string{"Model Mapping", "model-opus", "model-sonnet", "model-haiku", "model-custom", "model-subagent", "[1M]"} {
+	for _, expected := range []string{"Models", "Model Pool", "model-a", "model-b", "model-c", "Context & Compact"} {
 		if !strings.Contains(view, expected) {
-			t.Fatalf("expected review mapping to contain %q, got %q", expected, view)
+			t.Fatalf("expected review page to contain %q, got %q", expected, view)
 		}
-	}
-	if !strings.Contains(view, "Context & Compact") {
-		t.Fatalf("review page is missing Context & Compact: %q", view)
 	}
 }
 
@@ -320,15 +309,12 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 	locale.SetLanguage("en")
 
 	p := provider.Provider{
-		OpusModel:     "gpt-5.6-sol",
-		SonnetModel:   "gpt-5.6-terra",
-		HaikuModel:    "gpt-5.6-luna",
-		CustomModelID: "gpt-5.6-sol",
+		Type:     "openai",
+		Endpoint: "https://example.test/v1",
+		Model:    "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
-	m.live().oneMSlots["opus"], m.live().oneMSlots["sonnet"] = true, true
-	m.live().oneMSlots["haiku"], m.live().oneMSlots["custom"] = true, true
 	view := renderView(t, m)
 	// Only Default and Balanced exist, so old/custom presets are absent.
 	for _, removed := range []string{"300K", "Switch-safe", "Maximum", "Custom (preserve)"} {
@@ -336,24 +322,14 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 			t.Fatalf("single page still offers the removed preset %q: %q", removed, view)
 		}
 	}
-	if !allConfiguredModelsRecommendOneM(p) {
-		t.Fatal("all gpt-5.6 slots should recommend 1M")
-	}
-	if !strings.Contains(view, "[1M]") || !strings.Contains(view, "Default  200K / 1M & 85%") {
-		t.Fatalf("expected per-slot 1M badges and the default compact summary, got %q", view)
+	if !strings.Contains(view, "Default  200K / 1M & 85%") {
+		t.Fatalf("expected default compact summary, got %q", view)
 	}
 
-	p.CustomModelID = "unknown-model"
-	m = NewAdvancedConfigModel(&p)
-	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
-	if allConfiguredModelsRecommendOneM(p) {
-		t.Fatal("mixed unknown models should not all-recommend 1M")
-	}
-
-	// OAuth providers use the same two explicit choices.
+	// OAuth providers use the same explicit choices.
 	oauth := p
 	oauth.OAuthProvider = "gpt"
-	mo := NewAdvancedConfigModel(&oauth)
+	mo := readyOAuthPage(NewAdvancedConfigModel(&oauth))
 	enterDetectedReview(mo, "gpt-5.6-sol")
 	if view := renderView(t, mo); !strings.Contains(view, "Default  200K / 1M & 85%") {
 		t.Fatalf("expected Default context choice for OAuth, got %q", view)
@@ -361,18 +337,25 @@ func TestReviewShowsPerSlotContextRecommendationAndUnknownSafety(t *testing.T) {
 }
 
 func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
-	p := provider.Provider{Env: map[string]string{
-		autoCompactWindowEnv: "750000",
-		autoCompactPctEnv:    "82",
-	}}
+	original := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(original) })
+	locale.SetLanguage("en")
+
+	p := provider.Provider{
+		Model: "model[1m]",
+		Env: map[string]string{
+			autoCompactWindowEnv: "750000",
+			autoCompactPctEnv:    "82",
+		},
+	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "model")
+	p.Model = "model[1m]"
 	// Unsupported old/custom settings open on Default and are cleared on save.
 	if m.live().compactPreset != compactPresetDefault || !hasUnsupportedContextConfig(*m.p) {
 		t.Fatalf("compact preset = %v, want Default with unsupported env", m.live().compactPreset)
 	}
 	m.cursor = m.mainRowIndex(rowContext)
-	m.live().oneMSlots["opus"] = true
 
 	forward := []struct {
 		preset compactPreset
@@ -387,8 +370,8 @@ func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 		if m.live().compactPreset != want.preset || m.compactSummary() != want.label {
 			t.Fatalf("right cycle = preset %v summary %q, want %v %q", m.live().compactPreset, m.compactSummary(), want.preset, want.label)
 		}
-		if !m.live().oneMSlots["opus"] {
-			t.Fatal("cycling compact must not clear [1m] slots")
+		if p.Model != "model[1m]" {
+			t.Fatalf("cycling compact cleared [1m] marker in pool: %q", p.Model)
 		}
 	}
 
@@ -398,8 +381,12 @@ func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 		if m.live().compactPreset != want {
 			t.Fatalf("left cycle = %v, want %v", m.live().compactPreset, want)
 		}
-		if !m.live().oneMSlots["opus"] {
-			t.Fatal("reverse cycling compact must not clear [1m] slots")
+	}
+
+	applyCompactPreset(&p, m.live().compactPreset)
+	for _, key := range []string{maxContextTokensEnv, autoCompactWindowEnv, autoCompactPctEnv} {
+		if value, ok := p.Env[key]; ok {
+			t.Fatalf("%s = %q, want it unset on Default", key, value)
 		}
 	}
 
@@ -411,82 +398,22 @@ func TestCompactPresetCyclesAllSupportedTiers(t *testing.T) {
 	}
 }
 
-func TestSlotMappingCanConfigureSubagentModel(t *testing.T) {
-	p := provider.Provider{
-		Type:          "openai_responses",
-		Endpoint:      "https://example.test/v1",
-		CustomModelID: "main-model",
-	}
-	m := NewAdvancedMappingModel(&p, []string{"main-model", "cheap-subagent-model"}, nil)
-	m.cursor = m.mainRowIndex(rowSubagent)
-
-	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
-	if !m.filterFocused || modelSlotKeys[m.activeSlot] != "subagent" {
-		t.Fatalf("subagent picker was not opened: focused=%t activeSlot=%d", m.filterFocused, m.activeSlot)
-	}
-	m.slotListCursor = 2 // clear/unset is index 0
-	m.handleKey(tui.KeyEvent{Key: tui.KeyEnter})
-
-	if p.SubagentModel != "cheap-subagent-model" {
-		t.Fatalf("subagent mapping = %q", p.SubagentModel)
-	}
-}
-
-func TestOneMContextCanConfigureSubagentModel(t *testing.T) {
+func TestManualReviewPageShowsRuntimeSettings(t *testing.T) {
 	original := locale.Current()
 	t.Cleanup(func() { locale.SetLanguage(original) })
 	locale.SetLanguage("en")
 
 	p := provider.Provider{
-		Type:          "openai_responses",
-		Endpoint:      "https://example.test/v1",
-		SubagentModel: "subagent-model",
-	}
-	m := NewAdvancedConfigModel(&p)
-	enterDetectedReview(m, "subagent-model")
-	m.cursor = m.mainRowIndex(rowSubagent)
-
-	view := renderView(t, m)
-	if !strings.Contains(view, "Subagent") || !strings.Contains(view, "subagent-model") {
-		t.Fatalf("single page does not show Subagent: %q", view)
-	}
-	if !strings.Contains(view, "Default  200K / 1M & 85%") {
-		t.Fatalf("single page missing compact summary: %q", view)
-	}
-	// Space on the Subagent row toggles its catalog context marker.
-	m.handleKey(tui.KeyEvent{Key: tui.KeyRune, Rune: ' '})
-	if !m.live().oneMSlots["subagent"] {
-		t.Fatal("Subagent 1M option was not enabled")
-	}
-	if p.SubagentModel != "subagent-model" {
-		t.Fatalf("subagent mapping was lost: %q", p.SubagentModel)
-	}
-
-	applyCompactConfig(&p, m.live().oneMSlots, compactPresetDefault)
-	if p.SubagentModel != "subagent-model[1m]" {
-		t.Fatalf("subagent model = %q, want 1M suffix", p.SubagentModel)
-	}
-	// Enabling 1M is expressed by the [1m] marker alone; ccl writes no context env.
-	for _, key := range []string{maxContextTokensEnv, autoCompactWindowEnv} {
-		if value, ok := p.Env[key]; ok {
-			t.Fatalf("%s = %q, want it unset", key, value)
-		}
-	}
-}
-
-func TestManualReviewPageShowsRuntimeSettings(t *testing.T) {
-	p := provider.Provider{
-		Type:          "openai_responses",
-		Endpoint:      "https://example.test/v1",
-		CustomModelID: "gpt-5.6-sol",
+		Type:     "openai_responses",
+		Endpoint: "https://example.test/v1",
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol")
 
 	view := renderView(t, m)
 	for _, expected := range []string{
+		"Models", "gpt-5.6-sol",
 		"Runtime",
-		"Subagent", "gpt-5.6-sol",
 		"Fast",
 		"Set as active provider",
 		"Save & Activate",
@@ -506,13 +433,8 @@ func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
 	locale.SetLanguage("en")
 
 	p := provider.Provider{
-		Type:          "openai_responses",
-		Endpoint:      "https://example.test/v1",
-		OpusModel:     "gpt-5.6-sol",
-		SonnetModel:   "gpt-5.6-terra",
-		HaikuModel:    "gpt-5.6-luna",
-		CustomModelID: "gpt-5.4-mini",
-		SubagentModel: "gpt-5.6-terra",
+		Type:     "openai_responses",
+		Endpoint: "https://example.test/v1",
 	}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
@@ -531,7 +453,11 @@ func TestReviewPageFitsThirtyLineTerminal(t *testing.T) {
 }
 
 func TestAutoReviewPageShowsRuntimeControls(t *testing.T) {
-	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", CustomModelID: "gpt-5.6-sol"}
+	original := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(original) })
+	locale.SetLanguage("en")
+
+	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-5.6-sol")
 
@@ -564,13 +490,17 @@ func TestReviewPageCanSelectOpenAIResponses(t *testing.T) {
 }
 
 func TestOpenAIReviewStaysOnSinglePage(t *testing.T) {
+	original := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(original) })
+	locale.SetLanguage("en")
+
 	p := provider.Provider{Type: "openai_responses", Endpoint: "https://example.test/v1"}
 	m := NewAdvancedConfigModel(&p)
 	enterDetectedReview(m, "gpt-test")
 
-	// Detection success keeps the cursor on the first model row.
-	if m.cursor != m.mainRowIndex(rowOpus) {
-		t.Fatalf("cursor=%d, want rowOpus %d", m.cursor, m.mainRowIndex(rowOpus))
+	// Detection success places the cursor on Context & Compact.
+	if m.cursor != m.mainRowIndex(rowContext) {
+		t.Fatalf("cursor=%d, want rowContext %d", m.cursor, m.mainRowIndex(rowContext))
 	}
 	view := renderView(t, m)
 	if !strings.Contains(view, "Protocol") {
@@ -621,10 +551,12 @@ func TestReorderModelsByAvailability(t *testing.T) {
 }
 
 func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
+	previous := locale.Current()
+	t.Cleanup(func() { locale.SetLanguage(previous) })
+	locale.SetLanguage("en")
+
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
-	m := NewAdvancedMappingModel(&p, []string{"model-unavailable", "model-available"}, nil)
-	// The single page has no dedicated test button; the test is driven by the
-	// modelTesting state that the availability command wires up.
+	m := enterDetectedReview(NewAdvancedConfigModel(&p), "model-unavailable", "model-available")
 	m.modelTesting = true
 	m.modelTestID = 42
 
@@ -642,12 +574,10 @@ func TestSlotModelAvailabilityTestUpdatesPicker(t *testing.T) {
 		t.Fatalf("stored model pool = %q, want %q", got, want)
 	}
 
-	m.activeSlot = 0
-	m.filterFocused = true
-	m.updateFilteredPool()
+	m.width = 140
 	view := renderView(t, m)
-	if !strings.Contains(view, "✓ available") || !strings.Contains(view, "✗ unavailable") {
-		t.Fatalf("expected availability labels in picker, got %q", view)
+	if !strings.Contains(view, "1 available · 1 unavailable · 0 inconclusive") {
+		t.Fatalf("expected availability summary on main page, got %q", view)
 	}
 	if strings.Index(view, "model-available") > strings.Index(view, "model-unavailable") {
 		t.Fatalf("expected available model to be listed first, got %q", view)
@@ -670,15 +600,6 @@ func TestInconclusiveModelProbeIsNotDisplayedAsUnavailable(t *testing.T) {
 	if !strings.Contains(mainView, "0 available · 0 unavailable · 1 inconclusive") {
 		t.Fatalf("inconclusive count missing: %q", mainView)
 	}
-	m.filterFocused = true
-	m.updateFilteredPool()
-	view := renderView(t, m)
-	if !strings.Contains(view, "? inconclusive") {
-		t.Fatalf("inconclusive probe was not shown accurately: %q", view)
-	}
-	if strings.Contains(view, "✗ unavailable") {
-		t.Fatalf("inconclusive probe was marked unavailable: %q", view)
-	}
 }
 
 func TestParseModelListForDetectionPreservesDisplayMetadata(t *testing.T) {
@@ -700,7 +621,7 @@ func TestParseModelListForDetectionPreservesDisplayMetadata(t *testing.T) {
 
 func TestSlotModelAvailabilityTestCanBeCanceled(t *testing.T) {
 	p := provider.Provider{Type: "openai", Endpoint: "https://example.test/v1", APIKey: "test-key"}
-	m := NewAdvancedMappingModel(&p, []string{"model-a"}, nil)
+	m := enterDetectedReview(NewAdvancedConfigModel(&p), "model-a")
 	m.modelTesting = true
 	m.modelTestID = 7
 	m.modelTestCancel = func() {}
@@ -772,8 +693,8 @@ func TestOAuthChatGPTAvailabilityUsesSingleCheapProbe(t *testing.T) {
 	if got := m.availabilitySmokeTestModel(); got != lowCostProbeModel {
 		t.Fatalf("OAuth smoke model = %q, want %q", got, lowCostProbeModel)
 	}
-	if view := renderView(t, m); !strings.Contains(view, "Model Mapping") {
-		t.Fatalf("OAuth single page missing Model Mapping: %q", view)
+	if view := renderView(t, m); !strings.Contains(view, locale.T("模型", "Models")) {
+		t.Fatalf("OAuth single page missing Models section: %q", view)
 	}
 }
 
@@ -796,15 +717,11 @@ func TestAdvancedConfigViewAdaptsToWindowSize(t *testing.T) {
 
 func TestApplyModelDetectionResultUsesDiscoveredModelsOnly(t *testing.T) {
 	p := provider.Provider{
-		Name:          "existing-provider",
-		Type:          "openai",
-		Endpoint:      "https://zenmux.ai/api/v1",
-		APIKey:        "test-key",
-		Model:         "old-a,old-b",
-		OpusModel:     "old-a",
-		SonnetModel:   "new-b",
-		HaikuModel:    "old-haiku",
-		CustomModelID: "new-a",
+		Name:     "existing-provider",
+		Type:     "openai",
+		Endpoint: "https://zenmux.ai/api/v1",
+		APIKey:   "test-key",
+		Model:    "old-a,old-b",
 	}
 	m := NewAdvancedConfigModel(&p)
 
@@ -818,9 +735,6 @@ func TestApplyModelDetectionResultUsesDiscoveredModelsOnly(t *testing.T) {
 	}
 	if strings.Join(m.live().modelPool, ",") != "new-a,new-b" {
 		t.Fatalf("expected selectable model pool to use API models only, got %v", m.live().modelPool)
-	}
-	if m.staleSlotCount() != 2 {
-		t.Fatalf("expected two stale slot mappings, got %d", m.staleSlotCount())
 	}
 }
 
@@ -1343,5 +1257,33 @@ func TestDetectProtocolRejectsRetiredModelList(t *testing.T) {
 	result := detectProtocolAndModelsDetailed(server.URL+"/v1", "key")
 	if result.err == nil || !strings.Contains(result.err.Error(), "retired Anthropic Messages") {
 		t.Fatalf("legacy endpoint accepted: %+v", result)
+	}
+}
+
+// TestProviderSaveNameNeverOverwritesAnotherProvider pins the S4 fix: a new
+// provider whose generated placeholder became the models.dev catalog ID must
+// not replace an existing provider of that name (and with it, its API key).
+func TestProviderSaveNameNeverOverwritesAnotherProvider(t *testing.T) {
+	existing := map[string]provider.Provider{
+		"opencode-go":   {Name: "opencode-go"},
+		"opencode-go-2": {Name: "opencode-go-2"},
+		"work":          {Name: "work"},
+	}
+	for name, testCase := range map[string]struct {
+		openedAs, name, want string
+		collided             bool
+	}{
+		"catalog ID taken twice":         {"provider-abc234", "opencode-go", "opencode-go-3", true},
+		"catalog ID free":                {"provider-abc234", "openrouter", "openrouter", false},
+		"editing keeps its own name":     {"work", "work", "work", false},
+		"new provider with a fresh name": {"oc", "oc", "oc", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, collided := providerSaveName(existing, testCase.openedAs, testCase.name)
+			if got != testCase.want || collided != testCase.collided {
+				t.Fatalf("providerSaveName(%q, %q) = %q, %t; want %q, %t",
+					testCase.openedAs, testCase.name, got, collided, testCase.want, testCase.collided)
+			}
+		})
 	}
 }

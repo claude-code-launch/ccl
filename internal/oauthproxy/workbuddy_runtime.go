@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
 	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/google/uuid"
 )
@@ -363,7 +365,178 @@ func (g *workbuddyGateway) do(ctx context.Context, path, rawQuery string, header
 	return g.doOne(ctx, path, rawQuery, headers, body, refreshed)
 }
 
+var (
+	reAnthropicBillingHeader = regexp.MustCompile(`(?im)^\s*x-anthropic-billing-(?:header|hdr)\s*:.*(?:\r?\n)?`)
+	reCompetitorAgent        = regexp.MustCompile(`(?i)You are an?(?:\s+AI)?(?:\s+coding)?\s+agent\s+powered by [^;\n.]+`)
+	reGrokIdentity           = regexp.MustCompile(`(?i)You are Grok[^.\n]*\.?`)
+	reClaudeCodeIdentity     = regexp.MustCompile(`(?i)You are Claude(?: Code)?[^.\n]*\.?`)
+	reCodexIdentity          = regexp.MustCompile(`(?i)You are Codex[^.\n]*\.?`)
+	reCursorIdentity         = regexp.MustCompile(`(?i)You are Cursor[^.\n]*\.?`)
+	reMainBranchPR           = regexp.MustCompile(`(?i)Main branch \(you will usually use this for PRs\)`)
+)
+
+func sanitizeWorkBuddySystemPrompt(text string) string {
+	text = reAnthropicBillingHeader.ReplaceAllString(text, "")
+	text = reCompetitorAgent.ReplaceAllLiteralString(text, "You are a helpful AI assistant.")
+	text = reGrokIdentity.ReplaceAllLiteralString(text, "You are a helpful AI assistant.")
+	text = reClaudeCodeIdentity.ReplaceAllLiteralString(text, "You are a helpful AI assistant.")
+	text = reCodexIdentity.ReplaceAllLiteralString(text, "You are a helpful AI assistant.")
+	text = reCursorIdentity.ReplaceAllLiteralString(text, "You are a helpful AI assistant.")
+	text = reMainBranchPR.ReplaceAllLiteralString(text, "Main branch")
+	return strings.TrimSpace(text)
+}
+
+func extractMessageText(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, part := range v {
+			if m, ok := part.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok {
+					parts = append(parts, t)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+func flattenTextParts(parts []any) (string, bool) {
+	if len(parts) == 0 {
+		return "", true
+	}
+	var sb strings.Builder
+	for _, part := range parts {
+		m, ok := part.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		partType, _ := m["type"].(string)
+		if strings.EqualFold(partType, "image_url") || m["image_url"] != nil {
+			return "", false
+		}
+		if strings.EqualFold(partType, "text") {
+			if t, ok := m["text"].(string); ok {
+				sb.WriteString(t)
+				continue
+			}
+		}
+		return "", false
+	}
+	return sb.String(), true
+}
+
+// sanitizeWorkBuddyPayload adapts client Chat Completions requests for the
+// WorkBuddy upstream API. WorkBuddy's backend Go struct expects tool_choice as a
+// string ("auto"/"none") rather than an object (HTTP 400 code 11101). In addition,
+// upstream channel verification (HTTP 400 code 11128) checks for billing headers,
+// competitor agent templates, developer role, and reasoning content in history.
+func sanitizeWorkBuddyPayload(body []byte) ([]byte, error) {
+	if len(body) == 0 {
+		return body, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload map[string]any
+	if err := decoder.Decode(&payload); err != nil {
+		return body, nil
+	}
+
+	// 1. Normalize tool_choice to a string or drop it if no tools are declared.
+	if tc, exists := payload["tool_choice"]; exists {
+		tools, hasTools := payload["tools"].([]any)
+		if !hasTools || len(tools) == 0 {
+			delete(payload, "tool_choice")
+		} else {
+			switch v := tc.(type) {
+			case string:
+				if strings.TrimSpace(v) == "" {
+					delete(payload, "tool_choice")
+				}
+			case map[string]any:
+				payload["tool_choice"] = "auto"
+			default:
+				payload["tool_choice"] = "auto"
+			}
+		}
+	}
+
+	// 2. Sanitize messages: scrub billing headers, neutralize competitor identities,
+	// remap developer role to system, drop empty system prompts, flatten text-only parts,
+	// and remove reasoning_content from history.
+	if rawMessages, ok := payload["messages"].([]any); ok {
+		sanitizedMessages := make([]any, 0, len(rawMessages))
+		for _, rawMsg := range rawMessages {
+			msg, ok := rawMsg.(map[string]any)
+			if !ok {
+				sanitizedMessages = append(sanitizedMessages, rawMsg)
+				continue
+			}
+
+			delete(msg, "reasoning_content")
+
+			role, _ := msg["role"].(string)
+			if strings.EqualFold(role, "developer") {
+				role = "system"
+				msg["role"] = "system"
+			}
+
+			if strings.EqualFold(role, "system") {
+				text := extractMessageText(msg["content"])
+				sanitized := sanitizeWorkBuddySystemPrompt(text)
+				if strings.TrimSpace(sanitized) == "" {
+					continue
+				}
+				msg["content"] = sanitized
+			} else {
+				if parts, isArray := msg["content"].([]any); isArray {
+					if text, ok := flattenTextParts(parts); ok {
+						msg["content"] = text
+					}
+				} else if strings.EqualFold(role, "assistant") && msg["content"] == nil {
+					msg["content"] = ""
+				}
+			}
+			sanitizedMessages = append(sanitizedMessages, msg)
+		}
+		payload["messages"] = sanitizedMessages
+	}
+
+	return json.Marshal(payload)
+}
+
+func filterWorkBuddyOutboundHeaders(header http.Header) {
+	for _, name := range []string{"Authorization", "X-Api-Key", "Api-Key", "Host", "Content-Length", "User-Agent", "Cookie"} {
+		header.Del(name)
+	}
+	for name := range header {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-anthropic") ||
+			strings.HasPrefix(lower, "anthropic") ||
+			strings.HasPrefix(lower, "x-codex") ||
+			strings.HasPrefix(lower, "x-stainless") ||
+			strings.HasPrefix(lower, "x-opencode") ||
+			strings.HasPrefix(lower, "x-claude") ||
+			strings.HasPrefix(lower, "x-cursor") ||
+			strings.HasPrefix(lower, "originator") ||
+			strings.HasPrefix(lower, "session_id") ||
+			strings.HasPrefix(lower, "x-session") {
+			header.Del(name)
+		}
+	}
+}
+
 func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, headers http.Header, body []byte, credential *workbuddyCredential) (*http.Response, error) {
+	sanitized, err := sanitizeWorkBuddyPayload(body)
+	if err != nil {
+		return nil, fmt.Errorf("sanitize WorkBuddy payload: %w", err)
+	}
+	body = sanitized
+
 	target := strings.TrimRight(g.store.deployment.baseURL, "/") + path
 	if rawQuery != "" {
 		target += "?" + rawQuery
@@ -373,9 +546,7 @@ func (g *workbuddyGateway) doOne(ctx context.Context, path, rawQuery string, hea
 		return nil, err
 	}
 	copyGatewayHeaders(request.Header, headers)
-	for _, name := range []string{"Authorization", "X-Api-Key", "Api-Key", "Host", "Content-Length", "User-Agent"} {
-		request.Header.Del(name)
-	}
+	filterWorkBuddyOutboundHeaders(request.Header)
 	token := credential.token()
 	account := credential.account()
 	for name, values := range g.store.deployment.authenticatedHeaders(token, account) {
@@ -572,6 +743,9 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 			names[model.ID] = name
 		}
 		info := protocol.ModelInfo{ID: model.ID, DisplayName: strings.TrimSpace(model.Name), MaxOutputTokens: int(model.MaxOutputTokens)}
+		if model.MaxAllowedSize > 0 {
+			info.ContextWindow = int(model.MaxAllowedSize)
+		}
 		if model.SupportsImages {
 			info.InputModalities = []string{"text", "image"}
 		}
@@ -609,6 +783,33 @@ func buildWorkBuddyRoutes(modelSpec string, catalog []workbuddyModel) ([]runtime
 		add(model.ID, route.Alias)
 	}
 	return routes, models, names, details
+}
+
+func enrichWorkBuddyModelDetails(details map[string]protocol.ModelInfo) {
+	if len(details) == 0 {
+		return
+	}
+	index, err := modelsdev.CachedIndex()
+	if err != nil || index == nil {
+		return
+	}
+	for key, info := range details {
+		if len(info.InputModalities) == 0 {
+			if mod, ok := index.InputModalities("workbuddy", info.ID, info.DisplayName); ok && len(mod) > 0 {
+				info.InputModalities = mod
+			}
+		}
+		if info.MaxOutputTokens <= 0 {
+			if maxOut, ok := index.MaxOutputTokens("workbuddy", info.ID, info.DisplayName); ok && maxOut > 0 {
+				info.MaxOutputTokens = maxOut
+			}
+		}
+		if efforts, ok := index.Efforts("workbuddy", info.ID, info.DisplayName); ok {
+			info.ReasoningLevels, info.DefaultReasoningLevel = reasoningLevelsFromEfforts(efforts, info.DefaultReasoningLevel)
+			info.ReasoningKnown = true
+		}
+		details[key] = info
+	}
 }
 
 // workbuddyChatCatalog keeps the rows WorkBuddy's own model picker lists:
@@ -677,9 +878,13 @@ func startWorkBuddyOAuth(parent context.Context, providerName, modelSpec, creden
 		return nil, err
 	}
 	routes, models, names, details := buildWorkBuddyRoutes(modelSpec, catalog)
+	enrichWorkBuddyModelDetails(details)
 	// The gateway verifies a per-runtime token on the internal hop before it
 	// attaches the user's subscription credential.
-	proxyRuntime, err := startOpenAIChatRuntimeRoutes(parent, gateway.endpoint, routes, &chatStaticAuthorizer{token: gateway.key})
+	proxyRuntime, err := startOpenAIChatRuntimeService(parent, gateway.endpoint, routes, &chatStaticAuthorizer{token: gateway.key}, func(service *chatCompletionsService) {
+		service.normalizeBody = sanitizeWorkBuddyPayload
+		service.modelDetails = details
+	})
 	if err != nil {
 		return nil, err
 	}

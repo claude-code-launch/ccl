@@ -252,3 +252,83 @@ func TestGetCodexClientModelInfosRequiresClientVersion(t *testing.T) {
 		t.Errorf("entry without a window = %d (present=%t), want 0", window, ok)
 	}
 }
+
+func TestGetOpenAIModelInfosNormalizesModalitiesAndTokenLimits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"kiro-style","max_input_tokens":200000,"max_output_tokens":64000,"supported_input_types":["TEXT","IMAGE"]},
+			{"id":"modelsdev-style","modalities":{"input":["IMAGE","TEXT"]},"token_limits":{"context_window":500000,"max_output_token_length":32768}},
+			{"id":"plain-unknown"}
+		]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	infos, err := protocol.GetOpenAIModelInfos(server.URL, "key")
+	if err != nil {
+		t.Fatalf("GetOpenAIModelInfos: %v", err)
+	}
+	byID := map[string]protocol.ModelInfo{}
+	for _, info := range infos {
+		byID[info.ID] = info
+	}
+	kiro := byID["kiro-style"]
+	if kiro.ContextWindow != 200000 || kiro.MaxOutputTokens != 64000 || strings.Join(kiro.InputModalities, ",") != "text,image" {
+		t.Fatalf("kiro-style metadata = %+v", kiro)
+	}
+	mdev := byID["modelsdev-style"]
+	if mdev.ContextWindow != 500000 || mdev.MaxOutputTokens != 32768 || strings.Join(mdev.InputModalities, ",") != "text,image" {
+		t.Fatalf("modelsdev-style metadata = %+v", mdev)
+	}
+	if unknown := byID["plain-unknown"]; len(unknown.InputModalities) != 0 || unknown.MaxOutputTokens != 0 || unknown.ReasoningKnown {
+		t.Fatalf("invented metadata for unknown model = %+v", unknown)
+	}
+}
+
+func TestGetOpenAIModelInfosDecodesGrokReasoningEffortsAndCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{
+				"id":"grok-4.6",
+				"supports_reasoning_effort":true,
+				"reasoning_effort_server_default":"high",
+				"reasoning_efforts":[
+					{"value":"low","label":"Low Effort","description":"Quick"},
+					{"value":"medium","label":"Medium Effort"},
+					{"value":"high","label":"High Effort","default":true},
+					{"value":"xhigh","label":"Extra High Effort"}
+				]
+			},
+			{
+				"id":"cap-model",
+				"capabilities":{"default_reasoning_effort":"medium","reasoning_effort":["low","medium","high"]}
+			},
+			{
+				"id":"disabled-reasoning",
+				"supports_reasoning_effort":false,
+				"reasoning_efforts":[{"value":"high"}]
+			}
+		]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	infos, err := protocol.GetOpenAIModelInfos(server.URL, "key")
+	if err != nil {
+		t.Fatalf("GetOpenAIModelInfos: %v", err)
+	}
+	byID := map[string]protocol.ModelInfo{}
+	for _, info := range infos {
+		byID[info.ID] = info
+	}
+	grok := byID["grok-4.6"]
+	if !grok.ReasoningKnown || len(grok.ReasoningLevels) != 4 || grok.DefaultReasoningLevel != "high" || grok.ReasoningLevels[0].Description != "Quick" {
+		t.Fatalf("grok-4.6 reasoning metadata = %+v", grok)
+	}
+	capModel := byID["cap-model"]
+	if !capModel.ReasoningKnown || len(capModel.ReasoningLevels) != 3 || capModel.DefaultReasoningLevel != "medium" {
+		t.Fatalf("cap-model reasoning metadata = %+v", capModel)
+	}
+	disabled := byID["disabled-reasoning"]
+	if !disabled.ReasoningKnown || len(disabled.ReasoningLevels) != 0 || disabled.DefaultReasoningLevel != "" {
+		t.Fatalf("disabled-reasoning metadata = %+v", disabled)
+	}
+}

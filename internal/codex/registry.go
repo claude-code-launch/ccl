@@ -206,6 +206,7 @@ func (g *Gateway) RefreshProvidersMetadata(providers []provider.Provider, persis
 	current := g.currentLocked()
 	next := *current
 	next.models = cloneCatalogModels(current.models)
+	next.routes = maps.Clone(current.routes)
 	for _, p := range providers {
 		var runtime *oauthproxy.Runtime
 		for alias, route := range current.routes {
@@ -217,22 +218,29 @@ func (g *Gateway) RefreshProvidersMetadata(providers []provider.Provider, persis
 		if runtime == nil {
 			continue
 		}
-		details := runtime.ModelDetails()
+		p.Type = provider.EffectiveType(p)
+		oauth := strings.ToLower(strings.TrimSpace(p.OAuthProvider))
+		mixed := oauth == "" && len(p.ModelProtocols) > 0
+		nativeProvider := oauth == "gpt" || oauth == "codex" ||
+			oauth == "" && !mixed && provider.IsOpenAIResponsesType(p.Type)
+		details := withGPTReasoningDefaults(runtime.Models(), runtime.ModelDetails())
 		if _, err := modelsdev.CachedIndex(); err == nil {
-			details, _ = withModelsDevReasoning(runtime.Models(), details, runtime.ModelDisplayNames(), p)
-		} else {
-			details = nil
+			details, _ = withModelsDevMetadata(runtime.Models(), details, runtime.ModelDisplayNames(), p, !nativeProvider)
 		}
 		for _, model := range next.models {
 			alias, _ := model["slug"].(string)
-			route, ok := current.routes[alias]
+			route, ok := next.routes[alias]
 			if !ok || route.Provider != p.Name {
 				continue
 			}
 			applyProviderContext(model, provider.StripContextSuffix(route.Model), p)
-			info, ok := details[route.Model]
-			if !ok {
-				info = details[strings.ToLower(route.Model)]
+			_, info, _ := lookupModelInfo(details, route.Model)
+			if len(info.InputModalities) > 0 {
+				applyModelModalities(model, info)
+			}
+			if info.MaxOutputTokens > 0 {
+				route.MaxOutputTokens = info.MaxOutputTokens
+				next.routes[alias] = route
 			}
 			if !route.NativeResponses && info.ReasoningKnown {
 				model["supported_reasoning_levels"], model["default_reasoning_level"] = reasoningLevels(info)

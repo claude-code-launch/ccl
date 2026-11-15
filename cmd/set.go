@@ -32,15 +32,72 @@ const maxModelListProbeBytes = 8 << 20
 var setCmd = &cobra.Command{
 	Use:   "set [name]",
 	Short: "Add or update an LLM provider configuration",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if refresh, _ := cmd.Flags().GetBool("refresh-models"); refresh {
-			if len(args) != 0 {
-				return fmt.Errorf("--refresh-models takes no provider name")
-			}
-			return refreshModelsDevMetadata(cmd.Context(), cmd.OutOrStdout())
+	RunE:  runProviderSetCommand,
+}
+
+func registerProviderSetFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("refresh-models", false, "Refresh models.dev metadata and its offline cache without editing providers")
+	cmd.Flags().StringP("default-model", "m", "", "Set or clear (empty string) the provider's default model ID without opening the TUI")
+}
+
+func runProviderSetCommand(cmd *cobra.Command, args []string) error {
+	refresh, _ := cmd.Flags().GetBool("refresh-models")
+	defaultModelChanged := cmd.Flags().Changed("default-model")
+	if refresh && defaultModelChanged {
+		return fmt.Errorf("%s", locale.T("不能同时使用 --refresh-models 和 --default-model", "cannot combine --refresh-models with --default-model"))
+	}
+	if refresh {
+		if len(args) != 0 {
+			return fmt.Errorf("--refresh-models takes no provider name")
 		}
-		return RunProviderSet(args)
-	},
+		return refreshModelsDevMetadata(cmd.Context(), cmd.OutOrStdout())
+	}
+	if defaultModelChanged {
+		rawModel, _ := cmd.Flags().GetString("default-model")
+		return runSetProviderDefaultModel(cmd, args, rawModel)
+	}
+	return RunProviderSet(args)
+}
+
+func runSetProviderDefaultModel(cmd *cobra.Command, args []string, rawModel string) error {
+	if len(args) > 1 {
+		return fmt.Errorf(locale.T("最多只能指定一个 Provider 名称（当前 %d 个）", "expected at most 1 provider name, got %d"), len(args))
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	target := ""
+	if len(args) == 1 {
+		target = strings.TrimSpace(args[0])
+	} else {
+		target = strings.TrimSpace(cfg.ActiveProvider)
+	}
+	if target == "" || provider.IsDefaultProvider(target) {
+		return fmt.Errorf("%s", locale.T("请先指定 Provider 名称或先通过 ccl use 激活一个 Provider", "specify a provider name or activate one first before setting --default-model"))
+	}
+	normalized := provider.NormalizeModelID(rawModel)
+	var updated provider.Provider
+	if err := updateProvider(target, func(p *provider.Provider) error {
+		candidate := *p
+		candidate.DefaultModel = normalized
+		if err := provider.ValidateRuntime(candidate); err != nil {
+			return err
+		}
+		p.DefaultModel = normalized
+		updated = *p
+		return nil
+	}); err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if normalized == "" {
+		fmt.Fprintf(out, "✅ %s %q\n", locale.T("已清除默认模型，Provider：", "Cleared default model for provider"), updated.Name)
+	} else {
+		fmt.Fprintf(out, "✅ %s %q -> %s\n", locale.T("已设置默认模型：", "Updated default model for provider"), updated.Name, normalized)
+	}
+	printCodexModelUpdateNotice(out, updated.Name)
+	return nil
 }
 
 func RunProviderSet(args []string) error {
@@ -156,15 +213,13 @@ func RunProviderSet(args []string) error {
 	updatedModel.syncConnectionInputs()
 	p = *updatedModel.p
 	setDebugf(
-		"advanced config finished name=%q endpoint_empty=%t api_key_len=%d type=%q model_count=%d effort=%q slots=%s one_m=%s detecting=%t detection_error=%v model_pool_count=%d connection_dirty=%t auto_configured=%t",
+		"advanced config finished name=%q endpoint_empty=%t api_key_len=%d type=%q model_count=%d effort=%q detecting=%t detection_error=%v model_pool_count=%d connection_dirty=%t auto_configured=%t",
 		p.Name,
 		p.Endpoint == "",
 		len(p.APIKey),
 		p.Type,
 		countCSV(p.Model),
 		p.EffortLevel,
-		slotDebugSummary(p),
-		reviewOneMSummary(updatedModel.live().oneMSlots),
 		updatedModel.live().detecting,
 		updatedModel.live().detectionError,
 		len(updatedModel.live().modelPool),
@@ -199,7 +254,7 @@ func RunProviderSet(args []string) error {
 	// 未完成探测就退出（如在凭据页按 Esc）→ 不保存半成品配置
 	if !providerConfigurationComplete(p) {
 		setDebugf(
-			"abort: incomplete config endpoint_empty=%t api_key_empty=%t type_empty=%t model_empty=%t type=%q model_count=%d effort=%q slots=%s",
+			"abort: incomplete config endpoint_empty=%t api_key_empty=%t type_empty=%t model_empty=%t type=%q model_count=%d effort=%q",
 			p.Endpoint == "",
 			p.APIKey == "",
 			p.Type == "",
@@ -207,20 +262,18 @@ func RunProviderSet(args []string) error {
 			p.Type,
 			countCSV(p.Model),
 			p.EffortLevel,
-			slotDebugSummary(p),
 		)
 		fmt.Fprintln(os.Stderr, locale.T("ℹ️ 配置未完成，已退出，未保存。", "ℹ️ Configuration incomplete; aborted without saving."))
 		return nil
 	}
 
-	applyCompactConfig(&p, updatedModel.live().oneMSlots, updatedModel.live().compactPreset)
+	applyCompactPreset(&p, updatedModel.live().compactPreset)
 	setDebugf(
-		"after applyCompactConfig provider=%q type=%q effort=%q model_count=%d slots=%s compact=%s active_chosen=%t",
+		"after applyCompactPreset provider=%q type=%q effort=%q model_count=%d compact=%s active_chosen=%t",
 		p.Name,
 		p.Type,
 		p.EffortLevel,
 		countCSV(p.Model),
-		slotDebugSummary(p),
 		updatedModel.compactSummary(),
 		updatedModel.IsActiveChosen,
 	)
@@ -274,7 +327,7 @@ func providerConfigurationComplete(p provider.Provider) bool {
 }
 
 func init() {
-	setCmd.Flags().Bool("refresh-models", false, "Refresh models.dev metadata and its offline cache without editing providers")
+	registerProviderSetFlags(setCmd)
 	rootCmd.AddCommand(setCmd)
 }
 
@@ -339,18 +392,6 @@ func uniqueProviderName(existing map[string]provider.Provider, base string) stri
 
 func countCSV(csv string) int {
 	return len(modelrouting.SplitCSV(csv))
-}
-
-func slotDebugSummary(p provider.Provider) string {
-	return fmt.Sprintf(
-		"opus_set=%t sonnet_set=%t haiku_set=%t fable_set=%t custom_set=%t subagent_set=%t",
-		strings.TrimSpace(p.OpusModel) != "",
-		strings.TrimSpace(p.SonnetModel) != "",
-		strings.TrimSpace(p.HaikuModel) != "",
-		strings.TrimSpace(p.FableModel) != "",
-		strings.TrimSpace(p.CustomModelID) != "",
-		strings.TrimSpace(p.SubagentModel) != "",
-	)
 }
 
 func stringInSlice(s string, slice []string) bool {

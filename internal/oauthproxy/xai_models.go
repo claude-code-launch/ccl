@@ -7,18 +7,44 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 type xaiModel struct {
-	ID            string
-	Name          string
-	ContextWindow int
+	ID                    string
+	Name                  string
+	ContextWindow         int
+	MaxOutputTokens       int
+	InputModalities       []string
+	ReasoningLevels       []protocol.ReasoningLevel
+	DefaultReasoningLevel string
+	ReasoningKnown        bool
 }
 
 func xaiFallbackModels() []xaiModel {
+	grok46Levels, _ := reasoningLevelsFromEfforts([]string{"low", "medium", "high", "xhigh"}, "high")
+	grok45Levels, _ := reasoningLevelsFromEfforts([]string{"low", "medium", "high"}, "high")
 	return []xaiModel{
-		{ID: "grok-4.6", Name: "Grok 4.6", ContextWindow: 500_000},
-		{ID: "grok-4.5", Name: "Grok 4.5", ContextWindow: 500_000},
+		{
+			ID:                    "grok-4.6",
+			Name:                  "Grok 4.6",
+			ContextWindow:         500_000,
+			InputModalities:       []string{"text", "image"},
+			ReasoningLevels:       grok46Levels,
+			DefaultReasoningLevel: "high",
+			ReasoningKnown:        true,
+		},
+		{
+			ID:                    "grok-4.5",
+			Name:                  "Grok 4.5",
+			ContextWindow:         500_000,
+			InputModalities:       []string{"text", "image"},
+			ReasoningLevels:       grok45Levels,
+			DefaultReasoningLevel: "high",
+			ReasoningKnown:        true,
+		},
 	}
 }
 
@@ -79,11 +105,28 @@ func requestXaiModels(ctx context.Context, client *http.Client, endpoint string,
 func parseXaiModels(body []byte) ([]xaiModel, error) {
 	var catalog struct {
 		Data []struct {
-			ID            string `json:"id"`
-			Model         string `json:"model"`
-			Name          string `json:"name"`
-			APIBackend    string `json:"api_backend"`
-			ContextWindow int    `json:"context_window"`
+			ID                           string                    `json:"id"`
+			Model                        string                    `json:"model"`
+			Name                         string                    `json:"name"`
+			APIBackend                   string                    `json:"api_backend"`
+			ContextWindow                int                       `json:"context_window"`
+			MaxInputTokens               int                       `json:"max_input_tokens"`
+			MaxOutputTokens              int                       `json:"max_output_tokens"`
+			InputModalities              []string                  `json:"input_modalities"`
+			SupportedInputTypes          []string                  `json:"supported_input_types"`
+			ReasoningLevels              []protocol.ReasoningLevel `json:"supported_reasoning_levels"`
+			DefaultReasoningLevel        string                    `json:"default_reasoning_level"`
+			SupportsReasoningEffort      *bool                     `json:"supports_reasoning_effort"`
+			ReasoningEffort              string                    `json:"reasoning_effort"`
+			ReasoningEffortServerDefault string                    `json:"reasoning_effort_server_default"`
+			ReasoningEfforts             json.RawMessage           `json:"reasoning_efforts"`
+			Capabilities                 struct {
+				DefaultReasoningEffort string          `json:"default_reasoning_effort"`
+				ReasoningEffort        json.RawMessage `json:"reasoning_effort"`
+			} `json:"capabilities"`
+			Modalities struct {
+				Input []string `json:"input"`
+			} `json:"modalities"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &catalog); err != nil {
@@ -91,6 +134,7 @@ func parseXaiModels(body []byte) ([]xaiModel, error) {
 	}
 	models := make([]xaiModel, 0, len(catalog.Data))
 	seen := make(map[string]bool, len(catalog.Data))
+	index, _ := modelsdev.CachedIndex()
 	for _, entry := range catalog.Data {
 		id := strings.TrimSpace(entry.ID)
 		if id == "" {
@@ -106,9 +150,67 @@ func parseXaiModels(body []byte) ([]xaiModel, error) {
 		if name == "" {
 			name = id
 		}
-		models = append(models, xaiModel{ID: id, Name: name, ContextWindow: entry.ContextWindow})
+		window := entry.ContextWindow
+		if window == 0 {
+			window = entry.MaxInputTokens
+		}
+		modalities := normalizeModelModalities(entry.InputModalities)
+		if len(modalities) == 0 {
+			modalities = normalizeModelModalities(entry.Modalities.Input)
+		}
+		if len(modalities) == 0 {
+			modalities = normalizeModelModalities(entry.SupportedInputTypes)
+		}
+		if len(modalities) == 0 && index != nil {
+			if resolved, ok := index.InputModalities("xai", id, name); ok {
+				modalities = resolved
+			}
+		}
+		if len(modalities) == 0 && xaiKnownVisionModel(id) {
+			modalities = []string{"text", "image"}
+		}
+		maxOut := entry.MaxOutputTokens
+		if maxOut == 0 && index != nil {
+			if resolved, ok := index.MaxOutputTokens("xai", id, name); ok {
+				maxOut = resolved
+			}
+		}
+		levels, defaultLevel, known := entry.ReasoningLevels, strings.TrimSpace(entry.DefaultReasoningLevel), len(entry.ReasoningLevels) > 0
+		if !known {
+			levels, defaultLevel, known = protocol.ParseRemoteReasoningEfforts(
+				entry.SupportsReasoningEffort,
+				entry.ReasoningEfforts,
+				entry.ReasoningEffortServerDefault,
+				entry.ReasoningEffort,
+				entry.Capabilities.DefaultReasoningEffort,
+				entry.Capabilities.ReasoningEffort,
+			)
+		} else if entry.SupportsReasoningEffort != nil && !*entry.SupportsReasoningEffort {
+			levels, defaultLevel, known = nil, "", true
+		}
+		if !known && index != nil {
+			if efforts, found := index.Efforts("xai", id, name); found {
+				levels, defaultLevel = reasoningLevelsFromEfforts(efforts, "high")
+				known = true
+			}
+		}
+		models = append(models, xaiModel{
+			ID:                    id,
+			Name:                  name,
+			ContextWindow:         window,
+			MaxOutputTokens:       maxOut,
+			InputModalities:       modalities,
+			ReasoningLevels:       levels,
+			DefaultReasoningLevel: defaultLevel,
+			ReasoningKnown:        known,
+		})
 	}
 	return models, nil
+}
+
+func xaiKnownVisionModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(stripContextModelSuffix(model)))
+	return strings.HasPrefix(lower, "grok-4") || strings.HasPrefix(lower, "grok-2-vision")
 }
 
 func xaiModelSpec(configured string, models []xaiModel) string {
@@ -154,4 +256,42 @@ func addXaiDisplayAliases(service *codexResponsesService, models []xaiModel) {
 			service.modelRoute[strings.ToLower(name)] = id
 		}
 	}
+}
+
+func xaiModelDetails(configured string, models []xaiModel) map[string]protocol.ModelInfo {
+	details := make(map[string]protocol.ModelInfo, len(models)*2)
+	byID := make(map[string]xaiModel, len(models))
+	build := func(alias string, model xaiModel) protocol.ModelInfo {
+		levels := append([]protocol.ReasoningLevel(nil), model.ReasoningLevels...)
+		return protocol.ModelInfo{
+			ID:                    alias,
+			DisplayName:           model.Name,
+			ContextWindow:         model.ContextWindow,
+			MaxOutputTokens:       model.MaxOutputTokens,
+			InputModalities:       append([]string(nil), model.InputModalities...),
+			ReasoningLevels:       levels,
+			DefaultReasoningLevel: model.DefaultReasoningLevel,
+			ReasoningKnown:        model.ReasoningKnown,
+		}
+	}
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		byID[strings.ToLower(id)] = model
+		details[strings.ToLower(id)] = build(id, model)
+		if name := strings.TrimSpace(model.Name); name != "" {
+			details[strings.ToLower(name)] = build(name, model)
+		}
+	}
+	for _, route := range runtimeModelRoutes(configured) {
+		if model, ok := byID[strings.ToLower(strings.TrimSpace(route.Name))]; ok {
+			alias := strings.TrimSpace(route.Alias)
+			if alias != "" {
+				details[strings.ToLower(alias)] = build(alias, model)
+			}
+		}
+	}
+	return details
 }

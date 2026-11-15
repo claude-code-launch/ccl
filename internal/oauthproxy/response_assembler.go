@@ -181,8 +181,60 @@ func (a *responseAssembler) item(index int, complete bool) map[string]any {
 		case "tool_search":
 			arguments := map[string]any{}
 			_ = decodeProtocolJSON([]byte(block.Arguments), &arguments)
-			return map[string]any{"id": "tsc_" + block.ID, "type": "tool_search_call", "call_id": block.ID,
+			return map[string]any{"id": block.ItemID, "type": "tool_search_call", "call_id": block.ID,
 				"execution": "client", "arguments": arguments, "status": status}
+		case "computer":
+			payload := map[string]any{}
+			_ = decodeProtocolJSON([]byte(block.Arguments), &payload)
+			if nested, ok := payload["action"].(map[string]any); ok {
+				payload = nested
+			}
+			item := map[string]any{
+				"id":                    block.ItemID,
+				"type":                  "computer_call",
+				"call_id":               block.ID,
+				"action":                payload,
+				"pending_safety_checks": []any{},
+				"status":                status,
+			}
+			if actions, ok := payload["actions"].([]any); ok && len(payload) == 1 {
+				item["actions"] = actions
+				delete(item, "action")
+			}
+			return item
+		case "shell":
+			payload := map[string]any{}
+			_ = decodeProtocolJSON([]byte(block.Arguments), &payload)
+			if nested, ok := payload["action"].(map[string]any); ok {
+				payload = nested
+			}
+			return map[string]any{
+				"id": block.ItemID, "type": "shell_call", "call_id": block.ID,
+				"action": payload, "status": status,
+			}
+		case "local_shell":
+			payload := map[string]any{}
+			_ = decodeProtocolJSON([]byte(block.Arguments), &payload)
+			if nested, ok := payload["action"].(map[string]any); ok {
+				payload = nested
+			}
+			if payload["type"] == nil {
+				payload["type"] = "exec"
+			}
+			return map[string]any{
+				"id": block.ItemID, "type": "local_shell_call", "call_id": block.ID,
+				"action": payload, "status": status,
+			}
+		case "apply_patch":
+			payload := map[string]any{}
+			_ = decodeProtocolJSON([]byte(block.Arguments), &payload)
+			if nested, ok := payload["operation"].(map[string]any); ok {
+				payload = nested
+			}
+			return map[string]any{
+				"id": block.ItemID, "type": "apply_patch_call", "call_id": block.ID,
+				"operation": payload, "status": status,
+			}
 		case "custom":
 			var input map[string]any
 			_ = decodeProtocolJSON([]byte(block.Arguments), &input)
@@ -430,16 +482,29 @@ func (a *responseAssembler) addToolUse(id, name, partialJSON string) error {
 	if err := a.retain(len(partialJSON)); err != nil {
 		return err
 	}
+	itemID := "fc_" + id
+	switch spec.Kind {
+	case "tool_search":
+		itemID = "tsc_" + id
+	case "computer":
+		itemID = "cu_" + id
+	case "shell":
+		itemID = "sh_" + id
+	case "local_shell":
+		itemID = "lsh_" + id
+	case "apply_patch":
+		itemID = "apc_" + id
+	}
 	index := a.appendBlock(assemblerBlock{
-		Type: blockToolUse, ItemID: "fc_" + id, ID: id, Name: spec.Name, Arguments: partialJSON, spec: spec,
+		Type: blockToolUse, ItemID: itemID, ID: id, Name: spec.Name, Arguments: partialJSON, spec: spec,
 	})
 	a.hasToolUse = true
 	a.outputTokens += estimateApproxTokens(partialJSON)
 	fields := map[string]any{"item_id": a.blocks[index].ItemID, "output_index": index}
 	switch spec.Kind {
-	case "tool_search":
-		// Search arguments travel in the output item itself; the client runs
-		// the search and returns tool_search_output on its next request.
+	case "tool_search", "computer", "shell", "local_shell", "apply_patch":
+		// Arguments/action payloads travel in the output item itself; the client
+		// executes the action and returns the matching *_output on its next request.
 		if err := a.emit("response.output_item.added", map[string]any{"output_index": index, "item": a.item(index, false)}); err != nil {
 			return err
 		}

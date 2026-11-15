@@ -23,10 +23,14 @@ func writeMigrationFixture(t *testing.T, home, session, encrypted string) string
 	var records []map[string]any
 	records = append(records, map[string]any{"type": "session_meta", "payload": map[string]any{"id": session, "creator_account_id": "fake-native-account"}})
 	for _, item := range []map[string]any{
-		{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "keep-this-goal"}}},
+		{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "keep-this-goal"}, {"type": "input_image", "image_url": "data:image/png;base64,USER_SCREENSHOT_SECRET_BYTES"}}},
 		{"type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "private-reasoning-not-for-migration"}}},
 		{"type": "function_call", "name": "old_tool", "arguments": "old tool arguments"},
 		{"type": "function_call_output", "call_id": "old-call", "output": "prior-test-result"},
+		{"type": "custom_tool_call", "name": "exec", "input": "await tools.computer_use_screenshot({})"},
+		{"type": "custom_tool_call_output", "call_id": "exec-call", "output": []any{map[string]any{"type": "input_text", "text": "exec-observation"}, map[string]any{"type": "input_image", "image_url": "data:image/png;base64,EXEC_SCREENSHOT_SECRET_BYTES"}}},
+		{"type": "computer_call", "call_id": "cu-call", "action": map[string]any{"type": "click", "x": 120, "y": 240}},
+		{"type": "computer_call_output", "call_id": "cu-call", "output": map[string]any{"type": "computer_screenshot", "image_url": "data:image/png;base64,CU_SCREENSHOT_SECRET_BYTES"}},
 		{"type": "message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": "pending-fix"}}},
 	} {
 		records = append(records, map[string]any{"type": "response_item", "payload": item})
@@ -52,12 +56,12 @@ func TestNativeCompactionMigrationValidatesChatAndCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"keep-this-goal", "prior-test-result", "pending-fix", "not decrypted"} {
+	for _, want := range []string{"keep-this-goal", "prior-test-result", "exec-observation", "Historical tool call computer:", "[image omitted]", "pending-fix", "not decrypted"} {
 		if !strings.Contains(text, want) {
-			t.Errorf("lost context %q", want)
+			t.Errorf("lost context %q in:\n%s", want, text)
 		}
 	}
-	for _, unwanted := range []string{"private-reasoning-not-for-migration", "future-message-must-not-leak", "opaque-test-cipher"} {
+	for _, unwanted := range []string{"private-reasoning-not-for-migration", "future-message-must-not-leak", "opaque-test-cipher", "USER_SCREENSHOT_SECRET_BYTES", "EXEC_SCREENSHOT_SECRET_BYTES", "CU_SCREENSHOT_SECRET_BYTES"} {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("migration leaked %q", unwanted)
 		}

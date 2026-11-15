@@ -42,33 +42,184 @@ func hoistCompactionTrigger(items []map[string]any) ([]map[string]any, bool) {
 }
 
 // Summarization has no live tools. Preserve historical calls/results as text
-// so the summarization request cannot resume a tool loop.
+// so the summarization request cannot resume a tool loop, and omit inline
+// screenshot/image payloads so compaction stays within model context limits.
 func compactionItems(items []map[string]any) []map[string]any {
 	result := make([]map[string]any, 0, len(items)+1)
 	for _, item := range items {
 		kind, _ := item["type"].(string)
 		switch kind {
-		case "function_call", "custom_tool_call", "tool_search_call":
-			input := item["arguments"]
-			if kind == "custom_tool_call" {
-				input = item["input"]
-			}
-			name := textValue(item["name"])
-			if kind == "tool_search_call" {
-				name = "tool_search"
-			}
-			result = append(result, map[string]any{"type": "message", "role": "assistant", "content": fmt.Sprintf("Previous tool call %s (%s):\n%s", name, textValue(item["call_id"]), textValue(input))})
-		case "function_call_output", "custom_tool_call_output", "tool_search_output":
+		case "function_call", "custom_tool_call", "tool_search_call", "computer_call", "shell_call", "local_shell_call", "apply_patch_call":
+			name, input := compactionToolCallSummary(kind, item)
+			result = append(result, map[string]any{"type": "message", "role": "assistant", "content": fmt.Sprintf("Previous tool call %s (%s):\n%s", name, textValue(item["call_id"]), compactionTextValue(input))})
+		case "function_call_output", "custom_tool_call_output", "tool_search_output", "computer_call_output", "shell_call_output", "local_shell_call_output", "apply_patch_call_output":
 			output := item["output"]
 			if kind == "tool_search_output" {
 				output = item["tools"]
 			}
-			result = append(result, map[string]any{"type": "message", "role": "user", "content": fmt.Sprintf("Previous tool result (%s):\n%s", textValue(item["call_id"]), textValue(output))})
+			result = append(result, map[string]any{"type": "message", "role": "user", "content": fmt.Sprintf("Previous tool result (%s):\n%s", textValue(item["call_id"]), compactionTextValue(output))})
+		case "message":
+			result = append(result, sanitizeCompactionMessage(item))
 		default:
 			result = append(result, item)
 		}
 	}
 	return append(result, map[string]any{"type": "message", "role": "user", "content": "Summarize the conversation above for another assistant to continue. Preserve the goals, constraints, decisions, tool results, changed files, and outstanding tasks. Return only the summary; do not continue the task or call tools."})
+}
+
+func compactionToolCallSummary(kind string, item map[string]any) (string, any) {
+	switch kind {
+	case "custom_tool_call":
+		return textValue(item["name"]), item["input"]
+	case "tool_search_call":
+		if args, ok := item["arguments"]; ok && args != nil {
+			return "tool_search", args
+		}
+		return "tool_search", item["execution"]
+	case "computer_call":
+		if actions, ok := item["actions"]; ok && actions != nil {
+			return "computer", actions
+		}
+		return "computer", item["action"]
+	case "shell_call", "local_shell_call":
+		return "shell", item["action"]
+	case "apply_patch_call":
+		if op, ok := item["operation"]; ok && op != nil {
+			return "apply_patch", op
+		}
+		return "apply_patch", item["patch"]
+	default:
+		return textValue(item["name"]), item["arguments"]
+	}
+}
+
+func sanitizeCompactionMessage(item map[string]any) map[string]any {
+	switch content := item["content"].(type) {
+	case string:
+		if !isInlineImageData(content) {
+			return item
+		}
+		cloned := make(map[string]any, len(item))
+		for k, v := range item {
+			cloned[k] = v
+		}
+		cloned["content"] = "[image omitted]"
+		return cloned
+	case []any:
+		changed := false
+		partType := "input_text"
+		if role, _ := item["role"].(string); role == "assistant" {
+			partType = "output_text"
+		}
+		sanitized := make([]any, 0, len(content))
+		for _, raw := range content {
+			part, ok := raw.(map[string]any)
+			if !ok {
+				sanitized = append(sanitized, raw)
+				continue
+			}
+			if isImageContentItem(part) {
+				changed = true
+				sanitized = append(sanitized, map[string]any{"type": partType, "text": "[image omitted]"})
+				continue
+			}
+			if text, ok := part["text"].(string); ok && isInlineImageData(text) {
+				changed = true
+				clonedPart := make(map[string]any, len(part))
+				for k, v := range part {
+					clonedPart[k] = v
+				}
+				clonedPart["text"] = "[image omitted]"
+				sanitized = append(sanitized, clonedPart)
+				continue
+			}
+			sanitized = append(sanitized, raw)
+		}
+		if !changed {
+			return item
+		}
+		cloned := make(map[string]any, len(item))
+		for k, v := range item {
+			cloned[k] = v
+		}
+		cloned["content"] = sanitized
+		return cloned
+	default:
+		return item
+	}
+}
+
+func compactionTextValue(value any) string {
+	if s, ok := value.(string); ok {
+		if isInlineImageData(s) {
+			return "[image omitted]"
+		}
+		return s
+	}
+	sanitized, changed := sanitizeCompactionValue(value)
+	if !changed {
+		return textValue(value)
+	}
+	if s, ok := sanitized.(string); ok {
+		return s
+	}
+	raw, _ := json.Marshal(sanitized)
+	return string(raw)
+}
+
+func sanitizeCompactionValue(value any) (any, bool) {
+	switch v := value.(type) {
+	case string:
+		if isInlineImageData(v) {
+			return "[image omitted]", true
+		}
+		return v, false
+	case []any:
+		changed := false
+		out := make([]any, 0, len(v))
+		for _, elem := range v {
+			next, elemChanged := sanitizeCompactionValue(elem)
+			changed = changed || elemChanged
+			out = append(out, next)
+		}
+		return out, changed
+	case map[string]any:
+		if isImageContentItem(v) {
+			return "[image omitted]", true
+		}
+		changed := false
+		out := make(map[string]any, len(v))
+		for k, elem := range v {
+			if (k == "image_url" || k == "file_data") && elem != nil {
+				out[k] = "[image omitted]"
+				changed = true
+				continue
+			}
+			next, elemChanged := sanitizeCompactionValue(elem)
+			changed = changed || elemChanged
+			out[k] = next
+		}
+		return out, changed
+	default:
+		return value, false
+	}
+}
+
+func isImageContentItem(item map[string]any) bool {
+	kind, _ := item["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "input_image", "computer_screenshot", "image", "image_url":
+		return true
+	}
+	if urlValue, ok := item["image_url"].(string); ok && urlValue != "" {
+		return true
+	}
+	return false
+}
+
+func isInlineImageData(value string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(trimmed, "data:image/")
 }
 
 func inputItems(raw json.RawMessage) ([]map[string]any, error) {
@@ -310,7 +461,7 @@ func (h *responseHistory) put(id, route, owner string, items []map[string]any) {
 	if h.entries == nil {
 		h.entries = make(map[string]historyEntry)
 	}
-	for len(h.entries) >= 64 || h.bytes+len(raw) > 64<<20 {
+	for len(h.entries) >= 64 || h.bytes+len(raw) > 128<<20 {
 		var oldest string
 		var at time.Time
 		for k, e := range h.entries {

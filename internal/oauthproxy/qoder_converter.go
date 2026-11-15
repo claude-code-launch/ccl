@@ -57,9 +57,12 @@ func convertResponsesToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedR
 	if system := strings.TrimSpace(request.System); system != "" {
 		messages = append([]any{map[string]any{"role": "system", "content": system}}, messages...)
 	}
-	tools, err := qoderTransformTools(request.Tools)
-	if err != nil {
-		return nil, err
+	var tools []any
+	if request.ToolChoice.Mode != toolChoiceNone {
+		tools, err = qoderTransformTools(request.Tools)
+		if err != nil {
+			return nil, err
+		}
 	}
 	maxTokens := request.MaxOutputTokens
 	if maxTokens <= 0 {
@@ -83,6 +86,29 @@ func convertResponsesToQoder(raw []byte, catalog []qoderModel) (*qoderConvertedR
 		modelConfig["source"] = model.Source
 	}
 	parameters := map[string]any{"max_tokens": maxTokens}
+	if request.Temperature != nil {
+		parameters["temperature"] = *request.Temperature
+	}
+	if request.TopP != nil {
+		parameters["top_p"] = *request.TopP
+	}
+	if len(request.Stop) > 0 {
+		parameters["stop"] = request.Stop
+	}
+	if request.ParallelToolCalls != nil {
+		parameters["parallel_tool_calls"] = *request.ParallelToolCalls
+	}
+	if format := structuredOutputSchema(request.Format); format != nil {
+		parameters["response_format"] = map[string]any{"type": "json_schema", "json_schema": format}
+	}
+	if len(tools) > 0 {
+		switch request.ToolChoice.Mode {
+		case toolChoiceTool:
+			parameters["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": request.ToolChoice.Name}}
+		case toolChoiceRequired:
+			parameters["tool_choice"] = toolChoiceRequired
+		}
+	}
 	if levels, _ := qoderReasoningLevels(model.Config); len(levels) > 0 {
 		thinkingOff := strings.EqualFold(request.Effort, "none")
 		if matched := qoderMatchEffort(levels, request.Effort); matched != "" && !thinkingOff {
@@ -232,23 +258,10 @@ func qoderTransformTurns(turns []conversationTurn) ([]any, string) {
 }
 
 func qoderTransformUserTurn(turn conversationTurn) ([]any, string) {
-	messages := make([]any, 0, len(turn.Parts))
+	toolMessages := make([]any, 0, len(turn.Parts))
 	parts := make([]any, 0, len(turn.Parts))
 	var toolImages []any
 	var allText strings.Builder
-	flushUser := func() {
-		if len(parts) == 0 {
-			return
-		}
-		content := any(parts)
-		if len(parts) == 1 {
-			if part, ok := parts[0].(map[string]any); ok && part["type"] == "text" {
-				content = part["text"]
-			}
-		}
-		messages = append(messages, map[string]any{"role": "user", "content": content})
-		parts = nil
-	}
 	for _, part := range turn.Parts {
 		switch part.Kind {
 		case partText:
@@ -259,12 +272,11 @@ func qoderTransformUserTurn(turn conversationTurn) ([]any, string) {
 				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageURL}})
 			}
 		case partToolResult:
-			flushUser()
 			content := part.outputText()
 			var toolText []string
 			hasImage := false
-			// Tool messages carry text. Preserve screenshots as a subsequent
-			// user message, after all tool replies, like the Chat adapter.
+			// Tool messages carry text and precede any user parts so
+			// assistant(tool_calls) -> tool adjacency is always preserved.
 			for _, sub := range part.Output {
 				if sub.Kind == partText {
 					toolText = append(toolText, sub.Text)
@@ -280,15 +292,25 @@ func qoderTransformUserTurn(turn conversationTurn) ([]any, string) {
 			if hasImage {
 				content = strings.Join(toolText, "\n")
 			}
-			messages = append(messages, map[string]any{
+			toolMessages = append(toolMessages, map[string]any{
 				"role":         "tool",
 				"tool_call_id": part.CallID,
 				"content":      content,
 			})
 		}
 	}
+	messages := make([]any, 0, len(toolMessages)+1)
+	messages = append(messages, toolMessages...)
 	parts = append(parts, toolImages...)
-	flushUser()
+	if len(parts) > 0 {
+		content := any(parts)
+		if len(parts) == 1 {
+			if part, ok := parts[0].(map[string]any); ok && part["type"] == "text" {
+				content = part["text"]
+			}
+		}
+		messages = append(messages, map[string]any{"role": "user", "content": content})
+	}
 	if len(messages) == 0 {
 		messages = append(messages, map[string]any{"role": "user", "content": ""})
 	}

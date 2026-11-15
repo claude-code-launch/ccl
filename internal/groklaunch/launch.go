@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -19,7 +20,6 @@ import (
 	"github.com/claude-code-launch/ccl/internal/process"
 	"github.com/claude-code-launch/ccl/internal/provider"
 	"github.com/claude-code-launch/ccl/internal/providersession"
-	"github.com/claude-code-launch/ccl/internal/slotrec"
 )
 
 // Launch is a prepared Grok Build process spec: its embedded loopback
@@ -66,59 +66,154 @@ func newGrokSessionName() string {
 	return "grok_" + hex.EncodeToString(raw)
 }
 
-func resolveGrokModels(p provider.Provider) (defaultModel, fastModel string) {
-	models := modelrouting.SplitCSV(p.Model)
-	var rec slotrec.Recommendation
-	if len(models) > 0 {
-		rec = slotrec.Recommend(provider.Provider{}, models, nil)
+func resolveGrokDefaultModel(p provider.Provider) string {
+	if def := provider.StripContextSuffix(provider.NormalizeModelID(p.DefaultModel)); def != "" {
+		return def
 	}
-	for _, candidate := range []string{p.CustomModelID, p.SonnetModel, p.OpusModel, p.HaikuModel, p.FableModel, rec.Sonnet, rec.Opus, rec.Haiku} {
-		if m := strings.TrimSpace(candidate); m != "" {
-			defaultModel = m
-			break
+	for _, candidate := range modelrouting.SplitCSV(provider.RuntimeModelSpec(p)) {
+		if m := provider.StripContextSuffix(candidate); m != "" {
+			return m
 		}
 	}
-	if defaultModel == "" && len(models) > 0 {
-		defaultModel = strings.TrimSpace(models[0])
+	return ""
+}
+
+func resolveGrokDefaultModelWithRuntime(p provider.Provider, runtimeModels []string, modelNames map[string]string) string {
+	if len(runtimeModels) == 0 {
+		return resolveGrokDefaultModel(p)
 	}
-	for _, candidate := range []string{p.HaikuModel, rec.Haiku, defaultModel} {
-		if m := strings.TrimSpace(candidate); m != "" {
-			fastModel = m
-			break
+	lookupDisplay := func(key string) string {
+		for k, v := range modelNames {
+			if strings.EqualFold(strings.TrimSpace(k), key) ||
+				strings.EqualFold(provider.StripContextSuffix(k), key) {
+				return strings.TrimSpace(v)
+			}
+		}
+		return ""
+	}
+	candidates := make([]string, 0, 1+len(modelrouting.SplitCSV(provider.RuntimeModelSpec(p))))
+	if def := provider.StripContextSuffix(provider.NormalizeModelID(p.DefaultModel)); def != "" {
+		candidates = append(candidates, def)
+	}
+	candidates = append(candidates, modelrouting.SplitCSV(provider.RuntimeModelSpec(p))...)
+	for _, rawCandidate := range candidates {
+		candidate := provider.StripContextSuffix(rawCandidate)
+		if candidate == "" {
+			continue
+		}
+		for _, rm := range runtimeModels {
+			stripped := provider.StripContextSuffix(rm)
+			if stripped != "" && strings.EqualFold(stripped, candidate) {
+				return stripped
+			}
+		}
+		candDisplay := lookupDisplay(candidate)
+		for _, rm := range runtimeModels {
+			stripped := provider.StripContextSuffix(rm)
+			if stripped == "" {
+				continue
+			}
+			rmDisplay := lookupDisplay(stripped)
+			if rmDisplay != "" && (strings.EqualFold(rmDisplay, candidate) || (candDisplay != "" && strings.EqualFold(rmDisplay, candDisplay))) {
+				return stripped
+			}
 		}
 	}
-	return defaultModel, fastModel
+	for _, rm := range runtimeModels {
+		if stripped := provider.StripContextSuffix(rm); stripped != "" {
+			return stripped
+		}
+	}
+	return resolveGrokDefaultModel(p)
+}
+
+func resolveGrokAllowedModels(p provider.Provider, extraModels ...string) []string {
+	var allowed []string
+	seen := make(map[string]struct{})
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		allowed = append(allowed, id)
+	}
+	for _, candidate := range modelrouting.SplitCSV(provider.RuntimeModelSpec(p)) {
+		add(provider.StripContextSuffix(candidate))
+		add(candidate)
+	}
+	for _, extra := range extraModels {
+		add(provider.StripContextSuffix(extra))
+		add(extra)
+	}
+	return allowed
 }
 
 // ConfigOverlay renders model defaults without starting a runtime.
 func ConfigOverlay(p provider.Provider) string {
-	defaultModel, fastModel := resolveGrokModels(p)
-	return buildConfigOverlay(p, defaultModel, fastModel)
+	return buildConfigOverlay(p, resolveGrokDefaultModel(p))
 }
 
-func buildConfigOverlay(p provider.Provider, defaultModel, fastModel string) string {
-	raw, _ := json.Marshal(modelOverlay(p, defaultModel, fastModel))
+func buildConfigOverlay(p provider.Provider, defaultModel string) string {
+	raw, _ := json.Marshal(modelOverlay(p, defaultModel))
 	return string(raw)
 }
 
-func modelOverlay(p provider.Provider, defaultModel, fastModel string) map[string]any {
+// NormalizeReasoningEffort maps a CCL reasoning effort tier onto Grok Build's
+// accepted ReasoningEffort enum (none, minimal, low, medium, high, xhigh, max),
+// clamping Codex's "ultra" tier to "max" and dropping unrecognized values.
+func NormalizeReasoningEffort(level string) string {
+	switch normalized := strings.ToLower(strings.TrimSpace(level)); normalized {
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return normalized
+	case "ultra":
+		return "max"
+	default:
+		return ""
+	}
+}
+
+func modelOverlay(p provider.Provider, defaultModel string, runtimeModels ...string) map[string]any {
 	modelsCfg := make(map[string]any)
 	if defaultModel != "" {
 		modelsCfg["default"] = defaultModel
 		modelsCfg["web_search"] = defaultModel
 		modelsCfg["image_description"] = defaultModel
+		modelsCfg["session_summary"] = defaultModel
+		modelsCfg["prompt_suggestion"] = defaultModel
 	}
-	if fastModel != "" {
-		modelsCfg["session_summary"] = fastModel
-		modelsCfg["prompt_suggestion"] = fastModel
+	allowed := make([]string, 0, 1+len(runtimeModels))
+	seen := make(map[string]struct{})
+	if def := strings.TrimSpace(defaultModel); def != "" {
+		allowed = append(allowed, def)
+		seen[def] = struct{}{}
 	}
-	if effort := strings.TrimSpace(p.EffortLevel); effort != "" {
+	for _, id := range resolveGrokAllowedModels(p, runtimeModels...) {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		allowed = append(allowed, id)
+	}
+	if len(allowed) > 0 {
+		modelsCfg["allowed_models"] = allowed
+	}
+	if effort := NormalizeReasoningEffort(p.EffortLevel); effort != "" {
 		modelsCfg["default_reasoning_effort"] = effort
 	}
+	out := make(map[string]any)
 	if len(modelsCfg) > 0 {
-		return map[string]any{"models": modelsCfg}
+		out["models"] = modelsCfg
 	}
-	return map[string]any{}
+	if defaultModel != "" || len(allowed) > 0 {
+		out["features"] = map[string]any{
+			"subagent_model_inheritance": true,
+		}
+	}
+	return out
 }
 
 var reservedEnv = map[string]struct{}{
@@ -186,6 +281,44 @@ func buildGrokProcessEnv(inherited []string, p provider.Provider, configJSON, au
 	return env
 }
 
+// LookPath locates the Grok Build executable in PATH or ~/.grok/bin.
+func LookPath() (string, error) {
+	path, err := exec.LookPath("grok")
+	if err == nil {
+		return path, nil
+	}
+	if home, homeErr := os.UserHomeDir(); homeErr == nil {
+		name := "grok"
+		if runtime.GOOS == "windows" {
+			name = "grok.exe"
+		}
+		if local, localErr := exec.LookPath(filepath.Join(home, ".grok", "bin", name)); localErr == nil {
+			return local, nil
+		}
+	}
+	return "", err
+}
+
+// NativeBrowserEnv builds the process environment for a browser worker running
+// on Grok Build's own ~/.grok login.
+func NativeBrowserEnv(inherited []string, permissionMode string) []string {
+	_ = permissionMode
+	env := make([]string, 0, len(inherited)+2)
+	for _, entry := range inherited {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			env = append(env, entry)
+			continue
+		}
+		switch strings.ToUpper(key) {
+		case "GROK_CONFIG", "GROK_CONFIG_PATH", "GROK_SANDBOX", "GROK_DISABLE_AUTOUPDATER":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "GROK_SANDBOX=workspace", "GROK_DISABLE_AUTOUPDATER=1")
+}
+
 // Prepare resolves the provider runtime and creates an isolated Grok launch.
 func Prepare(ctx context.Context, grokPath string, p provider.Provider) (*Launch, error) {
 	sweepStaleSessionFiles()
@@ -199,16 +332,22 @@ func Prepare(ctx context.Context, grokPath string, p provider.Provider) (*Launch
 		oauthproxy.LogInfoEvent("session_start", "session", sessionName, "agent", "grokbuild", "provider", p.Name,
 			"oauth", p.OAuthProvider, "protocol", provider.ProtocolLabelForProvider(p))
 	}
-	return prepare(ctx, grokPath, p, sessionName, "")
+	return prepare(ctx, grokPath, p, sessionName, false, "")
 }
 
 // PrepareBrowser gives the ACP worker its own Grok profile and keeps the
-// surrounding server's log sink. Browser workers always start in Ask mode.
+// surrounding server's log sink. Browser workers start in Ask mode by default.
 func PrepareBrowser(ctx context.Context, grokPath string, p provider.Provider, profile string) (*Launch, error) {
-	return prepare(ctx, grokPath, p, newGrokSessionName(), profile)
+	return PrepareBrowserWithMode(ctx, grokPath, p, profile, "ask")
 }
 
-func prepare(ctx context.Context, grokPath string, p provider.Provider, sessionName, profile string) (*Launch, error) {
+// PrepareBrowserWithMode prepares an isolated Grok profile with an explicit permission mode.
+func PrepareBrowserWithMode(ctx context.Context, grokPath string, p provider.Provider, profile, permissionMode string) (*Launch, error) {
+	_ = permissionMode
+	return prepare(ctx, grokPath, p, newGrokSessionName(), true, profile)
+}
+
+func prepare(ctx context.Context, grokPath string, p provider.Provider, sessionName string, browser bool, profile string) (*Launch, error) {
 	session, err := providersession.Prepare(ctx, p)
 	if err != nil {
 		oauthproxy.LogErrorEvent("session_setup_failed", "session", sessionName, "agent", "grokbuild", "provider", p.Name,
@@ -221,27 +360,27 @@ func prepare(ctx context.Context, grokPath string, p provider.Provider, sessionN
 		"base", oauthproxy.SafeLogEndpoint(session.Provider.Endpoint))
 
 	resolved := session.Provider
-	provider.ApplyOAuthSlotDefaults(&resolved)
-	models := session.Runtime.Models()
-	provider.ClearUnavailablePreferredDefaults(&resolved, models)
-	if provider.IsModelsDevType(resolved.Type) {
-		// A saved pool can still contain models with a retired wire protocol.
-		resolved.Model = strings.Join(models, ",")
-		for _, slot := range []*string{&resolved.CustomModelID, &resolved.SonnetModel, &resolved.OpusModel, &resolved.HaikuModel, &resolved.FableModel} {
-			if !hasModel(models, *slot) {
-				*slot = ""
-			}
-		}
+	var runtimeModels []string
+	var runtimeNames map[string]string
+	if session.Runtime != nil {
+		runtimeModels = session.Runtime.Models()
+		runtimeNames = session.Runtime.ModelDisplayNames()
 	}
-	defaultModel, fastModel := resolveGrokModels(resolved)
-	overlay := modelOverlay(resolved, defaultModel, fastModel)
+	if provider.IsModelsDevType(resolved.Type) && len(runtimeModels) > 0 {
+		// A saved pool can still contain models with a retired wire protocol.
+		resolved.Model = strings.Join(runtimeModels, ",")
+	}
+	defaultModel := resolveGrokDefaultModelWithRuntime(resolved, runtimeModels, runtimeNames)
+	overlay := modelOverlay(resolved, defaultModel, runtimeModels...)
 	env := os.Environ()
-	if profile != "" {
-		overlay["ui"] = map[string]any{"permission_mode": "ask"}
-		overlay["cli"] = map[string]any{"auto_update": false}
+	if browser {
 		env, resolved.Env = browserEnvironment(env, resolved.Env, profile)
 	}
-	configJSON, _ := json.Marshal(overlay) // The overlay contains only JSON primitives and maps.
+	var configJSON string
+	if len(overlay) > 0 {
+		raw, _ := json.Marshal(overlay) // The overlay contains only JSON primitives and maps.
+		configJSON = string(raw)
+	}
 	// Isolate Grok Build from any cached OIDC session in ~/.grok/auth.json.
 	// Without this, Grok prefers its cached grok.com JWT over XAI_API_KEY on
 	// inference requests, causing the CCL loopback runtime to reject the JWT
@@ -256,27 +395,64 @@ func prepare(ctx context.Context, grokPath string, p provider.Provider, sessionN
 		Path:         grokPath,
 		AuthPath:     authPath,
 		DefaultModel: defaultModel,
-		Env:          buildGrokProcessEnv(env, resolved, string(configJSON), authPath),
+		Env:          buildGrokProcessEnv(env, resolved, configJSON, authPath),
 		Session:      session,
 	}, nil
 }
 
+var allowedBrowserGrokEnv = map[string]struct{}{
+	"GROK_CLAUDE_SKILLS_ENABLED": {},
+	"GROK_CURSOR_SKILLS_ENABLED": {},
+	"GROK_SUBAGENTS":             {},
+	"GROK_SUBAGENTS_MAX_DEPTH":   {},
+	"GROK_MEMORY":                {},
+}
+
 func browserEnvironment(inherited []string, overrides map[string]string, profile string) ([]string, map[string]string) {
-	isGrokSetting := func(key string) bool { return strings.HasPrefix(strings.ToUpper(key), "GROK_") }
-	env := make([]string, 0, len(inherited)+2)
+	keepKey := func(key string) bool {
+		upper := strings.ToUpper(key)
+		if !strings.HasPrefix(upper, "GROK_") {
+			return true
+		}
+		if profile == "" && upper == "GROK_HOME" {
+			return true
+		}
+		_, ok := allowedBrowserGrokEnv[upper]
+		return ok
+	}
+	env := make([]string, 0, len(inherited)+3)
 	for _, entry := range inherited {
-		key, _, _ := strings.Cut(entry, "=")
-		if !isGrokSetting(key) {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || keepKey(key) {
 			env = append(env, entry)
 		}
 	}
 	filtered := make(map[string]string, len(overrides))
 	for key, value := range overrides {
-		if !isGrokSetting(key) {
+		if keepKey(key) {
 			filtered[key] = value
 		}
 	}
-	return append(env, "GROK_HOME="+profile, "GROK_SANDBOX=workspace"), filtered
+	if profile != "" {
+		env = append(env, "GROK_HOME="+profile)
+	}
+	return append(env, "GROK_SANDBOX=workspace", "GROK_DISABLE_AUTOUPDATER=1"), filtered
+}
+
+func shouldSilenceBanner(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "--json" || arg == "--output-format=json" {
+			return true
+		}
+		if arg == "--output-format" && i+1 < len(args) && args[i+1] == "json" {
+			return true
+		}
+	}
+	return false
 }
 
 // Run launches the Grok Build CLI with settings derived from p, forwarding extra args.
@@ -287,10 +463,13 @@ func Run(grokPath string, p provider.Provider, args []string) error {
 	}
 	defer launch.Close()
 
-	if launch.DefaultModel != "" {
-		fmt.Fprintf(os.Stderr, "Using provider %s with Grok Build (default model: %s)\n", p.Name, launch.DefaultModel)
-	} else {
-		fmt.Fprintf(os.Stderr, "Using provider %s with Grok Build\n", p.Name)
+	quiet := shouldSilenceBanner(args)
+	if !quiet {
+		if launch.DefaultModel != "" {
+			fmt.Fprintf(os.Stderr, "Using provider %s with Grok Build (default model: %s)\n", p.Name, launch.DefaultModel)
+		} else {
+			fmt.Fprintf(os.Stderr, "Using provider %s with Grok Build\n", p.Name)
+		}
 	}
 
 	cmd := launch.Command(args...)
@@ -301,8 +480,10 @@ func Run(grokPath string, p provider.Provider, args []string) error {
 	start := time.Now()
 	runErr := RunCommand(cmd)
 
-	if summary := oauthproxy.FormatUsageSummary(usageSnapshot(launch.Session.Runtime)); summary != "" {
-		fmt.Fprintln(os.Stderr, "\n"+summary)
+	if !quiet {
+		if summary := oauthproxy.FormatUsageSummary(usageSnapshot(launch.Session.Runtime)); summary != "" {
+			fmt.Fprintln(os.Stderr, "\n"+summary)
+		}
 	}
 
 	if oauthproxy.LogEnabled() {
@@ -318,7 +499,7 @@ func Run(grokPath string, p provider.Provider, args []string) error {
 		oauthproxy.LogInfoEvent("session_exit", "agent", "grokbuild", "provider", p.Name, "oauth", p.OAuthProvider,
 			"protocol", provider.ProtocolLabelForProvider(p), "base", oauthproxy.SafeLogEndpoint(launch.Session.Provider.Endpoint),
 			"model_count", modelCount, "env_override", len(p.Env),
-			"custom_model", p.CustomModelID, "fast", p.FastMode, "outcome", outcome,
+			"fast", p.FastMode, "outcome", outcome,
 			"duration", time.Since(start).Round(time.Millisecond))
 	}
 	return runErr
@@ -397,13 +578,4 @@ func usageSnapshot(runtime *oauthproxy.Runtime) []oauthproxy.UsageModelTotals {
 		return nil
 	}
 	return totals
-}
-
-func hasModel(models []string, candidate string) bool {
-	for _, model := range models {
-		if strings.EqualFold(model, strings.TrimSpace(candidate)) {
-			return true
-		}
-	}
-	return false
 }

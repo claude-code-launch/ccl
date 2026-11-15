@@ -1,0 +1,327 @@
+package cmd
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/claude-code-launch/ccl/internal/config"
+	"github.com/claude-code-launch/ccl/internal/oauthproxy"
+	"github.com/claude-code-launch/ccl/internal/provider"
+	"github.com/claude-code-launch/ccl/internal/providersession"
+	"github.com/spf13/cobra"
+)
+
+type authOptions struct {
+	noBrowser    bool
+	callbackPort int
+	kiroAuthMode string
+	fromDesktop  bool
+}
+
+var oauthLogin = oauthproxy.Login
+
+// oauthImport is stubbed in tests, mirroring oauthLogin.
+var oauthImport = oauthproxy.ImportCredential
+
+var authCmd = newAuthCommand()
+
+func newAuthCommand() *cobra.Command {
+	opts := authOptions{}
+	cmd := &cobra.Command{
+		Use:   "oauth <gpt|gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|cursor> [alias]",
+		Short: "Authenticate a subscription-backed provider",
+		Long: `Authenticate subscription-backed providers.
+
+Login:
+
+  ccl oauth gpt                 # ChatGPT / Codex subscription
+  ccl oauth gpt work            # same backend, provider name "work"
+  ccl oauth gemini|grok|qoder|kimi|kiro|workbuddy|workbuddycn|autoclaw|cursor
+
+Notes:
+  - Subscription logins create providers and use ~/.ccl/auth
+  - gemini signs in to Google Antigravity; it does not use Gemini CLI credentials
+  - WorkBuddy has two deployments with separate accounts and credentials:
+    workbuddy is www.workbuddy.ai, workbuddycn is www.workbuddy.cn
+  - Fast mode (gpt): ccl set Review & Apply
+  - Qoder uses direct browser OAuth; qodercli is neither required nor invoked
+  - Kiro defaults to Portal OAuth (Google/GitHub); use --kiro-auth builder for Builder ID
+  - AutoClaw opens a CCL-owned browser login, including the provider's human
+    verification step, then stores and refreshes the resulting session without
+    starting AutoClaw. To reuse the desktop app's existing login instead, run:
+    ccl oauth autoclaw --from-desktop
+    (auth.json is read through the Chromium Safe Storage Keychain item on
+    macOS; desktop files are never modified)
+  - Cursor signs in through cursor.com's deep-control PKCE flow; ccl speaks
+    Cursor's agent stream directly, so the Cursor CLI is not needed
+  - Flags: --no-browser, --callback-port, --kiro-auth, --from-desktop
+  - ccl oauth prune deletes credentials no provider uses
+`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAuth(cmd.Context(), cmd.OutOrStdout(), args, opts)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Print the OAuth URL instead of opening a browser")
+	cmd.Flags().IntVar(&opts.callbackPort, "callback-port", 0, "Override the OAuth callback port (ChatGPT/Gemini/Kiro Portal/AutoClaw)")
+	cmd.Flags().StringVar(&opts.kiroAuthMode, "kiro-auth", oauthproxy.KiroAuthModePortal, "Kiro login mode: portal or builder")
+	cmd.Flags().BoolVar(&opts.fromDesktop, "from-desktop", false, "AutoClaw only: reuse the desktop app's login instead of a browser flow")
+	cmd.AddCommand(newOAuthPruneCommand())
+	return cmd
+}
+
+// supportsFastMode reports whether the GPT subscription backend honours the
+// configured fast mode.
+func supportsFastMode(providerName string) bool {
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case oauthproxy.ProviderChatGPT:
+		return true
+	default:
+		return false
+	}
+}
+
+func runAuth(ctx context.Context, out io.Writer, args []string, opts authOptions) error {
+	target, err := oauthproxy.ValidateLoginProvider(args[0])
+	if err != nil {
+		return err
+	}
+	// OAuth backends have a fixed runtime protocol. StartProvider ignores any
+	// Type override when OAuthProvider is set, so always persist the real path.
+	protocolType := oauthRuntimeType(target)
+
+	var alias string
+	if len(args) > 1 {
+		alias = strings.TrimSpace(args[1])
+		if err := validateProviderAlias(alias); err != nil {
+			return err
+		}
+	}
+
+	var result oauthproxy.LoginResult
+	if opts.fromDesktop {
+		if target != oauthproxy.ProviderAutoClaw {
+			return fmt.Errorf("--from-desktop is only supported for autoclaw")
+		}
+		fmt.Fprintf(out, "Importing the %s desktop login...\n", target)
+		result, err = oauthImport(ctx, target)
+		if err != nil {
+			return fmt.Errorf("import %s credential: %w", target, err)
+		}
+	} else {
+		fmt.Fprintf(out, "Authenticating %s...\n", target)
+		result, err = oauthLogin(ctx, target, oauthproxy.LoginOptions{
+			NoBrowser:    opts.noBrowser,
+			CallbackPort: opts.callbackPort,
+			KiroAuthMode: opts.kiroAuthMode,
+		})
+		if err != nil {
+			return fmt.Errorf("authenticate %s: %w", target, err)
+		}
+	}
+
+	providerName, p, err := activateProvider(target, alias, result)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "Authenticated %s as provider %q and switched active provider.\n", target, providerName)
+	fmt.Fprintf(out, "Credentials: %s\n", result.Path)
+	fmt.Fprintf(out, "Protocol: %s (fixed for this OAuth backend)\n", provider.ProtocolLabel(protocolType))
+	if supportsFastMode(target) {
+		fmt.Fprintf(out, "Fast: %s (toggle with ccl set Review & Apply)\n", providerFastSummary(p))
+	}
+	_ = refreshModelsDevMetadata(ctx, out)
+	return nil
+}
+
+// validateProviderAlias checks an explicit provider alias before any login or
+// import work runs, so a bad alias never wastes an upstream round-trip.
+func validateProviderAlias(alias string) error {
+	if isReservedProviderName(alias) {
+		return fmt.Errorf("alias %q collides with a reserved provider name; choose a different alias", alias)
+	}
+	if alias == "" {
+		return fmt.Errorf("alias cannot be empty")
+	}
+	return nil
+}
+
+// activateProvider persists a freshly created credential as an active
+// provider. Every login produces an independent provider entry: an explicit
+// alias becomes the provider key; GPT otherwise uses the account email, while
+// other backends derive the name from the credential filename.
+func activateProvider(target, alias string, result oauthproxy.LoginResult) (string, provider.Provider, error) {
+	providerName := alias
+	if providerName == "" {
+		providerName = derivedProviderName(target, result.Path)
+	}
+	credentialFile := filepath.Base(result.Path)
+
+	// The login can take minutes; the update re-reads the config under its lock
+	// so changes made meanwhile by another ccl survive.
+	var p provider.Provider
+	err := config.Update(func(cfg *provider.Config) error {
+		p = cfg.Providers[providerName]
+		p = configureOAuthProvider(p, providerName, target, credentialFile)
+		cfg.Providers[providerName] = p
+		cfg.ActiveProvider = providerName
+		return nil
+	})
+	if err != nil {
+		return "", provider.Provider{}, fmt.Errorf("save OAuth provider: %w", err)
+	}
+	return providerName, p, nil
+}
+
+// configureOAuthProvider normalizes the provider created or refreshed by login
+// while preserving the model pool and other user-tuned fields on p.
+func configureOAuthProvider(p provider.Provider, name, oauthProvider, credentialFile string) provider.Provider {
+	backend, _ := oauthproxy.BackendProvider(oauthProvider)
+	p.Name = name
+	p.Type = oauthRuntimeType(oauthProvider)
+	p.APIKey = ""
+	p.AnthropicAuth = ""
+	p.OAuthProvider = oauthProvider
+	p.OAuthAccountCredential = strings.TrimSpace(credentialFile)
+	if provider.IsAutoClawType(p.Type) {
+		// The local runtime uses the managed OpenAI Chat proxy and injects
+		// AutoClaw's X-Authorization contract. The built-in model catalog seeds
+		// the pool when the user has not chosen models yet.
+		p.Endpoint = oauthproxy.AutoClawOpenAIBaseURL()
+		if strings.TrimSpace(p.Model) == "" {
+			p.Model = strings.Join(oauthproxy.AutoClawModelIDs(), ",")
+		}
+	} else {
+		p.Endpoint = "oauth://" + backend
+		if strings.TrimSpace(p.Model) == "" {
+			p.Model = provider.OAuthDefaultModels(oauthProvider)
+		}
+	}
+	if !supportsFastMode(oauthProvider) {
+		p.FastMode = false
+	}
+	return p
+}
+
+// oauthRuntimeType is the internal compatibility type persisted for each
+// subscription backend.
+func oauthRuntimeType(providerName string) string {
+	if runtimeType, ok := provider.OAuthRuntimeType(providerName); ok {
+		return runtimeType
+	}
+	return "openai_responses"
+}
+
+// isReservedProviderName blocks aliases that would collide with canonical
+// provider names or SDK backend keys.
+func isReservedProviderName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case provider.DefaultProvider, "claude",
+		oauthproxy.ProviderChatGPT, oauthproxy.ProviderCodex,
+		oauthproxy.ProviderGemini, "antigravity",
+		oauthproxy.ProviderGrok, "xai",
+		oauthproxy.ProviderQoder,
+		oauthproxy.ProviderKimi,
+		oauthproxy.ProviderKiro,
+		oauthproxy.ProviderWorkBuddy,
+		oauthproxy.ProviderWorkBuddyCN,
+		oauthproxy.ProviderAutoClaw,
+		"zed", // reserved legacy backend name
+		oauthproxy.ProviderCursor:
+		return true
+	default:
+		return false
+	}
+}
+
+// derivedProviderName names GPT accounts by their full email, independently of
+// the account hash and plan in the credential filename. Other backends and
+// credentials without an email retain filename-derived naming.
+func derivedProviderName(target, credentialPath string) string {
+	if target == oauthproxy.ProviderChatGPT {
+		var credential struct {
+			Email string `json:"email"`
+		}
+		if raw, err := os.ReadFile(credentialPath); err == nil && json.Unmarshal(raw, &credential) == nil {
+			if email := strings.TrimSpace(credential.Email); email != "" {
+				return target + "-" + email
+			}
+		}
+	}
+	return derivedCredentialProviderName(target, credentialPath)
+}
+
+func derivedCredentialProviderName(target, credentialPath string) string {
+	base := filepath.Base(credentialPath)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	identity := ""
+	fragments := strings.SplitN(base, "-", 2)
+	if len(fragments) == 2 && strings.TrimSpace(fragments[1]) != "" {
+		identity = fragments[1]
+	} else if strings.TrimSpace(base) != "" && base != target {
+		identity = base
+	}
+	if identity == "" {
+		return target
+	}
+	return compactDerivedProviderName(target, identity)
+}
+
+// maxDerivedProviderName bounds auto-derived provider names. Identities like
+// Kiro's "d-9067c98495.<uuid>" OIDC client id are 40+ characters and make
+// every provider listing unwieldy; typical email identities still fit.
+const maxDerivedProviderName = 32
+
+// compactDerivedProviderName shortens target+"-"+identity to the budget when
+// it overruns: the identity is cut at the nearest separator boundary and
+// disambiguated with a short hash of the full identity, so distinct accounts
+// still derive distinct names and re-login derives the same name again.
+func compactDerivedProviderName(target, identity string) string {
+	candidate := target + "-" + identity
+	if len(candidate) <= maxDerivedProviderName {
+		return candidate
+	}
+	// Final shape is target + "-" + prefix + "-" + 6 hash chars.
+	cut := maxDerivedProviderName - len(target) - 8
+	if cut < 1 {
+		cut = 1
+	}
+	if cut > len(identity) {
+		cut = len(identity)
+	}
+	// Prefer cutting at the earliest natural boundary ("." or "-") that keeps
+	// at least 8 characters of identity, instead of slicing through an
+	// identifier segment.
+	if boundary := strings.IndexAny(identity[8:cut+1], ".-"); boundary >= 0 && 8+boundary <= cut {
+		cut = 8 + boundary
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return target + "-" + identity[:cut] + "-" + hex.EncodeToString(sum[:3])
+}
+
+func init() {
+	rootCmd.AddCommand(authCmd)
+}
+
+// prepareProviderRuntime starts the loopback runtime a subscription needs and
+// returns it alongside the session copy of the provider. The context bounds the
+// credential refresh and catalog discovery the runtime performs on the way up,
+// so a slow upstream can be abandoned instead of holding the caller.
+func prepareProviderRuntime(ctx context.Context, p provider.Provider) (provider.Provider, *oauthproxy.Runtime, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	session, err := providersession.Prepare(ctx, p)
+	if err != nil {
+		return provider.Provider{}, nil, func() {}, err
+	}
+	return session.Provider, session.Runtime, session.Close, nil
+}

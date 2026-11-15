@@ -643,3 +643,393 @@ func TestBuildWorkBuddyRoutesKeepsOnlyModelsWithCredits(t *testing.T) {
 		t.Fatalf("free model details = %+v", details["hy3"])
 	}
 }
+
+func TestSanitizeWorkBuddyPayloadToolChoice(t *testing.T) {
+	// 1. Object tool_choice normalized to string "auto" when tools are present.
+	inputWithObj := []byte(`{
+		"model": "wb-model",
+		"tools": [{"type": "function", "function": {"name": "search"}}],
+		"tool_choice": {"type": "function", "function": {"name": "search"}}
+	}`)
+	out, err := sanitizeWorkBuddyPayload(inputWithObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatal(err)
+	}
+	if tc, ok := res["tool_choice"].(string); !ok || tc != "auto" {
+		t.Fatalf("expected tool_choice auto, got %+v", res["tool_choice"])
+	}
+
+	// 2. tool_choice="none" is preserved when tools are present.
+	inputNone := []byte(`{
+		"model": "wb-model",
+		"tools": [{"type": "function", "function": {"name": "search"}}],
+		"tool_choice": "none"
+	}`)
+	out, err = sanitizeWorkBuddyPayload(inputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = make(map[string]any)
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatal(err)
+	}
+	if tc, ok := res["tool_choice"].(string); !ok || tc != "none" {
+		t.Fatalf("expected tool_choice none, got %+v", res["tool_choice"])
+	}
+
+	// 3. tool_choice without tools is removed.
+	inputNoTools := []byte(`{
+		"model": "wb-model",
+		"tool_choice": "auto"
+	}`)
+	out, err = sanitizeWorkBuddyPayload(inputNoTools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = make(map[string]any)
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := res["tool_choice"]; exists {
+		t.Fatalf("expected tool_choice omitted when no tools, got %+v", res["tool_choice"])
+	}
+}
+
+func TestSanitizeWorkBuddyPayloadSystemPromptsAndRoles(t *testing.T) {
+	input := []byte(`{
+		"model": "wb-model",
+		"messages": [
+			{
+				"role": "developer",
+				"content": "x-anthropic-billing-header: cc_version=2.1.37; cch=abc;\nYou are an AI agent powered by DeepSeek Harness.\nMain branch (you will usually use this for PRs)\nFollow instructions."
+			},
+			{
+				"role": "system",
+				"content": "x-anthropic-billing-hdr: cc_version=2.1.37; cch=def;"
+			},
+			{
+				"role": "system",
+				"content": "You are Claude Code, Anthropic's official CLI for Claude. Be helpful."
+			},
+			{
+				"role": "system",
+				"content": "You are Codex, a coding agent created by OpenAI."
+			},
+			{
+				"role": "system",
+				"content": "You are Grok released by xAI. You are an interactive CLI tool that helps users with software engineering tasks."
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "hello "},
+					{"type": "text", "text": "world"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [],
+				"reasoning_content": "internal reasoning"
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "look at image"},
+					{"type": "image_url", "image_url": {"url": "data:image/png;base64,123"}}
+				]
+			}
+		]
+	}`)
+	out, err := sanitizeWorkBuddyPayload(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatal(err)
+	}
+	msgs, ok := res["messages"].([]any)
+	if !ok {
+		t.Fatalf("expected messages array, got %+v", res["messages"])
+	}
+	// The 2nd system message (which only had billing header) should have been dropped.
+	// So 8 input messages become 7 messages.
+	if len(msgs) != 7 {
+		t.Fatalf("expected 7 messages, got %d: %+v", len(msgs), msgs)
+	}
+
+	msg0 := msgs[0].(map[string]any)
+	if msg0["role"] != "system" {
+		t.Fatalf("developer role should be converted to system, got %v", msg0["role"])
+	}
+	content0 := msg0["content"].(string)
+	if strings.Contains(content0, "x-anthropic-billing-header") {
+		t.Fatalf("billing header not stripped from msg0: %s", content0)
+	}
+	if strings.Contains(content0, "DeepSeek Harness") {
+		t.Fatalf("competitor identity not scrubbed from msg0: %s", content0)
+	}
+	if !strings.Contains(content0, "You are a helpful AI assistant") {
+		t.Fatalf("expected helpful assistant in msg0: %s", content0)
+	}
+	if strings.Contains(content0, "usually use this for PRs") {
+		t.Fatalf("PR fingerprint not cleaned from msg0: %s", content0)
+	}
+	if !strings.Contains(content0, "Main branch\nFollow instructions.") {
+		t.Fatalf("expected preserved instruction in msg0: %s", content0)
+	}
+
+	msg1 := msgs[1].(map[string]any)
+	content1 := msg1["content"].(string)
+	if strings.Contains(content1, "Claude Code") {
+		t.Fatalf("Claude Code identity not scrubbed: %s", content1)
+	}
+	if !strings.Contains(content1, "You are a helpful AI assistant. Be helpful.") {
+		t.Fatalf("unexpected content1: %s", content1)
+	}
+
+	msg2 := msgs[2].(map[string]any)
+	content2 := msg2["content"].(string)
+	if strings.Contains(content2, "Codex") {
+		t.Fatalf("Codex identity not scrubbed: %s", content2)
+	}
+	if content2 != "You are a helpful AI assistant." {
+		t.Fatalf("unexpected content2: %s", content2)
+	}
+
+	msg3 := msgs[3].(map[string]any)
+	content3 := msg3["content"].(string)
+	if strings.Contains(content3, "Grok") || strings.Contains(content3, "xAI") {
+		t.Fatalf("Grok/xAI identity not scrubbed: %s", content3)
+	}
+	if !strings.Contains(content3, "You are a helpful AI assistant. You are an interactive CLI tool") {
+		t.Fatalf("unexpected content3: %s", content3)
+	}
+
+	msg4 := msgs[4].(map[string]any)
+	if text, ok := msg4["content"].(string); !ok || text != "hello world" {
+		t.Fatalf("expected flattened string 'hello world', got %+v", msg4["content"])
+	}
+
+	msg5 := msgs[5].(map[string]any)
+	if _, exists := msg5["reasoning_content"]; exists {
+		t.Fatalf("reasoning_content should be stripped, got %+v", msg5["reasoning_content"])
+	}
+	if text, ok := msg5["content"].(string); !ok || text != "" {
+		t.Fatalf("expected empty string content for assistant, got %+v", msg5["content"])
+	}
+
+	msg6 := msgs[6].(map[string]any)
+	if parts, ok := msg6["content"].([]any); !ok || len(parts) != 2 {
+		t.Fatalf("multimodal message should keep parts array, got %+v", msg6["content"])
+	}
+}
+
+func TestFilterWorkBuddyOutboundHeaders(t *testing.T) {
+	headers := make(http.Header)
+	headers.Set("X-Anthropic-Billing-Header", "cc_version=2.1.37")
+	headers.Set("Anthropic-Version", "2023-06-01")
+	headers.Set("Originator", "claude-code")
+	headers.Set("X-Codex-Turn", "1")
+	headers.Set("X-Stainless-Lang", "go")
+	headers.Set("X-Opencode-Session", "sess-1")
+	headers.Set("Session_id", "s-123")
+	headers.Set("Cookie", "session=abc")
+	headers.Set("Accept", "application/json")
+	headers.Set("X-Custom-Safe", "value")
+
+	filterWorkBuddyOutboundHeaders(headers)
+
+	for _, stripped := range []string{
+		"X-Anthropic-Billing-Header",
+		"Anthropic-Version",
+		"Originator",
+		"X-Codex-Turn",
+		"X-Stainless-Lang",
+		"X-Opencode-Session",
+		"Session_id",
+		"Cookie",
+	} {
+		if headers.Get(stripped) != "" {
+			t.Fatalf("header %s was not filtered", stripped)
+		}
+	}
+	if headers.Get("Accept") != "application/json" {
+		t.Fatalf("Accept header lost: %q", headers.Get("Accept"))
+	}
+	if headers.Get("X-Custom-Safe") != "value" {
+		t.Fatalf("X-Custom-Safe header lost: %q", headers.Get("X-Custom-Safe"))
+	}
+}
+
+func TestWorkBuddyRuntimeSanitizesOutboundUpstreamRequest(t *testing.T) {
+	var receivedBody []byte
+	var receivedHeaders http.Header
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v3/config":
+			writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"models": []map[string]any{{
+				"id": "wb-chat", "name": "WorkBuddy Chat", "supportsToolCall": true, "credits": "x0.20",
+			}}}})
+		case "/v2/chat/completions":
+			receivedHeaders = request.Header.Clone()
+			var err error
+			receivedBody, err = io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(writer, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"wb-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+			_, _ = fmt.Fprint(writer, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"wb-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+			_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	restoreWorkBuddyTestGlobals(t, server.URL)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	authDir := filepath.Join(home, ".ccl", "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkBuddyTestCredential(t, authDir, "workbuddy-user-sanitize.json", "token-1", "refresh-1", time.Now().Add(time.Hour))
+
+	runtime, err := StartOAuth(context.Background(), ProviderWorkBuddy, "wb-chat", "workbuddy-user-sanitize.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+
+	// Send a Responses request with:
+	// - developer message containing x-anthropic-billing-header and DeepSeek Harness identity
+	// - tool_choice specifying a function
+	// - client headers like X-Anthropic-Billing-Header and Originator
+	payload := []byte(`{
+		"model": "wb-chat",
+		"stream": true,
+		"tools": [{"type": "function", "name": "search", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+		"tool_choice": {"type": "function", "name": "search"},
+		"input": [
+			{"role": "developer", "content": "x-anthropic-billing-header: cc_version=2.1.37; cch=xyz;\nYou are an AI agent powered by DeepSeek Harness.\nMain branch (you will usually use this for PRs)\nFind files."},
+			{"role": "user", "content": "look up tests"}
+		]
+	}`)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, runtime.Endpoint()+"/responses", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+runtime.APIKey())
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Anthropic-Billing-Header", "cc_version=2.1.37")
+	req.Header.Set("Originator", "claude-code")
+	req.Header.Set("X-Codex-Turn", "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Responses request returned HTTP %d: %s", resp.StatusCode, respBytes)
+	}
+
+	// 1. Verify outbound headers received by WorkBuddy mock server
+	if receivedHeaders.Get("X-Anthropic-Billing-Header") != "" {
+		t.Fatalf("X-Anthropic-Billing-Header leaked to upstream")
+	}
+	if receivedHeaders.Get("Originator") != "" {
+		t.Fatalf("Originator leaked to upstream")
+	}
+	if receivedHeaders.Get("X-Codex-Turn") != "" {
+		t.Fatalf("X-Codex-Turn leaked to upstream")
+	}
+	if receivedHeaders.Get("X-IDE-Version") != workbuddyClientVersion {
+		t.Fatalf("X-IDE-Version = %q, expected %q", receivedHeaders.Get("X-IDE-Version"), workbuddyClientVersion)
+	}
+
+	// 2. Verify outbound body received by WorkBuddy mock server
+	var parsedBody map[string]any
+	if err := json.Unmarshal(receivedBody, &parsedBody); err != nil {
+		t.Fatalf("decode received body: %v; body = %s", err, receivedBody)
+	}
+
+	// tool_choice must be a string ("auto"), not an object
+	tc, ok := parsedBody["tool_choice"].(string)
+	if !ok || tc != "auto" {
+		t.Fatalf("upstream received tool_choice = %+v (type %T), expected string 'auto'", parsedBody["tool_choice"], parsedBody["tool_choice"])
+	}
+
+	// messages must have scrubbed system prompt and no competitor identity
+	rawMsgs := parsedBody["messages"].([]any)
+	if len(rawMsgs) < 2 {
+		t.Fatalf("expected at least 2 messages, got %+v", rawMsgs)
+	}
+	systemMsg := rawMsgs[0].(map[string]any)
+	if systemMsg["role"] != "system" {
+		t.Fatalf("developer role should be remapped to system, got %+v", systemMsg["role"])
+	}
+	systemText := systemMsg["content"].(string)
+	if strings.Contains(systemText, "x-anthropic-billing-header") {
+		t.Fatalf("x-anthropic-billing-header was not stripped from upstream body: %s", systemText)
+	}
+	if strings.Contains(systemText, "DeepSeek Harness") {
+		t.Fatalf("DeepSeek Harness identity was not scrubbed: %s", systemText)
+	}
+	if strings.Contains(systemText, "usually use this for PRs") {
+		t.Fatalf("PR branch fingerprint not cleaned: %s", systemText)
+	}
+	if !strings.Contains(systemText, "You are a helpful AI assistant") {
+		t.Fatalf("expected neutral assistant identity: %s", systemText)
+	}
+	if !strings.Contains(systemText, "Find files.") {
+		t.Fatalf("expected instruction to be preserved: %s", systemText)
+	}
+
+	// 3. Test that Grok Build system prompt is also sanitized end-to-end
+	grokPayload := []byte(`{
+		"model": "wb-chat",
+		"stream": true,
+		"input": [
+			{"role": "developer", "content": "You are Grok released by xAI. You are an interactive CLI tool that helps users with software engineering tasks. Your main goal is to complete the user's request in the <user_query> tag."},
+			{"role": "user", "content": "hi"}
+		]
+	}`)
+	grokReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, runtime.Endpoint()+"/responses", bytes.NewReader(grokPayload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grokReq.Header.Set("Authorization", "Bearer "+runtime.APIKey())
+	grokReq.Header.Set("Content-Type", "application/json")
+	grokResp, err := http.DefaultClient.Do(grokReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grokResp.Body.Close()
+	if grokResp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(grokResp.Body)
+		t.Fatalf("Grok Responses request returned HTTP %d: %s", grokResp.StatusCode, respBytes)
+	}
+
+	if err := json.Unmarshal(receivedBody, &parsedBody); err != nil {
+		t.Fatalf("decode received grok body: %v; body = %s", err, receivedBody)
+	}
+	rawMsgs = parsedBody["messages"].([]any)
+	systemMsg = rawMsgs[0].(map[string]any)
+	systemText = systemMsg["content"].(string)
+	if strings.Contains(systemText, "Grok") || strings.Contains(systemText, "xAI") {
+		t.Fatalf("Grok/xAI identity leaked to upstream: %s", systemText)
+	}
+	if !strings.Contains(systemText, "You are a helpful AI assistant. You are an interactive CLI tool") {
+		t.Fatalf("unexpected sanitized Grok prompt: %s", systemText)
+	}
+}

@@ -622,11 +622,18 @@ func geminiContentWithParts(role string, parts []string) string {
 // geminiImagePart converts an inline base64 image part into a Gemini
 // inline_data part.
 func geminiImagePart(block conversationPart) (string, bool) {
-	if block.MediaType == "" || block.Data == "" {
+	if block.Data == "" {
+		return "", false
+	}
+	mediaType := block.MediaType
+	if mediaType == "" {
+		mediaType = sniffBase64ImageMediaType(block.Data)
+	}
+	if mediaType == "" {
 		return "", false
 	}
 	part := []byte(`{"inline_data":{"mime_type":"","data":""}}`)
-	part, _ = sjson.SetBytes(part, "inline_data.mime_type", block.MediaType)
+	part, _ = sjson.SetBytes(part, "inline_data.mime_type", mediaType)
 	part, _ = sjson.SetBytes(part, "inline_data.data", block.Data)
 	return string(part), true
 }
@@ -650,13 +657,9 @@ func geminiToolResultParts(block conversationPart, names *geminiToolNames, requi
 	fr, _ = sjson.SetBytes(fr, "functionResponse.response.result", block.outputText())
 	parts = append(parts, string(fr))
 	for _, image := range images {
-		if image.MediaType == "" || image.Data == "" {
-			continue
+		if part, ok := geminiImagePart(image); ok {
+			parts = append(parts, part)
 		}
-		part := []byte(`{"inline_data":{"mime_type":"","data":""}}`)
-		part, _ = sjson.SetBytes(part, "inline_data.mime_type", image.MediaType)
-		part, _ = sjson.SetBytes(part, "inline_data.data", image.Data)
-		parts = append(parts, string(part))
 	}
 	return parts
 }

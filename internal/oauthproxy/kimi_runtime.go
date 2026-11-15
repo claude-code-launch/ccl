@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -577,20 +579,101 @@ func startKimiOAuth(parent context.Context, modelSpec, credentialFile string) (*
 	if credential.accessToken == "" && credential.refreshToken == "" {
 		return nil, fmt.Errorf("Kimi credential %s has no access or refresh token", filepath.Base(path))
 	}
+	if strings.TrimSpace(modelSpec) == "" {
+		modelSpec = "kimi-for-coding,kimi-for-coding-highspeed"
+	}
 	routes := runtimeModelRoutes(modelSpec)
 	if len(routes) == 0 {
 		return nil, fmt.Errorf("Kimi Chat runtime requires at least one model")
 	}
+	details := kimiModelDetails(routes)
 	runtime, err := startOpenAIChatRuntimeService(parent, kimiAPIBaseURL, routes, authorizer, func(service *chatCompletionsService) {
 		service.normalizeModel = normalizeKimiUpstreamModel
 		service.decorateHeader = authorizer.decorateHeader
 		service.normalizeBody = normalizeKimiBody
+		service.modelDetails = details
 	})
 	if err != nil {
 		return nil, err
 	}
 	runtime.listAuths = authorizer.listAuths
+	runtime.modelDetails = details
 	LogInfof("runtime start oauth provider=kimi backend=kimi protocol=openai_chat port=%s credential_file=%s model_count=%d",
 		strings.TrimPrefix(strings.TrimSuffix(runtime.endpoint, "/v1"), "http://"), filepath.Base(path), len(runtime.models))
 	return runtime, nil
+}
+
+func kimiModelDetails(routes []runtimeModelRoute) map[string]protocol.ModelInfo {
+	index, _ := modelsdev.CachedIndex()
+	details := make(map[string]protocol.ModelInfo, len(routes))
+	for _, route := range routes {
+		alias := strings.TrimSpace(route.Alias)
+		if alias == "" {
+			continue
+		}
+		rawName := strings.TrimSpace(route.Name)
+		normalized := normalizeKimiUpstreamModel(rawName)
+		var info protocol.ModelInfo
+		matched := false
+		if index != nil {
+			for _, candidate := range []string{rawName, normalized, alias} {
+				for _, provider := range []string{"kimi-code-plan-global", "kimi-code-plan-cn", "moonshotai", "moonshotai-cn"} {
+					if len(info.InputModalities) == 0 {
+						if mod, ok := index.InputModalities(provider, candidate, alias); ok {
+							info.InputModalities = mod
+							matched = true
+						}
+					}
+					if info.MaxOutputTokens == 0 {
+						if maxOut, ok := index.MaxOutputTokens(provider, candidate, alias); ok {
+							info.MaxOutputTokens = maxOut
+							matched = true
+						}
+					}
+					if !info.ReasoningKnown {
+						if efforts, ok := index.Efforts(provider, candidate, alias); ok {
+							info.ReasoningLevels, info.DefaultReasoningLevel = reasoningLevelsFromEfforts(efforts, "high")
+							info.ReasoningKnown = true
+							matched = true
+						}
+					}
+				}
+			}
+		}
+		if !info.ReasoningKnown {
+			if strings.EqualFold(rawName, "kimi-for-coding") || strings.EqualFold(normalized, "kimi-for-coding") || strings.EqualFold(alias, "kimi-for-coding") {
+				info.ReasoningLevels, info.DefaultReasoningLevel = reasoningLevelsFromEfforts([]string{"low", "high", "max"}, "high")
+				info.ReasoningKnown = true
+				matched = true
+			} else if strings.EqualFold(rawName, "kimi-for-coding-highspeed") || strings.EqualFold(normalized, "kimi-for-coding-highspeed") || strings.EqualFold(alias, "kimi-for-coding-highspeed") {
+				info.ReasoningKnown = true
+				matched = true
+			}
+		}
+		if len(info.InputModalities) == 0 && kimiKnownVisionModel(rawName, normalized) {
+			info.InputModalities = []string{"text", "image"}
+			matched = true
+		}
+		if matched {
+			info.ID = alias
+			details[strings.ToLower(alias)] = info
+		}
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return details
+}
+
+func kimiKnownVisionModel(rawName, normalized string) bool {
+	for _, candidate := range []string{rawName, normalized} {
+		lower := strings.ToLower(strings.TrimSpace(stripContextModelSuffix(candidate)))
+		switch {
+		case lower == "kimi-for-coding", lower == "kimi-for-coding-highspeed",
+			lower == "k2p5", strings.HasPrefix(lower, "kimi-k2.5"), strings.HasPrefix(lower, "kimi-k2.6"),
+			strings.HasPrefix(lower, "k2.5"), strings.HasPrefix(lower, "k2.6"):
+			return true
+		}
+	}
+	return false
 }

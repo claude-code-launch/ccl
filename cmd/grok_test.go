@@ -52,9 +52,7 @@ func TestRunGrokAgentLaunchesLoopbackRuntimeAndForwardsArgs(t *testing.T) {
 				Type:        "openai",
 				Endpoint:    "https://gw.invalid/v1",
 				APIKey:      "upstream-secret",
-				Model:       "claude-opus-4-6,claude-sonnet-4-6",
-				SonnetModel: "claude-sonnet-4-6",
-				HaikuModel:  "claude-opus-4-6",
+				Model:       "claude-sonnet-4-6,claude-opus-4-6",
 				EffortLevel: "high",
 				Env:         map[string]string{"GROK_MODELS_LIST_URL": "https://override.invalid/models", "GROK_AUTH_PROVIDER_COMMAND": "invalid"},
 			},
@@ -93,13 +91,21 @@ func TestRunGrokAgentLaunchesLoopbackRuntimeAndForwardsArgs(t *testing.T) {
 		t.Fatal("launch auth file was not removed")
 	}
 	var overlay struct {
-		Models map[string]string `json:"models"`
+		Models   map[string]any  `json:"models"`
+		Features map[string]bool `json:"features"`
 	}
 	if err := json.Unmarshal([]byte(got.GrokCfg), &overlay); err != nil {
 		t.Fatalf("decode GROK_CONFIG %q: %v", got.GrokCfg, err)
 	}
-	if overlay.Models["default"] != "claude-sonnet-4-6" || overlay.Models["session_summary"] != "claude-opus-4-6" || overlay.Models["default_reasoning_effort"] != "high" {
+	if overlay.Models["default"] != "claude-sonnet-4-6" || overlay.Models["session_summary"] != "claude-sonnet-4-6" || overlay.Models["default_reasoning_effort"] != "high" {
 		t.Fatalf("GROK_CONFIG models = %+v", overlay.Models)
+	}
+	wantAllowed := []any{"claude-sonnet-4-6", "claude-opus-4-6"}
+	if !reflect.DeepEqual(overlay.Models["allowed_models"], wantAllowed) {
+		t.Fatalf("GROK_CONFIG allowed_models = %#v, want %#v", overlay.Models["allowed_models"], wantAllowed)
+	}
+	if !overlay.Features["subagent_model_inheritance"] {
+		t.Fatalf("GROK_CONFIG features = %+v, want subagent_model_inheritance=true", overlay.Features)
 	}
 }
 
@@ -118,9 +124,26 @@ func TestRunGrokAgentRejectsClaudeSubscriptionAccount(t *testing.T) {
 }
 
 func TestGrokBypassAliasesAndSubcommands(t *testing.T) {
-	got := applyGrokBypassMode([]string{"-p", "hi"}, true)
-	if !slices.Equal(got, []string{"--always-approve", "-p", "hi"}) {
-		t.Fatalf("applyGrokBypassMode = %v", got)
+	for _, tc := range []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"-p", "hi"}, []string{"--always-approve", "-p", "hi"}},
+		{[]string{"-p", "mcp"}, []string{"--always-approve", "-p", "mcp"}},
+		{[]string{"-p", "-v"}, []string{"--always-approve", "-p", "-v"}},
+		{[]string{"--single", "update"}, []string{"--always-approve", "--single", "update"}},
+		{[]string{"--prompt-file", "update"}, []string{"--always-approve", "--prompt-file", "update"}},
+		{[]string{"--prompt-json", "[]"}, []string{"--always-approve", "--prompt-json", "[]"}},
+		{[]string{"-s", "update", "hello"}, []string{"--always-approve", "-s", "update", "hello"}},
+		{[]string{"--worktree-ref", "main", "hello"}, []string{"--always-approve", "--worktree-ref", "main", "hello"}},
+		{[]string{"--", "mcp"}, []string{"--always-approve", "--", "mcp"}},
+	} {
+		if got := applyGrokBypassMode(tc.in, true); !slices.Equal(got, tc.want) {
+			t.Fatalf("applyGrokBypassMode(%v) = %v, want %v", tc.in, got, tc.want)
+		}
+		if isLocalGrokInvocation(tc.in) {
+			t.Fatalf("isLocalGrokInvocation(%v) = true, want false", tc.in)
+		}
 	}
 	for _, args := range [][]string{
 		{"--always-approve", "-p", "hi"},
@@ -128,12 +151,22 @@ func TestGrokBypassAliasesAndSubcommands(t *testing.T) {
 		{"--permission-mode", "plan"},
 		{"--permission-mode=auto"},
 		{"models"},
+		{"--reasoning-effort", "high", "models"},
+		{"--allow", "Bash(git:*)", "--deny", "Write", "--rules", "strict", "--system-prompt-override", "sys", "inspect", "--json"},
 		{"doctor"},
 		{"mcp", "list"},
+		{"--debug", "mcp", "list"},
+		{"--cwd", "/tmp", "inspect", "--json"},
+		{"-v"},
+		{"--help"},
+		{"models", "--help"},
 	} {
 		if res := applyGrokBypassMode(args, true); !slices.Equal(res, args) {
 			t.Fatalf("applyGrokBypassMode(%v) = %v", args, res)
 		}
+	}
+	if !isLocalGrokInvocation([]string{"--reasoning-effort", "high", "mcp", "list"}) {
+		t.Fatal("expected `--reasoning-effort high mcp list` to be classified as a local Grok subcommand")
 	}
 }
 
@@ -223,5 +256,62 @@ func TestLegacyDefaultAccountRequiresExplicitSwitch(t *testing.T) {
 	}
 	if got := readFakeTraces(t, trace)[0]; got.GrokBase != "https://native.invalid/v1" || got.GrokAuth != "" {
 		t.Fatal("native default received a CCL session")
+	}
+}
+
+func TestResolveRootGrokArgsStripsGrokEscapeAfterProvider(t *testing.T) {
+	for _, tc := range []struct {
+		in       []string
+		wantName string
+		wantArgs []string
+		wantDisp bool
+	}{
+		{[]string{"grok", "doctor"}, "", []string{"doctor"}, true},
+		{[]string{"--provider", "gw", "grok", "doctor"}, "gw", []string{"doctor"}, true},
+		{[]string{"--provider=gw", "grok", "update"}, "gw", []string{"update"}, true},
+		{[]string{"--provider", "gw", "--", "grok"}, "gw", []string{"grok"}, true},
+		{[]string{"doctor"}, "", nil, false},
+		{[]string{"--version"}, "", nil, false},
+		{[]string{"-v"}, "", []string{"-v"}, true},
+	} {
+		name, rest, dispatch, err := resolveRootGrokArgs(tc.in)
+		if err != nil || dispatch != tc.wantDisp || name != tc.wantName || !slices.Equal(rest, tc.wantArgs) {
+			t.Fatalf("resolveRootGrokArgs(%v) = (%q, %v, %v, %v), want (%q, %v, %v, nil)",
+				tc.in, name, rest, dispatch, err, tc.wantName, tc.wantArgs, tc.wantDisp)
+		}
+	}
+}
+
+func TestLocalGrokSubcommandsSkipProxyStartup(t *testing.T) {
+	saveGrokFixture(t, &provider.Config{
+		ActiveProvider: "gw",
+		BypassMode:     true,
+		Providers: map[string]provider.Provider{
+			"gw": {
+				Name:     "gw",
+				Type:     "openai",
+				Endpoint: "https://gw.invalid/v1",
+				APIKey:   "upstream-secret",
+				Model:    "gpt-5.4",
+			},
+		},
+	})
+	tracePath := useFakeGrok(t)
+	t.Setenv("GROK_MODELS_BASE_URL", "https://ambient.invalid/v1")
+
+	if err := runGrok([]string{"--debug", "mcp", "list"}, ""); err != nil {
+		t.Fatalf("runGrok(mcp list): %v", err)
+	}
+	got := readFakeTraces(t, tracePath)[0]
+	if !slices.Equal(got.Args, []string{"--debug", "mcp", "list"}) {
+		t.Fatalf("args = %v, want [--debug mcp list]", got.Args)
+	}
+	if got.GrokAuth != "" || strings.HasPrefix(got.GrokBase, "http://127.0.0.1:") {
+		t.Fatalf("local mcp list started loopback session: base=%q auth=%q", got.GrokBase, got.GrokAuth)
+	}
+
+	// Explicit invalid --provider must still fail even on a local subcommand.
+	if err := runGrok([]string{"mcp", "list"}, "missing-provider"); err == nil {
+		t.Fatal("expected explicit missing --provider to fail")
 	}
 }

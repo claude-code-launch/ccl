@@ -258,6 +258,9 @@ func loadAuthorizedGoogleDriveAt(ctx context.Context, authPath, alias string) (*
 		}
 		return nil, err
 	}
+	if err := requireGoogleDesktopClient(); err != nil {
+		return nil, err
+	}
 	return newGoogleDriveRemote(ctx, token, authPath), nil
 }
 

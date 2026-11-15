@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/claude-code-launch/ccl/internal/modelsdev"
+	"github.com/claude-code-launch/ccl/internal/protocol"
 	"github.com/google/uuid"
 )
 
@@ -107,12 +109,13 @@ func startKiroOAuth(parent context.Context, modelSpec, credentialFile string) (*
 		// The service's own catalog is loaded lazily by /v1/models, but Runtime
 		// must carry the configured models too: providersession.Prepare and the
 		// launcher read Runtime.Models() without asking the runtime to start.
-		models:  models,
-		cancel:  cancel,
-		done:    make(chan struct{}),
-		runErr:  make(chan error, 1),
-		started: started,
-		usage:   usageTracker,
+		models:       models,
+		modelDetails: kiroInitialModelDetails(modelSpec, models),
+		cancel:       cancel,
+		done:         make(chan struct{}),
+		runErr:       make(chan error, 1),
+		started:      started,
+		usage:        usageTracker,
 	}
 	proxyRuntime.cleanup = append(proxyRuntime.cleanup, closeIdleClients(service.client, pool.client))
 	go func() {
@@ -139,7 +142,82 @@ func startKiroOAuth(parent context.Context, modelSpec, credentialFile string) (*
 
 // kiroRuntimeModels lists the client-visible model aliases of a model spec.
 func kiroRuntimeModels(modelSpec string) []string {
+	if strings.TrimSpace(modelSpec) == "" {
+		modelSpec = "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5"
+	}
 	return runtimeModelAliases(modelSpec)
+}
+
+func kiroInitialModelDetails(modelSpec string, models []string) map[string]protocol.ModelInfo {
+	index, _ := modelsdev.CachedIndex()
+	routes := make(map[string]string, len(models))
+	for _, route := range runtimeModelRoutes(modelSpec) {
+		routes[strings.ToLower(strings.TrimSpace(route.Alias))] = route.Name
+	}
+	details := make(map[string]protocol.ModelInfo, len(models))
+	for _, alias := range models {
+		trimmed := strings.TrimSpace(alias)
+		if trimmed == "" {
+			continue
+		}
+		target := routes[strings.ToLower(trimmed)]
+		if target == "" {
+			target = trimmed
+		}
+		mapped := mapKiroModel(target)
+		var info protocol.ModelInfo
+		matched := false
+		if index != nil {
+			if modalities, ok := index.InputModalities("anthropic", mapped, target); ok {
+				info.InputModalities = modalities
+				matched = true
+			}
+			if maxOut, ok := index.MaxOutputTokens("anthropic", mapped, target); ok {
+				info.MaxOutputTokens = maxOut
+				matched = true
+			}
+			if efforts, ok := index.Efforts("anthropic", mapped, target); ok {
+				info.ReasoningLevels, info.DefaultReasoningLevel = reasoningLevelsFromEfforts(efforts, "high")
+				info.ReasoningKnown = true
+				matched = true
+			}
+		}
+		if len(info.InputModalities) == 0 && kiroKnownVisionModel(mapped) {
+			info.InputModalities = []string{"text", "image"}
+			matched = true
+		}
+		if !info.ReasoningKnown && kiroKnownEffortModel(mapped) {
+			info.ReasoningLevels, info.DefaultReasoningLevel = reasoningLevelsFromEfforts([]string{"low", "medium", "high", "max"}, "high")
+			info.ReasoningKnown = true
+			matched = true
+		}
+		if matched {
+			info.ID = trimmed
+			details[strings.ToLower(trimmed)] = info
+		}
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return details
+}
+
+func kiroKnownEffortModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(stripContextModelSuffix(model)))
+	return strings.HasPrefix(lower, "claude-opus-4") || strings.HasPrefix(lower, "claude-sonnet-4")
+}
+
+func kiroKnownVisionModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(stripContextModelSuffix(model)))
+	for _, prefix := range []string{
+		"claude-3-5", "claude-3.5", "claude-3-7", "claude-3.7",
+		"claude-4", "claude-sonnet-4", "claude-opus-4", "claude-haiku-4",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *kiroService) handler() http.Handler {
@@ -160,6 +238,7 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 		writeProxyError(writer, http.StatusBadGateway, "api_error", "Unable to load available models from Kiro: "+err.Error())
 		return
 	}
+	index, _ := modelsdev.CachedIndex()
 	data := make([]map[string]any, 0, len(models))
 	for _, model := range models {
 		displayName := strings.TrimSpace(model.ModelName)
@@ -174,6 +253,7 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 		if model.TokenLimits != nil {
 			if model.TokenLimits.MaxInputTokens > 0 {
 				item["max_input_tokens"] = model.TokenLimits.MaxInputTokens
+				item["context_window"] = model.TokenLimits.MaxInputTokens
 			}
 			if model.TokenLimits.MaxOutputTokens > 0 {
 				item["max_output_tokens"] = model.TokenLimits.MaxOutputTokens
@@ -187,7 +267,28 @@ func (s *kiroService) handleModels(writer http.ResponseWriter, request *http.Req
 		}
 		if len(model.SupportedInputTypes) > 0 {
 			item["supported_input_types"] = model.SupportedInputTypes
+			if modalities := normalizeModelModalities(model.SupportedInputTypes); len(modalities) > 0 {
+				item["input_modalities"] = modalities
+			}
 		}
+		mapped := mapKiroModel(model.ModelID)
+		var levels []protocol.ReasoningLevel
+		var defaultLevel string
+		known := false
+		if index != nil {
+			if efforts, ok := index.Efforts("anthropic", mapped, displayName); ok {
+				levels, defaultLevel = reasoningLevelsFromEfforts(efforts, "high")
+				known = true
+			}
+		}
+		if !known && kiroKnownEffortModel(mapped) {
+			levels, defaultLevel = reasoningLevelsFromEfforts([]string{"low", "medium", "high", "max"}, "high")
+			known = true
+		}
+		if !known {
+			levels, defaultLevel, known = resolveFallbackModelReasoning(index, "anthropic", mapped, displayName)
+		}
+		applyModelEntryReasoning(item, levels, defaultLevel, known)
 		data = append(data, item)
 	}
 	writeModelList(writer, data)

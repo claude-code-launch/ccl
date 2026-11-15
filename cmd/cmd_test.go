@@ -2,14 +2,11 @@ package cmd
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
 
-	"github.com/claude-code-launch/ccl/internal/config"
 	"github.com/claude-code-launch/ccl/internal/locale"
 	"github.com/claude-code-launch/ccl/internal/provider"
-	"github.com/claude-code-launch/ccl/internal/slotrec"
 	"github.com/spf13/cobra"
 )
 
@@ -20,7 +17,13 @@ func executeCommand(root *cobra.Command, args ...string) (string, error) {
 	root.SetArgs(args)
 
 	// 执行命令
-	_, err := root.ExecuteC()
+	executed, err := root.ExecuteC()
+	if executed != nil {
+		if helpFlag := executed.Flags().Lookup("help"); helpFlag != nil {
+			_ = helpFlag.Value.Set("false")
+			helpFlag.Changed = false
+		}
+	}
 	return buf.String(), err
 }
 
@@ -53,15 +56,15 @@ func TestRootHelpUsesNewCommandNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"  codex", "  oauth", "  bypass", "  log", "  ls", "  use", "  set", "  map", "  provider", "  cloud"} {
+	for _, want := range []string{"  codex", "  oauth", "  bypass", "  log", "  ls", "  use", "  preview", "  set", "  provider", "  cloud"} {
 		if !contains(out, want) {
 			t.Fatalf("expected root help to contain %q, got:\n%s", want, out)
 		}
 	}
 	// Old root shortcuts are gone entirely.
 	for _, unwanted := range []string{"\n  conf", "\n  list", "\n  run", "\n  settings", "acp-permission",
-		"\n  cp ", "\n  mv ", "\n  rm ", "\n  preview", "\n  login", "\n  push", "\n  pull", "\n  tag ", "\n  status",
-		"\n  import", "\n  auth", "\n  debug"} {
+		"\n  cp ", "\n  mv ", "\n  rm ", "\n  login", "\n  push", "\n  pull", "\n  tag ", "\n  status",
+		"\n  import", "\n  auth", "\n  debug", "\n  map"} {
 		if contains(out, unwanted) {
 			t.Fatalf("root help should not contain old command %q, got:\n%s", unwanted, out)
 		}
@@ -74,27 +77,35 @@ func TestProviderHelpUsesShortSubcommands(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, want := range []string{"ccl provider [command]", "  ls", "  cp", "  mv", "  rm", "  preview", "  set", "  use", "  map", "  models", "  env"} {
+	for _, want := range []string{"ccl provider [command]", "  ls", "  cp", "  mv", "  rm", "  preview", "  set", "  use", "  models"} {
 		if !contains(out, want) {
 			t.Fatalf("expected provider help to contain %q, got:\n%s", want, out)
 		}
 	}
-	if contains(out, "\n  list") {
-		t.Fatalf("provider help should prefer ls over list, got:\n%s", out)
+	for _, unwanted := range []string{"\n  list", "\n  map", "\n  env", "\n  effort"} {
+		if contains(out, unwanted) {
+			t.Fatalf("provider help should not contain removed command %q, got:\n%s", unwanted, out)
+		}
 	}
 }
 
 func TestProviderSubcommandAliasesExist(t *testing.T) {
 	for _, args := range [][]string{
-		{"provider", "map", "--help"},
 		{"provider", "models", "--help"},
-		{"provider", "env", "--help"},
+		{"provider", "preview", "--help"},
+		{"preview", "--help"},
 		{"doctor", "--help"},
 		{"version", "--help"},
 		{"update", "--help"},
 	} {
 		if _, err := executeCommand(RootCmd(), args...); err != nil {
 			t.Fatalf("expected %v to be registered, got error: %v", args, err)
+		}
+	}
+	for _, c := range providerCmd.Commands() {
+		switch c.Name() {
+		case "env", "effort", "map":
+			t.Fatalf("removed provider subcommand %q is still registered", c.Name())
 		}
 	}
 }
@@ -202,12 +213,10 @@ func TestPrintProvidersUsesCompactTableByDefault(t *testing.T) {
 		ActiveProvider: "beta",
 		Providers: map[string]provider.Provider{
 			"beta": {
-				Name:        "beta",
-				Type:        "openai",
-				Endpoint:    "https://example.com/v1",
-				Model:       "pool-a,pool-b,pool-c,pool-d",
-				OpusModel:   "manual-opus",
-				SonnetModel: "sonnet",
+				Name:     "beta",
+				Type:     "openai",
+				Endpoint: "https://example.com/v1",
+				Model:    "pool-a,pool-b,pool-c,pool-d",
 			},
 		},
 	}
@@ -297,209 +306,13 @@ func TestPrintProvidersAllShowsFullModelPool(t *testing.T) {
 	}
 	out := buf.String()
 
-	for _, want := range []string{"beta", "Used By  : Grok Build", "Endpoint : https://example.com/v1", "Models   : 4", "Pool IDs : pool-a,pool-b,pool-c,pool-d"} {
+	for _, want := range []string{"beta", "Used By  : Grok Build", "Endpoint : https://example.com/v1", "Default  : auto (pool-a)", "Models   : 4", "Pool IDs : pool-a,pool-b,pool-c,pool-d"} {
 		if !contains(out, want) {
 			t.Fatalf("expected detailed output to contain %q, got:\n%s", want, out)
 		}
 	}
-}
-
-func TestMapAutoRefreshesModelPoolWithoutTransferringOneMToUnknownModels(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
-
-	cfg := &provider.Config{
-		ActiveProvider: "mock",
-		Providers: map[string]provider.Provider{
-			"mock": {
-				Name:        "mock",
-				Type:        "openai",
-				Endpoint:    server.URL + "/v1",
-				APIKey:      "test-key",
-				OpusModel:   "old-opus[1m]",
-				SonnetModel: "old-sonnet",
-				Env: map[string]string{
-					autoCompactWindowEnv: "1000000",
-				},
-			},
-		},
-	}
-	if err := config.Save(cfg); err != nil {
-		t.Fatalf("failed to save config: %v", err)
-	}
-
-	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
-		t.Fatalf("runMapAuto failed: %v", err)
-	}
-
-	updated, err := config.Load()
-	if err != nil {
-		t.Fatalf("failed to load config: %v", err)
-	}
-	p := updated.Providers["mock"]
-
-	if p.Model != "model-a,model-b,model-c,model-d" {
-		t.Fatalf("expected refreshed model pool, got %q", p.Model)
-	}
-	want := slotrec.Recommend(provider.Provider{}, []string{"model-a", "model-b", "model-c", "model-d"}, nil)
-	if p.OpusModel != want.Opus || strings.Contains(p.OpusModel, "[1m]") {
-		t.Fatalf("expected the recommended Opus without the old 1M marker, got %q", p.OpusModel)
-	}
-	if p.SonnetModel != want.Sonnet || p.HaikuModel != want.Haiku || p.CustomModelID != want.Custom {
-		t.Fatalf("map auto disagrees with the ccl set recommender: %+v vs %+v", p, want)
-	}
-	if _, ok := p.Env[autoCompactWindowEnv]; ok {
-		t.Fatalf("expected stale 1M compact window removed for unknown models, got %+v", p.Env)
-	}
-}
-
-// TestMapAutoMirrorsOpusIntoFable pins the Fable slot's auto-mapping: with no
-// Fable-family model in the catalog it follows Opus rather than keep a stale
-// value.
-func TestMapAutoMirrorsOpusIntoFable(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
-
-	cfg := &provider.Config{
-		ActiveProvider: "mock",
-		Providers: map[string]provider.Provider{
-			"mock": {
-				Name:       "mock",
-				Type:       "openai",
-				Endpoint:   server.URL + "/v1",
-				APIKey:     "test-key",
-				FableModel: "stale-fable",
-			},
-		},
-	}
-	if err := config.Save(cfg); err != nil {
-		t.Fatalf("failed to save config: %v", err)
-	}
-
-	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
-		t.Fatalf("runMapAuto failed: %v", err)
-	}
-
-	updated, err := config.Load()
-	if err != nil {
-		t.Fatalf("failed to load config: %v", err)
-	}
-	p := updated.Providers["mock"]
-	if p.OpusModel == "" || p.FableModel != p.OpusModel {
-		t.Fatalf("fable = %q, want it to follow the opus pick %q", p.FableModel, p.OpusModel)
-	}
-}
-
-func TestMapAutoClearsStaleContextPreset(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
-
-	cfg := &provider.Config{
-		ActiveProvider: "mock",
-		Providers: map[string]provider.Provider{
-			"mock": {
-				Name:      "mock",
-				Type:      "openai",
-				Endpoint:  server.URL + "/v1",
-				APIKey:    "test-key",
-				OpusModel: "old-opus[1m]",
-				Env: map[string]string{
-					maxContextTokensEnv:  "1000000",
-					autoCompactWindowEnv: "900000",
-				},
-			},
-		},
-	}
-	if err := config.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
-		t.Fatal(err)
-	}
-	updated, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := updated.Providers["mock"]
-	// ccl declares no context size any more, so a preset written by an older
-	// version is cleared and Grok Build sizes the session per slot.
-	for _, key := range []string{maxContextTokensEnv, autoCompactWindowEnv, autoCompactPctEnv} {
-		if value, ok := p.Env[key]; ok {
-			t.Fatalf("stale %s survived map auto: %q", key, value)
-		}
-	}
-}
-
-func TestMapAutoPreservesBalancedContextPreset(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
-
-	cfg := &provider.Config{
-		ActiveProvider: "mock",
-		Providers: map[string]provider.Provider{
-			"mock": {
-				Name:      "mock",
-				Type:      "openai",
-				Endpoint:  server.URL + "/v1",
-				APIKey:    "test-key",
-				OpusModel: "old-opus",
-				Env: map[string]string{
-					maxContextTokensEnv:  provider.BalancedMaxContextTokens,
-					autoCompactWindowEnv: provider.BalancedAutoCompactWindow,
-					autoCompactPctEnv:    provider.BalancedAutoCompactPct,
-				},
-			},
-		},
-	}
-	if err := config.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
-		t.Fatal(err)
-	}
-	updated, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := updated.Providers["mock"]; provider.ProviderContextPreset(got) != provider.ContextPresetBalanced500K {
-		t.Fatalf("map auto changed Balanced context preset: %+v / %q", got.Env, got.ContextPreset)
-	}
-}
-
-func TestMapAutoPreservesBalanced800KContextPreset(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	server := newMockGatewayServer(t, []string{"model-a", "model-b", "model-c", "model-d"}, false)
-
-	cfg := &provider.Config{
-		ActiveProvider: "mock",
-		Providers: map[string]provider.Provider{
-			"mock": {
-				Name:      "mock",
-				Type:      "openai",
-				Endpoint:  server.URL + "/v1",
-				APIKey:    "test-key",
-				OpusModel: "old-opus",
-				Env: map[string]string{
-					maxContextTokensEnv:  provider.Balanced800KMaxContextTokens,
-					autoCompactWindowEnv: provider.Balanced800KAutoCompactWindow,
-					autoCompactPctEnv:    provider.Balanced800KAutoCompactPct,
-				},
-			},
-		},
-	}
-	if err := config.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-	if err := runMapAuto(context.Background(), []string{"mock"}, false); err != nil {
-		t.Fatal(err)
-	}
-	updated, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := updated.Providers["mock"]
-	if preset := provider.ProviderContextPreset(got); preset != provider.ContextPresetBalanced800K {
-		t.Fatalf("map auto changed Balanced 800K context preset: %+v / %q", got.Env, got.ContextPreset)
+	if contains(out, "Slot IDs") {
+		t.Fatalf("detailed output should not contain Slot IDs, got:\n%s", out)
 	}
 }
 
@@ -516,8 +329,8 @@ func TestCloudAndOAuthCommandTrees(t *testing.T) {
 			t.Fatalf("expected %v to be registered, got error: %v\n%s", args, err, out)
 		}
 	}
-	// The former root shortcuts are gone, so they are not ccl commands.
-	for _, name := range []string{"cp", "mv", "env", "preview", "models", "login", "push", "pull", "status", "key", "logout", "tag", "device"} {
+	// The former/removed root commands are not registered at root.
+	for _, name := range []string{"cp", "mv", "env", "effort", "models", "login", "push", "pull", "status", "key", "logout", "tag", "device"} {
 		if isCclCommand(name) {
 			t.Fatalf("root shortcut %q is still registered", name)
 		}
@@ -569,8 +382,7 @@ func TestDoctorHelpDescribesProviderHealth(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Show environment prerequisites",
-		"Model pool (provider.Model) is an optional candidate list",
-		"empty pool with filled slots is normal",
+		"Model pool (provider.Model) lists the models exposed by the provider runtime",
 		"ccl cloud status",
 	} {
 		if !contains(out, want) {
@@ -586,16 +398,6 @@ func TestDoctorHelpDescribesProviderHealth(t *testing.T) {
 		if contains(providerHelp, unwanted) {
 			t.Fatalf("provider help should not list %q, got:\n%s", unwanted, providerHelp)
 		}
-	}
-}
-
-func TestDoctorConfiguredSlotCount(t *testing.T) {
-	p := provider.Provider{OpusModel: "a", SonnetModel: "b"}
-	if got := doctorConfiguredSlotCount(p); got != 2 {
-		t.Fatalf("slot count = %d, want 2", got)
-	}
-	if got := doctorConfiguredSlotCount(provider.Provider{}); got != 0 {
-		t.Fatalf("empty slot count = %d", got)
 	}
 }
 

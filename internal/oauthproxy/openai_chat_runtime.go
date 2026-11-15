@@ -40,13 +40,14 @@ func (*chatStaticAuthorizer) isOAuth() bool                                     
 // usage accounting all live here, independent of external runtime upgrades;
 // these details define how openai(chat) behaves.
 type chatCompletionsService struct {
-	apiKey     string
-	endpoint   string
-	authorizer chatAuthorizer
-	models     []string
-	modelRoute map[string]string
-	client     *http.Client
-	usage      *UsageTracker
+	apiKey       string
+	endpoint     string
+	authorizer   chatAuthorizer
+	models       []string
+	modelDetails map[string]protocol.ModelInfo
+	modelRoute   map[string]string
+	client       *http.Client
+	usage        *UsageTracker
 	// fastRetry controls CCL's hidden 429/5xx replay loop. It defaults to true
 	// for ordinary OpenAI-compatible gateways. Subscription brokers that charge
 	// per invocation can turn it off so an ambiguous 5xx is never submitted a
@@ -214,7 +215,7 @@ func (s *chatCompletionsService) authorized(request *http.Request) bool {
 }
 
 func (s *chatCompletionsService) handleModels(writer http.ResponseWriter, request *http.Request) {
-	serveModelList(writer, request, s.apiKey, s.models)
+	serveModelListWithRoutes(writer, request, s.apiKey, s.models, s.modelDetails, s.modelRoute)
 }
 
 func (s *chatCompletionsService) handleResponses(writer http.ResponseWriter, request *http.Request) {

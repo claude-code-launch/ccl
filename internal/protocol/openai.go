@@ -56,22 +56,34 @@ type ModelResponse struct {
 				SessionCache bool `json:"session_cache"`
 			} `json:"cache,omitempty"`
 		} `json:"features"`
-		Id                    string           `json:"id"`
-		Name                  string           `json:"name"`
-		Object                string           `json:"object"`
-		Status                string           `json:"status,omitempty"`
-		Version               string           `json:"version"`
-		ContextWindow         int              `json:"context_window,omitempty"`
-		InputModalities       []string         `json:"input_modalities,omitempty"`
-		SupportedInputTypes   []string         `json:"supported_input_types,omitempty"`
-		ReasoningLevels       []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
-		DefaultReasoningLevel string           `json:"default_reasoning_level,omitempty"`
+		Id                           string           `json:"id"`
+		Name                         string           `json:"name"`
+		Object                       string           `json:"object"`
+		Status                       string           `json:"status,omitempty"`
+		Version                      string           `json:"version"`
+		ContextWindow                int              `json:"context_window,omitempty"`
+		MaxInputTokens               int              `json:"max_input_tokens,omitempty"`
+		MaxOutputTokens              int              `json:"max_output_tokens,omitempty"`
+		InputModalities              []string         `json:"input_modalities,omitempty"`
+		SupportedInputTypes          []string         `json:"supported_input_types,omitempty"`
+		ReasoningLevels              []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
+		DefaultReasoningLevel        string           `json:"default_reasoning_level,omitempty"`
+		SupportsReasoningEffort      *bool            `json:"supports_reasoning_effort,omitempty"`
+		ReasoningEffort              string           `json:"reasoning_effort,omitempty"`
+		ReasoningEffortServerDefault string           `json:"reasoning_effort_server_default,omitempty"`
+		ReasoningEfforts             json.RawMessage  `json:"reasoning_efforts,omitempty"`
+		Capabilities                 struct {
+			DefaultReasoningEffort string          `json:"default_reasoning_effort,omitempty"`
+			ReasoningEffort        json.RawMessage `json:"reasoning_effort,omitempty"`
+		} `json:"capabilities,omitempty"`
 		// Optional gateway and CCL model metadata.
 		RateMultiplier     *float64 `json:"rate_multiplier,omitempty"`
 		RateUnit           string   `json:"rate_unit,omitempty"`
 		IsNew              bool     `json:"is_new,omitempty"`
 		PromotionAvailable bool     `json:"promotion_available,omitempty"`
 		Modalities         struct {
+			Input            []string `json:"input,omitempty"`
+			Output           []string `json:"output,omitempty"`
 			InputModalities  []string `json:"input_modalities,omitempty"`
 			OutputModalities []string `json:"output_modalities,omitempty"`
 		} `json:"modalities,omitempty"`
@@ -157,29 +169,239 @@ func GetOpenAIModelInfosContext(ctx context.Context, baseURL, apiKey string) ([]
 		if window == 0 {
 			window = m.ContextWindow
 		}
+		if window == 0 {
+			window = m.MaxInputTokens
+		}
+		maxOutput := m.TokenLimits.MaxOutputTokenLength
+		if maxOutput == 0 {
+			maxOutput = m.MaxOutputTokens
+		}
+		levels, defaultLevel, known := m.ReasoningLevels, strings.TrimSpace(m.DefaultReasoningLevel), len(m.ReasoningLevels) > 0
+		if !known {
+			levels, defaultLevel, known = ParseRemoteReasoningEfforts(
+				m.SupportsReasoningEffort,
+				m.ReasoningEfforts,
+				m.ReasoningEffortServerDefault,
+				m.ReasoningEffort,
+				m.Capabilities.DefaultReasoningEffort,
+				m.Capabilities.ReasoningEffort,
+			)
+		} else if m.SupportsReasoningEffort != nil && !*m.SupportsReasoningEffort {
+			levels, defaultLevel, known = nil, "", true
+		}
 		models = append(models, ModelInfo{
 			ID:                    m.Id,
 			DisplayName:           strings.TrimSpace(m.Name),
 			ContextWindow:         window,
-			InputModalities:       modelInputModalities(m.InputModalities, m.SupportedInputTypes, m.Modalities.InputModalities),
+			MaxOutputTokens:       maxOutput,
+			InputModalities:       modelInputModalities(m.InputModalities, m.SupportedInputTypes, m.Modalities.InputModalities, m.Modalities.Input),
 			RateMultiplier:        m.RateMultiplier,
 			RateUnit:              strings.TrimSpace(m.RateUnit),
 			IsNew:                 m.IsNew,
 			PromotionAvailable:    m.PromotionAvailable,
-			ReasoningLevels:       m.ReasoningLevels,
-			DefaultReasoningLevel: m.DefaultReasoningLevel,
+			ReasoningLevels:       levels,
+			DefaultReasoningLevel: defaultLevel,
+			ReasoningKnown:        known,
 		})
 	}
 	return models, nil
 }
 
+// ParseRemoteReasoningEfforts decodes Grok/xAI-style reasoning metadata from
+// GET /v1/models (supports_reasoning_effort, reasoning_efforts as string or
+// {value,label,description,default} entries, reasoning_effort_server_default,
+// and capabilities.reasoning_effort).
+func ParseRemoteReasoningEfforts(
+	supports *bool,
+	rawEfforts json.RawMessage,
+	serverDefault, legacyDefault, capDefault string,
+	capEfforts json.RawMessage,
+) ([]ReasoningLevel, string, bool) {
+	if supports != nil && !*supports {
+		return nil, "", true
+	}
+	levels, optionDefault, hasList := decodeRawEffortList(rawEfforts)
+	if !hasList {
+		var explicitFalse bool
+		levels, optionDefault, hasList, explicitFalse = decodeCapabilityEfforts(capEfforts)
+		if explicitFalse {
+			return nil, "", true
+		}
+	}
+	if !hasList {
+		if supports != nil && *supports {
+			levels = ChatReasoningLevels()
+			chosen := firstNonEmpty(serverDefault, capDefault, legacyDefault, "medium")
+			return levels, strings.ToLower(chosen), true
+		}
+		return nil, "", false
+	}
+	if len(levels) == 0 {
+		return nil, "", true
+	}
+	chosen := strings.ToLower(firstNonEmpty(serverDefault, capDefault, optionDefault, legacyDefault))
+	if chosen != "" {
+		matched := false
+		for _, level := range levels {
+			if strings.EqualFold(level.Effort, chosen) {
+				chosen = level.Effort
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			chosen = ""
+		}
+	}
+	if chosen == "" {
+		chosen = levels[0].Effort
+	}
+	return levels, chosen, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func decodeRawEffortList(raw json.RawMessage) ([]ReasoningLevel, string, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, "", false
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, "", false
+	}
+	levels := make([]ReasoningLevel, 0, len(items))
+	seen := make(map[string]bool, len(items))
+	defaultEffort := ""
+	for _, item := range items {
+		var s string
+		if err := json.Unmarshal(item, &s); err == nil {
+			effort := strings.ToLower(strings.TrimSpace(s))
+			if effort == "" || effort == "none" || seen[effort] {
+				continue
+			}
+			seen[effort] = true
+			levels = append(levels, ReasoningLevel{Effort: effort, Description: defaultEffortDescription(effort)})
+			continue
+		}
+		var obj struct {
+			Value       string `json:"value"`
+			Effort      string `json:"effort"`
+			Label       string `json:"label"`
+			Description string `json:"description"`
+			Default     bool   `json:"default"`
+		}
+		if err := json.Unmarshal(item, &obj); err != nil {
+			continue
+		}
+		effort := strings.ToLower(firstNonEmpty(obj.Value, obj.Effort))
+		if effort == "" || effort == "none" || seen[effort] {
+			continue
+		}
+		seen[effort] = true
+		desc := firstNonEmpty(obj.Description, obj.Label, defaultEffortDescription(effort))
+		levels = append(levels, ReasoningLevel{Effort: effort, Description: desc})
+		if obj.Default && defaultEffort == "" {
+			defaultEffort = effort
+		}
+	}
+	return levels, defaultEffort, true
+}
+
+func decodeCapabilityEfforts(raw json.RawMessage) ([]ReasoningLevel, string, bool, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, "", false, false
+	}
+	var flag bool
+	if err := json.Unmarshal(raw, &flag); err == nil {
+		if !flag {
+			return nil, "", false, true
+		}
+		return ChatReasoningLevels(), "medium", true, false
+	}
+	if levels, def, ok := decodeRawEffortList(raw); ok {
+		return levels, def, true, false
+	}
+	var wrapped struct {
+		Efforts json.RawMessage `json:"efforts"`
+		Values  json.RawMessage `json:"values"`
+		Default string          `json:"default"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil {
+		if levels, def, ok := decodeRawEffortList(wrapped.Efforts); ok {
+			return levels, firstNonEmpty(def, wrapped.Default), true, false
+		}
+		if levels, def, ok := decodeRawEffortList(wrapped.Values); ok {
+			return levels, firstNonEmpty(def, wrapped.Default), true, false
+		}
+	}
+	return nil, "", false, false
+}
+
+func defaultEffortDescription(effort string) string {
+	switch effort {
+	case "minimal":
+		return "Minimal reasoning for fast responses"
+	case "low":
+		return "Fast responses with lighter reasoning"
+	case "medium":
+		return "Balances speed and reasoning depth for everyday tasks"
+	case "high":
+		return "Greater reasoning depth for complex problems"
+	case "xhigh":
+		return "Extra high reasoning depth for complex problems"
+	case "max":
+		return "Maximum reasoning depth for the hardest problems"
+	case "ultra":
+		return "Maximum reasoning with automatic task delegation"
+	default:
+		return effort
+	}
+}
+
 func modelInputModalities(candidates ...[]string) []string {
 	for _, modalities := range candidates {
-		if len(modalities) > 0 {
-			return modalities
+		normalized := normalizeModalities(modalities)
+		if len(normalized) > 0 {
+			return normalized
 		}
 	}
 	return nil
+}
+
+func normalizeModalities(modalities []string) []string {
+	if len(modalities) == 0 {
+		return nil
+	}
+	var extras []string
+	seen := make(map[string]bool, len(modalities))
+	for _, item := range modalities {
+		m := strings.ToLower(strings.TrimSpace(item))
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		if m != "text" && m != "image" {
+			extras = append(extras, m)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	if seen["text"] {
+		out = append(out, "text")
+	}
+	if seen["image"] {
+		out = append(out, "image")
+	}
+	out = append(out, extras...)
+	return out
 }
 
 // codexClientVersionQuery selects the Codex client catalog, which is the only
@@ -194,6 +416,7 @@ type codexClientModelsResponse struct {
 		Slug                  string           `json:"slug"`
 		ContextWindow         int              `json:"context_window,omitempty"`
 		MaxContextWindow      int              `json:"max_context_window,omitempty"`
+		MaxOutputTokens       int              `json:"max_output_tokens,omitempty"`
 		InputModalities       []string         `json:"input_modalities,omitempty"`
 		ReasoningLevels       []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
 		DefaultReasoningLevel string           `json:"default_reasoning_level,omitempty"`
@@ -232,7 +455,14 @@ func GetCodexClientModelInfos(baseURL, apiKey string) ([]ModelInfo, error) {
 		if window == 0 {
 			window = model.MaxContextWindow
 		}
-		models = append(models, ModelInfo{ID: id, ContextWindow: window, InputModalities: model.InputModalities, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
+		models = append(models, ModelInfo{
+			ID:                    id,
+			ContextWindow:         window,
+			MaxOutputTokens:       model.MaxOutputTokens,
+			InputModalities:       normalizeModalities(model.InputModalities),
+			ReasoningLevels:       model.ReasoningLevels,
+			DefaultReasoningLevel: model.DefaultReasoningLevel,
+		})
 	}
 	return models, nil
 }

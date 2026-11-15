@@ -72,6 +72,7 @@ func requestCodexModelInfos(ctx context.Context, client *http.Client, endpoint s
 			DisplayName           string                    `json:"display_name"`
 			ContextWindow         int                       `json:"context_window"`
 			MaxContextWindow      int                       `json:"max_context_window"`
+			MaxOutputTokens       int                       `json:"max_output_tokens"`
 			InputModalities       []string                  `json:"input_modalities"`
 			ReasoningLevels       []protocol.ReasoningLevel `json:"supported_reasoning_levels"`
 			DefaultReasoningLevel string                    `json:"default_reasoning_level"`
@@ -93,7 +94,12 @@ func requestCodexModelInfos(ctx context.Context, client *http.Client, endpoint s
 		if window == 0 {
 			window = model.MaxContextWindow
 		}
-		models = append(models, protocol.ModelInfo{ID: id, DisplayName: model.DisplayName, ContextWindow: window, InputModalities: model.InputModalities, ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel})
+		modalities := normalizeModelModalities(model.InputModalities)
+		models = append(models, protocol.ModelInfo{
+			ID: id, DisplayName: model.DisplayName, ContextWindow: window,
+			MaxOutputTokens: model.MaxOutputTokens, InputModalities: modalities,
+			ReasoningLevels: model.ReasoningLevels, DefaultReasoningLevel: model.DefaultReasoningLevel,
+		})
 	}
 	if len(models) == 0 {
 		return nil, response.StatusCode, fmt.Errorf("discover GPT models: response contained no visible models")
@@ -107,4 +113,27 @@ func codexModelIDs(models []protocol.ModelInfo) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+func normalizeModelModalities(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	hasText := false
+	hasImage := false
+	for _, raw := range values {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "text":
+			hasText = true
+		case "image":
+			hasImage = true
+		}
+	}
+	if hasImage {
+		return []string{"text", "image"}
+	}
+	if hasText {
+		return []string{"text"}
+	}
+	return nil
 }

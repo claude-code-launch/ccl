@@ -440,3 +440,38 @@ func writeNativeFixture(w http.ResponseWriter, output []any, inputTokens int) {
 	response["status"], response["output"], response["usage"] = "completed", output, fixtureResponseUsage(inputTokens)
 	_ = events.emit("response.completed", map[string]any{"response": response})
 }
+
+func TestGatewayPromotesDefaultModelFirst(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	p := provider.Provider{
+		Name:         "chosen",
+		Type:         "openai_responses",
+		Endpoint:     upstream.URL + "/v1",
+		APIKey:       "fake-provider-key",
+		Model:        "model-a,model-b[1m]",
+		DefaultModel: "model-b",
+	}
+	runtime, err := oauthproxy.StartOpenAIResponsesAPI(context.Background(), upstream.URL+"/v1", p.APIKey, provider.RuntimeModelSpec(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Stop)
+
+	g, err := New(context.Background(), runtime, p, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(g.Close)
+
+	models := g.Models()
+	if len(models) < 2 {
+		t.Fatalf("models = %+v, want at least 2 entries", models)
+	}
+	if got, _ := models[0]["slug"].(string); got != "ccl/chosen/model-b" {
+		t.Fatalf("first catalog slug = %q, want ccl/chosen/model-b (models=%+v)", got, models)
+	}
+}

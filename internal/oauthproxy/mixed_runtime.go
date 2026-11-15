@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/claude-code-launch/ccl/internal/protocol"
 )
 
 const mixedMaxBodyBytes = int64(128 << 20)
@@ -203,7 +205,29 @@ func (r *mixedProtocolRouter) handler() http.Handler {
 }
 
 func (r *mixedProtocolRouter) handleModels(writer http.ResponseWriter, request *http.Request) {
-	serveModelList(writer, request, r.apiKey, r.models)
+	var routes map[string]string
+	var details map[string]protocol.ModelInfo
+	mergeService := func(svcRoutes map[string]string, svcDetails map[string]protocol.ModelInfo) {
+		for k, v := range svcRoutes {
+			if routes == nil {
+				routes = make(map[string]string)
+			}
+			routes[k] = v
+		}
+		for k, v := range svcDetails {
+			if details == nil {
+				details = make(map[string]protocol.ModelInfo)
+			}
+			details[k] = v
+		}
+	}
+	if r.codex != nil {
+		mergeService(r.codex.modelRoute, r.codex.modelDetails)
+	}
+	if r.chatSvc != nil {
+		mergeService(r.chatSvc.modelRoute, r.chatSvc.modelDetails)
+	}
+	serveModelListWithRoutes(writer, request, r.apiKey, r.models, details, routes)
 }
 
 // handleResponses dispatches one Responses request to the service that owns

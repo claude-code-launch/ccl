@@ -9,9 +9,14 @@ import (
 )
 
 // Converted models share the cached models.dev effort metadata. Provider
-// metadata still supplies names, images and prices; native Responses bypasses
-// this step. Unknown models retain the existing compatibility fallback.
+// metadata still supplies names, images and prices when explicitly declared,
+// while models.dev backfills missing modalities and output limits on known IDs.
+// Native Responses bypasses effort overrides; unknown models remain text-only.
 func withModelsDevReasoning(models []string, details map[string]protocol.ModelInfo, names map[string]string, configured provider.Provider) (map[string]protocol.ModelInfo, error) {
+	return withModelsDevMetadata(models, details, names, configured, true)
+}
+
+func withModelsDevMetadata(models []string, details map[string]protocol.ModelInfo, names map[string]string, configured provider.Provider, includeReasoning bool) (map[string]protocol.ModelInfo, error) {
 	index, err := modelsdev.CachedIndex()
 	if err != nil {
 		// Metadata is optional. A first offline setup must not block model use.
@@ -25,7 +30,7 @@ func withModelsDevReasoning(models []string, details map[string]protocol.ModelIn
 		if provider.IsModelsDevType(configured.Type) {
 			providerID = provider.ModelsDevCatalogID(configured)
 		} else {
-			providerID = configured.OAuthProvider
+			providerID = modelsDevOAuthProviderID(configured.OAuthProvider)
 		}
 	}
 	descriptions := map[string]string{"minimal": "Minimal reasoning for fast responses"}
@@ -33,24 +38,37 @@ func withModelsDevReasoning(models []string, details map[string]protocol.ModelIn
 		descriptions[level.Effort] = level.Description
 	}
 	for _, id := range models {
-		key := id
-		if _, ok := details[key]; !ok {
-			if _, ok := details[strings.ToLower(id)]; ok {
-				key = strings.ToLower(id)
-			}
-		}
-		info := details[key]
-		// Gemini's account inventory defines the callable thinking variants.
-		// Public metadata must not add tiers this bound account cannot route.
-		if configured.OAuthProvider == "gemini" && info.ReasoningKnown {
-			continue
-		}
-		name := names[id]
+		key, info, _ := lookupModelInfo(details, id)
+		name := lookupModelDisplayName(names, id)
 		if name == "" {
 			name = info.DisplayName
 		}
+		modified := false
+		if len(info.InputModalities) == 0 {
+			if modalities, found := index.InputModalities(providerID, id, name); found && len(modalities) > 0 {
+				info.InputModalities = modalities
+				modified = true
+			}
+		}
+		if info.MaxOutputTokens <= 0 {
+			if maxOut, found := index.MaxOutputTokens(providerID, id, name); found && maxOut > 0 {
+				info.MaxOutputTokens = maxOut
+				modified = true
+			}
+		}
+		// Gemini's account inventory defines the callable thinking variants.
+		// Public metadata must not add tiers this bound account cannot route.
+		if !includeReasoning || (strings.EqualFold(strings.TrimSpace(configured.OAuthProvider), "gemini") && info.ReasoningKnown) {
+			if modified {
+				details[key] = info
+			}
+			continue
+		}
 		efforts, found := index.Efforts(providerID, id, name)
 		if !found {
+			if modified {
+				details[key] = info
+			}
 			continue
 		}
 		info.ReasoningKnown = true
@@ -77,4 +95,17 @@ func withModelsDevReasoning(models []string, details map[string]protocol.ModelIn
 		details[key] = info
 	}
 	return details, nil
+}
+
+func modelsDevOAuthProviderID(oauth string) string {
+	switch strings.ToLower(strings.TrimSpace(oauth)) {
+	case "grok", "xai":
+		return "xai"
+	case "gpt", "codex":
+		return "openai"
+	case "gemini":
+		return "google"
+	default:
+		return oauth
+	}
 }

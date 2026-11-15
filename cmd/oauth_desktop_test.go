@@ -217,10 +217,6 @@ func TestRunAuthAutoClawRidesTheLoginPath(t *testing.T) {
 	if p.Model != strings.Join(oauthproxy.AutoClawModelIDs(), ",") {
 		t.Fatalf("model pool = %q", p.Model)
 	}
-	if p.CustomModelID != "zai_auto" || p.OpusModel != "zai_auto" || p.SonnetModel != "zaicoding_glm-5.3" || p.HaikuModel != "zai_glm-5.3-flash" {
-		t.Fatalf("slot defaults = custom %q / opus %q / sonnet %q / haiku %q",
-			p.CustomModelID, p.OpusModel, p.SonnetModel, p.HaikuModel)
-	}
 	if p.OAuthAccountCredential != "autoclaw-account-1234abcd.json" {
 		t.Fatalf("credential binding = %q", p.OAuthAccountCredential)
 	}
